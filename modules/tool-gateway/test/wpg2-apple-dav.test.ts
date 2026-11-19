@@ -144,6 +144,23 @@ describe("C: klienten mot en falsk server - les, opprett, endre, slett med readb
     expect(await code(client.list("privat", { from: "2026-12-01", to: "2026-12-02" }))).toBe("dav_malformed_response");
   });
 
+  it("review B MEDIUM-3: `If-Match` følger PUT (endring) og DELETE - en ANNEN klient som endrer ressursen mellom vår GET og PUT/DELETE blir ikke overskrevet/slettet (412 -> etag_mismatch)", async () => {
+    const { server, client } = mk();
+    const url = `${CAL}u-uid-0002.ics`;
+    const etag = server.seed(url, ics("u-uid-0002", "Original", "20261201T080000Z"));
+    server.onNext("PUT", (s) => { s.seed(url, ics("u-uid-0002", "Annen klient sin endring", "20261201T080000Z")); }); // etter vår GET, FØR vår PUT
+    expect(await code(client.update("privat", "u-uid-0002", etag, { summary: "Min endring" }))).toBe("etag_mismatch");
+    expect(server.requests.find((r) => r.method === "PUT")?.headers["If-Match"]).toBe(etag);
+    expect(server.store.get(url)?.body).toContain("Annen klient sin endring"); // ikke overskrevet
+
+    const url2 = `${CAL}d-uid-0003.ics`;
+    const e2 = server.seed(url2, ics("d-uid-0003", "Slettes", "20261201T080000Z"));
+    server.onNext("DELETE", (s) => { s.seed(url2, ics("d-uid-0003", "Endret av annen", "20261201T080000Z")); });
+    expect(await code(client.remove("privat", "d-uid-0003", e2))).toBe("etag_mismatch");
+    expect(server.requests.find((r) => r.method === "DELETE")?.headers["If-Match"]).toBe(e2);
+    expect(server.store.has(url2)).toBe(true); // ikke slettet
+  });
+
   it("endre: kun oppgitte egenskaper, SEQUENCE økes, varsler beholdes, ny etag; gammel etag og samtidig endring gir etag_mismatch; gjentakende arrangement kan ikke flyttes", async () => {
     const { server, client } = mk();
     const etag = server.seed(`${CAL}u-uid-0001.ics`, ics("u-uid-0001", "Gammel", "20261201T080000Z", ["BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT15M", "END:VALARM"]));
@@ -333,5 +350,40 @@ describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
     const client = new AppleDavClient({ transport: make(fetchFn), collections, now: () => NOW });
     expect(await code(client.create("privat", "idem-key-0009", { summary: "x", start: "2026-12-01T08:00:00Z" }))).toBe("dav_auth_rejected");
     expect(calls.every((u) => u.startsWith(CAL))).toBe(true);
+  });
+
+  /** En `DavFetch` som lar den falske serveren svare (ingen nettverk). */
+  const serverFetch = (server: FakeDavServer): DavFetch => (async (u: string, init?: RequestInit) => {
+    const res = await server.request({ method: init?.method as never, url: u, headers: (init?.headers ?? {}) as Record<string, string>, ...(init?.body ? { body: String(init.body) } : {}) });
+    return new Response(res.status === 204 ? null : res.body, { status: res.status, headers: res.headers });
+  }) as unknown as DavFetch;
+
+  it("review B MEDIUM-1: stoppvakten kjøres FØR HVER utsendelse - en kill switch som slås på MIDT i en endring (mellom GET og PUT) stopper PUT-en (bevist ikke utført) og ressursen er uendret", async () => {
+    const server = new FakeDavServer();
+    const url = `${CAL}g-uid-0004.ics`;
+    const etag = server.seed(url, ics("g-uid-0004", "Gammel", "20261201T080000Z"));
+    let active = false;
+    const transport = new FetchDavTransport({ collections, credentials: creds, fetchFn: serverFetch(server), guard: async () => (active ? "kill_switch_active" : null) });
+    const client = new AppleDavClient({ transport, collections, now: () => NOW });
+    server.onNext("GET", () => { active = true; }); // vakten slipper GET-en gjennom; kill switch slås på rett etterpå
+    expect(await code(client.update("privat", "g-uid-0004", etag, { summary: "Ny" }))).toBe("dav_kill_switch_active");
+    expect(server.requests.map((r) => r.method)).toEqual(["GET"]);
+    expect(server.store.get(url)?.body).toContain("SUMMARY:Gammel");
+    // og med kill switch på sendes ingenting i det hele tatt
+    const before = server.requests.length;
+    expect(await code(client.remove("privat", "g-uid-0004", etag))).toBe("dav_kill_switch_active");
+    expect(await code(client.list("privat"))).toBe("dav_kill_switch_active");
+    expect(server.requests).toHaveLength(before);
+  });
+
+  it("vakten: tilbakekalt credential og en vakt som feiler (fail-closed) gir sine koder - verken credentials eller fetch røres", async () => {
+    for (const [guard, expected] of [[async () => "credential_revoked" as const, "dav_credential_revoked"], [async (): Promise<null> => { throw new Error("db nede"); }, "dav_guard_unavailable"]] as const) {
+      const f = ok();
+      const credentials = vi.fn(creds);
+      const transport = new FetchDavTransport({ collections, credentials, fetchFn: f as unknown as DavFetch, guard });
+      expect(await code(transport.request({ method: "GET", url: `${CAL}a.ics`, headers: {} })), expected).toBe(expected);
+      expect(f).not.toHaveBeenCalled();
+      expect(credentials).not.toHaveBeenCalled();
+    }
   });
 });

@@ -20,7 +20,9 @@ export interface DavCollection { name: string; kind: DavKind; /** Slutter alltid
 
 export type DavErrorCode =
   | "collection_not_allowed" | "invalid_input" | "invalid_text" | "invalid_uid" | "invalid_etag" | "unsupported_change" | "not_found" | "etag_mismatch" | "dav_credentials_unavailable" | "dav_unreachable"
-  | "dav_redirect_refused" | "dav_response_too_large" | "dav_auth_rejected" | "dav_malformed_response" | "dav_rejected" | "url_not_allowed";
+  | "dav_redirect_refused" | "dav_response_too_large" | "dav_auth_rejected" | "dav_malformed_response" | "dav_rejected" | "url_not_allowed"
+  // Stoppvakten (kill switch / tilbakekalt credential) FØR hver utsendelse - se `DavSendGuard`.
+  | "dav_kill_switch_active" | "dav_credential_revoked" | "dav_guard_unavailable";
 export class DavError extends Error {
   constructor(readonly code: DavErrorCode, detail?: string) {
     super(detail === undefined ? code : `${code}:${detail}`);
@@ -339,7 +341,9 @@ export function uidFromKey(collection: string, idempotencyKey: string): string {
 }
 
 /** Feil som BEVISER at forespørselen ikke ble utført (avvist før sending eller av serveren). Alt annet etter en mutasjon (tidsavbrudd, nullstilt tilkobling, for stort svar) er et UAVKLART utfall. */
-const DEFINITELY_NOT_APPLIED: ReadonlySet<string> = new Set(["url_not_allowed", "dav_credentials_unavailable", "dav_auth_rejected", "dav_redirect_refused"]);
+const DEFINITELY_NOT_APPLIED: ReadonlySet<string> = new Set([
+  "url_not_allowed", "dav_credentials_unavailable", "dav_auth_rejected", "dav_redirect_refused", "dav_kill_switch_active", "dav_credential_revoked", "dav_guard_unavailable"
+]);
 const definitelyNotApplied = (err: unknown): boolean => err instanceof DavError && DEFINITELY_NOT_APPLIED.has(err.code);
 
 export interface AppleDavClientOptions { transport: DavTransport; collections: readonly DavCollection[]; now?: () => Date }
@@ -526,8 +530,17 @@ function expectedMatches(item: DavItem, expected: Record<string, string[] | null
 /** All utgående leverandørtrafikk i `tool-gateway/src` går via `guardedFetch` (D-436: rå-URL-sjekk, ingen redirect, tidsgrense); aldri rå `fetch`. */
 export type DavFetch = typeof guardedFetch;
 
+/**
+ * Stoppvakt som kjøres FØR HVER utsendelse (også lesing; en operasjon som `update` sender flere forespørsler, og en kill switch midt i skal stoppe den neste): `null` = fortsett, ellers hvorfor det stoppes. Gatewayen
+ * hørte kill switch og credential-revokering for alle verktøykall; DAV-rutene går utenom gatewayen (ruter, ikke verktøy), så uten denne vakten stoppet verken `kill switch` eller `revokeCredential` utgående skriving mot iCloud
+ * (fiks-runde review B, MEDIUM-1). Kaster vakten, er svaret fail-closed (`dav_guard_unavailable`).
+ */
+export type DavSendGuard = () => Promise<"kill_switch_active" | "credential_revoked" | null>;
+
 export interface FetchDavTransportOptions {
   collections: readonly DavCollection[];
+  /** Stoppvakten (kill switch + tilbakekalte credentials) FØR hver utsendelse. Uten den sendes alt som før (kun tester/frakoblet bruk). */
+  guard?: DavSendGuard;
   /** Hentes per forespørsel fra vaulten; `null` = ikke konfigurert (fail closed). Verdiene logges aldri. */
   credentials: () => Promise<{ user: string; password: string } | null>;
   /** Standard `guardedFetch`; tester injiserer en fake (ingen nettkall). */
@@ -573,6 +586,12 @@ export class FetchDavTransport implements DavTransport {
     const url = (() => { try { return new URL(request.url); } catch { return null; } })();
     const allowed = url !== null && url.protocol === "https:" && url.port === "" && this.options.collections.some((c) => `https://${url.hostname.toLowerCase()}${url.pathname}`.startsWith(c.url));
     if (!allowed) throw new DavError("url_not_allowed");
+    // Stoppvakten FØR credentials leses og FØR noe sendes (kill switch / tilbakekalt credential = ingenting forlater huset).
+    if (this.options.guard !== undefined) {
+      let denial: Awaited<ReturnType<DavSendGuard>>;
+      try { denial = await this.options.guard(); } catch { throw new DavError("dav_guard_unavailable"); }
+      if (denial !== null) throw new DavError(denial === "credential_revoked" ? "dav_credential_revoked" : "dav_kill_switch_active");
+    }
     const credentials = await this.options.credentials();
     if (!credentials || credentials.user.length === 0 || credentials.password.length === 0) throw new DavError("dav_credentials_unavailable");
     // Eget tak (standard 20 s) SAMMENSATT med et evt. forespørsels-/kallsignal (aldri bare eget signal, D-471); et allerede avbrutt kall sender ingenting.

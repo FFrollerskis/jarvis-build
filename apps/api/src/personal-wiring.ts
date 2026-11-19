@@ -2,11 +2,12 @@ import type pg from "pg";
 import { FamilyService } from "@jarvis/context";
 import type { IdentityContext } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
+import type { KillSwitch, OwnerControls } from "@jarvis/policy";
 import { BankingService } from "@jarvis/finance";
 import { HEALTH_INTAKE_MAX_DELETES, HEALTH_INTAKE_MAX_SAMPLES, HEALTH_INTAKE_SOURCE_TYPE, HealthIntakeService, HealthService, MetricTypeSchema } from "@jarvis/health";
 import { LocationService } from "@jarvis/location";
 import {
-  AppleDavClient, FetchDavTransport, PERSONAL_CONFIG_NAMES, parseDavCollections,
+  AppleDavClient, FetchDavTransport, PERSONAL_CONFIG_NAMES, parseDavCollections, type DavSendGuard,
   CAR_CRITICAL_OPS, CAR_READ_ACTION, CAR_TOOL_ID, CarTransport, UnconfiguredCarAdapter, carCriticalConfigFromEnv, carCriticalToolDefinitions,
   HOME_CRITICAL_OPS, HOME_CRITICAL_READ_ACTION, HOME_ASSISTANT_TOOL_ID, HomeAssistantCriticalTransport, PERSONAL_FLAG_NAMES, PERSONAL_SECRET_REFS, PersonalActionJournal,
   executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, homeSettleMsFor, legacyCriticalActionsToDrop, personalActionIndex, personalFlagOn,
@@ -51,6 +52,11 @@ export interface PersonalWiringInput {
   healthReader?: HealthReadApi;
   /** IANA-tidssone for «skritt i dag» (standard `Europe/Oslo`). */
   timeZone?: string;
+  /**
+   * Eierens stoppkontroller (fiks-runde review B MEDIUM-1): DAV-rutene går utenom ToolGateway, så kill switch og credential-revokering må sjekkes av dem selv, FØR hver utsendelse. Uten denne registreres IKKE DAV-rutene (fail closed).
+   * Må være de SAMME instansene som `PolicyGateway`/`ToolGateway` bruker (LIVE `*Durable`-sjekker, delt mellom prosesser).
+   */
+  controls?: { killSwitch: Pick<KillSwitch, "isActiveDurable">; ownerControls: Pick<OwnerControls, "isRevokedDurable"> };
 }
 
 export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring {
@@ -116,16 +122,27 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
 
   // Apple Kalender/Påminnelser/Kontakter (P2e): KUN ruter (`/personal/dav/*`), aldri verktøy. Samlingene er en allowlist fra eieren; passordet (app-spesifikt, D-108) hentes per forespørsel fra vaulten. Live mot iCloud er `BLOCKED_EXTERNAL`.
   let dav: PersonalDavDeps | undefined;
-  if (personalFlagOn(env, PERSONAL_FLAG_NAMES.appleDav)) {
+  if (personalFlagOn(env, PERSONAL_FLAG_NAMES.appleDav) && input.controls === undefined) {
+    // FAIL CLOSED (fiks-runde review B MEDIUM-1): uten kill switch og credential-revokering ville DAV-rutene (som går utenom ToolGateway) ikke kunne stoppes av eieren - da registreres de ikke.
+    log["apple_dav"] = { registered: false, reason: "controls_missing" };
+  } else if (personalFlagOn(env, PERSONAL_FLAG_NAMES.appleDav) && input.controls !== undefined) {
     const { collections, rejected } = parseDavCollections(env[PERSONAL_CONFIG_NAMES.appleDavAccounts]);
+    const { killSwitch, ownerControls } = input.controls;
+    // Stoppvakten FØR hver utsendelse (gatewayen hører kill switch og revokering for verktøykall; DAV er ruter utenom den): kill switch aktiv eller en av iCloud-referansene tilbakekalt = ingenting sendes.
+    const guard: DavSendGuard = async () => {
+      if (await killSwitch.isActiveDurable()) return "kill_switch_active";
+      for (const ref of [PERSONAL_SECRET_REFS.appleDavUser, PERSONAL_SECRET_REFS.appleDavAppPassword]) if (await ownerControls.isRevokedDurable(ref)) return "credential_revoked";
+      return null;
+    };
     const transport = new FetchDavTransport({
-      collections,
+      collections, guard,
       credentials: async () => {
         const [user, password] = [await readSecret(PERSONAL_SECRET_REFS.appleDavUser), await readSecret(PERSONAL_SECRET_REFS.appleDavAppPassword)];
         return user && password ? { user, password } : null;
       }
     });
     dav = {
+      guard,
       client: new AppleDavClient({ transport, collections }),
       audit: (identity, entry) =>
         withTenantTransaction(pool, identity.tenant_id, (client) =>

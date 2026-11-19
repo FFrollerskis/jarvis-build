@@ -1,5 +1,5 @@
 import type { IdentityContext } from "@jarvis/contracts";
-import { DavError, type AppleDavClient, type DavErrorCode } from "@jarvis/tool-gateway";
+import { DavError, type AppleDavClient, type DavErrorCode, type DavSendGuard } from "@jarvis/tool-gateway";
 import type { PersonalRouteContext } from "./personal-routes.ts";
 
 /**
@@ -15,6 +15,11 @@ export interface DavAuditEntry { action: string; collection: string; uid?: strin
 export interface PersonalDavDeps {
   client: Pick<AppleDavClient, "listCollections" | "list" | "get" | "create" | "update" | "remove">;
   audit(identity: IdentityContext, entry: DavAuditEntry): Promise<void>;
+  /**
+   * Stoppvakten (kill switch + tilbakekalte credentials; fiks-runde review B MEDIUM-1): sjekkes her FØR revisjon og klient (ingen forsøk, ingen revisjonsrad mens eieren har stanset systemet), OG av transporten FØR hver utsendelse
+   * (en operasjon sender flere forespørsler). DAV-rutene går utenom ToolGateway, som ellers er det som hører kill switch og revokering.
+   */
+  guard?: DavSendGuard;
 }
 
 export const DAV_ERROR_STATUS: Readonly<Record<DavErrorCode, number>> = {
@@ -22,7 +27,7 @@ export const DAV_ERROR_STATUS: Readonly<Record<DavErrorCode, number>> = {
   collection_not_allowed: 403, url_not_allowed: 403,
   not_found: 404,
   etag_mismatch: 409, unsupported_change: 409,
-  dav_credentials_unavailable: 503,
+  dav_credentials_unavailable: 503, dav_kill_switch_active: 503, dav_credential_revoked: 503, dav_guard_unavailable: 503,
   dav_unreachable: 502, dav_redirect_refused: 502, dav_response_too_large: 502, dav_auth_rejected: 502, dav_malformed_response: 502, dav_rejected: 502
 };
 
@@ -76,6 +81,12 @@ export async function handleDavRoute(ctx: PersonalRouteContext, deps: PersonalDa
   }
   const action = ctx.url.pathname.slice("/personal/dav/".length);
   const collection = typeof body["collection"] === "string" ? (body["collection"] as string).slice(0, 40) : "";
+  // Stoppvakten: kill switch / tilbakekalt credential = ingen forsøk, ingen revisjonsrad, ingen klient (samme avgrensning som gatewayen ville gitt). `collections` er lokal og sender ingenting.
+  if (deps.guard !== undefined && action !== "collections") {
+    let denial: Awaited<ReturnType<DavSendGuard>>;
+    try { denial = await deps.guard(); } catch { return ctx.json(503, { error: "dav_blocked", reason: "dav_guard_unavailable", request_id: ctx.requestId() }), true; }
+    if (denial !== null) return ctx.json(503, { error: "dav_blocked", reason: denial, request_id: ctx.requestId() }), true;
+  }
   try {
     const helpers = {
       str: (k: string) => ctx.fieldString(body, k), optStr: (k: string) => ctx.fieldOptionalString(body, k), optNum: (k: string) => ctx.fieldOptionalNumber(body, k), rec: (k: string) => ctx.fieldRecord(body, k)

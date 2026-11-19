@@ -18,8 +18,10 @@ const owner: IdentityContext = { person_id: "p-owner", tenant_id: "t-owner", mem
 const CAL = "https://caldav.example.com/u1/cal/";
 const { collections } = parseDavCollections(`calendar:privat=${CAL}`);
 
+const openControls = { killSwitch: { isActiveDurable: async () => false }, ownerControls: { isRevokedDurable: async () => false } };
+
 describe("A: flagg og wiring", () => {
-  const base = { pool: {} as never, gateway: {} as never };
+  const base = { pool: {} as never, gateway: {} as never, controls: openControls };
   it("uten flagg finnes ingen DAV-avhengighet; kun `on` registrerer rutene, aldri et verktøy; ugyldige samlinger forkastes og telles; uten passord sendes ingenting (fail closed)", async () => {
     for (const value of [undefined, "", "true", "1", "ON"]) {
       const w = createPersonalWiring({ ...base, readSecret: async () => null, env: value === undefined ? {} : { JARVIS_PERSONAL_APPLE_DAV: value } });
@@ -40,7 +42,7 @@ describe("A: flagg og wiring", () => {
     const queries: Array<{ text: string; values: unknown[] }> = [];
     const client = { query: vi.fn(async (text: string, values: unknown[] = []) => { queries.push({ text, values }); return { rows: [], rowCount: 0 }; }), release: vi.fn() };
     const pool = { connect: async () => client } as never;
-    const w = createPersonalWiring({ pool, gateway: {} as never, readSecret: async () => null, env: { JARVIS_PERSONAL_APPLE_DAV: "on", JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS: `calendar:privat=${CAL}` } });
+    const w = createPersonalWiring({ pool, gateway: {} as never, controls: openControls, readSecret: async () => null, env: { JARVIS_PERSONAL_APPLE_DAV: "on", JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS: `calendar:privat=${CAL}` } });
     await w.deps?.dav?.audit(owner, { action: "create", collection: "privat", uid: "jarvis-abc", outcome: "SUCCESS" });
     const insert = queries.find((q) => q.text.includes("INSERT INTO audit_events"));
     expect(insert?.values).toEqual(expect.arrayContaining(["t-owner", "p-owner", "dav.mutation", "apple_dav", "create"]));
@@ -50,9 +52,73 @@ describe("A: flagg og wiring", () => {
   });
 });
 
+describe("A2: stoppvakten - kill switch og credential-revokering stopper DAV (review B MEDIUM-1: rutene går utenom ToolGateway)", () => {
+  const env = { JARVIS_PERSONAL_APPLE_DAV: "on", JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS: `calendar:privat=${CAL}` };
+  const wire = (controls: Parameters<typeof createPersonalWiring>[0]["controls"], readSecret: (ref: string) => Promise<string | null> = async () => "fake-secret") =>
+    createPersonalWiring({ pool: {} as never, gateway: {} as never, readSecret, env, ...(controls ? { controls } : {}) });
+
+  it("uten stoppkontroller registreres IKKE DAV-rutene (fail closed): eieren ville ikke kunnet stoppe dem", () => {
+    const w = wire(undefined);
+    expect(w.deps?.dav).toBeUndefined();
+    expect(w.describe()).toEqual({ msg: "personal_twin", apple_dav: { registered: false, reason: "controls_missing" } });
+  });
+
+  it("kill switch aktiv: ingen nettkall og credentials leses ikke engang - for lesing, opprettelse, endring og sletting", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const secret = vi.fn(async () => "fake-secret");
+    const w = wire({ killSwitch: { isActiveDurable: async () => true }, ownerControls: { isRevokedDurable: async () => false } }, secret);
+    const client = w.deps!.dav!.client;
+    const fields = { summary: "x", start: "2026-12-01T08:00:00Z" };
+    for (const call of [() => client.list("privat"), () => client.get("privat", "uid-123456"), () => client.create("privat", "idem-key-0001", fields), () => client.update("privat", "uid-123456", '"e1"', { summary: "y" }), () => client.remove("privat", "uid-123456", '"e1"')]) {
+      await expect(call()).rejects.toMatchObject({ code: "dav_kill_switch_active" });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(secret).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("tilbakekalt credential (bruker ELLER app-passord): ingen nettkall; kun den tilbakekalte referansen stopper, og alle andre ref-er er upåvirket", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    for (const ref of ["JARVIS_PERSONAL_APPLE_DAV_USER", "JARVIS_PERSONAL_APPLE_DAV_APP_PASSWORD"]) {
+      const w = wire({ killSwitch: { isActiveDurable: async () => false }, ownerControls: { isRevokedDurable: async (r: string) => r === ref } });
+      await expect(w.deps!.dav!.client.list("privat"), ref).rejects.toMatchObject({ code: "dav_credential_revoked" });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("en vakt som feiler (database nede) er fail-closed `dav_guard_unavailable`: aldri «fortsett»", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const w = wire({ killSwitch: { isActiveDurable: async () => { throw new Error("db nede"); } }, ownerControls: { isRevokedDurable: async () => false } });
+    await expect(w.deps!.dav!.client.list("privat")).rejects.toMatchObject({ code: "dav_guard_unavailable" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("ruten: vakten FØR revisjon og klient (503 `dav_blocked`, ingen revisjonsrad, ingen klientkall); `collections` er lokal og påvirkes ikke", async () => {
+    const guard = async () => "kill_switch_active" as const;
+    for (const path of ["/personal/dav/list", "/personal/dav/create", "/personal/dav/delete"]) {
+      const h = harness({ path, body: { collection: "privat", idempotency_key: "idem-key-0001", fields: { summary: "x", start: "2026-12-01T08:00:00Z" }, uid: "uid-123456", expected_etag: '"e1"', confirm_uid: "uid-123456" }, guard });
+      await handlePersonalRoute(h.ctx);
+      expect(h.responses.at(-1), path).toEqual({ status: 503, body: { error: "dav_blocked", reason: "kill_switch_active", request_id: "req-1" } });
+      expect(h.calls.filter((c) => c.startsWith("audit") || ["list", "get", "create", "update", "remove"].includes(c)), path).toEqual([]);
+    }
+    const local = harness({ path: "/personal/dav/collections", body: {}, guard });
+    await handlePersonalRoute(local.ctx);
+    expect(local.responses.at(-1)?.status).toBe(200);
+    const down = harness({ path: "/personal/dav/list", body: { collection: "privat" }, guard: async () => { throw new Error("db nede"); } });
+    await handlePersonalRoute(down.ctx);
+    expect(down.responses.at(-1)).toEqual({ status: 503, body: { error: "dav_blocked", reason: "dav_guard_unavailable", request_id: "req-1" } });
+  });
+
+  it("hver DavError-kode fra vakten har en statuskode (503)", () => {
+    for (const code of ["dav_kill_switch_active", "dav_credential_revoked", "dav_guard_unavailable"] as const) expect(DAV_ERROR_STATUS[code], code).toBe(503);
+  });
+});
+
 interface Harness { ctx: PersonalRouteContext; calls: string[]; responses: Array<{ status: number; body: Record<string, unknown> }>; audits: DavAuditEntry[]; client: Record<string, ReturnType<typeof vi.fn>> }
 
-function harness(opts: { path: string; body?: Record<string, unknown>; owner?: boolean; stepUp?: string; auditFails?: boolean; fail?: unknown; dav?: false; method?: string; real?: AppleDavClient }): Harness {
+function harness(opts: { path: string; body?: Record<string, unknown>; owner?: boolean; stepUp?: string; auditFails?: boolean; fail?: unknown; dav?: false; method?: string; real?: AppleDavClient; guard?: PersonalDavDeps["guard"] }): Harness {
   const calls: string[] = [];
   const audits: DavAuditEntry[] = [];
   const responses: Harness["responses"] = [];
@@ -62,7 +128,8 @@ function harness(opts: { path: string; body?: Record<string, unknown>; owner?: b
   for (const name of ["list", "get", "create", "update", "remove"]) client[name] = vi.fn(async () => { calls.push(name); if (opts.fail !== undefined) throw opts.fail; return name === "list" ? [] : name === "get" ? null : { outcome: "SUCCESS", uid: "jarvis-1", etag: '"e"' }; });
   const dav: PersonalDavDeps = {
     client: (opts.real ?? client) as unknown as PersonalDavDeps["client"],
-    audit: async (_i, entry) => { calls.push(`audit:${entry.outcome}`); if (opts.auditFails === true && entry.outcome === "requested") throw new Error("db nede"); audits.push(entry); }
+    audit: async (_i, entry) => { calls.push(`audit:${entry.outcome}`); if (opts.auditFails === true && entry.outcome === "requested") throw new Error("db nede"); audits.push(entry); },
+    ...(opts.guard !== undefined ? { guard: opts.guard } : {})
   };
   const ctx: PersonalRouteContext = {
     req: { method: opts.method ?? "POST" } as never, res: {} as never, url: new URL(opts.path, "http://localhost"), deps: opts.dav === false ? {} : { dav },

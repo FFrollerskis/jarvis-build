@@ -15,12 +15,18 @@ export class FakeDavServer implements DavTransport {
   readonly foreignHrefs: Array<{ href: string; body: string }> = [];
   extraXml = "";
 
+  private readonly hooks: Array<{ method: DavRequest["method"]; fn: (server: FakeDavServer) => void }> = [];
+
   fail(method: DavRequest["method"], fault: FakeDavFault): void { this.faults.push({ method, fault }); }
+  /** Kjører `fn` rett FØR serveren behandler den neste forespørselen med denne metoden (en ANNEN klient som endrer ressursen mellom vår GET og PUT). Engangs. */
+  onNext(method: DavRequest["method"], fn: (server: FakeDavServer) => void): void { this.hooks.push({ method, fn }); }
   seed(url: string, body: string): string { const etag = this.nextEtag(); this.store.set(url, { body, etag }); return etag; }
   private nextEtag(): string { this.counter += 1; return `"etag-${this.counter}"`; }
 
   async request(req: DavRequest): Promise<DavResponse> {
     this.requests.push(req);
+    const hook = this.hooks.findIndex((h) => h.method === req.method);
+    if (hook >= 0) this.hooks.splice(hook, 1)[0]?.fn(this);
     const index = this.faults.findIndex((f) => f.method === req.method);
     const fault = index >= 0 ? this.faults.splice(index, 1)[0]?.fault : undefined;
     if (fault === "throw") throw new Error("fake: connection reset");
