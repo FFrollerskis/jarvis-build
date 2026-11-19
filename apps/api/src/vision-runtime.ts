@@ -6,7 +6,7 @@ import { envInt } from "@jarvis/contracts";
 import { MAX_MODEL_TIMEOUT_MS } from "@jarvis/model-gateway";
 import { LocalOpenAiCompatibleAdapter } from "@jarvis/provider-adapters";
 import { guardedFetch } from "@jarvis/tool-gateway";
-import type { EmbeddingProvider } from "@jarvis/memory";
+import { embeddingEndpointFromEnv, type EmbeddingProvider } from "@jarvis/memory";
 import {
   HomeAssistantVisionSource, LocalFsStorageAdapter, VisionCameraService, VisionCaptureService, VisionClassifier, VisionEmbeddingService, VisionIngestPipeline, VisionInventoryService,
   VisionLastSeenService, VisionPoller, VisionSnapshotService, runVisionMaintenanceSweepForAllTenants, startVisionPoller, type CaptureDeviceRegistry, type VisionHttpFetch,
@@ -22,6 +22,7 @@ import type { VisionApiDeps } from "./vision-routes.ts";
  *   JARVIS_VISION_ENABLED         hovedbryter: ruter (`/vision/*`), pipeline, vedlikeholdssveip.
  *   JARVIS_VISION_CLASSIFIER      lokal visjonsmodell (krever JARVIS_VISION_LOCAL_URL, som MÅ peke til en lokal/privat adresse - se `assertLocalVisionEndpoint`).
  *   JARVIS_VISION_LOCAL_URL / _MODEL   OpenAI-kompatibelt lokalt endepunkt (Ollama, llama.cpp ...) og modellnavn (standard `local-vision`).
+ *   JARVIS_VISION_ALLOW_TAILSCALE tillat Tailscale-adresser (CGNAT 100.64/10 og `*.ts.net`) for det lokale endepunktet og embedding-endepunktet (review A-L5). Uten flagget avvises de.
  *   JARVIS_VISION_MODEL_TIMEOUT_MS tidsavbrudd per modellkall (standard 90000; 5000-180000 = gatewayens harde tak, ellers kastes ved oppstart). Virker nå på selve kallet (review A-M2).
  *   JARVIS_VISION_STORE_SNAPSHOTS lagring av hendelsesbilder (krever JARVIS_VISION_STORAGE_DIR; kun kameraer med policy `store_snapshot` i hjemmesonen lagres). Flagget styrer KUN SKRIVING:
  *                                 så snart JARVIS_VISION_STORAGE_DIR er satt kjører vedlikeholdet (retensjon, erasure, kamera-fjerning, gravsteiner) mot mappen selv om flagget er av (review B-M1).
@@ -64,15 +65,47 @@ export function visionFlagsFromEnv(env: NodeJS.ProcessEnv): VisionFlags {
   };
 }
 
-const PRIVATE_V4 = [/^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./];
 const LOCAL_SUFFIXES = [".local", ".lan", ".internal", ".home.arpa", ".localdomain"];
 
 /**
- * Kamerabilder forlater ALDRI maskinen/det lokale nettverket. `local_vision`-identiteten er «lokal» ved KONFIGURASJON, så endepunktet valideres deterministisk ved oppstart: http(s), ingen brukerinfo,
- * og verten må være loopback, privat/link-lokal IP, `host.docker.internal`, et enkelt-label-navn (docker-compose-tjeneste), eller ende på .local/.lan/.internal/.home.arpa. Et offentlig vertsnavn/IP
- * avvises (`VisionConfigError`) - det finnes ingen overstyring. (DNS oppløses ikke her: et lokalt navn som peker utenfor er eierens nettverksoppsett; redirects følges uansett aldri, se adapteren.)
+ * Tailscale (CGNAT 100.64.0.0/10 og MagicDNS `*.ts.net`) er KUN tillatt med eierens eksplisitte `JARVIS_VISION_ALLOW_TAILSCALE=on` (review A-L5): et tailnet er eierens eget lukkede nett, så oppsettet «modellen kjører på
+ * PC-en min, nådd via Tailscale» må kunne brukes - men `100.x`/`.ts.net` er ellers ikke et privat nett, og uten flagget avvises begge.
  */
-export function assertLocalVisionEndpoint(raw: string): string {
+export function visionAllowTailscale(env: NodeJS.ProcessEnv): boolean {
+  return on(env["JARVIS_VISION_ALLOW_TAILSCALE"]);
+}
+
+export interface LocalEndpointOptions {
+  allowTailscale?: boolean;
+}
+
+/**
+ * Er denne IP-adressen lokal? Loopback, RFC 1918 (10/8, 172.16/12, 192.168/16), IPv6 ULA (fc00::/7, som også dekker Tailscales fd7a:115c:a1e0::/48) og - kun med eier-flagget - CGNAT 100.64/10. Link-lokale adresser
+ * (169.254/16 - inkludert skymetadata-adressen 169.254.169.254 - og fe80::/10), 0.0.0.0 og alt offentlig er IKKE lokale (review A-L5). En IPv4-mappet IPv6 (`::ffff:10.0.0.1`, slik getaddrinfo kan gi) vurderes som sin IPv4.
+ */
+export function isLocalAddress(address: string, options: LocalEndpointOptions = {}): boolean {
+  let host = address.replace(/^\[|\]$/g, "").toLowerCase();
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(host);
+  if (mapped !== null) host = mapped[1] as string;
+  const kind = isIP(host);
+  if (kind === 4) {
+    const [a, b] = host.split(".").map(Number) as [number, number];
+    if (a === 127 || a === 10) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    return options.allowTailscale === true && a === 100 && b >= 64 && b <= 127;
+  }
+  if (kind === 6) return host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host);
+  return false;
+}
+
+/**
+ * Kamerabilder forlater ALDRI maskinen/det lokale nettverket. `local_vision`-identiteten er «lokal» ved KONFIGURASJON, så endepunktet valideres deterministisk ved oppstart: http(s), ingen brukerinfo,
+ * og verten må være loopback, privat IP (se `isLocalAddress`), `host.docker.internal`, et enkelt-label-navn (docker-compose-tjeneste), eller ende på .local/.lan/.internal/.home.arpa (og `.ts.net` med
+ * Tailscale-flagget). Et offentlig vertsnavn/IP avvises (`VisionConfigError`) - det finnes ingen overstyring. Dette er den SYNTAKTISKE sjekken; selve navneoppløsningen kontrolleres ved oppstart av
+ * `verifyVisionEndpoints` (review A-L5). Redirects følges uansett aldri, se adapteren.
+ */
+export function assertLocalVisionEndpoint(raw: string, options: LocalEndpointOptions = {}): string {
   let url: URL;
   try {
     url = new URL(raw);
@@ -82,13 +115,93 @@ export function assertLocalVisionEndpoint(raw: string): string {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new VisionConfigError("local_url_scheme");
   if (url.username !== "" || url.password !== "") throw new VisionConfigError("local_url_credentials");
   const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  const kind = isIP(host);
-  let local = false;
-  if (kind === 4) local = host === "0.0.0.0" ? false : PRIVATE_V4.some((p) => p.test(host));
-  else if (kind === 6) local = host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host);
-  else local = host === "localhost" || host === "host.docker.internal" || !host.includes(".") || LOCAL_SUFFIXES.some((s) => host.endsWith(s));
+  const local = isIP(host) !== 0
+    ? isLocalAddress(host, options)
+    : host === "localhost" || host === "host.docker.internal" || !host.includes(".") || LOCAL_SUFFIXES.some((s) => host.endsWith(s)) || (options.allowTailscale === true && host.endsWith(".ts.net"));
   if (!local) throw new VisionConfigError("local_url_not_local");
   return raw;
+}
+
+/** Navneoppslag (injisert; i drift `dns.lookup(host, { all: true })` fra main.ts - visjonsfilene importerer aldri node:dns, byggevakten feller det). */
+export type VisionDnsLookup = (hostname: string) => Promise<ReadonlyArray<{ address: string }>>;
+
+export interface VisionEndpointVerification {
+  /** Kode (`embedding_url_not_local` ...) når embedding-endepunktet ikke er lokalt: vision bruker da INGEN embedding (ingen objektvektorer), men API-et starter. `null` = greit eller ikke relevant. */
+  embeddingBlockedReason: string | null;
+}
+
+const DNS_TIMEOUT_MS = 5_000;
+
+async function lookupWithTimeout(lookup: VisionDnsLookup, host: string, timeoutMs: number): Promise<ReadonlyArray<{ address: string }>> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([lookup(host), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("dns_timeout")), timeoutMs); })]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** Løser verten i `rawUrl` og avviser alt som peker utenfor det lokale nettet. Gir `"unresolved"` (med en logglinje uten vertsnavn) når navnet ikke kan løses akkurat nå - se `verifyVisionEndpoints`. */
+async function assertResolvesLocal(rawUrl: string, label: string, deps: { lookup: VisionDnsLookup; timeoutMs: number }, options: LocalEndpointOptions): Promise<"checked" | "literal" | "unresolved"> {
+  const host = new URL(rawUrl).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (isIP(host) !== 0) return "literal"; // en IP-adresse er allerede vurdert syntaktisk
+  let addresses: ReadonlyArray<{ address: string }>;
+  try {
+    addresses = await lookupWithTimeout(deps.lookup, host, deps.timeoutMs);
+  } catch {
+    addresses = [];
+  }
+  if (addresses.length === 0) {
+    console.error(JSON.stringify({ msg: "vision_endpoint_unresolved", endpoint: label }));
+    return "unresolved";
+  }
+  if (addresses.some((entry) => !isLocalAddress(entry.address, options))) throw new VisionConfigError(`${label}_resolves_nonlocal`);
+  return "checked";
+}
+
+/**
+ * Review A-L5 og A-INFO-4: løser vertsnavnet i endepunktene ved OPPSTART og avviser offentlige adresser - den syntaktiske sjekken (`assertLocalVisionEndpoint`) slapp gjennom `evil.com.local`, et enkelt-label-navn som
+ * i praksis peker utenfor, og `metadata.google.internal` (som peker til skymetadata-adressen). Gjelder (1) den lokale visjonsmodellen (`JARVIS_VISION_LOCAL_URL`, kun med CLASSIFIER på) - en ikke-lokal oppløsning KASTER
+ * (`local_url_resolves_nonlocal`) - og (2) embedding-endepunktet minnet bruker (`JARVIS_EMBEDDING_URL` -> `JARVIS_OLLAMA_URL` -> `JARVIS_GEMMA_LOCAL_URL`, kun når provideren er Ollama): er det ikke lokalt, bruker vision
+ * INGEN embedding (gir koden `embedding_url_*` tilbake) i stedet for å stoppe hele API-et, siden endepunktet deles med vanlig minne.
+ * Et navn som IKKE kan løses akkurat nå (docker-tjeneste som ikke er oppe ennå) stopper ikke oppstarten: da kan heller ingen forbindelse opprettes, og hvert kall feiler lukket - men det logges. Dette er en
+ * oppstartssjekk, IKKE per-kall DNS-pinning: et navn som senere endrer svar (DNS rebinding) fanges ikke - eierens DNS er en del av tillitsgrunnlaget (DPIA §7). Uten JARVIS_VISION_ENABLED=on gjøres ingenting.
+ */
+export async function verifyVisionEndpoints(env: NodeJS.ProcessEnv, deps: { lookup: VisionDnsLookup; timeoutMs?: number }): Promise<VisionEndpointVerification> {
+  const flags = visionFlagsFromEnv(env);
+  if (!flags.enabled) return { embeddingBlockedReason: null };
+  const options: LocalEndpointOptions = { allowTailscale: visionAllowTailscale(env) };
+  const lookupDeps = { lookup: deps.lookup, timeoutMs: deps.timeoutMs ?? DNS_TIMEOUT_MS };
+  if (flags.classifier && flags.localUrl !== undefined) {
+    assertLocalVisionEndpoint(flags.localUrl, options);
+    await assertResolvesLocal(flags.localUrl, "local_url", lookupDeps, options);
+  }
+  const embeddingUrl = embeddingEndpointFromEnv(env);
+  if (embeddingUrl === null) return { embeddingBlockedReason: null };
+  try {
+    assertLocalVisionEndpoint(embeddingUrl, options);
+    await assertResolvesLocal(embeddingUrl, "embedding_url", lookupDeps, options);
+    return { embeddingBlockedReason: null };
+  } catch (err) {
+    if (err instanceof VisionConfigError) return { embeddingBlockedReason: embeddingReason(err.code) };
+    throw err;
+  }
+}
+
+/** `local_url_not_local` -> `embedding_url_not_local` (samme feilkoder, men for embedding-endepunktet). */
+const embeddingReason = (code: string): string => (code.startsWith("local_url_") ? `embedding_url_${code.slice("local_url_".length)}` : code);
+
+/** Den SYNTAKTISKE sjekken av embedding-endepunktet (kjørt av `buildVisionRuntime` selv, uten DNS): `null` = greit eller ikke Ollama. */
+function embeddingBlockReason(env: NodeJS.ProcessEnv): string | null {
+  const url = embeddingEndpointFromEnv(env);
+  if (url === null) return null;
+  try {
+    assertLocalVisionEndpoint(url, { allowTailscale: visionAllowTailscale(env) });
+    return null;
+  } catch (err) {
+    if (err instanceof VisionConfigError) return embeddingReason(err.code);
+    throw err;
+  }
 }
 
 /**
@@ -106,7 +219,7 @@ export function visionAdapterFromEnv(env: NodeJS.ProcessEnv): LocalOpenAiCompati
   const flags = visionFlagsFromEnv(env);
   if (!flags.classifier) return null;
   if (flags.localUrl === undefined) throw new VisionConfigError("local_url_missing");
-  const url = assertLocalVisionEndpoint(flags.localUrl);
+  const url = assertLocalVisionEndpoint(flags.localUrl, { allowTailscale: visionAllowTailscale(env) });
   return new LocalOpenAiCompatibleAdapter(url, flags.localModel, visionModelTimeoutMs(env), "local_vision", undefined, { vision: true });
 }
 
@@ -141,6 +254,8 @@ export interface VisionRuntimeDeps {
   ownerControls: VisionOwnerControls;
   /** Test-/drift-injeksjon (standard: `guardedFetch` fra tool-gateway). */
   fetchImpl?: VisionHttpFetch;
+  /** Resultatet av `verifyVisionEndpoints` (navneoppløsningen av embedding-endepunktet, kjørt av main.ts ved oppstart). Utelatt = kun den syntaktiske sjekken. */
+  embeddingBlockedReason?: string | null;
 }
 
 export interface VisionRuntime {
@@ -178,7 +293,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   const flags = visionFlagsFromEnv(deps.env);
   if (!flags.enabled) return null;
   if (flags.classifier && flags.localUrl === undefined) throw new VisionConfigError("local_url_missing");
-  if (flags.classifier && flags.localUrl !== undefined) assertLocalVisionEndpoint(flags.localUrl);
+  if (flags.classifier && flags.localUrl !== undefined) assertLocalVisionEndpoint(flags.localUrl, { allowTailscale: visionAllowTailscale(deps.env) });
   if (flags.storeSnapshots && flags.storageDir === undefined) throw new VisionConfigError("storage_dir_missing");
   if (flags.storageDir !== undefined && !flags.storageDir.startsWith("/")) throw new VisionConfigError("storage_dir_not_absolute");
   if (flags.storeSnapshots && flags.storageDir !== undefined) assertStorageDirWritable(flags.storageDir);
@@ -191,11 +306,18 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
     ? new VisionSnapshotService(deps.pool, new LocalFsStorageAdapter(flags.storageDir), deps.vision, { maxStoredBytes: envInt("JARVIS_VISION_MAX_STORED_MB", 2048, { min: 16, max: 10_000_000 }, deps.env) * 1024 * 1024 })
     : undefined;
   let embeddings: VisionEmbeddingService | undefined;
-  try {
-    embeddings = new VisionEmbeddingService(deps.pool, deps.memoryEmbedding);
-  } catch (err) {
-    // Kun lokal embedding (fail-closed): en sky-provider gir ingen objektvektorer - «sist sett» faller til eksakte treff.
-    console.error(JSON.stringify({ msg: "vision_embeddings_disabled", code: (err as Error).name }));
+  // Review A-INFO-4: embedding-endepunktet minnet bruker valideres som privat/lokalt (samme regel som den lokale modellen; navneoppløsningen er allerede kontrollert av `verifyVisionEndpoints` og gitt hit i
+  // `embeddingBlockedReason`). Er det ikke lokalt bruker vision INGEN embedding - kamera-avledet tekst (objektnavn) sendes aldri dit - men resten av API-et (og vanlig minne) er uberørt.
+  const embeddingBlocked = deps.embeddingBlockedReason ?? embeddingBlockReason(deps.env);
+  if (embeddingBlocked !== null) {
+    console.error(JSON.stringify({ msg: "vision_embeddings_disabled", code: embeddingBlocked }));
+  } else {
+    try {
+      embeddings = new VisionEmbeddingService(deps.pool, deps.memoryEmbedding);
+    } catch (err) {
+      // Kun lokal embedding (fail-closed): en sky-provider gir ingen objektvektorer - «sist sett» faller til eksakte treff.
+      console.error(JSON.stringify({ msg: "vision_embeddings_disabled", code: (err as Error).name }));
+    }
   }
   // Review A-M2: tidsavbruddet fra JARVIS_VISION_MODEL_TIMEOUT_MS går inn i klassifisereren (per kall via gatewayen), ikke bare i adapterens konstruktør.
   const classifier = flags.classifier ? new VisionClassifier({ gateway: deps.gateway, timeoutMs: visionModelTimeoutMs(deps.env) }) : undefined;

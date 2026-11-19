@@ -195,6 +195,18 @@ export interface EmbeddingEnv {
 }
 
 /**
+ * Endepunktet embedding-provideren faktisk snakker med (WP-G3, review A-INFO-4): `null` når valget er `LocalHashEmbedding` (ingen nettverk) eller URL-en mangler. Én kilde for URL-valget:
+ * `createEmbeddingProviderFromEnv` bruker denne selv, og UA-9 (vision-runtime) validerer den som privat/lokal når kamerafunksjonen er på.
+ */
+export function embeddingEndpointFromEnv(env: EmbeddingEnv = process.env as EmbeddingEnv): string | null {
+  const provider = (env.JARVIS_EMBEDDING_PROVIDER ?? "").trim().toLowerCase();
+  const model = (env.JARVIS_EMBEDDING_MODEL ?? "").trim();
+  if (!(provider === "ollama" || (provider === "" && model !== ""))) return null;
+  const url = (env.JARVIS_EMBEDDING_URL || env.JARVIS_OLLAMA_URL || env.JARVIS_GEMMA_LOCAL_URL || "").trim();
+  return url === "" ? null : url;
+}
+
+/**
  * Én faktory for api OG worker (D-386: samme provider-instansvalg begge steder, aldri to uavhengige konstruksjoner).
  * - `JARVIS_EMBEDDING_PROVIDER=ollama` (eller satt `JARVIS_EMBEDDING_MODEL`) => `OllamaEmbedding` mot
  *   `JARVIS_EMBEDDING_URL` → `JARVIS_OLLAMA_URL` → `JARVIS_GEMMA_LOCAL_URL` (root, `/v1` strippes).
@@ -211,7 +223,7 @@ export function createEmbeddingProviderFromEnv(env: EmbeddingEnv = process.env a
     }
     return new LocalHashEmbedding();
   }
-  const url = (env.JARVIS_EMBEDDING_URL || env.JARVIS_OLLAMA_URL || env.JARVIS_GEMMA_LOCAL_URL || "").trim();
+  const url = embeddingEndpointFromEnv(env) ?? "";
   if (!url) throw new Error("memory_embedding_url_missing: sett JARVIS_EMBEDDING_URL (eller JARVIS_OLLAMA_URL/JARVIS_GEMMA_LOCAL_URL)");
   const dimRaw = (env.JARVIS_EMBEDDING_DIM ?? "").trim();
   const dim = dimRaw === "" ? undefined : Number.parseInt(dimRaw, 10);

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LocalHashEmbedding } from "@jarvis/memory";
+import { createEmbeddingProviderFromEnv, embeddingEndpointFromEnv, LocalHashEmbedding } from "@jarvis/memory";
 import { buildLimitationRegistry } from "@jarvis/executive";
 import { CapabilityRegistry, DEFAULT_PROFILES, LocalModelUnavailableError, MAX_MODEL_TIMEOUT_MS, MemoryTraceSink, ModelGateway, PROFILES_WITH_LOCAL_VISION, assertProvidersHaveExplicitPricing, pricingFromEnv } from "@jarvis/model-gateway";
 import { ProviderError, type ModelProviderAdapter, type ModelRequest, type ModelResult } from "@jarvis/provider-adapters";
@@ -15,7 +15,10 @@ import { guardedFetch } from "@jarvis/tool-gateway";
 import { HomeAssistantVisionSource, VisionClassifier, type VisionService } from "@jarvis/vision";
 import { FakeHaServer, haTimestamp } from "../../../modules/vision/test/support/fake-ha-server.ts";
 import { freezeTargetError, knownModelProviders } from "../src/provider-pause.ts";
-import { assertLocalVisionEndpoint, assertStorageDirWritable, buildVisionRuntime, createVisionPollerGuard, visionAdapterFromEnv, visionFlagsFromEnv, visionModelTimeoutMs, VISION_MODEL_TIMEOUT_BOUNDS, VisionConfigError } from "../src/vision-runtime.ts";
+import {
+  assertLocalVisionEndpoint, assertStorageDirWritable, buildVisionRuntime, createVisionPollerGuard, isLocalAddress, verifyVisionEndpoints, visionAdapterFromEnv, visionAllowTailscale, visionFlagsFromEnv, visionModelTimeoutMs,
+  VISION_MODEL_TIMEOUT_BOUNDS, VisionConfigError
+} from "../src/vision-runtime.ts";
 
 /**
  * WP-G3 (D-465): api-koblingen av UA-9 - flagg (alt AV som standard), URL-vakten for den lokale visjonsmodellen, `local_vision`-adapteren, eier-kontroll-porten for polleren, HA-kilden med den ENDELIGE `guardedFetch`
@@ -52,13 +55,16 @@ describe("flagg: alt er AV som standard, kun eksakt «on», og underflagg gjelde
 describe("assertLocalVisionEndpoint: kamerabilder forlater aldri maskinen/det lokale nettverket", () => {
   const ACCEPT = [
     "http://localhost:11434", "http://127.0.0.1:11434/v1", "http://127.1.2.3", "http://[::1]:11434", "http://host.docker.internal:11434", "http://10.0.0.5:8080", "http://192.168.1.20",
-    "http://172.16.5.4", "http://172.31.255.255:9", "http://169.254.1.1", "http://ollama-vision:11434", "http://gpu.lan", "http://gpu-box.home.arpa:11434", "http://workstation.local", "http://nas.internal/v1",
-    "http://[fd12:3456::1]:11434", "http://[fe80::1]:11434", "https://localhost:8443"
+    "http://172.16.5.4", "http://172.31.255.255:9", "http://ollama-vision:11434", "http://gpu.lan", "http://gpu-box.home.arpa:11434", "http://workstation.local", "http://nas.internal/v1",
+    "http://[fd12:3456::1]:11434", "https://localhost:8443"
   ];
   const REJECT: Array<[string, string]> = [
     ["https://api.openai.com/v1", "local_url_not_local"], ["http://8.8.8.8:11434", "local_url_not_local"], ["http://172.32.0.1", "local_url_not_local"], ["http://172.15.0.1", "local_url_not_local"],
     ["http://0.0.0.0:11434", "local_url_not_local"], ["http://example.com", "local_url_not_local"], ["http://vision.example.com:11434", "local_url_not_local"], ["http://localhost.evil.com", "local_url_not_local"],
     ["http://127.0.0.1.evil.com", "local_url_not_local"], ["http://evil.com/localhost", "local_url_not_local"], ["http://[2001:db8::1]:11434", "local_url_not_local"], ["http://11.0.0.1", "local_url_not_local"],
+    // review A-L5: link-lokale adresser (inkl. skymetadata-adressen) er IKKE lokale i denne betydningen, og Tailscale (CGNAT/.ts.net) avvises uten eier-flagget
+    ["http://169.254.169.254", "local_url_not_local"], ["http://169.254.1.1", "local_url_not_local"], ["http://[fe80::1]:11434", "local_url_not_local"], ["http://100.64.0.1:11434", "local_url_not_local"],
+    ["http://100.127.255.255", "local_url_not_local"], ["http://pc.tail1234.ts.net:11434", "local_url_not_local"], ["http://[::ffff:8.8.8.8]", "local_url_not_local"],
     ["http://user:pw@localhost:11434", "local_url_credentials"], ["http://user@localhost", "local_url_credentials"], ["ftp://localhost", "local_url_scheme"], ["file:///etc/passwd", "local_url_scheme"],
     ["ws://localhost", "local_url_scheme"], ["not a url", "local_url_malformed"], ["", "local_url_malformed"]
   ];
@@ -69,6 +75,149 @@ describe("assertLocalVisionEndpoint: kamerabilder forlater aldri maskinen/det lo
 
   it.each(REJECT)("avviser %s (%s)", (url, code) => {
     expect(() => assertLocalVisionEndpoint(url)).toThrow(new VisionConfigError(code).message);
+  });
+});
+
+describe("Tailscale og adresseklassifisering (review A-L5)", () => {
+  const TS = { allowTailscale: true };
+
+  it("med JARVIS_VISION_ALLOW_TAILSCALE godtas CGNAT 100.64.0.0/10 og *.ts.net - kanten av området og lignende navn avvises fortsatt", () => {
+    for (const url of ["http://100.64.0.1:11434", "http://100.101.102.103", "http://100.127.255.255", "http://pc.tail1234.ts.net:11434", "https://my-pc.ts.net"]) expect(assertLocalVisionEndpoint(url, TS), url).toBe(url);
+    for (const url of ["http://100.63.255.255", "http://100.128.0.1", "http://ts.net", "http://pc.ts.net.evil.com", "http://evilts.net", "http://8.8.8.8", "http://169.254.169.254", "http://[fe80::1]"]) {
+      expect(() => assertLocalVisionEndpoint(url, TS), url).toThrow(new VisionConfigError("local_url_not_local").message);
+    }
+  });
+
+  it("uten flagget avvises Tailscale; flagget leses kun som eksakt «on» (true/1/ON slår det ikke på) og gjelder adapteren", () => {
+    const base = { JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: "http://pc.tail1234.ts.net:11434" };
+    expect(() => visionAdapterFromEnv(base as NodeJS.ProcessEnv)).toThrow("vision_config_invalid:local_url_not_local");
+    for (const value of ["true", "1", "ON", "yes", ""]) {
+      expect(visionAllowTailscale({ JARVIS_VISION_ALLOW_TAILSCALE: value } as NodeJS.ProcessEnv), value).toBe(false);
+      expect(() => visionAdapterFromEnv({ ...base, JARVIS_VISION_ALLOW_TAILSCALE: value } as NodeJS.ProcessEnv), value).toThrow("local_url_not_local");
+    }
+    expect(visionAllowTailscale({ JARVIS_VISION_ALLOW_TAILSCALE: "on" } as NodeJS.ProcessEnv)).toBe(true);
+    expect(visionAdapterFromEnv({ ...base, JARVIS_VISION_ALLOW_TAILSCALE: "on" } as NodeJS.ProcessEnv)?.name).toBe("local_vision");
+    expect(buildVisionRuntime(stubs({ ...base, JARVIS_VISION_ALLOW_TAILSCALE: "on" }))).not.toBeNull();
+    expect(() => buildVisionRuntime(stubs(base))).toThrow("vision_config_invalid:local_url_not_local");
+  });
+
+  it("isLocalAddress: loopback, RFC 1918, ULA og (kun med flagget) CGNAT; link-lokal, offentlig, 0.0.0.0 og ugyldig er ikke lokale; IPv4-mappet IPv6 vurderes som sin IPv4", () => {
+    const local = ["127.0.0.1", "127.9.9.9", "10.1.2.3", "172.16.0.1", "172.31.255.254", "192.168.0.10", "::1", "fd12:3456::1", "fc00::1", "::ffff:10.0.0.5", "::ffff:192.168.1.1"];
+    const notLocal = ["8.8.8.8", "172.15.0.1", "172.32.0.1", "169.254.169.254", "169.254.0.1", "0.0.0.0", "100.64.0.1", "fe80::1", "2001:db8::1", "::ffff:8.8.8.8", "::ffff:169.254.169.254", "not-an-ip", "", "999.1.1.1"];
+    for (const address of local) expect(isLocalAddress(address), address).toBe(true);
+    for (const address of notLocal) expect(isLocalAddress(address), address).toBe(false);
+    for (const address of ["100.64.0.1", "100.100.100.100", "100.127.255.255", "::ffff:100.64.0.1"]) expect(isLocalAddress(address, { allowTailscale: true }), address).toBe(true);
+    for (const address of ["100.63.0.1", "100.128.0.1", "8.8.8.8", "169.254.169.254"]) expect(isLocalAddress(address, { allowTailscale: true }), address).toBe(false);
+  });
+});
+
+describe("verifyVisionEndpoints: vertsnavn løses ved oppstart og må peke til det lokale nettet (review A-L5 og A-INFO-4)", () => {
+  const VISION = { JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: "http://gpu-box.lan:11434" };
+  const lookupTo = (...addresses: string[]) => {
+    const asked: string[] = [];
+    return { asked, lookup: async (host: string) => { asked.push(host); return addresses.map((address) => ({ address })); } };
+  };
+  const verify = (env: Record<string, string>, lookup: (host: string) => Promise<ReadonlyArray<{ address: string }>>, timeoutMs?: number) =>
+    verifyVisionEndpoints(env as NodeJS.ProcessEnv, { lookup, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("hovedbryter av, eller ingen klassifisering/embedding-nettverk: ingen oppslag gjøres i det hele tatt", async () => {
+    const spy = lookupTo("8.8.8.8");
+    expect(await verify({}, spy.lookup)).toEqual({ embeddingBlockedReason: null });
+    expect(await verify({ ...VISION, JARVIS_VISION_ENABLED: "true" }, spy.lookup)).toEqual({ embeddingBlockedReason: null });
+    expect(await verify({ JARVIS_VISION_ENABLED: "on" }, spy.lookup)).toEqual({ embeddingBlockedReason: null }); // ingen CLASSIFIER, ingen Ollama-embedding
+    expect(spy.asked).toEqual([]);
+  });
+
+  it("et navn som peker til en offentlig adresse KASTER (evil.com.local, enkelt-label-navn, metadata.google.internal -> 169.254.169.254); privat oppløsning godtas; blandet oppløsning avvises", async () => {
+    const cases: Array<[string, string[], boolean]> = [
+      ["http://evil.com.local:11434", ["93.184.216.34"], false],
+      ["http://example:11434", ["93.184.216.34"], false],
+      ["http://metadata.google.internal", ["169.254.169.254"], false],
+      ["http://gpu-box.lan:11434", ["192.168.1.20"], true],
+      ["http://ollama-vision:11434", ["172.18.0.3", "fd12::3"], true],
+      ["http://mixed.lan", ["192.168.1.20", "8.8.8.8"], false],
+      ["http://localhost:11434", ["127.0.0.1", "::1"], true],
+      ["http://host.docker.internal:11434", ["::ffff:192.168.65.254"], true]
+    ];
+    for (const [url, addresses, ok] of cases) {
+      const spy = lookupTo(...addresses);
+      const promise = verify({ ...VISION, JARVIS_VISION_LOCAL_URL: url }, spy.lookup);
+      if (ok) await expect(promise, url).resolves.toEqual({ embeddingBlockedReason: null });
+      else await expect(promise, url).rejects.toThrow("vision_config_invalid:local_url_resolves_nonlocal");
+      expect(spy.asked, url).toEqual([new URL(url).hostname]);
+    }
+  });
+
+  it("IP-adresser løses ikke (vurderes syntaktisk), en syntaktisk ikke-lokal URL kastes uten oppslag, og Tailscale-navn krever flagget OG en tailnet-/privat oppløsning", async () => {
+    const spy = lookupTo("8.8.8.8");
+    await expect(verify({ ...VISION, JARVIS_VISION_LOCAL_URL: "http://192.168.1.5:11434" }, spy.lookup)).resolves.toEqual({ embeddingBlockedReason: null });
+    await expect(verify({ ...VISION, JARVIS_VISION_LOCAL_URL: "https://api.openai.com/v1" }, spy.lookup)).rejects.toThrow("local_url_not_local");
+    expect(spy.asked).toEqual([]);
+    const ts = { ...VISION, JARVIS_VISION_LOCAL_URL: "http://pc.tail1234.ts.net:11434" };
+    await expect(verify(ts, lookupTo("100.101.102.103").lookup)).rejects.toThrow("local_url_not_local"); // uten flagget
+    await expect(verify({ ...ts, JARVIS_VISION_ALLOW_TAILSCALE: "on" }, lookupTo("100.101.102.103").lookup)).resolves.toEqual({ embeddingBlockedReason: null });
+    await expect(verify({ ...ts, JARVIS_VISION_ALLOW_TAILSCALE: "on" }, lookupTo("8.8.8.8").lookup)).rejects.toThrow("local_url_resolves_nonlocal"); // flagget gjør ikke en offentlig oppløsning lokal
+    await expect(verify({ ...VISION, JARVIS_VISION_LOCAL_URL: "http://my-pc:11434" }, lookupTo("100.101.102.103").lookup)).rejects.toThrow("local_url_resolves_nonlocal"); // MagicDNS-kortnavn uten flagget
+    await expect(verify({ ...VISION, JARVIS_VISION_LOCAL_URL: "http://my-pc:11434", JARVIS_VISION_ALLOW_TAILSCALE: "on" }, lookupTo("100.101.102.103").lookup)).resolves.toBeDefined();
+  });
+
+  it("et navn som ikke kan løses akkurat nå (feil, tom liste, tidsavbrudd) stopper IKKE oppstarten, men logges uten vertsnavn - da kan heller ingen forbindelse opprettes", async () => {
+    const errors = (console.error as unknown as { mock: { calls: unknown[][] } }).mock;
+    const failing = async (): Promise<never> => { throw Object.assign(new Error("getaddrinfo ENOTFOUND secret-host.lan"), { code: "ENOTFOUND" }); };
+    await expect(verify(VISION, failing)).resolves.toEqual({ embeddingBlockedReason: null });
+    await expect(verify(VISION, async () => [])).resolves.toEqual({ embeddingBlockedReason: null });
+    await expect(verify(VISION, () => new Promise<ReadonlyArray<{ address: string }>>(() => undefined), 25)).resolves.toEqual({ embeddingBlockedReason: null });
+    const logged = errors.calls.map((c) => String(c[0])).join("\n");
+    expect(logged.match(/vision_endpoint_unresolved/g)).toHaveLength(3);
+    expect(logged).not.toContain("gpu-box");
+    expect(logged).not.toContain("secret-host");
+  });
+
+  it("embedding-endepunktet (kun når minnet bruker Ollama): ikke-lokal URL eller oppløsning gir koden embedding_url_* og INGEN oppstartsfeil; lokalt/lokal-hash gir null", async () => {
+    const ollama = { JARVIS_VISION_ENABLED: "on", JARVIS_EMBEDDING_PROVIDER: "ollama" };
+    expect(await verify({ ...ollama, JARVIS_EMBEDDING_URL: "http://ollama:11434" }, lookupTo("172.18.0.2").lookup)).toEqual({ embeddingBlockedReason: null });
+    expect(await verify({ ...ollama, JARVIS_EMBEDDING_URL: "https://embeddings.example.com" }, lookupTo("8.8.8.8").lookup)).toEqual({ embeddingBlockedReason: "embedding_url_not_local" });
+    expect(await verify({ ...ollama, JARVIS_EMBEDDING_URL: "http://nas.lan:11434" }, lookupTo("8.8.8.8").lookup)).toEqual({ embeddingBlockedReason: "embedding_url_resolves_nonlocal" });
+    expect(await verify({ ...ollama, JARVIS_EMBEDDING_URL: "http://user:pw@ollama:11434" }, lookupTo("172.18.0.2").lookup)).toEqual({ embeddingBlockedReason: "embedding_url_credentials" });
+    expect(await verify({ ...ollama, JARVIS_OLLAMA_URL: "http://169.254.169.254" }, lookupTo().lookup)).toEqual({ embeddingBlockedReason: "embedding_url_not_local" });
+    expect(await verify({ JARVIS_VISION_ENABLED: "on", JARVIS_EMBEDDING_URL: "https://embeddings.example.com" }, lookupTo("8.8.8.8").lookup)).toEqual({ embeddingBlockedReason: null }); // lokal-hash: ingen nettverk, URL-en brukes ikke
+  });
+
+  it("buildVisionRuntime: en ikke-lokal embedding-URL gir INGEN vision-embedding (logg vision_embeddings_disabled), mens en lokal URL eller lokal-hash gir embedding som før", () => {
+    const errors = (console.error as unknown as { mock: { calls: unknown[][] } }).mock;
+    const logged = (): string => errors.calls.map((c) => String(c[0])).join("\n");
+    const ollama = { JARVIS_VISION_ENABLED: "on", JARVIS_EMBEDDING_PROVIDER: "ollama" };
+    buildVisionRuntime(stubs({ ...ollama, JARVIS_EMBEDDING_URL: "https://embeddings.example.com" }))?.stop();
+    expect(logged()).toContain("\"code\":\"embedding_url_not_local\"");
+    errors.calls.length = 0;
+    buildVisionRuntime(stubs({ ...ollama, JARVIS_EMBEDDING_URL: "http://ollama:11434" }))?.stop();
+    buildVisionRuntime(stubs({ JARVIS_VISION_ENABLED: "on" }))?.stop();
+    expect(logged()).not.toContain("vision_embeddings_disabled");
+    errors.calls.length = 0;
+    buildVisionRuntime(stubs({ ...ollama, JARVIS_EMBEDDING_URL: "http://ollama:11434" }, { embeddingBlockedReason: "embedding_url_resolves_nonlocal" }))?.stop(); // navneoppløsningen fra oppstarten
+    expect(logged()).toContain("\"code\":\"embedding_url_resolves_nonlocal\"");
+  });
+});
+
+describe("embeddingEndpointFromEnv (review A-INFO-4): én kilde for embedding-URL-en minnet og vision bruker", () => {
+  it("null for lokal-hash (ingen nettverk) eller manglende URL; ellers JARVIS_EMBEDDING_URL -> JARVIS_OLLAMA_URL -> JARVIS_GEMMA_LOCAL_URL (trimmet) - og faktoren bruker den samme", () => {
+    expect(embeddingEndpointFromEnv({})).toBeNull();
+    expect(embeddingEndpointFromEnv({ JARVIS_EMBEDDING_PROVIDER: "local-hash", JARVIS_EMBEDDING_URL: "http://x:1" })).toBeNull();
+    expect(embeddingEndpointFromEnv({ JARVIS_EMBEDDING_URL: "http://x:1" })).toBeNull(); // uten Ollama-valg brukes ingen URL
+    expect(embeddingEndpointFromEnv({ JARVIS_EMBEDDING_PROVIDER: "ollama" })).toBeNull();
+    expect(() => createEmbeddingProviderFromEnv({ JARVIS_EMBEDDING_PROVIDER: "ollama" })).toThrow(/memory_embedding_url_missing/);
+    const all = { JARVIS_EMBEDDING_PROVIDER: "ollama", JARVIS_EMBEDDING_URL: " http://a:1 ", JARVIS_OLLAMA_URL: "http://b:1", JARVIS_GEMMA_LOCAL_URL: "http://c:1" };
+    expect(embeddingEndpointFromEnv(all)).toBe("http://a:1");
+    expect(embeddingEndpointFromEnv({ ...all, JARVIS_EMBEDDING_URL: "" })).toBe("http://b:1");
+    expect(embeddingEndpointFromEnv({ ...all, JARVIS_EMBEDDING_URL: "", JARVIS_OLLAMA_URL: "" })).toBe("http://c:1");
+    expect(embeddingEndpointFromEnv({ JARVIS_EMBEDDING_MODEL: "nomic-embed-text", JARVIS_OLLAMA_URL: "http://x:11434" })).toBe("http://x:11434");
   });
 });
 
@@ -110,6 +259,10 @@ describe("main.ts: flagg-av-identitet i selve koblingen", () => {
     // review B-M2: HA-polleren får EIERENS tenant (og ingen annen kilde) - `owner.tenant_id` er den samme verdien som resten av kjernen bruker som eier
     expect(MAIN_SRC).toMatch(/buildVisionRuntime\(\{\n\s*pool, env: process\.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, ownerTenantId: owner\.tenant_id, secrets: readSecretProvider,/);
     expect(MAIN_SRC.match(/ownerTenantId:/g)).toHaveLength(1);
+    // review A-L5/A-INFO-4: navneoppløsningen kjøres ved oppstart FØR adapteren bygges (offentlig oppløsning kaster), med den ekte dns.lookup, og embedding-vurderingen gis videre til kjøretiden
+    expect(MAIN_SRC).toMatch(/const visionEndpoints = await verifyVisionEndpoints\(process\.env, \{ lookup: \(host\) => dnsLookup\(host, \{ all: true, verbatim: true \}\) \}\);\n\s*const visionAdapter = visionAdapterFromEnv\(process\.env\);/);
+    expect(MAIN_SRC).toContain('import { lookup as dnsLookup } from "node:dns/promises";');
+    expect(MAIN_SRC).toContain("embeddingBlockedReason: visionEndpoints.embeddingBlockedReason");
     expect(MAIN_SRC).not.toMatch(/new LocalOpenAiCompatibleAdapter\([^)]*local_vision/);
   });
 
