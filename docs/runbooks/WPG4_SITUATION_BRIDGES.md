@@ -139,6 +139,7 @@ Forutsetninger (eier): NAS med kjørende compose, ekte Home Assistant med eieren
 
 ## 12. `DEFERRED` / `BLOCKED_EXTERNAL` (ærlig liste)
 
+* `DEFERRED`: etterfylling av kamerahendelser etter nedetid (løperen leser et vindu på 3 tikk, minst 10 min; hendelser i et lengre hull leses ikke inn. Overlapp er trygt fordi loggen er idempotent, men det finnes ingen etterfylling, og det daglige sveipet dekker ikke kamera);
 * `DEFERRED`: HA-push (WebSocket `subscribe_events`/webhook-automasjon) - i dag polling; eier-flate for abonnementer (rute/CLI/kontrollsenter-side; handlingene finnes som verktøy); lært energi-baseline for `power_over_limit` (i dag eierens egen grense); tidssone-bevisste helsedøgn (UTC brukes), søvnstadier, ukestrender; kommunikasjon/forretning som kilder (`communications`/`business` har tomt hendelsessett i registeret; G1-forpliktelser kan kobles senere); «borte»-bevisst bevegelse (kun eierens nattvindu); sanntids-løsning av incidents (løses av det daglige sveipet); kobling av `detectSpendSpike`/`detectStaleJobs` (§10); første kostnad etter lang rolig periode og aldri-kjørte jobber (krever vedlikeholdskatalogen); kontrollsenter-side for situasjoner.
 * `BLOCKED_EXTERNAL`: ACT/ACT+NOTIFY observert på NAS; lokal modell på NAS; ekte HA/kamera/helsedata.
 * `NOT_BUILT` (bevisst, utenfor UA-10): selvmodifikasjon (D-397), modell som avgjør ACT alene, ny leverandør, lokalagent med filtilgang (Q-60), JARVIS-084.
