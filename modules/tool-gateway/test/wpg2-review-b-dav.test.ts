@@ -226,3 +226,47 @@ describe("F: parseMultistatus er lineær også på `<` + navn uten `>` og ulukke
     }
   });
 });
+
+/**
+ * Fiks-runde 2 (delta-review B, NY-3): en vCard-gruppe som blander egenskaper (`item1.EMAIL` + `item1.TEL`) mistet telefonen ved e-postbytte, fordi hele gruppen ble droppet. Nå fjernes KUN de erstattede egenskapene, og gruppens etikett (`X-ABLabel`)
+ * bare når ingen annen egenskap står igjen i gruppen.
+ */
+describe("G: en vCard-gruppe som blander egenskaper mister ikke de andre ved e-postbytte (NY-3)", () => {
+  const mixed = ["BEGIN:VCARD", "VERSION:3.0", "UID:card-0002", "FN:Kari Nordmann", "item1.EMAIL;type=INTERNET;type=pref:kari@example.com", "item1.TEL:+4711112222", "item1.X-ABLabel:Jobb",
+    "item2.EMAIL:kari@hjemme.example", "item2.X-ABLabel:Hjem", "item3.X-CUSTOM:behold-meg", "item3.EMAIL:tre@example.com", "END:VCARD", ""].join("\r\n");
+  const patch = (fields: Record<string, unknown>): string[] => unfold(patchComponent(mixed, "VCARD", propertyChanges("contacts", fields, NOW)));
+
+  it("bytte av e-post fjerner KUN e-postlinjene: telefonen og etiketten i den blandede gruppen står igjen, en ukjent egenskap i en gruppe også; en ren e-postgruppe mister fortsatt etiketten sin", () => {
+    const patched = patch({ emails: ["ny@example.com"] });
+    expect(patched.filter((l) => /(^|\.)EMAIL[;:]/i.test(l))).toEqual(["EMAIL;TYPE=INTERNET:ny@example.com"]); // alle tre gamle e-poster er borte, den nye står
+    expect(patched).toContain("item1.TEL:+4711112222"); // telefonen i gruppen med e-posten overlever
+    expect(patched).toContain("item1.X-ABLabel:Jobb"); // ... og etiketten blir hos den
+    expect(patched).toContain("item3.X-CUSTOM:behold-meg"); // en ukjent egenskap i en gruppe med en erstattet e-post står urørt
+    expect(patched).not.toContain("item2.X-ABLabel:Hjem"); // item2 hadde KUN e-posten: etiketten ville blitt foreldreløs
+    expect(patched.some((l) => l.startsWith("item2."))).toBe(false);
+  });
+
+  it("bytte av BÅDE e-post og telefon tømmer den blandede gruppen helt, også etiketten (ingen foreldreløs etikett)", () => {
+    const patched = patch({ emails: ["ny@example.com"], phones: ["+4700000000"] });
+    expect(patched.some((l) => l.startsWith("item1.") || l.startsWith("item2."))).toBe(false);
+    expect(patched).toContain("item3.X-CUSTOM:behold-meg");
+    expect(patched.filter((l) => /(^|\.)TEL[;:]/i.test(l))).toEqual(["TEL;TYPE=VOICE:+4700000000"]);
+  });
+
+  it("en endring som ikke treffer gruppen (kun navn) rører ingen gruppelinjer", () => {
+    const patched = patch({ full_name: "Kari Ny" });
+    for (const line of unfold(mixed).filter((l) => /^item\d\./.test(l))) expect(patched, line).toContain(line);
+  });
+
+  it("end-to-end: e-postbytte gjennom klienten gir readback SUCCESS med de nye e-postene, og telefonen i den blandede gruppen er fortsatt lagret og lesbar", async () => {
+    const { server, client } = mk();
+    const url = `${CARD}card-0002.vcf`;
+    const etag = server.seed(url, mixed);
+    const res = await client.update("folk", "card-0002", etag, { emails: ["ny@example.com"] });
+    expect(res.outcome).toBe("SUCCESS");
+    expect(res.item?.emails).toEqual(["ny@example.com"]);
+    expect(res.item?.phones).toEqual(["+4711112222"]);
+    expect(server.store.get(url)?.body).toContain("item1.TEL:+4711112222");
+    expect(server.store.get(url)?.body).not.toContain("kari@example.com");
+  });
+});

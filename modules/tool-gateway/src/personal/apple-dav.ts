@@ -152,6 +152,9 @@ export function findComponent(lines: readonly string[], name: string): { start: 
   return null;
 }
 
+/** Apples etikett på en gruppert egenskap (`item1.X-ABLabel:Jobb`); (store bokstaver, slik `parseProp` normaliserer navnet). */
+const GROUP_LABEL = "X-ABLABEL";
+
 /** Erstatter/fjerner egenskaper på komponentens eget nivå; ALT annet (underkomponenter, ukjente egenskaper) står urørt. `null`/tom liste = fjern. Nye linjer settes inn rett før `END:`. */
 export function patchComponent(raw: string, component: string, changes: Record<string, string[] | null>): string {
   const lines = unfold(raw);
@@ -159,9 +162,16 @@ export function patchComponent(raw: string, component: string, changes: Record<s
   if (!found) throw new DavError("dav_malformed_response", `no_${component}`);
   const names = new Set(Object.keys(changes));
   const hit = found.props.filter((p) => names.has(p.prop.name));
-  // En erstattet egenskap i en vCard-GRUPPE (`item1.EMAIL`) tar sin gruppes øvrige egenskaper (etiketten `item1.X-ABLabel`) med seg - ellers står en foreldreløs etikett igjen. Andre grupper rører vi ikke.
+  // En erstattet egenskap i en vCard-GRUPPE (`item1.EMAIL`) tar KUN gruppens etikett (`item1.X-ABLabel`) med seg, og bare når ingen annen egenskap står igjen i gruppen - ellers står en foreldreløs etikett igjen. En gruppe som blander egenskaper
+  // (`item1.EMAIL` + `item1.TEL`, eller en ukjent `item1.X-...`) beholder de andre egenskapene og etiketten (ingen datatap; delta-review B NY-3). Andre grupper rører vi ikke.
+  const hitIndexes = new Set(hit.map((p) => p.index));
   const groups = new Set(hit.flatMap((p) => (p.prop.group === undefined ? [] : [p.prop.group])));
-  const drop = new Set([...hit, ...found.props.filter((p) => p.prop.group !== undefined && groups.has(p.prop.group))].map((p) => p.index));
+  const orphanLabels = [...groups].flatMap((group) => {
+    const members = found.props.filter((p) => p.prop.group === group);
+    const survivors = members.filter((p) => !hitIndexes.has(p.index) && p.prop.name !== GROUP_LABEL);
+    return survivors.length === 0 ? members.filter((p) => p.prop.name === GROUP_LABEL) : [];
+  });
+  const drop = new Set([...hit, ...orphanLabels].map((p) => p.index));
   const added = Object.values(changes).flatMap((v) => v ?? []);
   const out: string[] = [];
   lines.forEach((line, i) => {
