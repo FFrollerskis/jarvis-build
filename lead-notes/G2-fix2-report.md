@@ -1,4 +1,24 @@
-TS: 2026-11-19T17:34:33.000Z
+TS: 2026-11-19T18:17:52.000Z
+**TILLEGG runde 2b (mini-delta B NY2-1 + A INFO): ny HEAD `3c3f30e8cdb5956978cd583b4f461cbd28d8b98c`** (lokalt, ikke pushet). Dette erstatter HEAD i teksten under (`adfa8308...`); 2 nye commits over den: `dd52a729` (fix + tester) og `3c3f30e8` (docs). Ingen rebase, ingen force-push, base b2d43703 uendret.
+
+**Push:** Ett forsøk (`git push -u origin claude/wp-g2-personal`) ga igjen 503 («credential service temporarily unavailable; retry shortly»). Ingenting er pushet (heller ikke de 9 commits fra runde 2); grenen finnes kun lokalt i worktreen. Jeg har ikke forsøkt på nytt.
+
+| Funn | Status | Test og mutasjonsbevis |
+|---|---|---|
+| B NY2-1 (LOW, fjerning mot samtidig innrullering) | LUKKET | review-b-family blokk F (4 nye DB-tester: R-A billett, R-B deadlock, R-C device_proof for `removed` og `left`; kappløpene settes opp deterministisk med en åpen transaksjon + `waitBlocked`, ingen sleep). Rød uten fiksen: 4 av 4 med reviewerens utfall (R-A/R-C: ny enhet AKTIV; R-B: `['ERR:40P01','ok']`). Mutanter mot den nye koden, hver mot R-A/R-B/R-C for seg (`timeout -k 5`, `--bail=1`): billett sist med løkke -> R-A og R-B røde; billett først uten løkke -> R-C rød; ingen billettforbruk -> R-A og R-B røde |
+| A INFO (409-klientregel) | LUKKET | én setning i runbook §2.5: etter 409 `personal_action_target_busy` bruk SAMME idempotensnøkkel og les status først (`.../list`, `.../read`) |
+
+- **Fiksen (reviewerens verifiserte, 12 linjer, `modules/context/src/family/service.ts` `endMembership`):** billett-UPDATE FØRST (samme låsrekkefølge som innrulleringen: billett, så enhet), deretter list + tilbakekall av enhetene i en LØKKE til ingen aktive står igjen, alt i samme transaksjon. Revisjonen teller summen over rundene (`devices_revoked`).
+- **Uavhengig kontroll:** reviewerens egen probe (`zz-g2b-delta2-ticket-race.test.ts`, kopiert inn midlertidig og slettet igjen) mot den nye koden: R-A `removal ok`, ny enhet `active:false`, `unknown_device`; R-B `["ok","redeemer_ok"]` (ingen deadlock); R-C `removal ok`, ny enhet `active:false`, `unknown_device`. 3 av 3 grønne.
+- **Rest (ikke endret, ærlig):** et sjeldent `device_proof`-tilfelle der innrulleringen ROTERER en eksisterende enhet D2 med en autoriserende enhet D1 som sorterer ETTER D2, kan gi en deadlock (40P01) mot fjerningens sorterte låsrekkefølge. Utfallet er trygt (hele transaksjonen ruller tilbake, medlemmet står `active`, eieren prøver igjen), ikke et sikkerhetshull, og ikke en regresjon (den sorterte rekkefølgen fantes også i adfa8308); ikke dekket av reviewerens tre scenarier og ikke endret.
+- **Testtall:** review-b-family 14 -> 18; målrettede G2-tester som postgres (samme 34 filer som før): **34 filer, 458 tester, alle grønne** (454 + 4 nye). Familie-suitene grønne: review-b-family 18, family-service 30, wpg2-family-integration 4, wpg2-family-erasure 2.
+- **Kvalitetsport:** `pnpm -r --workspace-concurrency=2 run typecheck`, `pnpm lint` og `pnpm check:containment`: alle exit 0. gitleaks adfa8308..HEAD (2 commits, 15 KB): ingen funn. Vaktbatchen (214 filer, samme liste som sist): **213 filer grønne, 3218 av 3221 tester grønne**; de 3 røde er de samme kjente sandkassefeilene wpc3-review1-hardening F10a/b/c (`git check-ignore` feiler med «dubious ownership» som OS-brukeren postgres), uendret fra forrige kjøring (3214 av 3217; de 4 nye testene er grønne). Ingen full suite er kjørt.
+- **Maskin:** maks 2 workers, `timeout -k 5`, `NODE_OPTIONS=--max-old-space-size=2048`, ingen full suite; egne vitest-prosesser ryddet (ingen igjen etter kjøringene); ingen `pkill`/`rm -rf` (kun `rm` av den ene midlertidige probe-kopien).
+- **D-464, bare endringer (2b):** **P1c:** fjerning/forlating tar billettene FØRST og tilbakekaller deretter enheter i løkke til ingen aktive står igjen (samme låsrekkefølge som innrullering); en samtidig innrullering gir aldri en aktiv enhet hos et fjernet medlem og aldri deadlock. **P1a (kun docs):** klientregel etter 409 `personal_action_target_busy`: samme idempotensnøkkel og les status først.
+
+---
+(Teksten under er rapporten for runde 2 slik den sto ved adfa8308; HEAD der er avløst av HEAD over.)
+
 WP-G2 fiks-runde 2 er ferdig lokalt, men ikke pushet.
 
 **Ny HEAD: `adfa8308c7747c2a00b21b4342885492dcf237da`** (gren `claude/wp-g2-personal`, 9 nye commits over c7c57a6c, 21 filer, +903/-99, base b2d43703 uendret, ingen rebase/force-push).
