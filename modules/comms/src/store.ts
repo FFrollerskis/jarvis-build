@@ -30,6 +30,15 @@ export interface Actor {
 
 export type OptOutSource = "inbound_stop_keyword" | "provider_error" | "owner_recorded" | "recipient_request";
 
+/**
+ * N1 (LEDER-AVGJØRELSE, delta-review A): ÉN aktiv avmeldingsrad per (tenant, mottaker-navnerom, KANAL, KILDE). Den unike indeksen i migrasjon 118 er (tenant, kanal, account_ref, hash) for aktive rader, og en tenant-bred avmelding
+ * har ingen avsenderkonto - `account_ref` er derfor et KILDE-spor (aldri en faktisk konto): stopp-ord `*` (som før), leverandørfeil `*provider`, eierregistrert `*owner`, mottakerens bønn utenfor kanalen `*request`. Slik kan en senere
+ * STOP aldri «absorberes» i en eksisterende rad med annen kanal/kilde (da ble kanalen/kilden til den første stående, og START på én kanal åpnet de andre, eller en eierregistrering forsvant ved START). Ingen migrasjon.
+ */
+const OPT_OUT_SLOT: Readonly<Record<OptOutSource, string>> = {
+  inbound_stop_keyword: "*", provider_error: "*provider", owner_recorded: "*owner", recipient_request: "*request"
+};
+
 /** B-H2: avmeldingen/gjenopptaket en innkommende STOP/START fører til. Skrives i SAMME transaksjon som hendelsens dedupe-rad (se `recordInbound`). */
 export interface OptEffect {
   readonly kind: "stop" | "start";
@@ -218,8 +227,9 @@ export class CommsStore {
   }
 
   /**
-   * Idempotent og TENANT-bred (A-M3): én aktiv avmelding per mottaker (`optOutHash`) i tenanten - `account_ref` lagres alltid som `'*'` (alle våre avsendere). En allerede aktiv avmelding (uansett kanal/rom den kom fra)
-   * gir `created: false`. Skrives i rommet kalleren står i; leses uavhengig av rom (`isOptedOut`).
+   * Idempotent og TENANT-bred (A-M3): avmeldingen gjelder mottakeren (`optOutHash`) i hele tenanten (alle kontoer, alle rom, alle kanaler i navnerommet) og leses uavhengig av rom (`isOptedOut`). Radene skrives derimot PER KANAL og
+   * PER KILDE (N1, se `OPT_OUT_SLOT`): samme STOP en gang til (samme kanal, samme kilde) gir `created: false`; en STOP på en annen kanal eller fra en annen kilde (f.eks. eieren) får sin EGEN rad, så START på én kanal kun løfter
+   * radene for den kanalen og aldri en eierregistrert avmelding. Skrives i rommet kalleren står i.
    */
   async recordOptOut(
     tenantId: string, space: MemorySpace,
@@ -232,15 +242,19 @@ export class CommsStore {
     client: pg.PoolClient, tenantId: string, space: MemorySpace,
     input: { channel: CommsChannel; recipient_hash: string; recipient_hint: string; source: OptOutSource; evidence_ref?: string; recorded_by: string; session_id?: string; task_id?: string }
   ): Promise<{ opt_out_id: string; created: boolean }> {
-    // To samtidige STOP for samme mottaker (f.eks. SMS og WhatsApp i samme sekund) serialiseres, så vi aldri får to aktive rader.
+    // To samtidige STOP for samme mottaker (f.eks. SMS og WhatsApp i samme sekund) serialiseres, så vi aldri får to aktive rader i SAMME (kanal, kilde)-spor.
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340464))", [`comms-optout|${tenantId}|${input.recipient_hash}`]);
-    const existing = await client.query(`SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 AND status = 'active' LIMIT 1`, [tenantId, input.recipient_hash]);
+    const slot = OPT_OUT_SLOT[input.source];
+    const existing = await client.query(
+      `SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 AND channel = $3 AND account_ref = $4 AND status = 'active' LIMIT 1`,
+      [tenantId, input.recipient_hash, input.channel, slot]
+    );
     if (existing.rowCount === 1) return { opt_out_id: (existing.rows[0] as { opt_out_id: string }).opt_out_id, created: false };
     const id = newId("optout");
     await client.query(
       `INSERT INTO comms_recipient_opt_outs (tenant_id, opt_out_id, memory_space_id, channel, account_ref, recipient_hash, recipient_hint, source, evidence_ref, recorded_by, session_id, task_id, created_at)
-       VALUES ($1, $2, $3, $4, '*', $5, $6, $7, $8, $9, $10, $11, $12)`,
-      [tenantId, id, space, input.channel, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock()]
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [tenantId, id, space, input.channel, slot, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock()]
     );
     return { opt_out_id: id, created: true };
   }
@@ -262,12 +276,12 @@ export class CommsStore {
     return res.rowCount ?? 0;
   }
 
-  /** Alle avmeldinger i tenanten (de gjelder tenant-bredt, så listen er det også - på tvers av rom). */
+  /** Alle avmeldinger i tenanten (de gjelder tenant-bredt, så listen er det også - på tvers av rom). `account_ref` vises alltid som `*` (alle våre avsendere): kolonnen er internt et kilde-spor (`OPT_OUT_SLOT`), ikke en konto. */
   async listOptOuts(tenantId: string, _space: MemorySpace, limit = 100): Promise<OptOutRow[]> {
     return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
       const res = await client.query(`SELECT * FROM comms_recipient_opt_outs WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`, [tenantId, Math.min(Math.max(limit, 1), 500)]);
       return (res.rows as Array<Record<string, unknown>>).map((r) => ({
-        opt_out_id: r["opt_out_id"] as string, channel: r["channel"] as CommsChannel, account_ref: r["account_ref"] as string, recipient_hint: (r["recipient_hint"] as string | null) ?? null,
+        opt_out_id: r["opt_out_id"] as string, channel: r["channel"] as CommsChannel, account_ref: "*", recipient_hint: (r["recipient_hint"] as string | null) ?? null,
         status: r["status"] as "active" | "lifted", source: r["source"] as OptOutSource, created_at: iso(r["created_at"]), lifted_at: isoOrNull(r["lifted_at"])
       }));
     });
