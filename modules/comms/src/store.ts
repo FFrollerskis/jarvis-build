@@ -296,7 +296,9 @@ export class CommsStore {
    * Journal-nivåets gjenspillingsvern (`INSERT ... ON CONFLICT DO NOTHING` på (tenant, request_id)) står i tillegg til ToolGateway-ledgeren (forsvar i dybden).
    */
   async beginAttempt(tenantId: string, space: MemorySpace, entry: JournalEntryInput, actor: Actor, retentionDays: number, caps: RateCaps): Promise<BeginResult> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+    // Alle comms-rom er synlige (A-H2 rest, LEDER-AVGJØRELSE): per-mottaker-døgntaket gjelder TENANT-bredt på tvers av rom, i samsvar med tenant-bred STOP (et nummer er ÉN mottaker uansett hvilket rom vi sender fra). Kontotaket er
+    // fortsatt per konto (konto-allowlisten er per tenant, og telles over alle rom kontoen har stått i). Raden skrives i `space`; gjenspillingsvernet (unik indeks på (tenant, request_id)) er også tenant-bredt.
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
       if (caps.recipient !== null) await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340463))", [`comms-cap-recipient|${tenantId}|${entry.channel}|${entry.recipient_hash}`]);
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340463))", [`comms-cap-account|${tenantId}|${entry.channel}|${entry.account_ref}`]);
       const replay = await this.priorAttemptOf(client, tenantId, entry.request_id);
@@ -335,8 +337,9 @@ export class CommsStore {
   }
 
   /** Finnes det allerede et IKKE-avslått forsøk med denne forespørsels-id-en? (`null` = nei.) Eier-ruten bruker det til å la en gjenspilling gå rett til gatewayens ledger i stedet for å vurdere policyen mot en tilstand det første forsøket selv har endret. */
-  async findAttempt(tenantId: string, space: MemorySpace, requestId: string): Promise<Extract<BeginResult, { kind: "replay" }> | null> {
-    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.priorAttemptOf(client, tenantId, requestId));
+  async findAttempt(tenantId: string, _space: MemorySpace, requestId: string): Promise<Extract<BeginResult, { kind: "replay" }> | null> {
+    // Tenant-bredt (alle comms-rom): den unike indeksen på (tenant, request_id) er det, og ledgeren er ikke rom-skopet - en forespørsels-id brukt i ett rom skal aldri se «ny» ut fra et annet (ellers `ok + deduplicated` uten sending).
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, (client) => this.priorAttemptOf(client, tenantId, requestId));
   }
 
   /** Bevisføring for et AVSLÅTT forsøk (policy). Brenner IKKE forespørsels-id-en (delvis unik indeks utelater `denied`). */
@@ -370,12 +373,13 @@ export class CommsStore {
     });
   }
 
-  async countRecipient24h(tenantId: string, space: MemorySpace, channel: CommsChannel, recipientHash: string, kind: "message" | "call"): Promise<number> {
-    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.recipientCount(client, tenantId, channel, recipientHash, kind, this.clock()));
+  async countRecipient24h(tenantId: string, _space: MemorySpace, channel: CommsChannel, recipientHash: string, kind: "message" | "call"): Promise<number> {
+    // Tenant-bredt (samme tall som den atomiske tellingen i `beginAttempt`): policyens tørrkjøring skal aldri være mildere enn håndhevelsen.
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, (client) => this.recipientCount(client, tenantId, channel, recipientHash, kind, this.clock()));
   }
 
-  async countAccountHour(tenantId: string, space: MemorySpace, channel: CommsChannel, accountRef: string): Promise<number> {
-    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.accountCount(client, tenantId, channel, accountRef, this.clock()));
+  async countAccountHour(tenantId: string, _space: MemorySpace, channel: CommsChannel, accountRef: string): Promise<number> {
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, (client) => this.accountCount(client, tenantId, channel, accountRef, this.clock()));
   }
 
   /** Samme SQL for den rådgivende tellingen (policyens tørrkjøring) og den atomiske tellingen under lås i `beginAttempt`: aktive forsøk (requested/sent/outcome_unknown) siste 24 t til mottakeren, per handlingstype. */
