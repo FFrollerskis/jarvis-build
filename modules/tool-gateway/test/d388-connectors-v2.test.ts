@@ -305,6 +305,64 @@ describe("G: Home Assistant - ekte REST-transport bak homeAssistantTools(), romk
     expect(normalizeHomeState({ entity_id: "sensor.z", state: "1", attributes: { token: true, secret: null, password: "x", pin: 1234 } })["attributes"]).toEqual({ token: true, secret: null });
   });
 
+  describe("WP-G3 mikro-runde 3 (review delta2 A LOW-E2): normalisert nøkkel mot EKSPLISITT liste av hemmelighetsnavn - ingen regresjon mot den gamle regelen, ingen falske positiver", () => {
+    const attrs = (attributes: Record<string, unknown>): Record<string, unknown> => normalizeHomeState({ entity_id: "sensor.x", state: "1", attributes })["attributes"] as Record<string, unknown>;
+
+    it("REGRESJON: sammenskrevne og uvanlig skrevne hemmelighetsnavn fjernes (accesstoken/ACCESSTOKEN ble strippet av den gamle regelen og ble stille beholdt etter forrige runde)", () => {
+      const secretNames = [
+        "accesstoken", "ACCESSTOKEN", "AccessToken", "accessToken", "access_token", "access-token", "authtoken", "AUTHTOKEN", "authToken", "secretkey", "SECRETKEY", "SecretKey", "accesskey", "ACCESSKEY", "apikey", "APIKEY", "api_key", "API.Key", "x-api-key",
+        "refreshtoken", "idtoken", "bearertoken", "privatekey", "clientsecret", "passwd", "PASSWD", "password", "PASSWORD", "PIN", "pin", "JWT", "Bearer", "CREDENTIALS", "credentials", "authorization", "AUTHORIZATION", "Cookie",
+        "ha_access_token", "my.api.key", "HA_LONG_LIVED_ACCESS_TOKEN", "token", "TOKEN", "secret", "Secret", "auth", "AUTH", "Auth",
+        // camelCase med ord foran/etter navnet (deles på ordgrensene før navnet slås opp)
+        "myAccessTokenValue", "haApiKey", "userPassword", "botToken", "SomeSecretKeyHere"
+      ];
+      for (const key of secretNames) expect(attrs({ [key]: "hemmelig-verdi", friendly_name: "S" }), key).toEqual({ friendly_name: "S" });
+      // objekt- og listeverdier under et hemmelig navn fjernes også
+      expect(attrs({ accesstoken: { value: "x" }, apikey: ["a", "b"], friendly_name: "S" })).toEqual({ friendly_name: "S" });
+    });
+
+    it("FALSKE POSITIVER beholdes: `auth_failed`, `token_count`, `max_tokens`, `password_required` m.fl. er ikke hemmelighetsnavn (ikke-boolske verdier, så NAVNET avgjør)", () => {
+      const innocent = {
+        auth_failed: 3, auth_error: "invalid_grant", auth_method: "oauth2", auth_type: "basic", auth_status: "ok", auth_state: "ready", auth_provider: "local", authenticated: "yes", authority: "x", author: "Kari",
+        token_count: 12, token_failed: "no", token_limit: 100, token_type: "Bearer", token_expires_at: "2026-12-01T00:00:00Z", max_tokens: 5, tokens: 3, password_required: "yes", password_length: 12, password_error: "too_short",
+        pin_attempts: 3, pin_length: 4, secret_configured: "yes", secret_status: "ok", api_key_count: 2, key_count: 2, keyboard: "no", friendly_name: "S", unit_of_measurement: "W",
+        // samme navn i camelCase
+        authFailed: 3, tokenCount: 12, maxTokens: 5, passwordRequired: "yes", tokenExpiresAt: "2026-12-01T00:00:00Z", authMethod: "oauth2"
+      };
+      expect(attrs(innocent)).toEqual(innocent);
+    });
+
+    it("INGEN REGRESJON mot den gamle regelen (c6488c10): hver nøkkel den strippet (alle termer x prefiks x suffiks x store/små bokstaver) strippes fortsatt - unntatt den TILSIKTEDE egenskapsklassen (`token_count`, `password_required`, `token_expires_at` ...)", () => {
+      const OLD = /(^|_)(access_?token|token|secret|password|api_?key|authorization)($|_)/i;
+      const terms = ["access_token", "accesstoken", "token", "secret", "password", "api_key", "apikey", "authorization"];
+      const prefixes = ["", "my_", "x_", "ha_", "long_lived_", "Some_"];
+      const secretSuffixes = ["", "_value", "_data", "_string", "_hash", "_1", "_x", "_plain"];
+      const propertySuffixes = ["_count", "_limit", "_length", "_type", "_expires", "_expires_at", "_required", "_status", "_failed", "_error", "_enabled", "_max"];
+      let secretChecked = 0;
+      let propertyChecked = 0;
+      for (const term of terms) {
+        for (const prefix of prefixes) {
+          for (const toCase of [(s: string): string => s, (s: string): string => s.toUpperCase()]) {
+            for (const suffix of secretSuffixes) {
+              const key = toCase(prefix + term + suffix);
+              expect(OLD.test(key), `orakelet: den gamle regelen strippet ${key}`).toBe(true);
+              expect(attrs({ [key]: "verdi", friendly_name: "S" }), `ny regel: ${key}`).toEqual({ friendly_name: "S" });
+              secretChecked += 1;
+            }
+            for (const suffix of propertySuffixes) {
+              const key = toCase(prefix + term + suffix);
+              expect(OLD.test(key), `orakelet: den gamle regelen strippet ${key}`).toBe(true);
+              expect(attrs({ [key]: "verdi", friendly_name: "S" }), `egenskapsklassen beholdes: ${key}`).toEqual({ [key]: "verdi", friendly_name: "S" });
+              propertyChecked += 1;
+            }
+          }
+        }
+      }
+      expect(secretChecked).toBe(8 * 6 * 2 * 8);
+      expect(propertyChecked).toBe(8 * 6 * 2 * 12);
+    });
+  });
+
   it("read_state uten entity leser rommets kartlagte enheter og gir samlebilde", async () => {
     stubFetch((url) => {
       if (url.endsWith("light.stue_tak")) return { json: { entity_id: "light.stue_tak", state: "off" } };

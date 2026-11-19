@@ -50,20 +50,34 @@ export function assertEntityId(value: unknown, label: string): string {
  */
 const CAMERA_TOKEN_ATTRIBUTES = new Set(["access_token", "entity_picture", "entity_picture_local"]);
 /**
- * Review delta A INFO-D6: navnebasert gjenkjenning av hemmelige attributter, BEST EFFORT (HA har ingen standard for hva en integrasjon kaller et token: det er ikke en garanti, og er ikke et sikkerhetsvern alene - kamerabildet
- * er vernet av at HA-tokenet aldri er i modellflaten, og kamera-attributtene over fjernes uansett navn). Nøkkelen gjøres først kanonisk (camelCase, kebab, punktum og mellomrom -> `snake_case`, små bokstaver:
- * `authToken`, `access-token`, `API.Key` -> `auth_token`, `access_token`, `api_key`), og deretter er en nøkkel hemmelig når den KAN SETTES SAMMEN av en hemmelighetsfrase på ordgrenser (`auth_token`, `secret_key`, `access_key`,
- * `password`, `passwd`, `jwt`, `bearer`, `credentials`, `pin`, ...) - MED mindre den ender på et ord som beskriver noe ANNET enn selve hemmeligheten (`token_count`, `max_tokens` (flertall er et annet ord), `password_required`,
- * `pin_length`, `token_expires`). En boolsk verdi eller `null` kan aldri bære en hemmelighet og beholdes alltid (`auth: true`).
+ * Review delta A INFO-D6 + delta2 A LOW-E2: navnebasert gjenkjenning av hemmelige attributter, BEST EFFORT (HA har ingen standard for hva en integrasjon kaller et token: det er ikke en garanti, og er ikke et sikkerhetsvern alene -
+ * kamerabildet er vernet av at HA-tokenet aldri er i modellflaten, og kamera-attributtene over fjernes uansett navn).
+ * Nøkkelen NORMALISERES (camelCase, kebab, punktum og mellomrom -> ord, små bokstaver: `authToken`, `access-token`, `API.Key`, `ACCESSTOKEN` -> `auth`+`token`, `access`+`token`, `api`+`key`, `accesstoken`), og er hemmelig når
+ * en SAMMENHENGENDE RUNDE AV ORD, skrevet sammen uten skilletegn, er et navn på en EKSPLISITT liste (`SECRET_NAMES`: `accesstoken`, `authtoken`, `secretkey`, `accesskey`, `apikey`, `jwt`, `bearer`, `credentials`, `passwd`, `pin` ...).
+ * Det finnes ingen delstrengregel: `auth_failed`, `token_count`, `max_tokens` (flertall er et annet navn), `password_required`, `pin_length` og `authenticated` er ikke på listen og beholdes. `auth` ALENE er et hemmelighetsnavn (en bar
+ * `auth`-nøkkel med tekst er typisk et innloggingsfelt), men `auth_*` er det ikke med mindre runden er et eget navn (`auth_token`, `auth_key`). Et siste ord som beskriver en EGENSKAP ved hemmeligheten (antall, grense, utløp, påkrevd,
+ * feilet ...) gjør nøkkelen uskyldig selv når en runde før det er et hemmelighetsnavn (`token_expires_at`, `password_required`, `token_failed`).
+ * En boolsk verdi eller `null` kan aldri bære en hemmelighet og beholdes alltid (`auth: true`). Tidligere regel (c6488c10: `(^|_)(access_?token|token|secret|password|api_?key|authorization)($|_)`) strippet alt dette unntatt den tilsiktede
+ * egenskapsklassen og boolske verdier - en test sammenligner mot den regelen (ingen regresjon: `accesstoken`/`ACCESSTOKEN` ble strippet av den og skal fortsatt strippes).
  */
-const SECRET_PHRASES: ReadonlyArray<readonly string[]> = [
-  ["token"], ["secret"], ["password"], ["passwd"], ["pwd"], ["passphrase"], ["passcode"], ["jwt"], ["bearer"], ["credential"], ["credentials"], ["authorization"], ["auth"], ["pin"], ["cookie"],
-  ["api", "key"], ["apikey"], ["access", "key"], ["secret", "key"], ["private", "key"], ["signing", "key"], ["encryption", "key"], ["auth", "key"], ["client", "secret"], ["pin", "code"]
-];
-/** Siste ord som gjør at nøkkelen beskriver en egenskap ved hemmeligheten (antall, grense, utløp, påkrevd ...), ikke hemmeligheten selv. */
+const SECRET_NAMES: ReadonlySet<string> = new Set([
+  // token-familien
+  "token", "accesstoken", "authtoken", "refreshtoken", "idtoken", "bearertoken", "apitoken", "sessiontoken", "csrftoken",
+  // hemmeligheter og nøkler
+  "secret", "secretkey", "clientsecret", "sharedsecret", "apikey", "accesskey", "privatekey", "signingkey", "encryptionkey", "authkey",
+  // passord og PIN
+  "password", "passwd", "pwd", "passphrase", "passcode", "pin", "pincode",
+  // øvrige innloggingsbærere
+  "jwt", "bearer", "credential", "credentials", "authorization", "cookie"
+]);
+/** Navn som KUN er hemmelige når de er hele nøkkelen: `auth` (men `auth_failed`, `auth_method`, `auth_required` er det ikke). */
+const WHOLE_KEY_SECRET_NAMES: ReadonlySet<string> = new Set(["auth"]);
+const MAX_NAME_WORDS = 3;
+/** Siste ord som gjør at nøkkelen beskriver en egenskap ved hemmeligheten (antall, grense, utløp, påkrevd, feilet ...), ikke hemmeligheten selv. */
 const BENIGN_LAST_WORDS: ReadonlySet<string> = new Set([
   "count", "counts", "limit", "limits", "usage", "used", "total", "max", "min", "length", "len", "size", "type", "kind", "expires", "expiry", "expired", "expiration", "ttl", "timeout", "time", "ts", "at", "age",
-  "required", "enabled", "disabled", "configured", "set", "present", "valid", "status", "state", "format", "mode", "policy", "version", "attempts", "rate"
+  "required", "enabled", "disabled", "configured", "set", "present", "valid", "status", "state", "format", "mode", "policy", "version", "attempts", "rate",
+  "failed", "failure", "failures", "error", "errors", "invalid", "denied"
 ]);
 
 function canonicalKeyWords(key: string): string[] {
@@ -78,11 +92,16 @@ function canonicalKeyWords(key: string): string[] {
 function isSecretAttributeName(key: string): boolean {
   const words = canonicalKeyWords(key);
   if (words.length === 0) return false;
-  if (BENIGN_LAST_WORDS.has(words[words.length - 1] as string) && words.length > 1) return false;
-  return SECRET_PHRASES.some((phrase) => {
-    for (let start = 0; start + phrase.length <= words.length; start += 1) if (phrase.every((word, offset) => words[start + offset] === word)) return true;
-    return false;
-  });
+  if (words.length === 1) return SECRET_NAMES.has(words[0] as string) || WHOLE_KEY_SECRET_NAMES.has(words[0] as string);
+  if (BENIGN_LAST_WORDS.has(words[words.length - 1] as string)) return false;
+  for (let start = 0; start < words.length; start += 1) {
+    let run = "";
+    for (let end = start; end < words.length && end < start + MAX_NAME_WORDS; end += 1) {
+      run += words[end];
+      if (SECRET_NAMES.has(run)) return true;
+    }
+  }
+  return false;
 }
 
 /** Spørreparametere som bærer adgang i en URL (`?token=`, `&auth=`, `&key=`, `&apikey=`, `&signature=` ...). */
