@@ -53,7 +53,7 @@ beforeAll(async () => {
     if (tokenFails) throw new Error("invalid_grant: refresh-token abc-hemmelig");
     return "fake-access-token";
   }, { warmupDelayMs: 0 });
-  for (const d of commsToolDefinitions({ transport: new CommsTransport({ funnel, store, contacts: { api, graph } }), store, rateLimitPerMinute: 1000, contacts: true })) gateway.register(d);
+  for (const d of commsToolDefinitions({ transport: new CommsTransport({ funnel, store, contacts: { api, graph } }), store, rateLimitPerMinute: 1000, contacts: true })) gateway.register({ ...d, rate_limit_per_minute: 1_000_000 }); // per-verktøy-grensen (20/min for skriving) er ikke det som testes her
 }, 240_000);
 
 afterAll(async () => { await db?.stop(); }, 120_000);
@@ -411,6 +411,45 @@ describe("C: lenking til Conversation Graph (`contacts_sync`)", () => {
       expect(unknown.ok && unknown.data).toEqual({ revoked: 0 });
       for (const bad of [{ resource_name: "people/c1; DROP" }, { resource_name: "people/c1", extra: true }, {}, { resource_name: "people/c1", restore: "ja" }] as Array<Record<string, JsonValue>>) {
         expect((await act("contacts_unlink", bad)).ok, JSON.stringify(bad)).toBe(false);
+      }
+    });
+
+    it("B-H1 rest: TO SAMTIDIGE contacts_sync (ulike sider, delt telefon) kryss-lenker aldri to personer - nøyaktig én kontakt lenkes, den andre er en konflikt (12 runder med ekte parallellitet)", async () => {
+      const pages = new Map<string, unknown[]>();
+      handler = (call) => jsonRes({ connections: pages.get(new URL(call.url).searchParams.get("pageToken") ?? "") ?? [] });
+      const crossLinked: number[] = [];
+      let conflicts = 0;
+      for (let i = 0; i < 12; i++) {
+        const phone = `+47${22_100_000 + i}`;
+        const e1 = `ola${i}@samtidig-a.no`;
+        const e2 = `kari${i}@samtidig-b.no`;
+        pages.set(`A${i}`, [person(`${200 + i}`, { phoneNumbers: [{ value: phone }], emailAddresses: [{ value: e1 }] })]);
+        pages.set(`B${i}`, [person(`${300 + i}`, { phoneNumbers: [{ value: phone }], emailAddresses: [{ value: e2 }] })]);
+        const [a, b] = await Promise.all([sync({ page_size: 10, page_token: `A${i}` }), sync({ page_size: 10, page_token: `B${i}` })]);
+        expect(a.ok && b.ok, `runde ${i}`).toBe(true);
+        conflicts += [a, b].reduce((sum, r) => sum + (r.ok ? (r.data as { contacts_conflict: number }).contacts_conflict : 0), 0);
+        const i1 = await graph.resolveIdentityByChannel(TENANT_A, "business", "email", e1);
+        const i2 = await graph.resolveIdentityByChannel(TENANT_A, "business", "email", e2);
+        if (i1 !== null && i2 !== null) crossLinked.push(i);
+        expect((i1 === null) !== (i2 === null), `runde ${i}: nøyaktig én av de to kontaktene er lenket`).toBe(true);
+      }
+      expect(crossLinked).toEqual([]);
+      expect(conflicts).toBe(12);
+    });
+
+    it("B-H1 rest: en feil midtveis i lenkingen ruller ALT tilbake (ingen halvt lenket kontakt, ingen foreldreløs identitet)", async () => {
+      const marker = `boom${Date.now()}@example.com`;
+      await db.admin.query(`CREATE OR REPLACE FUNCTION g1_fail_marker() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.channel_identifier = '${marker}' THEN RAISE EXCEPTION 'simulert feil'; END IF; RETURN NEW; END $$`);
+      await db.admin.query("CREATE TRIGGER g1_fail_marker BEFORE INSERT ON conversation_channel_links FOR EACH ROW EXECUTE FUNCTION g1_fail_marker()");
+      try {
+        handler = () => jsonRes({ connections: [person("555", { phoneNumbers: [{ value: "+4722000555" }], emailAddresses: [{ value: marker }] })] });
+        const before = await identityCount();
+        const r = await sync();
+        expect(r.ok && r.data).toMatchObject({ scanned: 1, linked_identifiers: 0, contacts_failed: 1, contacts_conflict: 0 });
+        expect(await graph.resolveIdentityByPhone(TENANT_A, "business", "+4722000555")).toBeNull(); // telefonen (første lenke) ble IKKE værende
+        expect(await identityCount()).toBe(before);
+      } finally {
+        await db.admin.query("DROP TRIGGER g1_fail_marker ON conversation_channel_links");
       }
     });
   });

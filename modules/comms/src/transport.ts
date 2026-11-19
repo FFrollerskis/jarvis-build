@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, isValidAccountRef, normalizeRecipient, optOutHash, recipientHint, type CommsProvider } from "./channels.ts";
-import { PHONE_CHANNELS, type ConversationGraphService } from "@jarvis/conversation-graph";
+import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import {
   CONTACTS_LINK_SOURCE, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema, type ContactView, type GoogleContacts
 } from "./contacts.ts";
@@ -52,7 +52,7 @@ export const MeetingDecideSchema = z.object({ commitment_id: z.string().min(8).m
 export const MeetingConfirmSchema = z.object({ meeting_id: z.string().min(8).max(80), participant_ref: z.string().min(1).max(80), identity_id: z.string().min(8).max(100) }).strict();
 
 /** Conversation Graph-flaten kontakt-verktøyene trenger (lenking, oppløsning og reversibel unlink/restore). */
-export type ContactsGraph = Pick<ConversationGraphService, "linkChannelIdentity" | "resolveIdentityByChannel" | "listChannelLinks" | "revokeLinksBySource" | "restoreLinksBySource">;
+export type ContactsGraph = Pick<ConversationGraphService, "linkExclusiveIdentifiers" | "revokeLinksBySource" | "restoreLinksBySource">;
 
 export class CommsTransport implements ToolTransport {
   constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore; reads?: VendorReads; contacts?: { api: GoogleContacts; graph: ContactsGraph }; meetings?: MeetingService }) {}
@@ -72,40 +72,23 @@ export class CommsTransport implements ToolTransport {
   /**
    * Lenker en kontakt til en identitet i Conversation Graph (P2e): eksakt E.164/e-post, `match_method: contact_sync`, confidence 0.9, proveniens (kilde + Google-ressursnavn).
    *
-   * FIKS B-H1: ALLE identifikatorene oppløses FØRST (telefon mot alle telefonkanalene), og ingenting skrives før vi vet hvor de peker. Kontakten lenkes KUN når (a) alle er nye, eller (b) alle eksisterende treff peker på
-   * ÉN identitet som ingen ANNEN kontakt (annen ressursnavn i `external_id`) allerede har lenket seg til. Ellers HOPPES kontakten OVER (`conflict_with`): å feste en annen persons identifikatorer til en fremmed identitet
-   * (delt sentralbord-/fasttelefon eller delt e-post) er en stille sammenslåing av to personer, som verken kan oppdages eller angres uten reversibel unlink. Eieren løser en konflikt eksplisitt (merge/split i Conversation Graph, eller
-   * `contacts_unlink`). Returnerer antall lenkede identifikatorer.
+   * FIKS B-H1: kontakten lenkes KUN når (a) alle identifikatorene er nye, eller (b) alle eksisterende treff peker på ÉN identitet som ingen ANNEN kontakt (annen ressursnavn i `external_id`) allerede har lenket seg til. Ellers HOPPES
+   * kontakten OVER (`conflict_with`): å feste en annen persons identifikatorer til en fremmed identitet (delt sentralbord-/fasttelefon eller delt e-post) er en stille sammenslåing av to personer, som verken kan oppdages eller angres
+   * uten reversibel unlink. Eieren løser en konflikt eksplisitt (merge/split i Conversation Graph, eller `contacts_unlink`).
+   *
+   * FIKS B-H1 rest (delta-review B): oppløsning, eierkontroll og skriving skjer ATOMISK i grafen (`linkExclusiveIdentifiers`: én transaksjon bak en advisory-lås per tenant og rom). Før lå de utenfor skrivingen og uten lås: to
+   * samtidige `contacts_sync` (to sider, en delt telefon) kryss-lenket i 7 av 8 forsøk. Returnerer antall lenkede identifikatorer.
    */
   private async linkContact(ctx: FunnelContext, view: ContactView): Promise<{ linked: number; conflict_with: string[] | null }> {
     const { graph } = this.contacts();
-    const identifiers: Array<{ channel: "phone" | "email"; id: string }> = [...view.phones.map((id) => ({ channel: "phone" as const, id })), ...view.emails.map((id) => ({ channel: "email" as const, id }))];
-    const identityIds = new Set<string>();
-    for (const { channel, id } of identifiers) {
-      for (const c of channel === "phone" ? PHONE_CHANNELS : (["email"] as const)) {
-        const found = await graph.resolveIdentityByChannel(ctx.tenantId, ctx.space, c, id);
-        if (found !== null) identityIds.add(found.identity_id);
-      }
-    }
-    // Identifikatorene peker på ULIKE identiteter: å feste dem sammen ville slått identitetene sammen.
-    if (identityIds.size > 1) return { linked: 0, conflict_with: [] };
-    let identityId: string | undefined = [...identityIds][0];
-    if (identityId !== undefined) {
-      const owners = (await graph.listChannelLinks(ctx.tenantId, ctx.space, identityId))
-        .filter((l) => l.status === "active" && l.source_type === CONTACTS_LINK_SOURCE && l.external_id !== null && l.external_id !== view.resource_name)
-        .map((l) => l.external_id as string);
-      if (owners.length > 0) return { linked: 0, conflict_with: [...new Set(owners)] };
-    }
-    let linked = 0;
-    for (const { channel, id } of identifiers) {
-      const link = await graph.linkChannelIdentity(ctx.tenantId, ctx.space, {
-        channel, channel_identifier: id, confidence: 0.9, match_method: "contact_sync", source_type: CONTACTS_LINK_SOURCE, external_id: view.resource_name, created_by_person_id: ctx.actor.person_id,
-        ...(identityId !== undefined ? { identity_id: identityId } : view.display_name !== null ? { display_name: view.display_name } : {})
-      });
-      identityId ??= link.identity_id;
-      linked += 1;
-    }
-    return { linked, conflict_with: null };
+    const identifiers: Array<{ channel: "phone" | "email"; identifier: string }> = [
+      ...view.phones.map((identifier) => ({ channel: "phone" as const, identifier })), ...view.emails.map((identifier) => ({ channel: "email" as const, identifier }))
+    ];
+    const result = await graph.linkExclusiveIdentifiers(ctx.tenantId, ctx.space, {
+      identifiers, source: { source_type: CONTACTS_LINK_SOURCE, external_id: view.resource_name }, confidence: 0.9, match_method: "contact_sync", created_by_person_id: ctx.actor.person_id,
+      ...(view.display_name !== null ? { display_name: view.display_name } : {})
+    });
+    return result.status === "linked" ? { linked: result.linked, conflict_with: null } : { linked: 0, conflict_with: result.with };
   }
 
   private meetings(): MeetingService {

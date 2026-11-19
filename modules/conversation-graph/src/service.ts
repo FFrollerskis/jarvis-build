@@ -90,9 +90,18 @@ import type {
   CrossChannelCommitmentView,
   IdentityTimelineEntry,
   LinkChannelIdentityInput,
+  LinkExclusiveIdentifiersInput,
+  LinkExclusiveIdentifiersResult,
   MergeIdentitiesInput,
   SplitMergeInput
 } from "./types.ts";
+
+/** Intern: en lenke endte på en identitet/kilde vi ikke forventet (en samtidig skriver utenfor låsen) - hele `linkExclusiveIdentifiers`-transaksjonen rulles tilbake og gir `conflict`. */
+class ExclusiveLinkRace extends Error {
+  constructor() {
+    super("conversation_exclusive_link_race");
+  }
+}
 
 export class ConversationGraphService {
   constructor(private readonly pool: pg.Pool) {}
@@ -210,77 +219,145 @@ export class ConversationGraphService {
     input: LinkChannelIdentityInput
   ): Promise<ConversationChannelLink> {
     const normalized = normalizeChannelIdentifier(input.channel, input.channel_identifier);
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      let identityId = input.identity_id;
-      if (identityId) {
-        // §11/§12: et oppgitt identity_id MÅ tilhøre DENNE tenanten og være aktivt -
-        // FK alene beviser IKKE tenant-eierskap (RLS-blind FK-sjekk, se filhode).
-        const owned = await client.query(
-          `SELECT 1 FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2 AND status = 'active'`,
-          [tenantId, identityId]
-        );
-        if ((owned.rowCount ?? 0) === 0) throw new Error("conversation_identity_not_found");
-      } else {
-        // §16: serialiser samtidige foerste-lenke-forsoek for SAMME identifikator -
-        // en transaksjonsskopet advisory-laas, frigitt automatisk ved COMMIT/ROLLBACK.
-        await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
-          `conv:${tenantId}:${input.channel}`,
-          normalized
-        ]);
-        const existing = await client.query(
-          `SELECT identity_id FROM conversation_channel_links
-           WHERE tenant_id = $1 AND channel = $2 AND channel_identifier = $3 AND status = 'active'`,
-          [tenantId, input.channel, normalized]
-        );
-        if (existing.rows.length === 1) {
-          identityId = (existing.rows[0] as { identity_id: string }).identity_id;
-        }
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => this.linkChannelIdentityIn(client, tenantId, memorySpace, input, normalized));
+  }
+
+  /** Kroppen til `linkChannelIdentity`, kjørbar i en TRANSAKSJON kalleren eier (`linkExclusiveIdentifiers` lenker flere identifikatorer atomisk). Atferden er uendret. */
+  private async linkChannelIdentityIn(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    input: LinkChannelIdentityInput,
+    normalized: string
+  ): Promise<ConversationChannelLink> {
+    let identityId = input.identity_id;
+    if (identityId) {
+      // §11/§12: et oppgitt identity_id MÅ tilhøre DENNE tenanten og være aktivt -
+      // FK alene beviser IKKE tenant-eierskap (RLS-blind FK-sjekk, se filhode).
+      const owned = await client.query(
+        `SELECT 1 FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2 AND status = 'active'`,
+        [tenantId, identityId]
+      );
+      if ((owned.rowCount ?? 0) === 0) throw new Error("conversation_identity_not_found");
+    } else {
+      // §16: serialiser samtidige foerste-lenke-forsoek for SAMME identifikator -
+      // en transaksjonsskopet advisory-laas, frigitt automatisk ved COMMIT/ROLLBACK.
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+        `conv:${tenantId}:${input.channel}`,
+        normalized
+      ]);
+      const existing = await client.query(
+        `SELECT identity_id FROM conversation_channel_links
+         WHERE tenant_id = $1 AND channel = $2 AND channel_identifier = $3 AND status = 'active'`,
+        [tenantId, input.channel, normalized]
+      );
+      if (existing.rows.length === 1) {
+        identityId = (existing.rows[0] as { identity_id: string }).identity_id;
       }
-      if (input.linked_business_contact_id !== undefined) {
-        const owned = await client.query(
-          `SELECT 1 FROM business_contacts WHERE tenant_id = $1 AND contact_id = $2`,
-          [tenantId, input.linked_business_contact_id]
-        );
-        if ((owned.rowCount ?? 0) === 0) throw new Error("conversation_linked_contact_not_found");
-      }
-      if (input.linked_person_id !== undefined) {
-        const owned = await client.query(
-          `SELECT 1 FROM person_tenants WHERE tenant_id = $1 AND person_id = $2`,
-          [tenantId, input.linked_person_id]
-        );
-        if ((owned.rowCount ?? 0) === 0) throw new Error("conversation_linked_person_not_found");
-      }
-      if (!identityId) {
-        identityId = `conv-id-${randomUUID()}`;
-        await client.query(
-          `INSERT INTO conversation_identities
-             (identity_id, tenant_id, memory_space_id, display_name, linked_business_contact_id, linked_person_id, created_by_person_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [
-            identityId, tenantId, memorySpace,
-            input.display_name ?? null,
-            input.linked_business_contact_id ?? null,
-            input.linked_person_id ?? null,
-            input.created_by_person_id ?? null
-          ]
-        );
-      }
-      const linkId = `conv-link-${randomUUID()}`;
-      const { rows } = await client.query(
-        `INSERT INTO conversation_channel_links
-           (link_id, tenant_id, memory_space_id, identity_id, channel, channel_identifier, confidence, match_method, source_type, source_instance_id, external_id, created_by_person_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-         ON CONFLICT (tenant_id, channel, channel_identifier) WHERE status = 'active'
-         DO UPDATE SET confidence = GREATEST(conversation_channel_links.confidence, EXCLUDED.confidence), updated_at = now()
-         RETURNING *`,
+    }
+    if (input.linked_business_contact_id !== undefined) {
+      const owned = await client.query(
+        `SELECT 1 FROM business_contacts WHERE tenant_id = $1 AND contact_id = $2`,
+        [tenantId, input.linked_business_contact_id]
+      );
+      if ((owned.rowCount ?? 0) === 0) throw new Error("conversation_linked_contact_not_found");
+    }
+    if (input.linked_person_id !== undefined) {
+      const owned = await client.query(
+        `SELECT 1 FROM person_tenants WHERE tenant_id = $1 AND person_id = $2`,
+        [tenantId, input.linked_person_id]
+      );
+      if ((owned.rowCount ?? 0) === 0) throw new Error("conversation_linked_person_not_found");
+    }
+    if (!identityId) {
+      identityId = `conv-id-${randomUUID()}`;
+      await client.query(
+        `INSERT INTO conversation_identities
+           (identity_id, tenant_id, memory_space_id, display_name, linked_business_contact_id, linked_person_id, created_by_person_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
-          linkId, tenantId, memorySpace, identityId, input.channel, normalized, input.confidence, input.match_method,
-          input.source_type ?? null, input.source_instance_id ?? null, input.external_id ?? null,
+          identityId, tenantId, memorySpace,
+          input.display_name ?? null,
+          input.linked_business_contact_id ?? null,
+          input.linked_person_id ?? null,
           input.created_by_person_id ?? null
         ]
       );
-      return rows[0] as ConversationChannelLink;
-    });
+    }
+    const linkId = `conv-link-${randomUUID()}`;
+    const { rows } = await client.query(
+      `INSERT INTO conversation_channel_links
+         (link_id, tenant_id, memory_space_id, identity_id, channel, channel_identifier, confidence, match_method, source_type, source_instance_id, external_id, created_by_person_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       ON CONFLICT (tenant_id, channel, channel_identifier) WHERE status = 'active'
+       DO UPDATE SET confidence = GREATEST(conversation_channel_links.confidence, EXCLUDED.confidence), updated_at = now()
+       RETURNING *`,
+      [
+        linkId, tenantId, memorySpace, identityId, input.channel, normalized, input.confidence, input.match_method,
+        input.source_type ?? null, input.source_instance_id ?? null, input.external_id ?? null,
+        input.created_by_person_id ?? null
+      ]
+    );
+    return rows[0] as ConversationChannelLink;
+  }
+
+  /**
+   * WP-G1 fiks-runde 2 (B-H1 rest, delta-review B): lenker ÉN kildes identifikatorer (f.eks. én Google-kontakts telefoner og e-poster) til ÉN identitet, ATOMISK og uten å binde to personer sammen. Hele jobben (oppløsning, eierkontroll
+   * og skriving) skjer i ÉN transaksjon bak en advisory-lås per (tenant, rom): to samtidige kall (to `contacts_sync`-sider) ser hverandres resultat, og et kall som feiler midtveis ruller alt tilbake (ingen halvt lenket kontakt).
+   * Før lå oppløsningen og eierkontrollen utenfor skrivingen og uten lås - to samtidige synker med en delt telefon kryss-lenket i 7 av 8 forsøk.
+   *
+   * Lenkes KUN når (a) alle identifikatorene er nye, eller (b) alle eksisterende treff peker på ÉN identitet som ingen ANNEN kilde-id (`external_id` med samme `source_type`) allerede har lenker til. Ellers skrives ingenting og svaret er
+   * `conflict` (+ de andre kilde-id-ene). En lenke som likevel havner på en annen identitet/kilde enn forventet (en samtidig skriver UTENFOR låsen, f.eks. en innkommende melding) rulles tilbake og gir også `conflict`.
+   */
+  async linkExclusiveIdentifiers(tenantId: string, memorySpace: MemorySpace, input: LinkExclusiveIdentifiersInput): Promise<LinkExclusiveIdentifiersResult> {
+    if (input.identifiers.length === 0) throw new Error("conversation_no_identifiers");
+    const items = input.identifiers.map((i) => ({ channel: i.channel, normalized: normalizeChannelIdentifier(i.channel, i.identifier) }));
+    try {
+      return await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<LinkExclusiveIdentifiersResult> => {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [`conv-exclusive:${tenantId}`, memorySpace]);
+        const identityIds = new Set<string>();
+        for (const item of items) {
+          const channels = (PHONE_CHANNELS as readonly string[]).includes(item.channel) ? [...PHONE_CHANNELS] : [item.channel];
+          const { rows } = await client.query(
+            `SELECT DISTINCT identity_id FROM conversation_channel_links WHERE tenant_id = $1 AND channel = ANY($2::text[]) AND channel_identifier = $3 AND status = 'active'`,
+            [tenantId, channels, item.normalized]
+          );
+          for (const r of rows as Array<{ identity_id: string }>) identityIds.add(r.identity_id);
+        }
+        // Identifikatorene peker på ULIKE identiteter: å feste dem sammen ville slått identitetene sammen.
+        if (identityIds.size > 1) return { status: "conflict", with: [] };
+        let identityId: string | undefined = [...identityIds][0];
+        if (identityId !== undefined) {
+          const owners = await client.query(
+            `SELECT DISTINCT external_id FROM conversation_channel_links
+              WHERE tenant_id = $1 AND identity_id = $2 AND status = 'active' AND source_type = $3 AND external_id IS NOT NULL AND external_id <> $4`,
+            [tenantId, identityId, input.source.source_type, input.source.external_id]
+          );
+          if ((owners.rowCount ?? 0) > 0) return { status: "conflict", with: (owners.rows as Array<{ external_id: string }>).map((r) => r.external_id) };
+        }
+        let linked = 0;
+        for (const item of items) {
+          const link = await this.linkChannelIdentityIn(client, tenantId, memorySpace, {
+            channel: item.channel, channel_identifier: item.normalized, confidence: input.confidence, match_method: input.match_method,
+            source_type: input.source.source_type, external_id: input.source.external_id,
+            ...(input.created_by_person_id !== undefined ? { created_by_person_id: input.created_by_person_id } : {}),
+            ...(identityId !== undefined ? { identity_id: identityId } : input.display_name !== undefined ? { display_name: input.display_name } : {})
+          }, item.normalized);
+          if (identityId === undefined) {
+            // Første lenke i en «alt er nytt»-jobb: kommer raden fra en ANNEN kilde, finnes identifikatoren allerede (en samtidig skriver utenfor låsen).
+            if (link.source_type !== input.source.source_type || link.external_id !== input.source.external_id) throw new ExclusiveLinkRace();
+            identityId = link.identity_id;
+          } else if (link.identity_id !== identityId) {
+            throw new ExclusiveLinkRace();
+          }
+          linked += 1;
+        }
+        return { status: "linked", identity_id: identityId as string, linked };
+      });
+    } catch (err) {
+      if (err instanceof ExclusiveLinkRace) return { status: "conflict", with: [] };
+      throw err;
+    }
   }
 
   /**
