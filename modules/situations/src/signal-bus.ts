@@ -19,7 +19,8 @@ import type { Situation } from "./types.ts";
  *   4. PAUSE (domene og hele motoren, både prosess-cache og varig database) -> pauset = ikke innlest (ikke bufret; tilstandsbaserte kilder gjenoppdages ved neste tikk, hendelsesbaserte innenfor oppslagsvinduet)
  *   5. (valgfritt) modellassistert vurdering - kun et løft `low` -> `normal`, aldri ACT (assist.ts)
  *   6. `SituationEngine.evaluateCandidate()` - dedupe, undertrykking, stille timer og tilstandsmaskin er MOTORENS (gjenbrukt uendret)
- *   7. signallogg (idempotent på kilde + `source_ref`)
+ *   7. signallogg (idempotent på kilde + `source_ref`) - UNNTATT et signal motoren HOLDER tilbake (stille timer, B-HIGH-1): det logges IKKE (se `heldByQuietHours`), så neste tikk evaluerer det på nytt og varselet
+ *      går ut når stille timer er over. Loggen betyr «ferdig behandlet», aldri «sett mens vi ikke kunne varsle».
  *
  * «Ingen duplikat-spam»: samme hendelse får samme `detection_key` uansett kilde (incident via sveip og buss, åpning via Home Assistant og kamerasensor) og motorens `UNIQUE (tenant, space, detection_key)` + resuppress
  * gjør at det aldri blir mer enn én situasjon og ett varsel. Loggen hindrer i tillegg at en uendret tilstand evalueres på nytt hvert tikk (maks én evaluering per episode og nivå).
@@ -31,8 +32,16 @@ export type IgnoredReason = "no_rule" | "no_subscription" | "no_signal" | "pause
 
 export type PublishResult =
   | { status: "ignored"; reason: IgnoredReason }
-  | { status: "evaluated"; situation: Situation; created: boolean; newly_actionable: boolean; uplifted: boolean }
+  | { status: "evaluated"; situation: Situation; created: boolean; newly_actionable: boolean; uplifted: boolean; held: boolean }
   | { status: "failed"; code: string };
+
+/**
+ * B-HIGH-1: et signal er HOLDT når motoren har lagret situasjonen på `remember` uten å varsle fordi stille timer gjelder (ikke fordi prioriteten er `low`, og aldri når det faktisk ble varslet). Et holdt signal
+ * logges ikke - det skal evalueres på nytt hvert tikk til stille timer er over (`evaluateCandidate` gir da `newly_actionable` og leveransen varsler). Uten dette ble `duplicate` et evig svar og varselet aldri sendt.
+ */
+export function heldByQuietHours(evaluated: { newly_actionable: boolean; situation: { stage: string } }, priority: string): boolean {
+  return !evaluated.newly_actionable && evaluated.situation.stage === "remember" && priority !== "low";
+}
 
 export interface SignalBatchResult {
   received: number;
@@ -40,6 +49,8 @@ export interface SignalBatchResult {
   evaluated: number;
   created: number;
   newly_actionable: number;
+  /** Evaluert, men ikke logget fordi stille timer holder varselet tilbake (re-evalueres neste tikk). */
+  held: number;
   failed: number;
   assist: { assessed: number; rejected: number; unavailable: number; uplifted: number; cached: number; skipped_cap: number };
   /** Korte koder (aldri innhold) for feil per observasjon. */
@@ -49,7 +60,7 @@ export interface SignalBatchResult {
 export const emptyBatchResult = (): SignalBatchResult => ({
   received: 0,
   ignored: { no_rule: 0, no_subscription: 0, no_signal: 0, paused: 0, duplicate: 0 },
-  evaluated: 0, created: 0, newly_actionable: 0, failed: 0,
+  evaluated: 0, created: 0, newly_actionable: 0, held: 0, failed: 0,
   assist: { assessed: 0, rejected: 0, unavailable: 0, uplifted: 0, cached: 0, skipped_cap: 0 },
   errors: []
 });
@@ -60,6 +71,7 @@ export function mergeBatchResults(into: SignalBatchResult, add: SignalBatchResul
   into.evaluated += add.evaluated;
   into.created += add.created;
   into.newly_actionable += add.newly_actionable;
+  into.held += add.held;
   into.failed += add.failed;
   for (const key of Object.keys(into.assist) as Array<keyof SignalBatchResult["assist"]>) into.assist[key] += add.assist[key];
   into.errors.push(...add.errors.slice(0, Math.max(0, 20 - into.errors.length)));
@@ -142,10 +154,11 @@ export class SituationSignalBus {
 
   private async persist(
     tenantId: string, memorySpace: MemorySpace, bridge: BridgeResult, facts: SignalFacts, situation: Situation, created: boolean, newlyActionable: boolean,
-    subscriptionId: string, ctx: PublishContext, assessed: { digest: string; outcome: AssistOutcome } | null
+    subscriptionId: string, ctx: PublishContext, assessed: { digest: string; outcome: AssistOutcome } | null, held: boolean
   ): Promise<void> {
     await withMemoryTransaction(this.deps.pool, tenantId, [memorySpace], async (client) => {
-      await client.query(
+      // B-HIGH-1: et holdt signal (stille timer) logges IKKE - ellers ville neste tikk svare `duplicate` og varselet aldri gå ut. Vurderingen (modellkallet) lagres likevel, så den ikke gjentas hvert tikk.
+      if (!held) await client.query(
         `INSERT INTO situation_signal_log
            (signal_id, tenant_id, memory_space_id, source, event_type, domain, source_ref, detection_key, situation_id, subscription_id,
             occurred_at, outcome, stage_after, priority, notified, facts, task_id, session_id)
@@ -242,8 +255,9 @@ export class SituationSignalBus {
         tenantId, memorySpace, bridge.urgent ? { ...candidate, urgent: true } : candidate, this.now()
       );
       const created = before === null;
-      await this.persist(tenantId, memorySpace, bridge, facts, evaluated.situation, created, evaluated.newly_actionable, sub.subscription_id, ctx, assessed);
-      return { status: "evaluated", situation: evaluated.situation, created, newly_actionable: evaluated.newly_actionable, uplifted };
+      const held = heldByQuietHours(evaluated, candidate.priority);
+      await this.persist(tenantId, memorySpace, bridge, facts, evaluated.situation, created, evaluated.newly_actionable, sub.subscription_id, ctx, assessed, held);
+      return { status: "evaluated", situation: evaluated.situation, created, newly_actionable: evaluated.newly_actionable, uplifted, held };
     } catch (err) {
       if (err instanceof SituationDetectionKeyConflictError) return { status: "failed", code: "identity_conflict" };
       return { status: "failed", code: codeOf(err) };
@@ -276,6 +290,7 @@ export class SituationSignalBus {
         result.evaluated += 1;
         if (out.created) result.created += 1;
         if (out.newly_actionable) result.newly_actionable += 1;
+        if (out.held) result.held += 1;
       }
     }
     return result;
