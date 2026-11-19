@@ -106,7 +106,7 @@ export function healthIntakeDenial(identity: Pick<IdentityContext, "auth_strengt
   return undefined;
 }
 
-const HEALTH_INTAKE_STATUS: Readonly<Record<string, number>> = { empty_batch: 400, invalid_request: 400, batch_too_large: 413 };
+const HEALTH_INTAKE_STATUS: Readonly<Record<string, number>> = { empty_batch: 400, invalid_request: 400, invalid_timestamps: 400, batch_too_large: 413 };
 
 async function handleHealthIngest(ctx: PersonalRouteContext, health: PersonalHealthDeps): Promise<boolean> {
   const authed = await ctx.authed(["samples", "deleted_external_sample_ids"]);
@@ -117,7 +117,8 @@ async function handleHealthIngest(ctx: PersonalRouteContext, health: PersonalHea
     const result = await health.intake.ingestBatch(authed.identity, { samples: authed.body["samples"], deleted_external_sample_ids: authed.body["deleted_external_sample_ids"] });
     ctx.json(200, { source: "apple_health", ...result });
   } catch (err) {
-    if (err instanceof HealthIntakeError) ctx.json(HEALTH_INTAKE_STATUS[err.code] ?? 400, { error: "health_intake_rejected", reason: err.code, request_id: ctx.requestId() });
+    // `indexes` (kun for `invalid_timestamps`): posisjonene til prøvene med ugyldig tidsstempel - aldri verdiene.
+    if (err instanceof HealthIntakeError) ctx.json(HEALTH_INTAKE_STATUS[err.code] ?? 400, { error: "health_intake_rejected", reason: err.code, ...(err.indexes !== undefined ? { indexes: err.indexes.slice(0, 250) } : {}), request_id: ctx.requestId() });
     else if (err instanceof HealthRetentionPolicyRequiredError) ctx.json(409, { error: "health_retention_policy_required", request_id: ctx.requestId() });
     else ctx.domainFailure(500, "health_intake_failed", new Error(err instanceof Error ? err.name : "unknown")); // aldri feilmeldingen: den kan sitere helseverdier
   }

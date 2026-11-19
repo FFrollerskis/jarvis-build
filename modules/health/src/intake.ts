@@ -5,7 +5,7 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { HealthRetentionPolicyRequiredError } from "./service.ts";
 import { MetricTypeSchema, type MetricType } from "./types.ts";
-import { validateHealthObservation } from "./validation.ts";
+import { isPlausibleObservedAt, validateHealthObservation } from "./validation.ts";
 
 /**
  * WP-G2 (D-464, UA-8 Personal Twin) P1d: HELSE-INNTAK fra personens egen iPhone/Watch. Serversiden av et enhetssignert push; selve appen finnes ikke (krever Mac + Apple Developer-konto = `BLOCKED_EXTERNAL`), så alt her er bygget
@@ -31,9 +31,10 @@ export const HEALTH_INTAKE_MAX_FUTURE_SKEW_MS = 10 * 60_000;
 /** `HKObject.uuid` (36 tegn) og lignende stabile id-er; tilsvarer migrasjon 128 (8-128 tegn). */
 const SAMPLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 
-export type HealthIntakeErrorCode = "empty_batch" | "batch_too_large" | "invalid_request";
+export type HealthIntakeErrorCode = "empty_batch" | "batch_too_large" | "invalid_request" | "invalid_timestamps";
 export class HealthIntakeError extends Error {
-  constructor(readonly code: HealthIntakeErrorCode) {
+  /** `invalid_timestamps`: INDEKSENE (aldri verdiene) til prøvene med et ugyldig `observed_at`, slik at appen kan rette dem og sende batchen på nytt. */
+  constructor(readonly code: HealthIntakeErrorCode, readonly indexes?: readonly number[]) {
     super(`health_intake_${code}`);
     this.name = "HealthIntakeError";
   }
@@ -70,6 +71,13 @@ export class HealthIntakeService {
     if (samples.length > HEALTH_INTAKE_MAX_SAMPLES || deleted.length > HEALTH_INTAKE_MAX_DELETES) throw new HealthIntakeError("batch_too_large");
     if (samples.length === 0 && deleted.length === 0) throw new HealthIntakeError("empty_batch");
     if (deleted.some((id) => typeof id !== "string" || !SAMPLE_ID.test(id))) throw new HealthIntakeError("invalid_request");
+    // Et ugyldig `observed_at` (en streng JS godtar men Postgres avviser, f.eks. `2026-09-31T10:00:00Z`) ville felt HELE transaksjonen MIDT I (22008/22007 -> rollback av alle, 500, og appen ville sendt den samme giftige batchen for evig):
+    // valider STRENGT FØR transaksjonen og avvis batchen med INDEKSENE (review B MEDIUM-2). En manglende/ikke-streng verdi er en vanlig per-prøve-feil (`invalid`) og når aldri databasen.
+    const malformed = samples.flatMap((raw, index) => {
+      const at = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>)["observed_at"] : undefined;
+      return typeof at === "string" && !isPlausibleObservedAt(at) ? [index] : [];
+    });
+    if (malformed.length > 0) throw new HealthIntakeError("invalid_timestamps", malformed);
 
     return withMemoryTransaction(this.pool, identity.tenant_id, ["health"], async (client) => {
       const policy = await client.query(`SELECT retention_days, now() AS db_now FROM health_retention_policies WHERE tenant_id = $1 AND memory_space_id = 'health'`, [identity.tenant_id]);
