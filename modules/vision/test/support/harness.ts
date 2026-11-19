@@ -20,9 +20,15 @@ export interface VisionDb {
   stop: () => Promise<void>;
 }
 
-export async function startVisionDb(prefix: string): Promise<VisionDb> {
+export interface VisionDbOptions {
+  /** Klyngens locale (initdb `--locale`), f.eks. `C.UTF-8` (Unicode-bevisst ctype, slik produksjonsbildet `en_US.utf8` er) eller `C`. Utelatt = miljøets standard. Kodeoppsettet er alltid UTF8. */
+  locale?: string;
+}
+
+export async function startVisionDb(prefix: string, options: VisionDbOptions = {}): Promise<VisionDb> {
   const dir = await mkdtemp(join(tmpdir(), `jarvis-pg-${prefix}-`));
-  const leased = await startLeasedEmbeddedPostgres((port) => new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false }));
+  const initdbFlags = options.locale === undefined ? [] : ["--encoding=UTF8", `--locale=${options.locale}`];
+  const leased = await startLeasedEmbeddedPostgres((port) => new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false, ...(initdbFlags.length > 0 ? { initdbFlags } : {}) }));
   await leased.postgres.createDatabase("jarvis_test");
   const admin = new pg.Pool({ host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: "postgres", password: "pw" });
   admin.on("error", () => undefined);

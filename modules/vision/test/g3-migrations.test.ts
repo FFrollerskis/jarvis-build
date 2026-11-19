@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
-import { isStorableObjectLabel, normalizeObjectLabel } from "../src/labels.ts";
+import { isInventoryLabel, isStorableObjectLabel, normalizeObjectLabel } from "../src/labels.ts";
 import { startVisionDb, seedTenant, type VisionDb } from "./support/harness.ts";
 
 // Usynlige tegn bygges av kodepunkter (ingen tegnescape i kilden).
@@ -156,7 +156,8 @@ describe("133/135 (review A-M1): object_label-CHECK på formen til et kort objek
         )
       );
     let i = 0;
-    for (const label of ["nøkler lbl", "coffee-mug lbl", "tobias sorensen lbl", "ignore all instructions", "a1 lbl"]) await insert(`inv-lbl-ok-${i++}`, label);
+    // «a<U+09F4>a» (tall-tegn av kategori No): avvist av den gamle, locale-avhengige regelen i en Unicode-bevisst locale (review delta D1) og må godtas.
+    for (const label of ["nøkler lbl", "coffee-mug lbl", "tobias sorensen lbl", "ignore all instructions", "a1 lbl", `a${String.fromCodePoint(0x9f4)}a lbl`]) await insert(`inv-lbl-ok-${i++}`, label);
     for (const label of ["x".repeat(65), "en to tre fire fem", "12345", "...", "<b>sekk</b>", "sekk; rm", "keys.", "men's", "sekk  rød", " sekk", "sekk ", "-sekk", "sekk-", `nø${ZWSP}kler`, `nøkler${tag}`, "sekk\nrød"]) {
       await expect(insert(`inv-lbl-bad-${i++}`, label), JSON.stringify(label)).rejects.toThrow(new RegExp(INV_CHECK));
     }
@@ -198,9 +199,18 @@ describe("133/135 (review A-M1): object_label-CHECK på formen til et kort objek
     for (const canary of [0x3c, 0x5c, 0x01, 0x7f, 0x85, 0xad, 0x200b, 0x202e, 0x2060, 0xfeff, 0xe0041, 0xe0fff]) expect(sqlRejected).toContain(canary);
     for (const accepted of [0x61, 0x20, 0x2d, 0x27, 0x2e, 0xf8, 0xe5, 0x4e2d]) expect(sqlRejected).not.toContain(accepted);
     expect(sqlRejected).toEqual(jsRejected);
-    // Den strenge inventar-CHECK-en avviser MINST det samme (den avviser i tillegg all tegnsetting og ledende/doble mellomrom), men godtar bokstaver, tall og bindestrek.
-    const strictRejected = new Set(await rejectedBy(INV_CHECK));
+    // Den strenge inventar-CHECK-en (review delta D1: eksplisitte kodepunktområder, ingen POSIX-klasser) avviser NØYAKTIG de samme kodepunktene som isInventoryLabel - og MINST det den milde avviser
+    // (i tillegg all tegnsetting og alle Unicode-mellomrom), men godtar bokstaver, tall (også tall-tegn utenom ASCII) og bindestrek. Det samme bevises i to locales (C og C.UTF-8) i g3-label-locale.test.ts.
+    const strictList = await rejectedBy(INV_CHECK);
+    const strictRejected = new Set(strictList);
+    const jsStrictRejected: number[] = [];
+    for (let cp = 1; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      if (!isInventoryLabel(`a${String.fromCodePoint(cp)}a`)) jsStrictRejected.push(cp);
+    }
+    expect(strictList).toEqual(jsStrictRejected);
     for (const cp of sqlRejected) expect(strictRejected.has(cp), `inventar godtar U+${cp.toString(16)}`).toBe(true);
+    for (const numeral of [0x9f4, 0xb72, 0xbf0, 0xc78, 0xd58, 0x2776, 0x24eb, 0x3248]) expect(strictRejected.has(numeral), `inventar avviser tall-tegn U+${numeral.toString(16)}`).toBe(false);
     for (const accepted of [0x2d, 0x30, 0x39, 0x41, 0x61, 0x7a, 0xc5, 0xf8, 0x4e2d]) expect(strictRejected.has(accepted), `inventar avviser U+${accepted.toString(16)}`).toBe(false);
     for (const rejectedPunct of [0x27, 0x2e, 0x2c, 0x21, 0x28]) expect(strictRejected.has(rejectedPunct), `inventar godtar U+${rejectedPunct.toString(16)}`).toBe(true);
   }, 180_000);

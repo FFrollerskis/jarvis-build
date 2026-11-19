@@ -2,7 +2,7 @@ import { lstat, mkdir, mkdtemp, readdir, symlink, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { decayedConfidence, describeEventForEmbedding, isStorableObjectLabel, MAX_OBJECT_LABEL_CHARS, normalizeObjectLabel } from "../src/labels.ts";
+import { decayedConfidence, describeEventForEmbedding, INVENTORY_FORBIDDEN_RANGES, isInventoryLabel, isStorableObjectLabel, MAX_OBJECT_LABEL_CHARS, normalizeObjectLabel } from "../src/labels.ts";
 import { VisionObservationInputSchema } from "../src/types.ts";
 import { DEFAULT_MAX_IMAGE_BYTES, inspectImage, MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE, readBodyLimited, sniffMediaType, VisionImageError } from "../src/image.ts";
 import { jpegBytes, pngBytes, webpBytes } from "./support/images.ts";
@@ -109,6 +109,62 @@ describe("isStorableObjectLabel: lagringsregelen er FORMEN til et kort objektnav
     expect(VisionObservationInputSchema.safeParse({ ...base, object_label: "en to tre fire fem" }).success).toBe(false);
     expect(VisionObservationInputSchema.safeParse({ ...base, object_label: "nøkler" }).success).toBe(true);
     expect(VisionObservationInputSchema.safeParse({ ...base }).success).toBe(true);
+  });
+});
+
+describe("isInventoryLabel: den strenge inventarregelen bruker eksplisitte kodepunktområder (ikke POSIX-klasser) og avviser aldri noe normaliseringen lager (review delta D1)", () => {
+  const cp = (code: number): string => String.fromCodePoint(code);
+
+  it("godtar normaliserte etiketter - også tall-tegn utenom ASCII (kategori No) som en locale-avhengig regel avviste og som tapte hele hendelsen", () => {
+    for (const code of [0x9f4, 0x9f9, 0xb72, 0xbf0, 0xbf2, 0xc78, 0xd58, 0x2776, 0x2793, 0x24eb, 0x3248]) {
+      expect(isInventoryLabel(`a${cp(code)}a`), `U+${code.toString(16)}`).toBe(true);
+      expect(isInventoryLabel(`${cp(code)}b`), `U+${code.toString(16)}`).toBe(true);
+    }
+    for (const label of ["nøkler", "coffee-mug", "a1", "1a", "ladekabel usb c", "en to tre fire", "日本語", `${cp(0xaa)}${cp(0xb2)}${cp(0xb5)}`]) expect(isInventoryLabel(label), label).toBe(true);
+    for (const raw of ["Nøkler", "  Rød   sekk! ", "T-shirt.", "ÅRE-kart", `a${cp(0x9f4)}a`, "ＫＥＹＳ"]) {
+      const normalized = normalizeObjectLabel(raw);
+      expect(normalized, raw).not.toBeNull();
+      expect(isInventoryLabel(normalized), raw).toBe(true);
+    }
+  });
+
+  it("avviser tegnsetting, mellomrom utenom ASCII, kontroll- og usynlige tegn, ledende/etterfølgende/doble mellomrom og bindestreker, for mange ord, kun tall/bindestrek og feil lengde", () => {
+    const rejected = [
+      "", " ", "-", "12", "1-2", "---", "a  b", " a", "a ", "-a", "a-", "a--b", "a- b", "a -b", "en to tre fire fem", "a".repeat(MAX_OBJECT_LABEL_CHARS + 1),
+      "sekk's", "keys.", "a,b", "(a)", "a_b", "a/b", "<a>", "a|b", "x=y", "a\tb", "a\nb",
+      `a${cp(0x1)}b`, `a${cp(0x7f)}b`, `a${cp(0x85)}b`, `a${cp(0xa0)}b`, `a${cp(0xad)}b`, `a${cp(0x2003)}b`, `a${cp(0x2014)}b`, `a${cp(0x2019)}b`, `a${cp(0x200b)}b`, `a${cp(0x202e)}b`, `a${cp(0x2060)}b`,
+      `a${cp(0x3000)}b`, `a${cp(0x1680)}b`, `a${cp(0xfeff)}b`, `a${cp(0xe0041)}b`, `a${cp(0xfe0f)}b`, `a${cp(0x115f)}b`, `a${cp(0x3164)}b`, "a×b", "a÷b", "«a»", "¿a", "a´b", "a·b", "a¸b"
+    ];
+    for (const label of rejected) expect(isInventoryLabel(label), JSON.stringify([...label].map((ch) => ch.codePointAt(0)))).toBe(false);
+    expect(isInventoryLabel(42)).toBe(false);
+    expect(isInventoryLabel(null)).toBe(false);
+    expect(isInventoryLabel(undefined)).toBe(false);
+  });
+
+  it("lengden regnes i TEGN (kodepunkt, slik char_length i databasen gjør), ikke UTF-16-enheter, og et enkeltstående surrogat er aldri gyldig tekst", () => {
+    const astral = cp(0x10428); // bokstav utenfor BMP: 1 tegn, 2 UTF-16-enheter
+    expect(isInventoryLabel(astral.repeat(MAX_OBJECT_LABEL_CHARS))).toBe(true);
+    expect(isInventoryLabel(astral.repeat(MAX_OBJECT_LABEL_CHARS + 1))).toBe(false);
+    expect(isInventoryLabel("a".repeat(MAX_OBJECT_LABEL_CHARS))).toBe(true);
+    expect(isInventoryLabel(`a${String.fromCharCode(0xd800)}a`)).toBe(false);
+    expect(isInventoryLabel(`a${String.fromCharCode(0xdfff)}`)).toBe(false);
+  });
+
+  it("forbudt-områdene er sorterte og uten overlapp, og overlapper IKKE med noe normaliseringen kan gi (\\p{L}/\\p{N}) - bortsett fra Hangul-fyllerne, som normaliseringen fjerner først som usynlige tegn", () => {
+    for (let i = 1; i < INVENTORY_FORBIDDEN_RANGES.length; i++) {
+      expect((INVENTORY_FORBIDDEN_RANGES[i] as readonly [number, number])[0], `område ${i}`).toBeGreaterThan((INVENTORY_FORBIDDEN_RANGES[i - 1] as readonly [number, number])[1]);
+    }
+    for (const [from, to] of INVENTORY_FORBIDDEN_RANGES) expect(from).toBeLessThanOrEqual(to);
+    const overlap: number[] = [];
+    for (const [from, to] of INVENTORY_FORBIDDEN_RANGES) {
+      for (let code = from; code <= to; code++) if (/[\p{L}\p{N}]/u.test(cp(code))) overlap.push(code);
+    }
+    expect(overlap).toEqual([0x115f, 0x1160, 0x3164, 0xffa0]);
+    for (const code of overlap) expect(/\p{Default_Ignorable_Code_Point}/u.test(cp(code)), `U+${code.toString(16)}`).toBe(true);
+    // ASCII-sifre, mellomrom og bindestrek er ALDRI forbudt (det er det normaliserte alfabetet), og det er heller ikke latinske bokstaver.
+    for (const code of [0x20, 0x2d, ...Array.from({ length: 10 }, (_, i) => 0x30 + i), ...Array.from({ length: 26 }, (_, i) => 0x61 + i), ...Array.from({ length: 26 }, (_, i) => 0x41 + i)]) {
+      expect(INVENTORY_FORBIDDEN_RANGES.some(([from, to]) => code >= from && code <= to), `U+${code.toString(16)}`).toBe(false);
+    }
   });
 });
 

@@ -448,6 +448,24 @@ describe("ingen kontinuerlig rå video: kun hendelses-øyeblikksbilder", () => {
     expect(/route_policy\s+text NOT NULL CHECK \(route_policy IN \('discard','local_only','store_snapshot'\)\)/.test(cameras)).toBe(true);
   });
 
+  it("migrasjon 133/135: etikett-CHECK-ene bruker eksplisitte kodepunktområder, ingen locale-avhengige POSIX-klasser (review delta D1; selve databasebeviset ligger i g3-label-locale.test.ts)", () => {
+    const inventory = readFileSync(join(ROOT, "modules/core/src/db/migrations/135_vision_embeddings_inventory.sql"), "utf8");
+    const invStart = inventory.indexOf("object_label        text NOT NULL CHECK (");
+    expect(invStart, "inventar-CHECK-en finnes").toBeGreaterThan(0);
+    const inventoryCheck = inventory.slice(invStart, inventory.indexOf("\n  ),", invStart));
+    expect(inventoryCheck.length, "hele inventar-CHECK-en er med").toBeGreaterThan(300);
+    expect(inventoryCheck).toMatch(/object_label !~ '\[\\x01-\\x1f/); // forbudt-klassen er eksplisitte områder
+    expect(inventoryCheck).not.toMatch(/translate\(/);
+    const cameras = readFileSync(join(ROOT, "modules/core/src/db/migrations/133_vision_cameras.sql"), "utf8");
+    const obsStart = cameras.indexOf("ADD CONSTRAINT vision_event_observations_object_label_check CHECK (");
+    expect(obsStart, "den milde CHECK-en finnes").toBeGreaterThan(0);
+    const mildCheck = cameras.slice(obsStart, cameras.indexOf(") NOT VALID;", obsStart));
+    expect(mildCheck.length, "hele den milde CHECK-en er med").toBeGreaterThan(300);
+    for (const [name, check] of [["135", inventoryCheck], ["133", mildCheck]] as const) {
+      expect(check, `${name}: POSIX-klasser som [:punct:] er locale-avhengige og avviste tall-tegn (kategori No) i glibc-UTF-8`).not.toMatch(/\[:[a-z]+:\]/);
+    }
+  });
+
   it("NON-VAKUITET: vakten feller syntetiske brudd, ikke kommentarer", () => {
     expect(scanVideo('const url = `${base}/api/camera_proxy_stream/${entity}`;')).toEqual(["camera_proxy_stream (MJPEG-strøm)"]);
     expect(scanVideo('await fetch("rtsp://kamera.lokal/stream1");')).toEqual(["rtsp/rtmp/srt-URL"]);
