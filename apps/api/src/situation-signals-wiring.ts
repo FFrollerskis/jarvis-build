@@ -1,6 +1,7 @@
 import type pg from "pg";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { homeAssistantSituationReadTools, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
+import type { SituationSignalApiDeps } from "./situation-signal-routes.ts";
 import {
   boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
   SituationSignalsTransport, SituationsTransport, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS,
@@ -52,6 +53,8 @@ export interface SituationSignalsWiring {
   tools: ToolDefinition[];
   runner: SituationSignalRunner | null;
   registry: SubscriptionRegistry | null;
+  /** Eierens HTTP-flate `/situations/signals/*` (B-MEDIUM-5). `null` uten hovedbryteren = ingen ruter (404, identisk med main). */
+  api: SituationSignalApiDeps | null;
   /** Startlogg (kun når noe er på). */
   describe(): Record<string, unknown> | null;
   /** Starter løperen (ingen effekt uten flagg). */
@@ -207,7 +210,7 @@ export function createIncidentReader(deps: { incidents: SituationSignalsWiringDe
 
 export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): SituationSignalsWiring {
   const flags = situationFlagsFromEnv(deps.env);
-  if (!flags.signals) return { flags, tools: [], runner: null, registry: null, describe: () => null, start: () => undefined };
+  if (!flags.signals) return { flags, tools: [], runner: null, registry: null, api: null, describe: () => null, start: () => undefined };
 
   const now = deps.now ?? Date.now;
   const authority = { owner_person_id: deps.ownerPersonId };
@@ -257,6 +260,7 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
 
   return {
     flags, tools, runner, registry,
+    api: { registry, engine: deps.engine, logs, runner, simulation, ...(feedback ? { feedback } : {}) },
     describe: () => ({
       msg: "situation_signals", interval_seconds: intervalSeconds, log_retention_days: retentionDays, spaces: [...spaces],
       sources: { home: flags.home, vision: flags.vision, health: flags.health, incidents: flags.incidents }, model_assist: flags.modelAssist, feedback: flags.feedback

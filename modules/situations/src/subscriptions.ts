@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
+import { writeAudit } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import {
@@ -142,30 +143,45 @@ export class SubscriptionRegistry {
          RETURNING *`,
         [`sub-${randomUUID()}`, tenantId, memorySpace, v.source, v.eventType, v.domain, JSON.stringify(v.filter), filterDigest(v.filter), input.enabled ?? true, personId, actor.task_id ?? null, actor.session_id ?? null]
       );
-      return rows[0] as SituationSubscription;
+      const row = rows[0] as SituationSubscription;
+      await this.audit(client, tenantId, personId, actor, "situation.subscription_set", "subscribe", row, { enabled: row.enabled });
+      return row;
+    });
+  }
+
+  /** WP-G4 fiks-runde (B-MEDIUM-5): revisjonsraden skrives i SAMME transaksjon som endringen (aldri et abonnement uten revisjon, aldri en revisjon uten abonnement). Kun id/kilde/type/domene/rom - aldri filteret (eierens entitetslister). */
+  private async audit(client: pg.PoolClient, tenantId: string, personId: string, actor: SubscriptionActor, type: string, action: string, row: SituationSubscription, extra: Record<string, unknown> = {}): Promise<void> {
+    await writeAudit(client, { tenant_id: tenantId, person_id: personId, ...(actor.session_id !== undefined ? { session_id: actor.session_id } : {}) }, {
+      type, decision: "ALLOW", tool_id: "situations", action, capability_class: "C",
+      payload: { subscription_id: row.subscription_id, source: row.source, event_type: row.event_type, domain: row.domain, memory_space: row.memory_space_id, ...extra },
+      ...(actor.task_id !== undefined ? { task_id: actor.task_id } : {})
     });
   }
 
   async setEnabled(tenantId: string, memorySpace: MemorySpace, subscriptionId: string, enabled: boolean, actor: SubscriptionActor): Promise<SituationSubscription> {
-    this.assertOwner(actor);
+    const personId = this.assertOwner(actor);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
         `UPDATE situation_subscriptions SET enabled = $4, updated_at = now() WHERE tenant_id = $1 AND memory_space_id = $2 AND subscription_id = $3 RETURNING *`,
         [tenantId, memorySpace, subscriptionId, enabled]
       );
       if (!rows[0]) throw new SubscriptionNotFoundError(subscriptionId);
-      return rows[0] as SituationSubscription;
+      const row = rows[0] as SituationSubscription;
+      await this.audit(client, tenantId, personId, actor, enabled ? "situation.subscription_enabled" : "situation.subscription_disabled", "set_subscription_enabled", row, { enabled });
+      return row;
     });
   }
 
   async remove(tenantId: string, memorySpace: MemorySpace, subscriptionId: string, actor: SubscriptionActor): Promise<boolean> {
-    this.assertOwner(actor);
+    const personId = this.assertOwner(actor);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const { rowCount } = await client.query(
-        `DELETE FROM situation_subscriptions WHERE tenant_id = $1 AND memory_space_id = $2 AND subscription_id = $3`,
+      const { rows } = await client.query(
+        `DELETE FROM situation_subscriptions WHERE tenant_id = $1 AND memory_space_id = $2 AND subscription_id = $3 RETURNING *`,
         [tenantId, memorySpace, subscriptionId]
       );
-      return rowCount === 1;
+      if (rows[0] === undefined) return false;
+      await this.audit(client, tenantId, personId, actor, "situation.subscription_removed", "remove_subscription", rows[0] as SituationSubscription);
+      return true;
     });
   }
 

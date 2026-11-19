@@ -513,28 +513,41 @@ begrensede `facts` - aldri rå verdier, bilder, etiketter eller fritekst; oppbev
 (ETT tall per regel), `situation_assessments` (modellens vurdering, ubetrodd tekst, kuttet og renset), samt
 additive kolonner `situation_notification_policies.critical_bypass_quiet` og
 `situation_autonomy_policies.expires_at`. FORCE RLS (tenant + space), sammensatte FK-er med `tenant_id`,
-alle rader merket person/kilde/`task_id`/`session_id`, alle fem registrert i erasure-planen og i
-`PROCESSING_INVENTORY.md` (D-420). Mottakere: Telegram (eierens egen kanal, innholdsfri tekst for helse/kamera)
+alle rader merket person/kilde/`task_id`/`session_id` (fiks-runde: `situation_signal_log` og `situation_assessments`
+har `person_id` = abonnementets eier, `situation_rule_tuning` har `task_id`/`session_id` fra aktøren; indekser på
+(tenant, rom, situation_id) for logg og tilbakemelding; kun kolonne-GRANT for UPDATE på abonnement og
+tilbakemelding, ingen UPDATE på loggen), alle fem registrert i erasure-planen og i
+`PROCESSING_INVENTORY.md` (D-420). Mottakere: Telegram (eierens egen kanal, innholdsfri/nøytral tekst for helse/kamera)
 og modellen (kun lukkede felt; begrensede data kun lokal modell).
 
 **11.3 Flyt og dedupe.** observasjon (minimert) -> lukket hendelsestype -> abonnementssjekk (ingen
-abonnement = forkastet) -> ren bro -> pausesjekk (prosess-cache OG varig `situation_domain_pauses`) -> valgfri
-modellvurdering -> `evaluateCandidate()` -> idempotent logg (UNIK per kilde + `source_ref`). Samme fysiske
-hendelse via to kilder deler `detection_key` (`home:opening:<entitet>@<ISO>`; `infra_incident:<id>`), så
-dedupe/undertrykking/stille timer i motoren gir ÉN situasjon og ETT varsel uten ny mekanikk.
+abonnement = forkastet) -> ren bro -> pausesjekk (prosess-cache OG varig `situation_domain_pauses`; kilder der alle
+abonnementsdomener er pauset leses ikke i det hele tatt) -> `evaluateCandidate()` -> idempotent logg (UNIK per
+kilde + `source_ref`; et signal motoren HOLDER tilbake i stille timer logges IKKE, så det evalueres på nytt til
+stille timer er over) -> levering/auto-ACT -> valgfri modellvurdering som fase 2 med tak og tidsbudsjett
+(deterministisk først: en lekkasje venter aldri på en modell). Samme fysiske hendelse via to kilder deler
+`detection_key` (`home:opening:<entitet>@<ISO>`; `infra_incident:<id>`), så dedupe/undertrykking/stille timer i
+motoren gir ÉN situasjon og ETT varsel uten ny mekanikk. `updated_at` betyr «sist evaluert/observert»: bumpes av
+en observasjon som fortsatt gjelder, nullstiller aldri en gammel situasjon via levering, og er grunnlaget for
+ferskhetsvinduet til auto-ACT og for den daglige oppryddingen (løs etter 48 t uten observasjon; slett etter
+kildedataenes oppbevaring; normal HA-tilstand løser åpne situasjoner for entiteten).
 
 **11.4 ACT-autoritet (deterministisk kode).** ACT krever ALLTID eierens eksplisitte, tilbakekallbare binding
-(`situation_autonomy_policies`, valgfri `expires_at` <= 365 dager, re-verifisert rett før hvert kall).
-`health` og `vision` kan aldri få ACT (`NEVER_ACT_DOMAINS`: avvist ved binding, i `actOn()` og i SQL for
-auto-ACT). Hjemhandlinger går gjennom G2 D-kjeden (mål-allowlist, step-up, readback, umiddelbart varsel med
-gjenopprettingstekst); den autonome sveipe-identiteten har ikke en signert enhetsøkt og nektes derfor av
-step-up (målt mot de ekte G2-definisjonene): situasjonen eskalerer ærlig, aldri en stille omgåelse.
+(`situation_autonomy_policies`, valgfri `expires_at` <= 365 dager, re-verifisert rett før hvert kall OG i
+claim-transaksjonen under domenelåsen, sammen med ferskhet). `health` og `vision` kan aldri få ACT
+(`NEVER_ACT_DOMAINS`: avvist ved binding, i `actOn()` og i SQL for auto-ACT). Fysiske/kritiske handlinger
+(allowlist-regel i `autonomy-guard.ts`: kun kjente lese-handlinger i `home-assistant`/`car` er bindbare) kan
+ALDRI bindes eller utføres autonomt (bind-tid, `autoActPending`, `actOn`, simulering). Hjemhandlinger som er
+bindbare går gjennom ToolGateway-kjeden; for de G2-kritiske handlingene nekter step-up den autonome
+sveipe-identiteten (målt mot de ekte G2-definisjonene): situasjonen eskalerer ærlig, aldri en stille omgåelse.
+Binding er per DOMENE (regel-skopet binding er `DEFERRED`).
 
 **11.5 Modellassistert vurdering.** Inngangen er et lukket JSON-objekt (regel, domene, prioritet, minimerte
 fakta), utdata er UBETRODD data (lukkede sett, ukjent = laveste nivå). Eneste virkning: `low` -> `normal`
 (`remember` -> `inform`). Aldri `high`, aldri konfidens, aldri stadium, aldri ACT. Begrensede data
 (`SECRET_RESTRICTED`: helse, kamera): `mode: LOCAL`, ingen betalt/sky-modell, leverandørverifisering mot lokale
-navn, og INGEN sky-fallback - er den lokale modellen nede, uteblir vurderingen.
+navn, og INGEN sky-fallback - er den lokale modellen nede, uteblir vurderingen. Vurderingen kjøres i løperens
+fase 2 (etter deterministisk evaluering og levering), med tak per (tenant, rom) og ett felles tidsbudsjett per tikk.
 
 **11.6 Tilbakemeldingslæring og kontrafaktisk simulering.** Læring flytter ETT tall per (tenant, space, regel)
 ett steg etter tre enige, ubrukte stemmer, høyst ett steg per døgn, innenfor harde grenser i kode
@@ -550,10 +563,19 @@ som SUGGEST-bevis - den utfører og endrer ingenting.
 umiddelbart varsel + gjenopprettingskontekst gjennom D-kjedens `ClassDNotifier` (og utføres aldri uten klar
 varsler).
 
-**11.8 `DEFERRED` / `BLOCKED_EXTERNAL`.** HA-push (i dag polling), eier-flate for abonnementer, lært energi-baseline,
-tidssone-bevisste helsedøgn, kommunikasjon/forretning som kilder, «borte»-bevisst bevegelse, sanntids-løsning av
-incidents, kobling av anomali-detektorene, kontrollsenter-side. `BLOCKED_EXTERNAL`: ACT/ACT+NOTIFY observert på
-NAS, lokal modell på NAS, ekte HA/kamera/helsedata.
+**11.8 `DEFERRED` / `BLOCKED_EXTERNAL`.** HA-push (i dag polling), kontrollsenter-SIDE for abonnementer (eierens HTTP-flate
+`/situations/signals/*` finnes, fiks-runden), regel-skopet autonomi-binding, morgenoppsummering av nattlige hendelser,
+lært energi-baseline, tidssone-bevisste helsedøgn, kommunikasjon/forretning som kilder, «borte»-bevisst bevegelse,
+sanntids-løsning av incidents, kobling av anomali-detektorene. `BLOCKED_EXTERNAL`: ACT/ACT+NOTIFY observert på NAS,
+lokal modell på NAS, ekte HA/kamera/helsedata.
+
+**11.9 Fiks-runde etter to uavhengige reviews (MERGE ETTER FIKSER).** Se runbook §18 for tabell per funn (status,
+test, mutasjonsbevis). De bærende endringene i designet: (1) fysisk/kritisk-regelen (A-HIGH-1), (2) stille timer
+sluker aldri signaler (B-HIGH-1), (3) pg-`numeric` er en streng (B-HIGH-2), (4) deterministisk først + modellfase
+med budsjett (A-MEDIUM-2), (5) pause stopper kildelesingen (A-MEDIUM-3), (6) ferskhet/claim-vakt/normalisering/
+retensjon (A-MEDIUM-4, B-MEDIUM-3, A-LOW-5), (7) domenelås-semafor (A-MEDIUM-5), (8) ÉN HA-lesing per tikk
+(B-MEDIUM-4), (9) eierens HTTP-flate (B-MEDIUM-5). Flaggavhengighet: alle nye valg er under
+`JARVIS_SITUATION_*` bortsett fra de strengere stegene i den UFLAGGEDE motorstien som er listet i runbook §15.
 
 ## 9. Oppdateringsplikt
 

@@ -177,7 +177,7 @@ describe("B2: effektenhet (B-LOW-9) - W og kW sammenlignes riktig mot eierens gr
   it("en sensor i kW (1,2 kW = 1200 W) er UNDER grensen på 2000 W (normal), 2,5 kW er OVER; en ukjent enhet er verken over eller normal", async () => {
     expect((await readWith("1.2", "kW")(ctx(), entities))[0]).toMatchObject({ over_limit_ticks: 0, limit_w: 2000 });
     expect((await readWith("2.5", "kW")(ctx(), entities))[0]).toMatchObject({ over_limit_ticks: 1, limit_w: 2000 });
-    const unknownUnit = (await readWith("2500", "MW")(ctx(), entities))[0] as Record<string, unknown>;
+    const unknownUnit = (await readWith("2500", "MW")(ctx(), entities))[0] as unknown as Record<string, unknown>;
     expect(unknownUnit).toMatchObject({ role: "power", state: "2500" });
     expect(unknownUnit["over_limit_ticks"]).toBeUndefined();
   });

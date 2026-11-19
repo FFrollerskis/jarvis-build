@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
+import { writeAudit } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { JsonValue, MemorySpace, IdentityContext } from "@jarvis/contracts";
 import type { ToolGateway, ToolResult } from "@jarvis/tool-gateway";
@@ -811,6 +812,10 @@ export class SituationEngine {
          RETURNING *`,
         [tenantId, memorySpace, enabled, actorPersonId]
       );
+      // WP-G4 fiks-runde (B-MEDIUM-5): revisjonsraden i SAMME transaksjon som valget (`assertAutonomyAuthority` har allerede sikret at `actorPersonId` er satt).
+      await writeAudit(client, { tenant_id: tenantId, person_id: actorPersonId as string }, {
+        type: "situation.critical_bypass_set", decision: "ALLOW", tool_id: "situations", action: "set_critical_quiet_bypass", capability_class: "C", payload: { enabled, memory_space: memorySpace }
+      });
       return rows[0] as SituationNotificationPolicy;
     });
   }
