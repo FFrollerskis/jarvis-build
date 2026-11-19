@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { AppleDavClient, DavError, parseDavCollections } from "@jarvis/tool-gateway";
-import { FakeDavServer } from "../../../modules/tool-gateway/test/support/fake-dav-server.ts";
+import { FakeDavServer, ics } from "../../../modules/tool-gateway/test/support/fake-dav-server.ts";
 import { FORBIDDEN_IDENTITY_BODY_KEYS } from "../src/http-guard.ts";
 import { DAV_ERROR_STATUS, DAV_ROUTES, type DavAuditEntry, type PersonalDavDeps } from "../src/personal-dav.ts";
 import { handlePersonalRoute, type PersonalRouteContext } from "../src/personal-routes.ts";
@@ -250,5 +250,46 @@ describe("C: ende-til-ende med ekte klient mot en falsk DAV-server", () => {
     const deleted = await run("/personal/dav/delete", { collection: "privat", uid: result.uid, expected_etag: etag, confirm_uid: result.uid });
     expect((deleted.responses[0]?.body["result"] as { outcome: string }).outcome).toBe("SUCCESS");
     expect(server.store.size).toBe(0);
+  });
+});
+
+describe("D: deltakere - bekreftelsen fra eieren (review B LOW-7: endring/sletting kan sende e-post til andre)", () => {
+  it("`allow_attendee_notification` finnes KUN på update/delete; utelatt = false, `true` sendes videre, en ikke-boolsk verdi avvises (400) uten at klienten nås", async () => {
+    for (const [path, route] of Object.entries(DAV_ROUTES)) expect(route.keys.includes("allow_attendee_notification"), path).toBe(path.endsWith("/update") || path.endsWith("/delete"));
+    const upd = { collection: "privat", uid: "abcdef-1", expected_etag: '"e1"', fields: { summary: "y" } };
+    const del = { collection: "privat", uid: "abcdef-1", expected_etag: '"e1"', confirm_uid: "abcdef-1" };
+    for (const [path, base, method] of [["/personal/dav/update", upd, "update"], ["/personal/dav/delete", del, "remove"]] as const) {
+      const off = harness({ path, body: base });
+      await handlePersonalRoute(off.ctx);
+      expect(off.client[method]?.mock.calls[0]?.at(-1), path).toEqual({ allowAttendeeNotification: false });
+      const on = harness({ path, body: { ...base, allow_attendee_notification: true } });
+      await handlePersonalRoute(on.ctx);
+      expect(on.client[method]?.mock.calls[0]?.at(-1), path).toEqual({ allowAttendeeNotification: true });
+      for (const bad of ["true", 1, null, {}]) {
+        const h = harness({ path, body: { ...base, allow_attendee_notification: bad } });
+        await handlePersonalRoute(h.ctx);
+        expect(h.client[method], `${path} ${JSON.stringify(bad)}`).not.toHaveBeenCalled();
+        expect(h.responses[0], path).toEqual({ status: 400, body: { error: "dav_rejected", reason: "invalid_input", request_id: "req-1" } });
+      }
+    }
+    expect(DAV_ERROR_STATUS.attendees_confirmation_required).toBe(409);
+  });
+
+  it("ende-til-ende: en hendelse med deltakere gir 409 `attendees_confirmation_required` (revidert som avvist, ingen PUT/DELETE sendt) uten bekreftelsen, og går gjennom med den", async () => {
+    const server = new FakeDavServer();
+    const real = new AppleDavClient({ transport: server, collections, now: () => new Date("2026-11-18T10:00:00Z") });
+    const etag = server.seed(`${CAL}att-uid-0001.ics`, ics("att-uid-0001", "Møte", "20261201T080000Z", ["ORGANIZER:mailto:meg@example.com", "ATTENDEE;CN=Ola:mailto:ola@example.com"]));
+    const run = async (path: string, body: Record<string, unknown>) => { const h = harness({ path, body, real }); await handlePersonalRoute(h.ctx); return h; };
+    const denied = await run("/personal/dav/update", { collection: "privat", uid: "att-uid-0001", expected_etag: etag, fields: { summary: "Ny" } });
+    expect(denied.responses[0]).toEqual({ status: 409, body: { error: "dav_rejected", reason: "attendees_confirmation_required", request_id: "req-1" } });
+    expect(denied.audits.map((a) => a.outcome)).toEqual(["requested", "rejected:attendees_confirmation_required"]);
+    const deniedDelete = await run("/personal/dav/delete", { collection: "privat", uid: "att-uid-0001", expected_etag: etag, confirm_uid: "att-uid-0001" });
+    expect(deniedDelete.responses[0]).toMatchObject({ status: 409, body: { reason: "attendees_confirmation_required" } });
+    expect(server.requests.filter((r) => r.method === "PUT" || r.method === "DELETE")).toHaveLength(0);
+    const ok = await run("/personal/dav/update", { collection: "privat", uid: "att-uid-0001", expected_etag: etag, fields: { summary: "Ny" }, allow_attendee_notification: true });
+    expect(ok.responses[0]).toMatchObject({ status: 200, body: { result: { outcome: "SUCCESS" } } });
+    const newEtag = (ok.responses[0]?.body["result"] as { etag: string }).etag;
+    const gone = await run("/personal/dav/delete", { collection: "privat", uid: "att-uid-0001", expected_etag: newEtag, confirm_uid: "att-uid-0001", allow_attendee_notification: true });
+    expect(gone.responses[0]).toMatchObject({ status: 200, body: { result: { outcome: "SUCCESS" } } });
   });
 });

@@ -8,6 +8,7 @@ import type { PersonalRouteContext } from "./personal-routes.ts";
  *  - EIER-KUN for alt (kalender, påminnelser og kontakter er eierens private data); identitet fra grantet, aldri kroppen. Lesing krever ikke step-up; HVER mutasjon krever enhetssignert økt (step-up).
  *  - ruter, ikke verktøy: samtalen/modellene kan ikke endre eierens Apple-data (`DEFERRED`: et samtaleverktøy bak en risikoklasse når eieren har besluttet det). Innhold fra iCloud er ubetrodd data og leveres merket.
  *  - sletting krever en typet bekreftelse (`confirm_uid` = uid, regel 8: ingen destruktive handlinger uten eksplisitt bekreftelse).
+ *  - en hendelse/oppgave MED deltakere kan sende e-post til andre ved endring/sletting (iTIP, uverifisert mot iCloud): `allow_attendee_notification: true` kreves, ellers 409 `attendees_confirmation_required` og ingenting sendes.
  *  - REVISJON FØR mutasjon: en `requested`-rad skrives FØR noe sendes (feiler revisjonen, gjøres ingenting), og utfallet revideres etterpå (best effort). Revisjonen har samling, slag, UID og utfall - aldri innhold.
  *  - utfallet er alltid `SUCCESS` | `REPLAYED` | `MISMATCH` | `UNKNOWN` fra readback (aldri «ok» uten bevis); `UNKNOWN` skal føre til en lesing (`get`), aldri en ny blind kommando.
  */
@@ -26,7 +27,7 @@ export const DAV_ERROR_STATUS: Readonly<Record<DavErrorCode, number>> = {
   invalid_input: 400, invalid_text: 400, invalid_uid: 400, invalid_etag: 400,
   collection_not_allowed: 403, url_not_allowed: 403,
   not_found: 404,
-  etag_mismatch: 409, unsupported_change: 409,
+  etag_mismatch: 409, unsupported_change: 409, attendees_confirmation_required: 409,
   dav_credentials_unavailable: 503, dav_kill_switch_active: 503, dav_credential_revoked: 503, dav_guard_unavailable: 503,
   dav_unreachable: 502, dav_redirect_refused: 502, dav_response_too_large: 502, dav_auth_rejected: 502, dav_malformed_response: 502, dav_rejected: 502
 };
@@ -41,6 +42,16 @@ interface DavRoute {
 const UNTRUSTED = { content_trust: "untrusted_external_content" } as const;
 const optional = <K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } => (value === undefined ? {} : { [key]: value }) as { [P in K]?: V };
 
+/**
+ * `allow_attendee_notification` (kun update/delete): eierens eksplisitte bekreftelse på at endring/sletting av en hendelse/oppgave MED deltakere er ønsket selv om serveren kan sende e-post til dem (iTIP, uverifisert mot iCloud,
+ * kan ikke trekkes tilbake). Utelatt = `false`; en ikke-boolsk verdi avvises (aldri «truthy»).
+ */
+const allowAttendees = (b: Body): { allowAttendeeNotification: boolean } => {
+  const v = b["allow_attendee_notification"];
+  if (v !== undefined && typeof v !== "boolean") throw new DavError("invalid_input", "allow_attendee_notification");
+  return { allowAttendeeNotification: v === true };
+};
+
 export const DAV_ROUTES: Readonly<Record<string, DavRoute>> = {
   "/personal/dav/collections": { keys: [], mutation: false, run: async (d) => ({ collections: d.client.listCollections() }) },
   "/personal/dav/list": {
@@ -53,14 +64,14 @@ export const DAV_ROUTES: Readonly<Record<string, DavRoute>> = {
     run: async (d, _i, _b, h) => ({ result: await d.client.create(h.str("collection"), h.str("idempotency_key"), h.rec("fields")), ...UNTRUSTED })
   },
   "/personal/dav/update": {
-    keys: ["collection", "uid", "expected_etag", "fields"], mutation: true,
-    run: async (d, _i, _b, h) => ({ result: await d.client.update(h.str("collection"), h.str("uid"), h.str("expected_etag"), h.rec("fields")), ...UNTRUSTED })
+    keys: ["collection", "uid", "expected_etag", "fields", "allow_attendee_notification"], mutation: true,
+    run: async (d, _i, b, h) => ({ result: await d.client.update(h.str("collection"), h.str("uid"), h.str("expected_etag"), h.rec("fields"), allowAttendees(b)), ...UNTRUSTED })
   },
   "/personal/dav/delete": {
-    keys: ["collection", "uid", "expected_etag", "confirm_uid"], mutation: true,
-    run: async (d, _i, _b, h) => {
+    keys: ["collection", "uid", "expected_etag", "confirm_uid", "allow_attendee_notification"], mutation: true,
+    run: async (d, _i, b, h) => {
       if (h.str("confirm_uid") !== h.str("uid")) throw new DavError("invalid_input", "confirm_uid_must_equal_uid");
-      return { result: await d.client.remove(h.str("collection"), h.str("uid"), h.str("expected_etag")), ...UNTRUSTED };
+      return { result: await d.client.remove(h.str("collection"), h.str("uid"), h.str("expected_etag"), allowAttendees(b)), ...UNTRUSTED };
     }
   }
 };
