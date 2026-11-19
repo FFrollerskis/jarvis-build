@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readdir, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, lutimes, mkdir, mkdtemp, readdir, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -104,7 +104,7 @@ describe("put: en mislykket skriving etterlater ingen temp-fil (review delta B L
 });
 
 describe("purgeStaleTemp: foreldreløse temp-filer (ingen rad, ingen gravstein) ryddes - og ingenting annet", () => {
-  async function seed(): Promise<{ root: string; adapter: LocalFsStorageAdapter; oldTemp: string; oldTemp2: string; freshTemp: string; finalFile: string; lookalike: string; linkTemp: string; dirTemp: string; outside: string }> {
+  async function seed(): Promise<{ root: string; adapter: LocalFsStorageAdapter; oldTemp: string; oldTemp2: string; freshTemp: string; recentTemp: string; finalFile: string; lookalike: string; linkTemp: string; dirTemp: string; outside: string }> {
     const root = await freshRoot();
     const adapter = new LocalFsStorageAdapter(root);
     const dir = join(root, "snapshots", "aa");
@@ -118,16 +118,21 @@ describe("purgeStaleTemp: foreldreløse temp-filer (ingen rad, ingen gravstein) 
     const oldTemp = await make(tmpName("snap-1"), 48);
     const oldTemp2 = await make(tmpName("snap-2"), 12);
     const freshTemp = await make(tmpName("snap-3"), 0);
+    const recentTemp = await make(tmpName("snap-3b"), 1); // 1 time: yngre enn grensen på 6 t, så den kan være en treg skriving og står
     const finalFile = await make("snap-final", 200); // gammel, men et ekte objekt: aldri rørt
     const lookalike = await make("snap-4.tmp-not-a-uuid", 100);
     const outside = join(root, "..", `outside-${randomUUID()}`);
     await writeFile(outside, BYTES);
     await age(outside, 100);
+    // Symlenken og katalogen er GAMLE og heter som en temp-fil: det er KUN typen (ikke alderen) som skal berge dem.
+    const longAgo = new Date(Date.now() - 100 * HOURS);
     const linkTemp = join(dir, tmpName("snap-link"));
     await symlink(outside, linkTemp);
+    await lutimes(linkTemp, longAgo, longAgo);
     const dirTemp = join(dir, tmpName("snap-dir"));
     await mkdir(dirTemp);
-    return { root, adapter, oldTemp, oldTemp2, freshTemp, finalFile, lookalike, linkTemp, dirTemp, outside };
+    await age(dirTemp, 100);
+    return { root, adapter, oldTemp, oldTemp2, freshTemp, recentTemp, finalFile, lookalike, linkTemp, dirTemp, outside };
   }
   const exists = async (path: string): Promise<boolean> => (await lstat(path).catch(() => null)) !== null;
 
@@ -137,7 +142,7 @@ describe("purgeStaleTemp: foreldreløse temp-filer (ingen rad, ingen gravstein) 
     expect(result).toEqual({ removed: 2, failed: 0 });
     expect(await exists(s.oldTemp)).toBe(false);
     expect(await exists(s.oldTemp2)).toBe(false);
-    for (const kept of [s.freshTemp, s.finalFile, s.lookalike, s.linkTemp, s.dirTemp, s.outside]) expect(await exists(kept), kept).toBe(true);
+    for (const kept of [s.freshTemp, s.recentTemp, s.finalFile, s.lookalike, s.linkTemp, s.dirTemp, s.outside]) expect(await exists(kept), kept).toBe(true);
     expect((await stat(s.outside)).size).toBe(BYTES.length); // lenkemålet er urørt (lenker følges aldri)
     // idempotent: ingenting mer å rydde
     await expect(s.adapter.purgeStaleTemp(6 * HOURS)).resolves.toEqual({ removed: 0, failed: 0 });
@@ -163,7 +168,7 @@ describe("purgeStaleTemp: foreldreløse temp-filer (ingen rad, ingen gravstein) 
 
   it("ugyldig grense (negativ, NaN, uendelig) avvises - en feilkonfigurert grense kan aldri rydde bort ferske filer", async () => {
     const s = await seed();
-    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY]) await expect(s.adapter.purgeStaleTemp(bad), String(bad)).rejects.toThrow("storage_purge_age_invalid");
+    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, 0, 30_000]) await expect(s.adapter.purgeStaleTemp(bad), String(bad)).rejects.toThrow("storage_purge_age_invalid"); // under ett minutt kunne slettet en skriving som pågår
     expect(await exists(s.freshTemp)).toBe(true);
     expect(await exists(s.oldTemp)).toBe(true);
   });

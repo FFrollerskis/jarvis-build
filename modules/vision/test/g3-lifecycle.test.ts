@@ -499,9 +499,11 @@ describe("review delta B LOW-D4: skriverester (krasj midt i en put) ryddes av de
     await mkdir(dir, { recursive: true });
     const stale = join(dir, tmpName());
     const fresh = join(dir, tmpName());
+    const recent = join(dir, tmpName());
     const real = join(dir, "snap-real-object");
-    for (const path of [stale, fresh, real]) await writeFile(path, "x");
+    for (const path of [stale, fresh, recent, real]) await writeFile(path, "x");
     await age(stale, 30);
+    await age(recent, 1); // 1 time: yngre enn grensen (6 t) - kan være en treg skriving
     await age(real, 30);
     try {
       const light = await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots }, { light: true });
@@ -512,6 +514,7 @@ describe("review delta B LOW-D4: skriverester (krasj midt i en put) ryddes av de
       expect(full.failed).toEqual([]);
       expect(await exists(stale)).toBe(false);
       expect(await exists(fresh)).toBe(true); // kan være en skriving som pågår
+      expect(await exists(recent)).toBe(true); // yngre enn 6 timer
       expect(await exists(real)).toBe(true); // ekte objekt: aldri rørt, uansett alder
       expect((await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots })).temp_files_purged).toBe(0); // idempotent
       // uten lagringstjeneste er det ingenting å rydde (og ingen feil)

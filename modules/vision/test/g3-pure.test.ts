@@ -317,6 +317,9 @@ describe("inspectImage: mål fra bildehodet (review A-L6) - en liten fil kan dek
       unreadable(webpBytes("vp8x", { animation: true }), "animasjonsflagget");
       unreadable(webpBytes("vp8x", { inner: "anim" }), "ANIM før bildet");
       unreadable(webpBytes("vp8x", { inner: "anmf" }), "ANMF der bildet skulle stå");
+      // ANMF/ANIM som SØSKEN-chunk foran et ellers konsistent bilde: en animasjonsramme har egne mål, og en dekoder som behandler den kan allokere en pikselbombe selv om et senere VP8L ser harmløst ut.
+      unreadable(webpBytes("vp8x", { width: 100, height: 100, before: [{ fourcc: "ANMF", size: 16 }] }), "ANMF-chunk foran et VP8L med lerretets mål");
+      unreadable(webpBytes("vp8x", { width: 100, height: 100, before: [{ fourcc: "ANIM", size: 6 }] }), "ANIM-chunk foran et VP8L med lerretets mål");
       unreadable(webpBytes("vp8x", { vp8xSize: 12 }), "VP8X-lengde 12");
       unreadable(webpBytes("vp8x", { size: 0 }).slice(0, 36), "bildechunkens hode er avkortet");
       unreadable(webpBytes("vp8x", { size: 0 }).slice(0, 40), "bildechunkens nyttelast er avkortet");
@@ -348,7 +351,8 @@ describe("inspectImage: mål fra bildehodet (review A-L6) - en liten fil kan dek
     expect(inspectImage(Uint8Array.from([0xff, 0xd8, ...sof16, 1, 2, 3])), "non-vakuitet: lokkeduen er en gyldig SOF").toMatchObject({ width: 16, height: 16 });
     const bad: Array<[string, Uint8Array]> = [
       ["JPEG SOS før SOF, med en gyldig SOF-lignende markør i bildedataene etterpå", Uint8Array.from([0xff, 0xd8, ...sos, ...sof16])],
-      ["JPEG EOI før SOF, med en gyldig SOF-lignende markør etterpå", Uint8Array.from([0xff, 0xd8, 0xff, 0xd9, ...sof16])],
+      // EOI har ingen lengde; en parser som likevel leste «00 02» som lengde ville hoppet rett til lokkeduen.
+      ["JPEG EOI før SOF, med en gyldig SOF-lignende markør etterpå", Uint8Array.from([0xff, 0xd8, 0xff, 0xd9, 0x00, 0x02, ...sof16])],
       ["JPEG segmentlengde 0 rett før en gyldig SOF", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, ...sof16])],
       ["JPEG segmentlengde 1 rett før en gyldig SOF", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x01, ...sof16])],
       ["JPEG kun SOI + APP0", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1])],
