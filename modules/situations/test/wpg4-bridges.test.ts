@@ -270,12 +270,13 @@ describe("D: helse-broen - avvik fra egen baseline, innholdsfri, aldri ACT", () 
     expect(detectDeviation(s, 4, NOW)).toBeNull();
   });
 
-  it("bridgeHealthObservation: reason har KUN kategorien (aldri tall), ingen konfidens (-> inform), ingen verdier i fakta, domenet er `health`", () => {
+  it("bridgeHealthObservation: reason er NØYTRAL (B-LOW-9/Q-G4-6: ingen kategori, aldri tall), ingen konfidens (-> inform), ingen verdier i fakta, domenet er `health`", () => {
     const r = bridgeHealthObservation({ source: "health", metric: "resting_heart_rate", series: series(61, [73, 74, 75]) }, ctx());
     expect(r).not.toBeNull();
     expect(r?.candidate.domain).toBe("health");
     expect(r?.candidate.confidence).toBeUndefined();
-    expect(r?.candidate.reason).toContain("hvilepuls");
+    expect(r?.candidate.reason).toBe("Avvik i helsedata fra din egen baseline - åpne Jarvis for detaljer. Dette er ikke medisinsk rådgivning.");
+    expect(r?.candidate.reason).not.toMatch(/hvilepuls|søvn|aktivitet|skritt|puls/i);
     expect(r?.candidate.reason).not.toMatch(/\d/);
     expect(computeTargetStage(r!.candidate.priority, r!.candidate.confidence, false)).not.toBe("suggest");
     expect(Object.keys(r!.facts).sort()).toEqual(["baseline_days", "days", "direction", "metric", "severity"]);

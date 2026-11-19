@@ -210,7 +210,7 @@ describe("C: eier-kontroller, feilisolasjon og samtidighet", () => {
     const runner = makeRunner({ health: async () => [obs] });
     const result = await runner.tick();
     expect(result).toMatchObject({ delivered: 1, auto_act_attempted: 0 });
-    expect(telegram.messages).toEqual(["Jarvis oppdaget [health, normal]: Avvik fra din egen baseline (hvilepuls) - åpne Jarvis for detaljer. Dette er ikke medisinsk rådgivning."]);
+    expect(telegram.messages).toEqual(["Jarvis oppdaget [health, normal]: Avvik i helsedata fra din egen baseline - åpne Jarvis for detaljer. Dette er ikke medisinsk rådgivning."]);
     expect(telegram.messages[0]).not.toMatch(/\d/);
   });
 });

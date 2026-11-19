@@ -7,7 +7,7 @@ import { ALL_DOMAINS, type DomainPauseRegistry } from "./domain-pause.ts";
 import { homeKeyPrefix, homeStateIsNormal } from "./home-bridge.ts";
 import { resolveNormalizedHome, touchSituation } from "./signal-retention.ts";
 import { bridgeObservation, deriveEventType, type SignalObservation } from "./signal-bridges.ts";
-import { assertMinimalFacts, resolveRuleThreshold, ruleByKey, type BridgeContext, type BridgeResult, type SignalFacts } from "./signal-types.ts";
+import { assertMinimalFacts, resolveRuleThreshold, ruleByKey, type BridgeContext, type BridgeResult, type RuleDefinition, type SignalFacts } from "./signal-types.ts";
 import { SituationDetectionKeyConflictError, type SituationEngine } from "./service.ts";
 import type { SituationSubscription } from "./subscriptions.ts";
 import type { Situation } from "./types.ts";
@@ -20,6 +20,7 @@ import type { Situation } from "./types.ts";
  *   3. bro (ren, terskler tunet innenfor harde grenser) -> under terskel/utenfor filter = ingen signal
  *   4. PAUSE (domene og hele motoren, både prosess-cache og varig database) -> pauset = ikke innlest (ikke bufret; tilstandsbaserte kilder gjenoppdages ved neste tikk, hendelsesbaserte innenfor oppslagsvinduet).
  *      Sjekkes på nytt RETT ETTER en modellvurdering (en pause satt mens modellen vurderte slipper ikke signalet gjennom), og løperen leser ikke engang kilden når alle abonnementsdomenene er pauset (`pausedDomains`).
+ *   4b. FLAPP-DEMPING (A-LOW-8): en ikke-haste Home Assistant-entitet slipper inn høyst `FLAP_MAX_EPISODES` nye episoder per `FLAP_WINDOW_MS`; resten `damped` (forsinket, aldri tapt). Hver batch behandler høyst `MAX_OBSERVATIONS_PER_BATCH` (B-LOW-6).
  *   5. (valgfritt) modellassistert vurdering - kun et løft `low` -> `normal`, aldri ACT (assist.ts). I løperen kjøres den ETTER deterministisk evaluering og levering (fase 2, `publishPendingAssists`) med tak og tidsbudsjett:
  *      et haste-signal (lekkasje, alarm) venter aldri på en modell.
  *   6. `SituationEngine.evaluateCandidate()` - dedupe, undertrykking, stille timer og tilstandsmaskin er MOTORENS (gjenbrukt uendret)
@@ -32,7 +33,17 @@ import type { Situation } from "./types.ts";
  * Bussen har INGEN eksterne effekter (ingen verktøykall, ingen varsler): den skriver kun situasjonstilstand og logg. Leveranse (INFORM/SUGGEST) og ACT er fortsatt `deliverPendingInformNotifications()`/`autoActPending()`,
  * som begge sjekker pausen og eier-bindingen selv. Tenant/space er eksplisitte argumenter (RLS), og en observasjon kan aldri velge dem selv.
  */
-export type IgnoredReason = "no_rule" | "no_subscription" | "no_signal" | "paused" | "duplicate";
+export type IgnoredReason = "no_rule" | "no_subscription" | "no_signal" | "paused" | "duplicate" | "damped" | "over_cap";
+
+/**
+ * A-LOW-8 (flapp-demping): en ikke-haste Home Assistant-regel (dør/port åpen for lenge, effekt over grensen) gir en NY situasjon (og et nytt varsel) per episode. En dør/sensor som flakker ga 10 episoder = 10 situasjoner = 10 varsler.
+ * Høyst `FLAP_MAX_EPISODES` nye episoder per entitet og regel per rullerende `FLAP_WINDOW_MS` slippes inn; en episode over taket DEMPES (`damped`): den evalueres og logges ikke, og slippes inn av seg selv så snart
+ * en av de tidligere episodene er eldre enn vinduet (forsinket, aldri tapt). Haste-signaler (lekkasje, alarm) dempes aldri, og en episode som allerede er sluppet inn (nytt nivå på samme nøkkel) dempes aldri.
+ */
+export const FLAP_WINDOW_MS = 60 * 60_000;
+export const FLAP_MAX_EPISODES = 3;
+/** B-LOW-6: høyst så mange observasjoner behandles per `publishBatch`; resten telles som `over_cap` (backpressure: en leser kan aldri mate bussen ubegrenset). */
+export const MAX_OBSERVATIONS_PER_BATCH = 500;
 
 export type PublishResult =
   | { status: "ignored"; reason: IgnoredReason }
@@ -67,7 +78,7 @@ export interface SignalBatchResult {
 
 export const emptyBatchResult = (): SignalBatchResult => ({
   received: 0,
-  ignored: { no_rule: 0, no_subscription: 0, no_signal: 0, paused: 0, duplicate: 0 },
+  ignored: { no_rule: 0, no_subscription: 0, no_signal: 0, paused: 0, duplicate: 0, damped: 0, over_cap: 0 },
   evaluated: 0, created: 0, newly_actionable: 0, held: 0, failed: 0,
   assist: { assessed: 0, rejected: 0, unavailable: 0, uplifted: 0, cached: 0, skipped_cap: 0, skipped_budget: 0, deferred: 0 },
   errors: []
@@ -98,6 +109,11 @@ export interface SignalBusDeps {
   subscriptions: (tenantId: string, memorySpace: MemorySpace) => Promise<readonly SituationSubscription[]>;
   tuning?: RuleThresholdSource;
   assist?: SignalAssist | null;
+  /**
+   * A-LOW-8: flapp-demping. Utelatt = standard (`FLAP_MAX_EPISODES` nye episoder per `FLAP_WINDOW_MS` per entitet og regel); egne verdier kan gis; `false` slår den av (kun for tester som seeder mange episoder for samme entitet
+   * på kort tid - i drift er den alltid på).
+   */
+  flapDamping?: false | { windowMs?: number; maxEpisodes?: number };
   now?: () => number;
 }
 
@@ -179,6 +195,31 @@ export class SituationSignalBus {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  }
+
+  /**
+   * A-LOW-8: flapp-demping (se `FLAP_*`). Kun ikke-haste Home Assistant-regler; en episode som allerede er sluppet inn (situasjonen finnes) dempes aldri. Teller DISTINKTE episode-nøkler (`home:<art>:<entitet>@...`) i signalloggen
+   * for samme entitet og regel innenfor vinduet (på hendelsestidspunktet `occurred_at`, ikke på skrivetidspunktet), så resultatet er uavhengig av klokkeskjevhet mellom prosess og database.
+   */
+  private async isFlapping(tenantId: string, memorySpace: MemorySpace, rule: RuleDefinition, bridge: BridgeResult): Promise<boolean> {
+    const config = this.deps.flapDamping;
+    if (config === false || rule.source !== "home_assistant" || rule.urgent) return false;
+    const windowMs = Math.max(1, config?.windowMs ?? FLAP_WINDOW_MS);
+    const maxEpisodes = Math.max(1, Math.floor(config?.maxEpisodes ?? FLAP_MAX_EPISODES));
+    const key = bridge.candidate.detection_key;
+    const at = key.lastIndexOf("@");
+    if (at < 0) return false;
+    if ((await this.deps.engine.findByDetectionKey(tenantId, memorySpace, key)) !== null) return false;
+    const admitted = await withMemoryTransaction(this.deps.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT DISTINCT detection_key FROM situation_signal_log
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND source = 'home_assistant' AND event_type = $3 AND starts_with(detection_key, $4) AND occurred_at > $5
+         LIMIT $6`,
+        [tenantId, memorySpace, bridge.event_type, key.slice(0, at + 1), new Date(this.now() - windowMs).toISOString(), maxEpisodes]
+      );
+      return rows.length;
+    });
+    return admitted >= maxEpisodes;
   }
 
   private async alreadyLogged(tenantId: string, memorySpace: MemorySpace, source: string, sourceRef: string): Promise<boolean> {
@@ -277,6 +318,8 @@ export class SituationSignalBus {
         await touchSituation(this.deps.pool, tenantId, memorySpace, bridge.candidate.detection_key);
         return { status: "ignored", reason: "duplicate" };
       }
+      // A-LOW-8: en flakkende entitet (mange nye episoder på kort tid) gir høyst `FLAP_MAX_EPISODES` situasjoner/varsler per vindu; resten dempes (ikke evaluert, ikke logget) og slippes inn senere.
+      if (await this.isFlapping(tenantId, memorySpace, rule, bridge)) return { status: "ignored", reason: "damped" };
 
       // Modellassistert vurdering (valgfri): kun regler som er berettiget, og kun som et løft low -> normal (assist.ts). Hvert kall bundet til et tak per batch, et tidsbudsjett og en digest (samme input = ett kall).
       // A-MEDIUM-2: i løperens fase 1 (`deterministic`) kalles INGEN modell - signalet evalueres (og leveres) deterministisk først, og modellvurderingen kjøres etterpå i fase 2.
@@ -326,8 +369,9 @@ export class SituationSignalBus {
       assertMinimalFacts(facts);
 
       const before = await this.deps.engine.findByDetectionKey(tenantId, memorySpace, candidate.detection_key);
+      // A-LOW-6: `no_downgrade` - en senere, lavere prioritet fra en annen kilde (eller et senere svakere nivå) overskriver aldri en høyere prioritet på den åpne situasjonen (begrunnelsen følger vinneren).
       const evaluated = await this.deps.engine.evaluateCandidate(
-        tenantId, memorySpace, bridge.urgent ? { ...candidate, urgent: true } : candidate, this.now()
+        tenantId, memorySpace, { ...candidate, no_downgrade: true, ...(bridge.urgent ? { urgent: true } : {}) }, this.now()
       );
       const created = ctx.createdHint ?? before === null;
       const held = heldByQuietHours(evaluated, candidate.priority);
@@ -356,7 +400,9 @@ export class SituationSignalBus {
       result.errors.push(`setup:${codeOf(err)}`);
       return result;
     }
-    for (const observation of observations) {
+    // B-LOW-6: backpressure - høyst `MAX_OBSERVATIONS_PER_BATCH` behandles; resten telles (`over_cap`) og leses på nytt neste tikk (loggen er idempotent) i stedet for å mate bussen ubegrenset.
+    const accepted = observations.length > MAX_OBSERVATIONS_PER_BATCH ? observations.slice(0, MAX_OBSERVATIONS_PER_BATCH) : observations;
+    for (const observation of accepted) {
       result.received += 1;
       const out = await this.publish(tenantId, memorySpace, observation, subs, thresholds, ctx, result);
       if (out.status === "ignored") result.ignored[out.reason] += 1;
@@ -370,10 +416,14 @@ export class SituationSignalBus {
         if (out.held) result.held += 1;
       }
     }
+    if (accepted.length < observations.length) {
+      result.received += observations.length - accepted.length;
+      result.ignored.over_cap += observations.length - accepted.length;
+    }
     // A-MEDIUM-4/B-MEDIUM-3: tilstanden er NORMAL for en abonnert entitet (døra lukket, sensoren tørr, alarmen avarmert, effekten under grensen) -> åpne situasjoner for entiteten løses (ÉN spørring per batch; ikke mens domenet er pauset).
     try {
       const prefixes = new Set<string>();
-      for (const observation of observations) {
+      for (const observation of accepted) {
         if (observation.source !== "home_assistant" || !homeStateIsNormal(observation)) continue;
         const eventType = deriveEventType(observation);
         if (eventType === null || !subs.some((s) => s.enabled && s.source === "home_assistant" && s.event_type === eventType)) continue;

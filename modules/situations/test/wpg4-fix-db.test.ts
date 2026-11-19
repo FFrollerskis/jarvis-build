@@ -102,9 +102,12 @@ async function visible(tenant: string | null, spaces: string | null, table: Tabl
   return rows.map((r) => `${r.tenant_id}|${r.memory_space_id}`);
 }
 
-/** `count` ulike dør-situasjoner gjennom den EKTE bussen (ulik `last_changed` = ulik hendelsesnøkkel; åpne 16+ min = over standardterskelen på 15). Krever et dørabonnement. */
+/**
+ * `count` ulike dør-situasjoner gjennom den EKTE bussen (ulik `last_changed` = ulik hendelsesnøkkel; åpne 16+ min = over standardterskelen på 15). Krever et dørabonnement. Flapp-dempingen (A-LOW-8) er av her: seedingen
+ * lager bevisst mange episoder for SAMME entitet i løpet av en time, noe dempingen ellers (riktig) ville begrenset til tre.
+ */
 async function seedDoors(count: number): Promise<string[]> {
-  const bus = new SituationSignalBus({ pool: db.appPool, engine: db.engine, domainPauses: db.domainPauses, subscriptions: (t, s) => db.registry.listEnabled(t, s), now: () => NOW });
+  const bus = new SituationSignalBus({ pool: db.appPool, engine: db.engine, domainPauses: db.domainPauses, subscriptions: (t, s) => db.registry.listEnabled(t, s), flapDamping: false, now: () => NOW });
   const ids: string[] = [];
   for (let i = 0; i < count; i += 1) {
     const minutes = 16 + i;

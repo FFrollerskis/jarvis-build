@@ -558,7 +558,7 @@ describe("G: begrensede data - innholdsfri tekst, minimert logg, ingen ACT-domen
 
     for (const space of ["home", "health"] as const) await engine.deliverPendingInformNotifications(TENANT_A, space, gateway, identity(TENANT_A, space));
     expect(telegram.messages.sort()).toEqual([
-      "Jarvis oppdaget [health, normal]: Avvik fra din egen baseline (hvilepuls) - åpne Jarvis for detaljer. Dette er ikke medisinsk rådgivning.",
+      "Jarvis oppdaget [health, normal]: Avvik i helsedata fra din egen baseline - åpne Jarvis for detaljer. Dette er ikke medisinsk rådgivning.",
       "Jarvis oppdaget [vision, normal]: Kamerahendelse registrert - åpne Jarvis for detaljer"
     ]);
     const rows = [

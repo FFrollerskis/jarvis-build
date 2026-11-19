@@ -26,12 +26,15 @@ const HEALTH_EVENT: Readonly<Record<string, string>> = {
   resting_heart_rate: "resting_heart_rate_deviation", sleep_duration_minutes: "sleep_duration_deviation", steps: "activity_deviation"
 };
 
+/** B-INFO-11: oppslag KUN på egne nøkler (`Object.hasOwn`): et plain-objekt-oppslag ga `Object.prototype`-medlemmer (`constructor`, `toString` ...) for en uvanlig rolle/metrikk-streng. */
+const own = (table: Readonly<Record<string, string>>, key: string): string | null => (Object.hasOwn(table, key) ? (table[key] as string) : null);
+
 /** Hendelsestypen (lukket sett) en observasjon kan gi, eller `null` når den ikke hører til noen regel. Ren funksjon: abonnementet slås opp på (kilde, denne typen). */
 export function deriveEventType(obs: SignalObservation): string | null {
   switch (obs.source) {
-    case "home_assistant": return HOME_ROLE_EVENT[obs.role] ?? null;
+    case "home_assistant": return own(HOME_ROLE_EVENT, obs.role);
     case "vision": return visionEventTypeOf(obs);
-    case "health": return HEALTH_EVENT[obs.metric] ?? null;
+    case "health": return own(HEALTH_EVENT, obs.metric);
     case "incident": return "incident_active";
     default: return null;
   }

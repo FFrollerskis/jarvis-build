@@ -11,7 +11,7 @@ disiplin som enhver ny UA.
 
 **WP-G4 (D-466, §11):** samlet hendelsesabonnement (hjem, kamera, helse, hendelser), rene broer,
 modellassistert vurdering (aldri ACT alene), tilbakemeldingslæring, kontrafaktisk simulering og
-anomali-revisjon er BYGGET som `DORMANT` (AV bak `JARVIS_SITUATION_*`) og `NOT VERIFIED` (ingenting
+anomali-revisjon er BYGGET som `DORMANT` (AV bak `JARVIS_SITUATION_*`) og `NOT_VERIFIED` (ingenting
 er kjørt mot ekte Home Assistant/kamera/helse/lokal modell/NAS). Det som under står som «ikke
 behandlet»/«bevisst utsatt» for hjem/helse/kamera, modellvurdering, simulering og tilbakemelding er
 HISTORIKK fra P0/P1 og er nå besvart i §11; gjenstående `DEFERRED` står i §11.8 og i runbooken
@@ -403,7 +403,7 @@ eksplisitt her, ikke silently arvet.
 | Kapabilitet | Port som må kjøres først |
 |---|---|
 | Live bro fra `business_open_loops` til `situations` | **LUKKET i P1 (D-160, §10)** — `runSituationSweep()`/`open-loop-bridge.ts`. Vision-/helse-/lokasjonskilder: fortsatt egne, senere wiring-slicer mot SAMME `evaluateCandidate()`-kontrakt |
-| Nye anomali-detektorer for infra/home/health | **infra LUKKET (D-195, se §5)** — `infra-incident-bridge.ts` mot `modules/incidents` (UA-5). **home/health/kamera: bygget i WP-G4 (D-466, §11) som `DORMANT`/`NOT VERIFIED`** (egne rene broer + inntaksbuss, bak `JARVIS_SITUATION_*`) |
+| Nye anomali-detektorer for infra/home/health | **infra LUKKET (D-195, se §5)** — `infra-incident-bridge.ts` mot `modules/incidents` (UA-5). **home/health/kamera: bygget i WP-G4 (D-466, §11) som `DORMANT`/`NOT_VERIFIED`** (egne rene broer + inntaksbuss, bak `JARVIS_SITUATION_*`) |
 | Modell-assistert klassifisering | **WP-G4 (D-466, §11.5):** via `ModelGateway` (ingen ny leverandør; D-64-porten er kjørt, `CORE_DEPENDENCY_DECISION_REQUIRED=false`): aldri ACT alene, ubetrodd utdata, begrensede data kun lokal modell. `DORMANT` bak `JARVIS_SITUATION_MODEL_ASSIST` |
 | Counterfactual/simulation, feedback learning | **WP-G4 (D-466, §11.6):** kontrafaktisk simulering er en REN funksjon (ingen sideeffekt); tilbakemeldingslæring justerer ETT tall per regel innenfor harde grenser (revidert, tilbakestillbart, ingen selvmodifikasjon - D-397). `DORMANT` bak `JARVIS_SITUATION_FEEDBACK` |
 | Autonom/tidsstyrt auto-ACT | **LUKKET i P1 (D-160, §10) med en EKSPLISITT grense:** auto-ACT skjer KUN for situasjoner i `suggest` hvis domene har en AKTIVERT, eier-bundet `situation_autonomy_policies`-rad. Uten policy: ingenting. Domene-pause, global KillSwitch, PolicyGateway og hele ToolGateway-preflight-/postcondition-pipelinen gjelder UENDRET for hvert kall |
@@ -494,7 +494,7 @@ auto-ACT-feil ble bokført som vellykket daglig jobb. RETTET: `assertSituationSw
 scheduler-avsnittet over); bevist med en EKTE `DailyScheduler` mot embedded Postgres — evidensmismatch
 og transportfeil lar `completed_at` stå NULL, et sunt sveip setter det.
 
-## 11. WP-G4 (D-466) — samlet hendelsesabonnement, broer, modellvurdering, tilbakemelding og simulering (`DORMANT`, `NOT VERIFIED`)
+## 11. WP-G4 (D-466) — samlet hendelsesabonnement, broer, modellvurdering, tilbakemelding og simulering (`DORMANT`, `NOT_VERIFIED`)
 
 Full driftsbeskrivelse, kilde-/bro-tabell, NAS-verifisering og `DEFERRED`-liste: `docs/runbooks/WPG4_SITUATION_BRIDGES.md`. Her kun designets bærende valg.
 
@@ -530,7 +530,12 @@ stille timer er over) -> levering/auto-ACT -> valgfri modellvurdering som fase 2
 motoren gir ÉN situasjon og ETT varsel uten ny mekanikk. `updated_at` betyr «sist evaluert/observert»: bumpes av
 en observasjon som fortsatt gjelder, nullstiller aldri en gammel situasjon via levering, og er grunnlaget for
 ferskhetsvinduet til auto-ACT og for den daglige oppryddingen (løs etter 48 t uten observasjon; slett etter
-kildedataenes oppbevaring; normal HA-tilstand løser åpne situasjoner for entiteten).
+kildedataenes oppbevaring; normal HA-tilstand løser åpne situasjoner for entiteten). Sammenslåing av kilder:
+bussen setter `no_downgrade` på kandidaten, så den HØYESTE prioriteten for en åpen situasjon vinner og
+begrunnelse/konfidens/frosset tekst følger vinneren (sveipene er uendret). Flapp-demping: en ikke-haste HA-regel
+slipper inn høyst 3 nye episoder per entitet per time (resten `damped`: forsinket, aldri tapt; haste-signaler
+aldri). Backpressure: hver lesing har et tak (kamera 500, helse 20 000 rader per metrikk, HA 50 entiteter) og
+`publishBatch` behandler høyst 500 observasjoner; et nådd tak er en synlig advarsel, aldri et stille tap.
 
 **11.4 ACT-autoritet (deterministisk kode).** ACT krever ALLTID eierens eksplisitte, tilbakekallbare binding
 (`situation_autonomy_policies`, valgfri `expires_at` <= 365 dager, re-verifisert rett før hvert kall OG i
@@ -566,7 +571,8 @@ varsler).
 **11.8 `DEFERRED` / `BLOCKED_EXTERNAL`.** HA-push (i dag polling), kontrollsenter-SIDE for abonnementer (eierens HTTP-flate
 `/situations/signals/*` finnes, fiks-runden), regel-skopet autonomi-binding, morgenoppsummering av nattlige hendelser,
 lært energi-baseline, tidssone-bevisste helsedøgn, kommunikasjon/forretning som kilder, «borte»-bevisst bevegelse,
-sanntids-løsning av incidents, kobling av anomali-detektorene. `BLOCKED_EXTERNAL`: ACT/ACT+NOTIFY observert på NAS,
+sanntids-løsning av incidents, kobling av anomali-detektorene, glidende dedupe-vindu for kamera og delt nøkkel for
+alarm via HA og kamera. `BLOCKED_EXTERNAL`: ACT/ACT+NOTIFY observert på NAS,
 lokal modell på NAS, ekte HA/kamera/helsedata.
 
 **11.9 Fiks-runde etter to uavhengige reviews (MERGE ETTER FIKSER).** Se runbook §18 for tabell per funn (status,
@@ -574,7 +580,10 @@ test, mutasjonsbevis). De bærende endringene i designet: (1) fysisk/kritisk-reg
 sluker aldri signaler (B-HIGH-1), (3) pg-`numeric` er en streng (B-HIGH-2), (4) deterministisk først + modellfase
 med budsjett (A-MEDIUM-2), (5) pause stopper kildelesingen (A-MEDIUM-3), (6) ferskhet/claim-vakt/normalisering/
 retensjon (A-MEDIUM-4, B-MEDIUM-3, A-LOW-5), (7) domenelås-semafor (A-MEDIUM-5), (8) ÉN HA-lesing per tikk
-(B-MEDIUM-4), (9) eierens HTTP-flate (B-MEDIUM-5). Flaggavhengighet: alle nye valg er under
+(B-MEDIUM-4), (9) eierens HTTP-flate (B-MEDIUM-5), (10) høyeste prioritet vinner ved sammenslåing av kilder
+(A-LOW-6) og flapp-demping (A-LOW-8), (11) person/task/session på alle rader (regel 4) og RLS-/rettighetsbevis målt
+med direkte SQL (M05a/b/e/f), (12) tuning-lås per regel (A-LOW-10), (13) tak/backpressure (B-LOW-6), (14)
+kalenderdøgn, baseline-vakt og NØYTRAL helsetekst (B-LOW-9, Q-G4-6). Flaggavhengighet: alle nye valg er under
 `JARVIS_SITUATION_*` bortsett fra de strengere stegene i den UFLAGGEDE motorstien som er listet i runbook §15.
 
 ## 9. Oppdateringsplikt

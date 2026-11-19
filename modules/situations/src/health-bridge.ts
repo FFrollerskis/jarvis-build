@@ -5,12 +5,14 @@ import { assertMinimalFacts, ruleFor, type BridgeContext, type BridgeResult, typ
  *
  * BEGRENSEDE data (SECRET_RESTRICTED, utførelsesvern): serien (dag + ett tall per dag) er det ENESTE rå som passerer porten, og den leses KUN i denne funksjonen i prosessen. Det som forlater funksjonen er
  * avledet og minimert: `direction` (over/under), `severity` (mild/moderat/sterk), antall dager på rad og når episoden startet. Ingen måleverdi, ingen baselineverdi og ingen z-verdi havner i `reason`,
- * `facts`, logg eller varsel. `reason` bærer kun den LUKKEDE kategorien (hvilepuls/søvn/aktivitet) og en fast tekst («Avvik fra din egen baseline ... ikke medisinsk rådgivning»). Motoren kan ikke utføre ACT i domenet (`NEVER_ACT_DOMAINS`), og konfidens utelates alltid
+ * `facts`, logg eller varsel. `reason` (som også er varselteksten til Telegram) er NØYTRAL (B-LOW-9, eierspørsmål Q-G4-6): kun en fast tekst («Avvik i helsedata fra din egen baseline ... ikke medisinsk rådgivning») - ikke engang kategorien
+ * (hvilepuls/søvn/aktivitet) forlater Jarvis i en melding; kategorien står i `facts` og i `detection_key` (internt) og vises i Jarvis selv. Motoren kan ikke utføre ACT i domenet (`NEVER_ACT_DOMAINS`), og konfidens utelates alltid
  * slik at stadiet aldri går forbi `inform`: Jarvis gir ikke medisinsk råd, den sier bare at noe avviker fra eierens vanlige mønster.
  *
  * Metode (deterministisk, robust): fullførte døgn (UTC, alle dager før i dag) deles i et `recent`-vindu (siste 3 dager) og en baseline (inntil 28 dager før det, minst 14). Baseline = median og MAD
- * (skalert 1,4826) - ikke gjennomsnitt, så et enkelt ekstremt døgn flytter ikke baselinen. Et avvik krever at ALLE de siste 3 dagene ligger |z| >= terskelen på SAMME side av baselinen (terskelen er tunbar
- * innenfor harde grenser, se `RULES`). Det gir ingen enkeltmåling-alarm og ingen varsel uten nok historikk (færre enn 14 baselinedager = ingen signal, aldri en gjetning).
+ * (skalert 1,4826) - ikke gjennomsnitt, så et enkelt ekstremt døgn flytter ikke baselinen. Et avvik krever at ALLE de siste 3 KALENDERDØGNENE (uten hull; en manglende dag avslutter løpet) ligger |z| >= terskelen på SAMME side av
+ * baselinen (terskelen er tunbar innenfor harde grenser, se `RULES`). Det gir ingen enkeltmåling-alarm og ingen varsel uten nok historikk (færre enn 14 baselinedager = ingen signal, aldri en gjetning), og en baseline uten
+ * utslag (median 0: enheten var ikke i bruk) gir aldri et avvik (ellers ville 10 skritt mot en baseline av nuller gitt «sterkt avvik»).
  * `DEFERRED`: tidssone-bevisste døgn (UTC-døgn brukes), søvnstadier, trend over uker, og sammenligning mot alder/kjønn (ikke bygget og ikke ønsket: kun eierens egen baseline).
  */
 export interface DailyPoint {
@@ -38,7 +40,9 @@ const METRIC_EVENT: Readonly<Record<HealthSignalMetric, string>> = {
   sleep_duration_minutes: "sleep_duration_deviation",
   steps: "activity_deviation"
 };
-const METRIC_LABEL: Readonly<Record<HealthSignalMetric, string>> = { resting_heart_rate: "hvilepuls", sleep_duration_minutes: "søvn", steps: "aktivitet" };
+/** NØYTRAL varsel-/situasjonstekst (Q-G4-6): navner aldri kategorien (hvilepuls/søvn/aktivitet). */
+export const HEALTH_NEUTRAL_REASON = "Avvik i helsedata fra din egen baseline - åpne Jarvis for detaljer. Dette er ikke medisinsk rådgivning.";
+const dayMs = (day: string): number => Date.parse(`${day}T00:00:00Z`);
 
 export type DeviationSeverity = "mild" | "moderate" | "strong";
 export interface Deviation {
@@ -73,11 +77,13 @@ export function detectDeviation(series: readonly DailyPoint[], zThreshold: numbe
   const recentDays = days.slice(-RECENT_DAYS);
   const lastDay = days[days.length - 1] as string;
   // Serien må være FERSK: siste fullførte døgn er i går eller i forgårs (ikke et gammelt utsnitt).
-  if (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${lastDay}T00:00:00Z`) > 2 * DAY_MS) return null;
+  if (dayMs(today) - dayMs(lastDay) > 2 * DAY_MS) return null;
 
   const baselineValues = days.slice(0, -RECENT_DAYS).slice(-BASELINE_DAYS).map((d) => byDay.get(d) as number);
   if (baselineValues.length < MIN_BASELINE_DAYS) return null;
   const center = median(baselineValues);
+  // B-LOW-9: en baseline med median 0 (bare nuller: enheten var ikke i bruk) har ingen meningsfull spredning - sigma ville falt til 1e-6 og 10 skritt blitt et «sterkt avvik». Ingen baseline = ingen signal.
+  if (Math.abs(center) < 1e-9) return null;
   const mad = median(baselineValues.map((v) => Math.abs(v - center)));
   const sigma = Math.max(mad * 1.4826, Math.abs(center) * 0.03, 1e-6);
   const z = (v: number): number => (v - center) / sigma;
@@ -90,6 +96,8 @@ export function detectDeviation(series: readonly DailyPoint[], zThreshold: numbe
   let startDay = lastDay;
   for (let i = days.length - 1; i >= 0 && run < 30; i -= 1) {
     const d = days[i] as string;
+    // B-LOW-9: «dager på rad» er KALENDERdøgn - et hull (en dag uten data) avslutter løpet, så tre datadager spredt over en uke aldri blir «3 dager på rad».
+    if (i < days.length - 1 && dayMs(days[i + 1] as string) - dayMs(d) !== DAY_MS) break;
     const dz = z(byDay.get(d) as number);
     if (Math.sign(dz) !== sign || Math.abs(dz) < zThreshold) break;
     run += 1;
@@ -116,7 +124,7 @@ export function bridgeHealthObservation(obs: HealthObservation, ctx: BridgeConte
       domain: rule.domain, detection_key: key,
       // Sterk avvik = høy prioritet (sortering), men ALDRI konfidens: stadiet blir `inform` (ingen forslag, ingen ACT).
       priority: deviation.severity === "strong" ? "high" : "normal",
-      reason: `Avvik fra din egen baseline (${METRIC_LABEL[obs.metric]}) - åpne Jarvis for detaljer. Dette er ikke medisinsk rådgivning.`
+      reason: HEALTH_NEUTRAL_REASON
     },
     source_ref: `${key}#${deviation.severity}`,
     facts, urgent: false, occurred_at: `${deviation.episode_start_day}T00:00:00.000Z`

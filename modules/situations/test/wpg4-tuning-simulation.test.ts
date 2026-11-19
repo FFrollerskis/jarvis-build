@@ -331,7 +331,8 @@ const auditSince = async (baseline: number, type: string) =>
 
 beforeAll(async () => {
   db = await startG4Db("tuning");
-  signalBus = new SituationSignalBus({ pool: db.appPool, engine: db.engine, domainPauses: db.domainPauses, subscriptions: (t, s) => db.registry.listEnabled(t, s), now: () => NOW });
+  // Flapp-dempingen (A-LOW-8) er av her: seedingen lager bevisst mange dør-episoder for SAMME entitet i løpet av en time (et testoppsett, ikke en realistisk flakking).
+  signalBus = new SituationSignalBus({ pool: db.appPool, engine: db.engine, domainPauses: db.domainPauses, subscriptions: (t, s) => db.registry.listEnabled(t, s), flapDamping: false, now: () => NOW });
 }, 240_000);
 afterAll(async () => { await db?.stop(); }, 120_000);
 beforeEach(async () => {
@@ -516,7 +517,8 @@ describe("C: FeedbackService - eier, audit, brukte stemmer, nedkjøling, tilbake
   });
 
   it("bussen følger den tunede terskelen: samme dør (17 min åpen) gir signal ved standard, men ikke etter slakking til 20", async () => {
-    const tuned = new SituationSignalBus({ pool: db.appPool, engine: db.engine, domainPauses: db.domainPauses, subscriptions: (t, s) => db.registry.listEnabled(t, s), tuning: feedback, now: () => NOW });
+    // (flapp-demping av: testen seeder fire dør-episoder for samme entitet i løpet av en time)
+    const tuned = new SituationSignalBus({ pool: db.appPool, engine: db.engine, domainPauses: db.domainPauses, subscriptions: (t, s) => db.registry.listEnabled(t, s), tuning: feedback, flapDamping: false, now: () => NOW });
     expect((await tuned.publishBatch(TENANT_A, "home", [door({ last_changed: minutesAgo(40) })])).evaluated).toBe(1);
     const ids = await seedDoors(3, TENANT_A, tuned);
     for (const id of ids) await vote(id, "noise");

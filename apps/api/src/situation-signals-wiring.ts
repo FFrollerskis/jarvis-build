@@ -3,7 +3,7 @@ import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { homeAssistantSituationReadTools, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
 import type { SituationSignalApiDeps } from "./situation-signal-routes.ts";
 import {
-  boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
+  boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, MAX_OBSERVATIONS_PER_BATCH, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
   SituationSignalsTransport, SituationsTransport, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS,
   type AssistModelGateway, type DailyPoint, type DomainPauseRegistry, type HealthObservation, type HealthSignalMetric, type HomeObservation, type IncidentObservation, type SignalSourceReaders,
   type SituationEngine, type SituationFlags, type VisionObservation
@@ -31,14 +31,14 @@ export interface SituationSignalsWiringDeps {
   ownerPersonId: string;
   incidents: { listIncidents(tenantId: string, memorySpace: MemorySpace, status: "all"): Promise<Array<{ incident_id: string; title: string; status: string; severity: string; opened_at: string | Date }>> };
   vision: {
-    getRecentEvents(tenantId: string, memorySpace: MemorySpace, personId: string, filter: { sinceMs?: number }): Promise<Array<{
+    getRecentEvents(tenantId: string, memorySpace: MemorySpace, personId: string, filter: { sinceMs?: number; limit?: number }): Promise<Array<{
       observation_id: string; event_type: string; source_instance_id: string; source_event_id: string; observed_at: string | Date; object_label: string | null; classification_status: string }>>;
     /** Kildens EGEN oppbevaring (G3): en signalsituasjon overlever aldri kameradataene. Valgfri (uten den brukes standard). */
     getRetentionPolicy?(tenantId: string, memorySpace: MemorySpace): Promise<{ retention_days: number } | null>;
   };
   /** `value` er `unknown`: `health_metric_observations.value` er `numeric`, og node-postgres leverer det som STRENG (se `num()`). */
   health: {
-    getRecentMetrics(tenantId: string, personId: string, metricType: HealthSignalMetric, sinceMs?: number): Promise<Array<{ value: unknown; observed_at: string | Date }>>;
+    getRecentMetrics(tenantId: string, personId: string, metricType: HealthSignalMetric, sinceMs?: number, limit?: number): Promise<Array<{ value: unknown; observed_at: string | Date }>>;
     /** Kildens EGEN oppbevaring (G2): en signalsituasjon overlever aldri helsedataene. Valgfri (uten den brukes standard). */
     getRetentionPolicy?(tenantId: string): Promise<{ retention_days: number } | null>;
   };
@@ -63,6 +63,9 @@ export interface SituationSignalsWiring {
 
 const DAY_MS = 86_400_000;
 const HEALTH_WINDOW_DAYS = 35;
+/** B-LOW-6: tak per lesing (de NYESTE radene). Kamera: samme som bussens batch-tak. Helse: rå prøver per metrikk over 35 døgn (aggregeres til ett tall per døgn); treffer lesingen taket, er det en synlig advarsel. */
+export const VISION_READ_LIMIT = MAX_OBSERVATIONS_PER_BATCH;
+export const HEALTH_ROWS_LIMIT = 20_000;
 const iso = (value: string | Date): string | null => {
   const ms = value instanceof Date ? value.getTime() : Date.parse(value);
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
@@ -169,7 +172,9 @@ export function createHomeReader(deps: { gateway: Pick<ToolGateway, "execute">; 
 /** Kamera: kun de minimerte feltene bridgen trenger (etiketten brukes kun til å avgjøre kategorien «pakke» og lagres/gis aldri videre). */
 export function createVisionReader(deps: { vision: SituationSignalsWiringDeps["vision"]; ownerPersonId: string }): NonNullable<SignalSourceReaders["vision"]> {
   return async (ctx, sinceMs) => {
-    const rows = await deps.vision.getRecentEvents(ctx.tenant_id, ctx.memory_space, deps.ownerPersonId, { sinceMs });
+    const rows = await deps.vision.getRecentEvents(ctx.tenant_id, ctx.memory_space, deps.ownerPersonId, { sinceMs, limit: VISION_READ_LIMIT });
+    // B-LOW-6: taket er nådd = eldre hendelser i vinduet leses ikke (de nyeste først); synlig advarsel i stedet for stille tap.
+    if (rows.length >= VISION_READ_LIMIT) ctx.warnings?.push(`vision_events_truncated:${VISION_READ_LIMIT}`);
     const out: VisionObservation[] = [];
     for (const row of rows) {
       const at = iso(row.observed_at);
@@ -187,7 +192,16 @@ export function createHealthReader(deps: { health: SituationSignalsWiringDeps["h
     if (personId !== deps.ownerPersonId) return [];
     const out: HealthObservation[] = [];
     for (const metric of metrics) {
-      const rows = await deps.health.getRecentMetrics(ctx.tenant_id, personId, metric, ctx.now - HEALTH_WINDOW_DAYS * DAY_MS);
+      const fetched = await deps.health.getRecentMetrics(ctx.tenant_id, personId, metric, ctx.now - HEALTH_WINDOW_DAYS * DAY_MS, HEALTH_ROWS_LIMIT);
+      let rows = fetched;
+      if (fetched.length >= HEALTH_ROWS_LIMIT) {
+        // B-LOW-6: taket er nådd (de NYESTE radene kom): det eldste døgnet i utvalget kan være delvis og droppes, så en sum (søvn, skritt) aldri blir feil lav; synlig advarsel (aldri et stille tap).
+        ctx.warnings?.push(`health_rows_truncated:${metric}`);
+        const dayOf = (r: { observed_at: string | Date }): string | null => iso(r.observed_at)?.slice(0, 10) ?? null;
+        const days = fetched.map(dayOf).filter((d): d is string => d !== null);
+        const oldest = days.reduce((a, b) => (a < b ? a : b), days[0] ?? "");
+        rows = fetched.filter((r) => dayOf(r) !== oldest);
+      }
       out.push({ source: "health", metric, series: aggregateDaily(metric, rows) });
     }
     return out;

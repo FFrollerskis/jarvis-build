@@ -90,7 +90,12 @@ export const SituationCandidateInputSchema = z
     owner_person_id: z.string().min(1).optional(),
     source_open_loop_id: z.string().min(1).optional(),
     /** WP-G4: sikkerhetssignal (vannlekkasje, utløst alarm). Bryter stille timer KUN hvis eieren har valgt det (`critical_bypass_quiet`); påvirker ellers ingenting. */
-    urgent: z.boolean().optional()
+    urgent: z.boolean().optional(),
+    /**
+     * WP-G4 fiks-runde (A-LOW-6): en signalkandidat (inntaksbussen) kan aldri SENKE en åpen situasjon som allerede bærer en høyere prioritet. Flere kilder for samme nøkkel (HA og kamera for samme åpning) ga «siste vinner» som overskrev
+     * prioritet, konfidens og begrunnelse. Med flagget vinner den høyeste prioriteten, og konfidens og begrunnelse følger vinneren. Uten flagget (alle eksisterende kallere: sveipene) er oppførselen uendret.
+     */
+    no_downgrade: z.boolean().optional()
   })
   .strict();
 export type SituationCandidateInput = z.infer<typeof SituationCandidateInputSchema>;

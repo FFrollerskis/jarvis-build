@@ -77,7 +77,7 @@ export function homeAssistantTools(transport: ToolTransport = new UnconfiguredHt
 
 /**
  * WP-G4 (D-466): ÉN ekstra LESE-handling på den eksisterende Home Assistant-connectoren, brukt av situasjonsmotorens hjem-bro (`modules/situations`). Registreres KUN med `JARVIS_SITUATION_HOME=on` (egen funksjon, ikke
- * en del av `homeAssistantTools()`: flagg AV = verktøylisten er identisk med main). Klasse A (ren lesing, `states:read`), minimert utdata (se transporten: kun `state`/`last_changed`/`device_class`), ubetrodd utdata.
+ * en del av `homeAssistantTools()`: flagg AV = verktøylisten er identisk med main). Klasse A (ren lesing, `states:read`), minimert utdata (se transporten: kun `state`/`last_changed`/`unit`), ubetrodd utdata.
  * Policy, kill switch, frosset connector og tilbakekalt credential gjelder som for alle andre HA-kall (alt går gjennom ToolGateway). D-41: HA tilbyr `GET /api/states/<entity_id>` (lesing) - ingen skriving her.
  */
 export function homeAssistantStateDetailTool(transport: ToolTransport = new UnconfiguredHttpTransport("home-assistant")): ToolDefinition {

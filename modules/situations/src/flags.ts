@@ -28,7 +28,7 @@ export const SITUATION_FLAG_NAMES = {
 
 export type SituationFlagName = (typeof SITUATION_FLAG_NAMES)[keyof typeof SITUATION_FLAG_NAMES];
 
-/** Ikke-hemmelig tallkonfigurasjon. Satt-men-ugyldig STOPPER oppstarten (`envInt`); tom = standard. */
+/** Ikke-hemmelig tallkonfigurasjon. Tom, satt-men-ugyldig (ikke et heltall) eller utenfor intervallet gir STANDARDVERDIEN (`boundedInt`) - aldri en stille klemming til en farlig verdi, og oppstarten stoppes ikke. */
 export const SITUATION_CONFIG_NAMES = {
   /** Tikkintervall i sekunder (standard 60; 15-3600). */
   intervalSeconds: "JARVIS_SITUATION_BUS_INTERVAL_SECONDS",

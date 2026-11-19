@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "UA-10 Proactive Situation Engine: JARVIS_CANONICAL hendelses-/situasjons-tilstandsmaskin (D-64) - multi-space-segregert, dedupe/suppression/quiet-hours-håndhevet, komponerer den eksisterende ToolGateway-evidence-pipelinen for ACT, ZERO nye anomali-detektorer/live hendelseskilder.",
+  "description": "UA-10 Proactive Situation Engine: JARVIS_CANONICAL hendelses-/situasjons-tilstandsmaskin (D-64) - multi-space-segregert, dedupe/suppression/quiet-hours-håndhevet, komponerer den eksisterende ToolGateway-evidence-pipelinen for ACT. WP-G4 (D-466): samlet hendelsesabonnement (inntaksbuss, løper, bruer for hjem/kamera/helse/hendelser), signallogg, modellassistert vurdering, tilbakemeldingslæring og simulering - alt DORMANT bak JARVIS_SITUATION_*-flagg.",
   "exports": { ".": "./src/index.ts" },
   "scripts": { "typecheck": "tsc --noEmit" },
   "dependencies": {

@@ -6,7 +6,7 @@ import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { ToolGateway } from "@jarvis/tool-gateway";
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
-  aggregateDaily, createHealthReader, createHomeReader, createIncidentReader, createSituationSignalsWiring, createVisionReader, wattsOf, type SituationSignalsWiringDeps
+  aggregateDaily, createHealthReader, createHomeReader, createIncidentReader, createSituationSignalsWiring, createVisionReader, HEALTH_ROWS_LIMIT, VISION_READ_LIMIT, wattsOf, type SituationSignalsWiringDeps
 } from "../src/situation-signals-wiring.ts";
 
 /**
@@ -197,7 +197,7 @@ describe("C: kamera-, helse- og hendelsesleserne leverer minimerte observasjoner
       }, { observation_id: "o2", event_type: "motion_detected", source_instance_id: "c", source_event_id: "e", observed_at: "ugyldig", object_label: null, classification_status: "x" }]; } }
     });
     const out = await read(ctx, NOW - 600_000);
-    expect(seen).toEqual([["t-owner", "home", OWNER, { sinceMs: NOW - 600_000 }]]);
+    expect(seen).toEqual([["t-owner", "home", OWNER, { sinceMs: NOW - 600_000, limit: VISION_READ_LIMIT }]]); // B-LOW-6: lesingen har alltid et tak
     expect(out).toEqual([{ source: "vision", observation_id: "o1", event_type: "doorbell_event", source_instance_id: "camera.inngang", source_event_id: "e@x", observed_at: "2026-11-19T11:59:00.000Z", object_label: null, classification_status: "classified" }]);
     expect(JSON.stringify(out)).not.toMatch(/snap-secret|payload_fingerprint|confidence/);
   });
@@ -208,12 +208,12 @@ describe("C: kamera-, helse- og hendelsesleserne leverer minimerte observasjoner
     const queried: unknown[] = [];
     const read = createHealthReader({
       ownerPersonId: OWNER,
-      health: { getRecentMetrics: async (t, p, m, since) => { queried.push([t, p, m, since]); return [
+      health: { getRecentMetrics: async (t, p, m, since, limit) => { queried.push([t, p, m, since, limit]); return [
         { value: 60, observed_at: "2026-11-17T08:00:00Z" }, { value: 64, observed_at: "2026-11-17T20:00:00Z" }, { value: 70, observed_at: new Date("2026-11-18T09:00:00Z") }, { value: Number.NaN, observed_at: "2026-11-18T10:00:00Z" }
       ]; } }
     });
     const out = await read({ ...ctx, memory_space: "health" }, OWNER, ["resting_heart_rate"]);
-    expect(queried).toEqual([["t-owner", OWNER, "resting_heart_rate", NOW - 35 * 86_400_000]]);
+    expect(queried).toEqual([["t-owner", OWNER, "resting_heart_rate", NOW - 35 * 86_400_000, HEALTH_ROWS_LIMIT]]); // B-LOW-6: lesingen har alltid et tak
     expect(out).toEqual([{ source: "health", metric: "resting_heart_rate", series: [{ day: "2026-11-17", value: 62, samples: 2 }, { day: "2026-11-18", value: 70, samples: 1 }] }]);
     expect(await read({ ...ctx, memory_space: "health" }, "person-annen", ["steps"])).toEqual([]); // aldri andres helse
     expect(queried).toHaveLength(1);

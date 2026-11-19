@@ -278,6 +278,9 @@ const STAGE_RANK: Record<SituationStage, number> = {
   escalate: 6
 };
 
+/** A-LOW-6: rangering for `no_downgrade` (en signalkandidat senker aldri en åpen situasjon til lavere prioritet). */
+const PRIORITY_RANK: Record<SituationPriority, number> = { low: 0, normal: 1, high: 2 };
+
 /**
  * Ren funksjon (INGEN I/O, `nowMs` injisert - samme "deterministisk,
  * testbar" mønster som `classifyAttentionBucket()` i
@@ -742,13 +745,22 @@ export class SituationEngine {
         throw new SituationDetectionKeyConflictError(tenantId, memorySpace, value.detection_key);
       }
 
+      // A-LOW-6 (fiks-runde): en signalkandidat (`no_downgrade`) kan ikke senke en ÅPEN situasjon som allerede bærer en høyere prioritet (to kilder for samme nøkkel; «siste vinner» overskrev prioritet, konfidens og begrunnelse, og teksten
+      // som fryses ved varsling/ACT kom fra den overskrevne årsaken). Den høyeste prioriteten vinner, og konfidens og begrunnelse FØLGER vinneren. En løst situasjon åpnes på nytt av den nye kandidaten (ny episode: kandidaten vinner), og uten
+      // flagget (alle eksisterende kallere) er oppførselen uendret.
+      const keepExisting = value.no_downgrade === true && existing.status === "open" && PRIORITY_RANK[existing.priority] > PRIORITY_RANK[value.priority];
+      const winnerPriority: SituationPriority = keepExisting ? existing.priority : value.priority;
+      const winnerConfidence: number | undefined = keepExisting ? (existing.confidence === null ? undefined : Number(existing.confidence)) : value.confidence;
+      const winnerReason = keepExisting ? existing.reason : value.reason;
+      const targetStage = keepExisting ? computeTargetStage(winnerPriority, winnerConfidence, withinQuiet) : computedStage;
+
       const resuppressOpen =
         existing.last_notified_at === null || now - new Date(existing.last_notified_at).getTime() >= policy.resuppressHours * 3_600_000;
       const stageIsActedUpon = existing.stage === "act" || existing.stage === "act_notify" || existing.stage === "escalate";
       const nextStage = stageIsActedUpon
         ? existing.stage
-        : STAGE_RANK[computedStage] > STAGE_RANK[existing.stage as SituationStage]
-          ? computedStage
+        : STAGE_RANK[targetStage] > STAGE_RANK[existing.stage as SituationStage]
+          ? targetStage
           : (existing.stage as SituationStage);
       // Funn 5: stille timer (`withinQuiet`) MÅ sjekkes EKSPLISITT her,
       // ALDRI kun utledet fra `nextStage` - non-regresjon (over) kan HOLDE
@@ -772,14 +784,14 @@ export class SituationEngine {
           tenantId,
           memorySpace,
           value.detection_key,
-          value.priority,
-          value.confidence ?? null,
-          value.reason,
+          winnerPriority,
+          winnerConfidence ?? null,
+          winnerReason,
           nextStage,
           newlyActionable,
           new Date(now).toISOString(),
-          // D-160: ny syklus (nytt anker) => ny frosset tekst fra DENNE syklusens reason/stadium.
-          buildInformMessage(value.domain, value.priority, nextStage, value.reason)
+          // D-160: ny syklus (nytt anker) => ny frosset tekst fra DENNE syklusens reason/stadium (A-LOW-6: fra VINNERENS prioritet og begrunnelse).
+          buildInformMessage(value.domain, winnerPriority, nextStage, winnerReason)
         ]
       );
       return { situation: rows[0] as Situation, newly_actionable: newlyActionable };
