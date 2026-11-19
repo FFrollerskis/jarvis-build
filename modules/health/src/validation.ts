@@ -8,9 +8,27 @@ import { HealthObservationInputSchema, METRIC_CANONICAL_UNITS, METRIC_VALUE_BOUN
 const STRICT_DATETIME = z.string().datetime({ offset: true });
 export const HEALTH_OBSERVED_MIN_MS = Date.UTC(2000, 0, 1);
 export const HEALTH_OBSERVED_MAX_AHEAD_MS = 24 * 3_600_000;
+/**
+ * Størst tillatte tidssone-forskyvning (±14:00, som verdens faktiske soner og som DAV-datoene). Zod godtar ethvert tosifret ±HH(:MM) og Postgres kaster 22009 («time zone displacement out of range») for +16:00 og utover midt i transaksjonen
+ * (delta-review B, M2: hele batchen rullet tilbake med en rå pg-feil og 500). Avvises derfor i ALLE former (`Z`, ±HH, ±HHMM, ±HH:MM) FØR transaksjonen; minuttdelen må være 00-59.
+ */
+export const HEALTH_OBSERVED_MAX_OFFSET_MINUTES = 14 * 60;
+
+/** Forskyvningen i minutter (`Z` = 0) i en streng zod allerede har godtatt, eller `null` hvis den er ugyldig (minutter over 59). */
+function offsetMinutes(value: string): number | null {
+  const m = /(?:Z|([+-])(\d{2})(?::?(\d{2}))?)$/.exec(value);
+  if (m === null) return null;
+  if (m[1] === undefined) return 0;
+  const mm = Number(m[3] ?? "0");
+  if (mm > 59) return null;
+  const total = Number(m[2]) * 60 + mm;
+  return m[1] === "-" ? -total : total;
+}
 
 export function isPlausibleObservedAt(value: unknown, nowMs: number = Date.now()): boolean {
   if (typeof value !== "string" || !STRICT_DATETIME.safeParse(value).success) return false;
+  const offset = offsetMinutes(value);
+  if (offset === null || Math.abs(offset) > HEALTH_OBSERVED_MAX_OFFSET_MINUTES) return false;
   const ms = Date.parse(value);
   return Number.isFinite(ms) && ms >= HEALTH_OBSERVED_MIN_MS && ms <= nowMs + HEALTH_OBSERVED_MAX_AHEAD_MS;
 }
