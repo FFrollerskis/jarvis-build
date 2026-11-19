@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import { withDomainAdvisoryLocks } from "../src/advisory-lock.ts";
 import type { HomeObservation } from "../src/home-bridge.ts";
@@ -154,8 +154,15 @@ describe("A-MEDIUM-4: auto-ACT krever en FERSK observasjon (og bindingen sjekkes
     expect((await queue()).filter((s) => s.stage === "suggest")).toHaveLength(2);
     await bind({ expires_at: new Date(Date.now() + 3_600_000).toISOString() });
     actuator.onClose = async () => { await db.adminPool.query(`UPDATE situation_autonomy_policies SET expires_at = now() - interval '1 minute' WHERE tenant_id = '${TENANT_A}'`); };
-    const result = await act();
-    expect(result).toMatchObject({ attempted: 1, succeeded: 1, skipped: 1 });
+    const actOnSpy = vi.spyOn(db.engine, "actOn");
+    try {
+      const result = await act();
+      expect(result).toMatchObject({ attempted: 1, succeeded: 1, skipped: 1 });
+      // To lag, hver for seg: re-verifiseringen hopper over en utløpt binding FØR `actOn` (ingen lås, ingen claim - `actOn` kalles kun for den første), og claim-vakten fanger den uansett (forsvar i dybden, testet over).
+      expect(actOnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      actOnSpy.mockRestore();
+    }
     expect(actuator.calls.filter((c) => c.action === "close")).toHaveLength(1);
     expect((await queue()).filter((s) => s.act_idempotency_key === null)).toHaveLength(1); // den andre er aldri claimet
   });
