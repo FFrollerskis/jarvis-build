@@ -49,14 +49,50 @@ export function assertEntityId(value: unknown, label: string): string {
  * Dette gjelder uavhengig av alle `JARVIS_VISION_*`-flagg (en lekkasje skal ikke være flaggstyrt). Øvrige attributter (navn, lysstyrke, temperatur ...) er uendret.
  */
 const CAMERA_TOKEN_ATTRIBUTES = new Set(["access_token", "entity_picture", "entity_picture_local"]);
-const SECRET_ATTRIBUTE_NAME = /(^|_)(access_?token|token|secret|password|api_?key|authorization)($|_)/i;
-const TOKEN_IN_QUERY = /[?&](?:access_?token|token|authsig|signature|sig)=/i;
+/**
+ * Review delta A INFO-D6: navnebasert gjenkjenning av hemmelige attributter, BEST EFFORT (HA har ingen standard for hva en integrasjon kaller et token: det er ikke en garanti, og er ikke et sikkerhetsvern alene - kamerabildet
+ * er vernet av at HA-tokenet aldri er i modellflaten, og kamera-attributtene over fjernes uansett navn). Nøkkelen gjøres først kanonisk (camelCase, kebab, punktum og mellomrom -> `snake_case`, små bokstaver:
+ * `authToken`, `access-token`, `API.Key` -> `auth_token`, `access_token`, `api_key`), og deretter er en nøkkel hemmelig når den KAN SETTES SAMMEN av en hemmelighetsfrase på ordgrenser (`auth_token`, `secret_key`, `access_key`,
+ * `password`, `passwd`, `jwt`, `bearer`, `credentials`, `pin`, ...) - MED mindre den ender på et ord som beskriver noe ANNET enn selve hemmeligheten (`token_count`, `max_tokens` (flertall er et annet ord), `password_required`,
+ * `pin_length`, `token_expires`). En boolsk verdi eller `null` kan aldri bære en hemmelighet og beholdes alltid (`auth: true`).
+ */
+const SECRET_PHRASES: ReadonlyArray<readonly string[]> = [
+  ["token"], ["secret"], ["password"], ["passwd"], ["pwd"], ["passphrase"], ["passcode"], ["jwt"], ["bearer"], ["credential"], ["credentials"], ["authorization"], ["auth"], ["pin"], ["cookie"],
+  ["api", "key"], ["apikey"], ["access", "key"], ["secret", "key"], ["private", "key"], ["signing", "key"], ["encryption", "key"], ["auth", "key"], ["client", "secret"], ["pin", "code"]
+];
+/** Siste ord som gjør at nøkkelen beskriver en egenskap ved hemmeligheten (antall, grense, utløp, påkrevd ...), ikke hemmeligheten selv. */
+const BENIGN_LAST_WORDS: ReadonlySet<string> = new Set([
+  "count", "counts", "limit", "limits", "usage", "used", "total", "max", "min", "length", "len", "size", "type", "kind", "expires", "expiry", "expired", "expiration", "ttl", "timeout", "time", "ts", "at", "age",
+  "required", "enabled", "disabled", "configured", "set", "present", "valid", "status", "state", "format", "mode", "policy", "version", "attempts", "rate"
+]);
+
+function canonicalKeyWords(key: string): string[] {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .toLowerCase()
+    .split("_")
+    .filter((word) => word.length > 0);
+}
+
+function isSecretAttributeName(key: string): boolean {
+  const words = canonicalKeyWords(key);
+  if (words.length === 0) return false;
+  if (BENIGN_LAST_WORDS.has(words[words.length - 1] as string) && words.length > 1) return false;
+  return SECRET_PHRASES.some((phrase) => {
+    for (let start = 0; start + phrase.length <= words.length; start += 1) if (phrase.every((word, offset) => words[start + offset] === word)) return true;
+    return false;
+  });
+}
+
+/** Spørreparametere som bærer adgang i en URL (`?token=`, `&auth=`, `&key=`, `&apikey=`, `&signature=` ...). */
+const TOKEN_IN_QUERY = /[?&](?:access_?token|token|authsig|signature|sig|auth|key|api_?key|access_?key|secret|password|jwt|bearer|credential)=/i;
 
 export function stripSecretHomeAttributes(domain: string, attributes: Record<string, JsonValue>): Record<string, JsonValue> {
   const out: Record<string, JsonValue> = {};
   for (const [key, value] of Object.entries(attributes)) {
     if (domain === "camera" && CAMERA_TOKEN_ATTRIBUTES.has(key)) continue;
-    if (SECRET_ATTRIBUTE_NAME.test(key)) continue;
+    if (typeof value !== "boolean" && value !== null && isSecretAttributeName(key)) continue;
     const text = typeof value === "string" ? value : typeof value === "object" && value !== null ? JSON.stringify(value) : "";
     if (text !== "" && TOKEN_IN_QUERY.test(text)) continue;
     out[key] = value;

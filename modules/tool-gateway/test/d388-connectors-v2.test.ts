@@ -287,6 +287,24 @@ describe("G: Home Assistant - ekte REST-transport bak homeAssistantTools(), romk
     expect(normalizeHomeState({ entity_id: "lock.inngang", state: "locked" })).toMatchObject({ locked: true, attributes: {} });
   });
 
+  it("WP-G3 review delta A INFO-D6: flere vanlige hemmelighetsnavn (camelCase, kebab, jwt, bearer, credentials, passwd, pin) og URL-parametere (auth, key, apikey) fjernes - uten å røre uskyldige felt (token_count, password_required, auth: true)", () => {
+    const stripped = normalizeHomeState({
+      entity_id: "sensor.x", state: "1",
+      attributes: {
+        authToken: "a", secretKey: "b", accessKey: "c", "access-token": "d", jwt: "e", bearer: "f", credentials: { user: "u", pass: "p" }, passwd: "g", pin: "1234", refreshToken: "r", "API.Key": "k", client_secret: "s", pin_code: "0000", Cookie: "c",
+        link_a: "https://x.test/p?auth=zzz", link_b: "https://x.test/p?key=zzz", link_c: "https://x.test/p?x=1&apikey=zzz", link_d: "https://x.test/p?api_key=zzz", friendly_name: "Sensor"
+      }
+    })["attributes"];
+    expect(stripped).toEqual({ friendly_name: "Sensor" });
+    const innocent = {
+      token_count: 12, tokens: 3, max_tokens: 5, token_limit: 100, token_type: "Bearer", token_expires: "2026-12-01T00:00:00Z", password_required: true, auth: true, auth_required: false, pin_length: 4, pin_set: true, author: "Kari",
+      unauthorized: false, key_count: 2, keyboard: "no", description: "token-sangen", friendly_name: "S", unit_of_measurement: "W"
+    };
+    expect(normalizeHomeState({ entity_id: "sensor.y", state: "1", attributes: innocent })["attributes"]).toEqual(innocent);
+    // en boolsk/null-verdi kan aldri bære en hemmelighet og beholdes selv med et hemmelig navn; tall og tekst under samme navn fjernes
+    expect(normalizeHomeState({ entity_id: "sensor.z", state: "1", attributes: { token: true, secret: null, password: "x", pin: 1234 } })["attributes"]).toEqual({ token: true, secret: null });
+  });
+
   it("read_state uten entity leser rommets kartlagte enheter og gir samlebilde", async () => {
     stubFetch((url) => {
       if (url.endsWith("light.stue_tak")) return { json: { entity_id: "light.stue_tak", state: "off" } };
