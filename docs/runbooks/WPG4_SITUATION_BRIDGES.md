@@ -212,7 +212,7 @@ Vaktbatch (alt som leser `main.ts`/ruter/manifest, wph1/wph2, env-drift, compose
 
 ## 18. Fiks-runde etter to uavhengige reviews (verdikt MERGE ETTER FIKSER, 3 HIGH)
 
-Status per funn. `LUKKET` = rettet i koden og bevist med en test som er RØD uten fiksen (mutasjonsbevis: den aktuelle linjen/regelen ble mutert og testene falt); `DELVIS` = rettet med en dokumentert rest; `DEFERRED` = bevisst ikke bygget, dokumentert (kun LOW/INFO). Ingenting er `VERIFIED`: alt er fortsatt `NOT_VERIFIED` mot ekte utstyr. Mutasjoner totalt i fiks-runden: 183 kjørt, 182 drepte og 1 ekvivalent (se A-MEDIUM-4); 0 overlevde som testhull.
+Status per funn. `LUKKET` = rettet i koden og bevist med en test som er RØD uten fiksen (mutasjonsbevis: den aktuelle linjen/regelen ble mutert og testene falt); `DELVIS` = rettet med en dokumentert rest; `DEFERRED` = bevisst ikke bygget, dokumentert (kun LOW/INFO). Ingenting er `VERIFIED`: alt er fortsatt `NOT_VERIFIED` mot ekte utstyr. Mutasjoner totalt i fiks-runden: 183 egne kjørt og 183 drepte (0 overlevde som testhull; B-HIGH-1 sin `!newly_actionable` er analysert som ekvivalent og ikke talt). I tillegg er reviewernes EGNE overlevende mutanter kjørt ordrett mot kun de nye testene: B sin M05a, M05b, M05e, M05f, M08b, M08c, M09d, M19, M24, M26, M27, M32 og A sin M02 og M32: 14 av 14 drept (M08b/M08c tilpasset ankeret i dagens `simulation.ts`). Ekvivalente/iboende, ingen handling: B sin M10b, M23, M34 og A sin M25.
 
 | Funn | Status | Hva (kort) | Test | Mutasjonsbevis |
 |---|---|---|---|---|
@@ -221,7 +221,7 @@ Status per funn. `LUKKET` = rettet i koden og bevist med en test som er RØD ute
 | B-HIGH-2 | `LUKKET` | pg `numeric` er en streng: `num()`; helsekilden leverer mot ekte HealthService/Postgres | `apps/api/test/wpg4-signals-health-db`, `wpg4-signals-wiring` | 3/3 |
 | A-MEDIUM-2 | `LUKKET` | Deterministisk først (evaluer og lever), modellen i fase 2 med tak 5 og felles vegg-tidsbudsjett | `wpg4-fix-assist-pause` | 14/14 (sammen med A-MEDIUM-3) |
 | A-MEDIUM-3 | `LUKKET` | Pause stopper kildelesingen, re-sjekk etter modellkall, pause per varsel | `wpg4-fix-assist-pause`, `wpg4-signal-bus` D | (se over) |
-| A-MEDIUM-4 | `LUKKET` | Ferskhetsvindu for auto-ACT, `updated_at` = sist sett, normal HA-tilstand løser situasjoner | `wpg4-fix-lifecycle` | 31/32 + 1 ekvivalent: utløpssjekken fjernet KUN i re-verifiseringen fanges av claim-vakten (forsvar i dybden); fjernet begge steder: drept (sammen med B-MEDIUM-3 og A-LOW-5) |
+| A-MEDIUM-4 | `LUKKET` | Ferskhetsvindu for auto-ACT, `updated_at` = sist sett, normal HA-tilstand løser situasjoner | `wpg4-fix-lifecycle` | 32/32 (sammen med B-MEDIUM-3 og A-LOW-5). Reviewer A sin M02 (utløpssjekken fjernet KUN i re-verifiseringen) var først ekvivalent fordi claim-vakten fanger utløpet (forsvar i dybden); nå drept av en spion som krever at `actOn` aldri kalles for en utløpt binding, mens claim-vakten testes direkte |
 | B-MEDIUM-3 | `LUKKET` | Retensjonssveip (løs etter 48 t, slett etter kildedataenes oppbevaring), `getQueue`-tak, purge uavhengig av abonnement | `wpg4-fix-lifecycle` | (se over) |
 | A-MEDIUM-5 | `LUKKET` | Domenelås-semafor (arvet pool-dødlås), `DomainLockBusyError` | `wpg4-fix-locks` (pool på 3) | 6/6 |
 | B-MEDIUM-4 | `LUKKET` | ÉN HA-lesing per tikk (`read_states_detail`), synlige advarsler, effektenhet | `wpg4-ha-state-detail` (tool-gateway), `apps/api/test/wpg4-signals-wiring` | 12/12 (sammen med A-LOW-11, B-LOW-6 HA, effektenhet) |
