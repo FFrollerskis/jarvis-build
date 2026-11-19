@@ -261,7 +261,12 @@ describe("D: server.ts og main.ts - krokene er få og betingede (kildevakt)", ()
   });
 
   it("main.ts: personal opprettes fra miljøet, filtrerer firstWaveTools, legger verktøyene til sist og setter `personal` i ApiDeps KUN når deps finnes; loggen er betinget", () => {
-    expect(MAIN).toMatch(/const personal = createPersonalWiring\(\{ env: process\.env, pool, gateway: toolGateway, readSecret: \(ref\) => readSecretProvider\.get\(ref\), ownerPersonId: owner\.owner_person_id \}\);/);
+    // `controls` (fiks-runde review B MEDIUM-1): DAV-rutene går utenom ToolGateway og må selv høre kill switch og credential-revokering. Det MÅ være de SAMME instansene (én `killSwitch`, én `ownerControls`) som PolicyGateway/ToolGateway bruker.
+    expect(MAIN).toMatch(/const personal = createPersonalWiring\(\{ env: process\.env, pool, gateway: toolGateway, readSecret: \(ref\) => readSecretProvider\.get\(ref\), ownerPersonId: owner\.owner_person_id, controls: \{ killSwitch, ownerControls \} \}\);/);
+    expect(MAIN.match(/const killSwitch = /g)).toHaveLength(1);
+    expect(MAIN.match(/const ownerControls = /g)).toHaveLength(1);
+    expect(MAIN).toMatch(/new PolicyGateway\(\{[^}]{0,200}\n\s+killSwitch,\n/);
+    expect(MAIN).toMatch(/\n\s+controls: ownerControls,\n/);
     expect(MAIN).toMatch(/if \(personalLog\) console\.log\(JSON\.stringify\(personalLog\)\);/);
     expect(MAIN).toContain("for (const tool of personal.filterTools(firstWaveTools({");
     expect(MAIN).toMatch(/\.\.\.personal\.tools\s*\]\s*\}\)\)\) toolGateway\.register\(tool\);/);
