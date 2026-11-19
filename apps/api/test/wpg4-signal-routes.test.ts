@@ -76,7 +76,7 @@ const call = async (path: string, token: string, body: Record<string, unknown> =
   return { status: res.status, body: (await res.json().catch(() => ({}))) as Json };
 };
 const DOOR = { source: "home_assistant", event_type: "door_open_too_long", filter: { entities: [{ entity_id: "binary_sensor.inngang", role: "door" }] } };
-const auditTypes = async () => (await db.adminPool.query(`SELECT type, person_id, session_id, payload FROM audit_events WHERE tenant_id = $1 AND type LIKE 'situation.%' AND audit_id > $2 ORDER BY audit_id`, [TENANT_A, auditBaseline])).rows as Array<{ type: string; person_id: string; session_id: string | null; payload: Json }>;
+const auditTypes = async () => (await db.adminPool.query(`SELECT type, person_id, session_id, task_id, payload FROM audit_events WHERE tenant_id = $1 AND type LIKE 'situation.%' AND audit_id > $2 ORDER BY audit_id`, [TENANT_A, auditBaseline])).rows as Array<{ type: string; person_id: string; session_id: string | null; task_id: string | null; payload: Json }>;
 
 const READ_ROUTES: Array<[string, Record<string, unknown>]> = [
   ["/situations/signals/subscriptions/list", {}], ["/situations/signals/status", {}], ["/situations/signals/log", {}], ["/situations/signals/assessments", { situation_id: "sit-x" }], ["/situations/signals/simulate", { situation_id: "sit-x" }], ["/situations/signals/rule-tuning", {}]
@@ -193,6 +193,8 @@ describe("abonnementer: subscribe/list/set-enabled/remove med lukket validering,
     const rows = await auditTypes();
     expect(rows.map((r) => r.type)).toEqual(["situation.subscription_set", "situation.subscription_disabled", "situation.subscription_enabled", "situation.subscription_removed"]);
     expect(rows.every((r) => r.person_id === OWNER && r.session_id === "s-owner")).toBe(true);
+    // regel 4 (delta-review B, INFO): hver rad bærer også en oppgave-merkelapp for handlingen (identiteten har ingen `task_id`)
+    expect(rows.map((r) => r.task_id)).toEqual(["situation-signals-api:subscribe", "situation-signals-api:set_subscription_enabled", "situation-signals-api:set_subscription_enabled", "situation-signals-api:remove_subscription"]);
     expect(rows[0]!.payload).toMatchObject({ subscription_id: id, source: "home_assistant", event_type: "door_open_too_long", domain: "home", memory_space: "home", enabled: true });
     expect(JSON.stringify(rows)).not.toMatch(/binary_sensor|inngang|entities/); // aldri filterinnhold
   });
@@ -249,6 +251,79 @@ describe("status, logg, vurderinger, simulering, stille timer og tilbakemelding"
     const rows = await auditTypes();
     expect(rows.map((r) => r.type)).toEqual(["situation.critical_bypass_set", "situation.critical_bypass_set"]);
     expect(rows.map((r) => r.payload["enabled"])).toEqual([true, false]);
+    // regel 4 (delta-review A, D-LOW-2): revisjonsraden bærer personen, ØKTEN og oppgave-merkelappen (tidligere `session_id` = null)
+    expect(rows.map((r) => [r.person_id, r.session_id, r.task_id])).toEqual([[OWNER, "s-owner", "situation-signals-api:set_critical_quiet_bypass"], [OWNER, "s-owner", "situation-signals-api:set_critical_quiet_bypass"]]);
+  });
+
+  it("simulering av en ukjent situasjon er 404 `not_found` (ikke 500), også for en annen tenants situasjon; den finnes-ikke-feilen skriver ingenting (D-LOW-1)", async () => {
+    const unknown = await call("/situations/signals/simulate", "owner-signed", { situation_id: "sit-finnes-ikke" });
+    expect(unknown.status).toBe(404);
+    expect(unknown.body).toMatchObject({ error: "not_found", reason: "situation_not_found" });
+    const foreign = (await db.engine.evaluateCandidate(TENANT_B, "home", { domain: "home", detection_key: "home:opening:binary_sensor.b@2026-11-19T11:42:00.000Z", priority: "normal", reason: "Dør åpen" }, Date.parse("2026-11-19T12:00:00.000Z"))).situation.situation_id;
+    expect((await call("/situations/signals/simulate", "owner-signed", { situation_id: foreign })).status).toBe(404); // tenant A når aldri tenant B sin situasjon
+    expect((await call("/situations/signals/simulate", "owner-b", { situation_id: foreign })).status).toBe(200); // ... men tenant B selv gjør
+    expect(await auditTypes()).toEqual([]);
+  });
+
+  it("ingen domenefeil fra rutenes tjenester lekker som 500: hver feilklasse som tjenestene kaster er mappet i ruten, og hver feilsti gir 4xx med stabil kode (D-LOW-1)", async () => {
+    // (1) statisk: hver `throw new XError` i tjenestene som rutene kaller (registeret, tilbakemelding/tuning, simulering, loggen, og `setCriticalQuietBypass` via `assertAutonomyAuthority`) har en `instanceof XError` i ruten
+    const { readFileSync } = await import("node:fs");
+    const src = (rel: string): string => readFileSync(new URL(rel, import.meta.url), "utf8");
+    const thrown = new Set<string>(["SituationAutonomyUnauthorizedError"]);
+    for (const file of ["subscriptions.ts", "tuning.ts", "simulation.ts", "signal-log.ts"]) for (const m of src(`../../../modules/situations/src/${file}`).matchAll(/throw new (\w+Error)\b/g)) thrown.add(m[1]!);
+    expect([...thrown].sort()).toEqual(["FeedbackUnauthorizedError", "FeedbackValidationError", "SimulationNotFoundError", "SituationAutonomyUnauthorizedError", "SubscriptionNotFoundError", "SubscriptionUnauthorizedError", "SubscriptionValidationError"]);
+    const routes = src("../src/situation-signal-routes.ts");
+    for (const name of thrown) expect(routes, name).toMatch(new RegExp(`instanceof ${name}\\b`));
+    // (2) atferd: en feilsti per rute som kan feile i tjenesten
+    const open = await listen({ ...makeDeps("full"), ownerGate: () => true } as unknown as ApiDeps); // eier-porten slipper alle gjennom: registeret/motoren sin EGEN eier-sjekk avgjør
+    const cases: Array<[string, string, Record<string, unknown>, number, string, string]> = [
+      ["/situations/signals/simulate", "owner-signed", { situation_id: "sit-finnes-ikke" }, 404, "error", "not_found"],
+      ["/situations/signals/feedback", "owner-signed", { situation_id: "sit-finnes-ikke", verdict: "noise" }, 400, "error", "feedback_invalid"],
+      ["/situations/signals/rule-tuning/reset", "owner-signed", { rule_key: "finnes:ikke" }, 400, "error", "feedback_invalid"],
+      ["/situations/signals/subscriptions/set-enabled", "owner-signed", { subscription_id: "sub-finnes-ikke", enabled: true }, 404, "error", "subscription_not_found"],
+      ["/situations/signals/subscriptions/remove", "owner-signed", { subscription_id: "sub-finnes-ikke", confirm: true, confirm_subscription_id: "sub-finnes-ikke" }, 404, "error", "subscription_not_found"],
+      ["/situations/signals/subscriptions/subscribe", "owner-signed", { ...DOOR, source: "kafka" }, 400, "error", "subscription_invalid"]
+    ];
+    for (const [path, token, body, status, key, value] of cases) {
+      const res = await call(path, token, body);
+      expect(res.status, path).toBe(status);
+      expect(res.body[key], path).toBe(value);
+    }
+    // sovereign-eier-sjekken i tjenestene (en annen person slipper gjennom eier-porten) gir 403 på alle skriveruter, aldri 500
+    for (const [path, body] of WRITE_ROUTES) {
+      const res = await call(path, "other-signed", body, open);
+      expect(res.status, path).toBe(403);
+      expect(res.body["error"], path).toBe("owner_required");
+    }
+  });
+
+  it("rader som skrives via ruten er merket med person, økt OG oppgave (regel 4): abonnement, tilbakemelding, regeltuning og revisjon (delta-review B, INFO)", async () => {
+    const created = await call("/situations/signals/subscriptions/subscribe", "owner-signed", DOOR);
+    const sub = (await db.adminPool.query(`SELECT created_by_person_id, task_id, session_id FROM situation_subscriptions WHERE tenant_id = $1`, [TENANT_A])).rows;
+    expect(created.status).toBe(200);
+    expect(sub).toEqual([{ created_by_person_id: OWNER, task_id: "situation-signals-api:subscribe", session_id: "s-owner" }]);
+    // tre støy-stemmer på samme regel gir en tuning-rad (regelnøkkelen utledes fra signalloggen, så hver situasjon får en loggrad fra hjem-kilden)
+    for (const t of ["11:50", "11:51", "11:52"]) {
+      const key = `home:opening:binary_sensor.inngang@2026-11-19T${t}:00.000Z`;
+      const id = await situation(key);
+      await db.adminPool.query(
+        `INSERT INTO situation_signal_log (signal_id, tenant_id, memory_space_id, source, event_type, domain, source_ref, detection_key, situation_id, occurred_at, outcome, stage_after, priority, notified, facts, person_id)
+         VALUES ($1, $2, 'home', 'home_assistant', 'door_open_too_long', 'home', $3, $4, $5, now(), 'created', 'inform', 'normal', true, '{}', $6)`,
+        [`sig-${id}`, TENANT_A, `ref-${id}`, key, id, OWNER]
+      );
+      expect((await call("/situations/signals/feedback", "owner-signed", { situation_id: id, verdict: "noise" })).status).toBe(200);
+    }
+    const feedback = (await db.adminPool.query(`SELECT actor_person_id, task_id, session_id FROM situation_feedback WHERE tenant_id = $1`, [TENANT_A])).rows;
+    expect(feedback).toHaveLength(3);
+    expect(feedback.every((r) => r.actor_person_id === OWNER && r.task_id === "situation-signals-api:record_feedback" && r.session_id === "s-owner")).toBe(true);
+    const tuning = (await db.adminPool.query(`SELECT rule_key, updated_by_person_id, task_id, session_id FROM situation_rule_tuning WHERE tenant_id = $1`, [TENANT_A])).rows;
+    expect(tuning).toEqual([{ rule_key: "home_assistant:door_open_too_long", updated_by_person_id: OWNER, task_id: "situation-signals-api:record_feedback", session_id: "s-owner" }]);
+    expect((await call("/situations/signals/rule-tuning/reset", "owner-signed", { rule_key: "home_assistant:door_open_too_long" })).body["data"]).toEqual({ reset: true });
+    const rows = await auditTypes();
+    expect(rows.map((r) => r.type)).toEqual(["situation.subscription_set", "situation.rule_tuned", "situation.rule_tuning_reset"]);
+    expect(rows.map((r) => [r.session_id, r.task_id])).toEqual([
+      ["s-owner", "situation-signals-api:subscribe"], ["s-owner", "situation-signals-api:record_feedback"], ["s-owner", "situation-signals-api:reset_rule_tuning"]
+    ]);
   });
 
   it("tilbakemelding (kun med eget flagg): `useful`/`noise` på en situasjon, ugyldig verdikt/ukjent situasjon avvises, regeltuning kan leses og tilbakestilles", async () => {

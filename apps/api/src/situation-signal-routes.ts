@@ -2,7 +2,7 @@ import type { IncomingMessage } from "node:http";
 import type { IdentityContext } from "@jarvis/contracts";
 import { ownerStepUpDenial } from "@jarvis/tool-gateway";
 import {
-  FeedbackUnauthorizedError, FeedbackValidationError, SituationAutonomyUnauthorizedError, SubscriptionNotFoundError, SubscriptionUnauthorizedError, SubscriptionValidationError, isSignalSource,
+  FeedbackUnauthorizedError, FeedbackValidationError, SimulationNotFoundError, SituationAutonomyUnauthorizedError, SubscriptionNotFoundError, SubscriptionUnauthorizedError, SubscriptionValidationError, isSignalSource,
   type FeedbackService, type SignalLogService, type SimulationService, type SituationEngine, type SituationSignalRunner, type SubscriptionRegistry
 } from "@jarvis/situations";
 
@@ -85,7 +85,8 @@ export async function handleSituationSignalRoute(req: IncomingMessage, pathname:
   }
   const tenant = identity.tenant_id;
   const space = identity.memory_space_id;
-  const actor = { person_id: identity.person_id, session_id: identity.session_id };
+  // Regel 4 (delta-review B, INFO): hver rad som skrives via ruten bærer BÅDE økten og en oppgave-merkelapp for handlingen (som `/vision/*`: `vision-api:<handling>`); identiteten har ingen `task_id`.
+  const actor = { person_id: identity.person_id, session_id: identity.session_id, task_id: `situation-signals-api:${spec.action}` };
   const bad = (reason: string): true => {
     h.json(400, { error: "malformed_request", reason, request_id: requestId });
     return true;
@@ -165,7 +166,7 @@ export async function handleSituationSignalRoute(req: IncomingMessage, pathname:
       }
       case "/situations/signals/quiet-bypass": {
         if (typeof body["enabled"] !== "boolean") return bad("enabled");
-        h.json(200, { ok: true, data: await deps.engine.setCriticalQuietBypass(tenant, space, body["enabled"], identity.person_id) });
+        h.json(200, { ok: true, data: await deps.engine.setCriticalQuietBypass(tenant, space, body["enabled"], identity.person_id, { session_id: actor.session_id, task_id: actor.task_id }) });
         return true;
       }
       case "/situations/signals/feedback": {
@@ -196,6 +197,11 @@ export async function handleSituationSignalRoute(req: IncomingMessage, pathname:
     }
     if (err instanceof SubscriptionNotFoundError) {
       h.json(404, { error: "subscription_not_found", request_id: requestId });
+      return true;
+    }
+    // D-LOW-1 (delta-review A/B): en ukjent situasjon i simuleringen er en 404, ikke en intern feil (500).
+    if (err instanceof SimulationNotFoundError) {
+      h.json(404, { error: "not_found", reason: "situation_not_found", request_id: requestId });
       return true;
     }
     if (err instanceof SubscriptionUnauthorizedError || err instanceof FeedbackUnauthorizedError || err instanceof SituationAutonomyUnauthorizedError) {

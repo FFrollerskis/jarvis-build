@@ -90,11 +90,15 @@ describe("B: signallogg, status og stille timer", () => {
   });
 
   it("set_critical_quiet_bypass: kun eieren, bevarer stille timer, og er reversibelt", async () => {
+    const baseline = Number((await db.adminPool.query(`SELECT coalesce(max(audit_id), 0) AS id FROM audit_events`)).rows[0].id);
     await db.engine.setNotificationPolicy(TENANT_A, "home", { quiet_hours_start_utc: 22, quiet_hours_end_utc: 6 });
     const on = await call("set_critical_quiet_bypass", { enabled: true });
     expect((on as { data: { critical_bypass_quiet: boolean; quiet_hours_start_utc: number } }).data).toMatchObject({ critical_bypass_quiet: true, quiet_hours_start_utc: 22 });
     expect(((await call("set_critical_quiet_bypass", { enabled: false })) as { data: { critical_bypass_quiet: boolean } }).data.critical_bypass_quiet).toBe(false);
     expect((await call("set_critical_quiet_bypass", { enabled: true }, identity(TENANT_A, "home", OTHER))).ok).toBe(false);
+    // regel 4 (delta-review A, D-LOW-2): revisjonsraden bærer personen OG økten (tidligere `session_id` = null); den avviste endringen (annen person) skriver ingen rad
+    const audit = (await db.adminPool.query(`SELECT person_id, session_id FROM audit_events WHERE type = 'situation.critical_bypass_set' AND audit_id > $1 ORDER BY audit_id`, [baseline])).rows;
+    expect(audit).toEqual([{ person_id: "person-g4-owner", session_id: "sess-g4" }, { person_id: "person-g4-owner", session_id: "sess-g4" }]);
   });
 });
 

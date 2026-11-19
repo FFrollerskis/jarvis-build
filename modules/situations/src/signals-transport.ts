@@ -68,7 +68,7 @@ export class SituationSignalsTransport implements ToolTransport {
         return { data: rows as unknown as JsonValue };
       }
       case "set_critical_quiet_bypass": {
-        const row = await this.deps.engine.setCriticalQuietBypass(tenantId, space, parameters["enabled"] === true, identity.person_id);
+        const row = await this.deps.engine.setCriticalQuietBypass(tenantId, space, parameters["enabled"] === true, identity.person_id, { session_id: identity.session_id });
         return { data: row as unknown as JsonValue };
       }
       case "record_feedback": {

@@ -812,8 +812,15 @@ export class SituationEngine {
   /**
    * WP-G4: eierens valg om at sikkerhetssignaler (`urgent`) får bryte stille timer. SAMME sovereign-eier som for autonomi-bindinger og gjenoppretting (fail-closed uten konfigurert autoritet).
    * Selve verdien flyttes aldri av tilbakemelding eller modell. Standard (ingen rad / false) = stille timer virker som før.
+   * Regel 4 (delta-review A, D-LOW-2): revisjonsraden bærer også ØKTEN (og oppgave-merkelappen når kalleren har en) fra `context` - kallerne (ruten, verktøyet) har identiteten; tidligere var `session_id` alltid null.
    */
-  async setCriticalQuietBypass(tenantId: string, memorySpace: MemorySpace, enabled: boolean, actorPersonId: string | undefined): Promise<SituationNotificationPolicy> {
+  async setCriticalQuietBypass(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    enabled: boolean,
+    actorPersonId: string | undefined,
+    context: { session_id?: string | undefined; task_id?: string | undefined } = {}
+  ): Promise<SituationNotificationPolicy> {
     this.assertAutonomyAuthority(actorPersonId);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
@@ -825,8 +832,9 @@ export class SituationEngine {
         [tenantId, memorySpace, enabled, actorPersonId]
       );
       // WP-G4 fiks-runde (B-MEDIUM-5): revisjonsraden i SAMME transaksjon som valget (`assertAutonomyAuthority` har allerede sikret at `actorPersonId` er satt).
-      await writeAudit(client, { tenant_id: tenantId, person_id: actorPersonId as string }, {
-        type: "situation.critical_bypass_set", decision: "ALLOW", tool_id: "situations", action: "set_critical_quiet_bypass", capability_class: "C", payload: { enabled, memory_space: memorySpace }
+      await writeAudit(client, { tenant_id: tenantId, person_id: actorPersonId as string, ...(context.session_id !== undefined ? { session_id: context.session_id } : {}) }, {
+        type: "situation.critical_bypass_set", decision: "ALLOW", tool_id: "situations", action: "set_critical_quiet_bypass", capability_class: "C", payload: { enabled, memory_space: memorySpace },
+        ...(context.task_id !== undefined ? { task_id: context.task_id } : {})
       });
       return rows[0] as SituationNotificationPolicy;
     });
