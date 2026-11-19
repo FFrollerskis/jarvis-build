@@ -746,6 +746,14 @@ export async function planPerson(client: pg.PoolClient, mode: Mode, tenantId: st
     add(result, "family_events", await run(client, mode, "family_events", "tenant_id = $1 AND (created_by_person_id = $2 OR on_behalf_of_person_id = $2 OR cancelled_by_person_id = $2)", ownedValues));
     add(result, "family_invitations", await run(client, mode, "family_invitations", "tenant_id = $1 AND (invitee_person_id = $2 OR invited_by_person_id = $2 OR decided_by_person_id = $2)", ownedValues));
     add(result, "family_members", await run(client, mode, "family_members", "tenant_id = $1 AND person_id = $2", ownedValues));
+    // WP-G4 (D-466, migrasjon 139; delta-review B, INFO-9): signalloggen, modellvurderingene, tilbakemeldingene og abonnementene er person-merket (`person_id`/`actor_person_id`/`created_by_person_id`: avledet av eller eid av personen) og slettes
+    // HER (RESTRICTIVE memory-space-RLS, derfor innenfor `forEachSpaceGroup`). De har ingen FK seg imellom (barn av `situations` kaskaderer kun fra situasjonen), så rekkefølgen er fri. BEVISST IKKE med: `situation_rule_tuning` (eierens
+    // regelkonfigurasjon for rommet; `updated_by_person_id` er kun «sist endret av» - sletting ville fjernet terskler som fortsatt gjelder resten av rommet, samme prinsipp som `*_retention_policies` over) og `situations` selv (ingen person-kolonne:
+    // rommets avledede kø, som ryddes av G4-retensjonen og forsvinner med memory_space-/tenant-scope; samme mønster som situasjoner avledet av kamera-/helsehendelser over).
+    add(result, "situation_signal_log", await run(client, mode, "situation_signal_log", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "situation_assessments", await run(client, mode, "situation_assessments", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "situation_feedback", await run(client, mode, "situation_feedback", "tenant_id = $1 AND actor_person_id = $2", ownedValues));
+    add(result, "situation_subscriptions", await run(client, mode, "situation_subscriptions", "tenant_id = $1 AND created_by_person_id = $2", ownedValues));
     return result;
   });
 
