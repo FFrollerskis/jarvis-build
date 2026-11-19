@@ -4,7 +4,7 @@ import { homeAssistantSituationReadTools, type ToolDefinition, type ToolGateway,
 import type { SituationSignalApiDeps } from "./situation-signal-routes.ts";
 import {
   boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, MAX_OBSERVATIONS_PER_BATCH, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
-  SituationSignalsTransport, SituationsTransport, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS,
+  SituationSignalsTransport, SituationsTransport, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS, SOURCE_SPACES,
   type AssistModelGateway, type DailyPoint, type DomainPauseRegistry, type HealthObservation, type HealthSignalMetric, type HomeObservation, type IncidentObservation, type SignalSourceReaders,
   type SituationEngine, type SituationFlags, type VisionObservation
 } from "@jarvis/situations";
@@ -249,11 +249,15 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
   if (flags.health) spaces.add("health");
   if (flags.incidents) spaces.add("business");
   const targets = [...spaces].map((memory_space) => ({ tenant_id: deps.ownerTenant, memory_space }));
+  // D-LOW-3 (delta-review B): oppryddingen (signallogg, signalsituasjoner) dekker ALLE rom en kilde kan bo i, så lenge hovedbryteren er på - uavhengig av om kilden er på nå. Slås en kilde AV, ryddes de gamle radene fortsatt etter
+  // kildedataenes oppbevaring. (Er hovedbryteren AV bygges ingen løper, og ingenting kjører: da er erasure veien.)
+  const retentionSpaces = new Set<MemorySpace>(Object.values(SOURCE_SPACES).flat());
+  const retentionTargets = [...retentionSpaces].map((memory_space) => ({ tenant_id: deps.ownerTenant, memory_space }));
 
   const intervalSeconds = boundedInt(deps.env["JARVIS_SITUATION_BUS_INTERVAL_SECONDS"], 15, 3600, 60);
   const retentionDays = boundedInt(deps.env["JARVIS_SITUATION_LOG_RETENTION_DAYS"], SIGNAL_LOG_RETENTION_BOUNDS.min, SIGNAL_LOG_RETENTION_BOUNDS.max, DEFAULT_SIGNAL_LOG_RETENTION_DAYS);
   const runner = new SituationSignalRunner({
-    pool: deps.pool, bus, engine: deps.engine, gateway: deps.gateway, readers, subscriptions: (t, s) => registry.listEnabled(t, s), targets, identityFor,
+    pool: deps.pool, bus, engine: deps.engine, gateway: deps.gateway, readers, subscriptions: (t, s) => registry.listEnabled(t, s), targets, retentionTargets, identityFor,
     guard: { blocked: async () => ((await deps.killSwitch.isActiveDurable()) ? "kill_switch_active" : null) },
     intervalMs: intervalSeconds * 1000, logRetentionDays: retentionDays, now,
     // Signalsituasjonene (kamera/helse/hjem) rydder etter kildedataenes egen oppbevaring (G3/G2) når den finnes; ellers etter `logRetentionDays`.
@@ -276,7 +280,7 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
     flags, tools, runner, registry,
     api: { registry, engine: deps.engine, logs, runner, simulation, ...(feedback ? { feedback } : {}) },
     describe: () => ({
-      msg: "situation_signals", interval_seconds: intervalSeconds, log_retention_days: retentionDays, spaces: [...spaces],
+      msg: "situation_signals", interval_seconds: intervalSeconds, log_retention_days: retentionDays, spaces: [...spaces], retention_spaces: [...retentionSpaces],
       sources: { home: flags.home, vision: flags.vision, health: flags.health, incidents: flags.incidents }, model_assist: flags.modelAssist, feedback: flags.feedback
     }),
     start: () => runner.start()

@@ -9,7 +9,8 @@ import { withMemoryTransaction } from "@jarvis/memory";
  *  1. `touchSituation`: en observasjon som fortsatt gjelder (`duplicate` i bussen) bumper `updated_at` (høyst hvert 5. minutt) - «sist sett». Auto-ACT krever fersk observasjon (`autoActPending`), så et gammelt forslag UTFØRES aldri.
  *  2. `resolveNormalizedHome`: tilstanden er normal (døra lukket, sensoren tørr, alarmen avarmert, effekten under grensen) -> åpne situasjoner for entiteten løses (ikke lenger «åpen/suggest» i tre døgn).
  *  3. `retireSignalSituations` (daglig, uavhengig av abonnement): åpne, uclaimede signalsituasjoner som ikke er sett på 48 t løses, og signalsituasjoner (løste og åpne) eldre enn kildedataenes oppbevaringstid SLETTES (kaskade til logg,
- *     vurderinger og tilbakemeldinger). Situasjonene er ellers en varig kamera-/helse-tidslinje utenfor G2/G3-retensjonen.
+ *     vurderinger og tilbakemeldinger). Situasjonene er ellers en varig kamera-/helse-tidslinje utenfor G2/G3-retensjonen. Eneste unntak fra slettingen: en situasjon som en av eierens beslutninger refererer
+ *     (`decision_log.related_situation_id`) består til beslutningen er borte (den løses likevel som vanlig).
  */
 export const SIGNAL_SITUATION_DOMAINS = ["home", "vision", "health"] as const;
 export const SIGNAL_SITUATION_KEY_PREFIXES = ["home:", "vision:", "health:"] as const;
@@ -61,30 +62,75 @@ export interface SignalRetentionOptions {
 const clampDays = (value: number | null | undefined, fallback: number): number =>
   value === null || value === undefined || !Number.isFinite(value) ? fallback : Math.min(365, Math.max(1, Math.floor(value)));
 
-/** Daglig opprydding (se filhode, punkt 3). Returnerer antall løste og slettede situasjoner. Situasjoner som er claimet/utført (act_idempotency_key satt) røres aldri. */
+/**
+ * Én eller begge oppryddingsstegene feilet. Begge forsøkes ALLTID (se `retireSignalSituations`); feilen kastes først etter det, med hvilke steg som feilet og hva som likevel lyktes. Meldingen er en kort kode uten innhold
+ * (`signal_retention_failed:delete`, `...:resolve`, `...:delete.resolve`); den underliggende databasefeilen ligger i `cause`.
+ */
+export class SignalRetentionFailedError extends Error {
+  readonly steps: ReadonlyArray<"delete" | "resolve">;
+  readonly resolved: number;
+  readonly deleted: number;
+  constructor(steps: ReadonlyArray<"delete" | "resolve">, done: { resolved: number; deleted: number }, cause: unknown) {
+    super(`signal_retention_failed:${steps.join(".")}`, { cause });
+    this.name = "SignalRetentionFailedError";
+    this.steps = steps;
+    this.resolved = done.resolved;
+    this.deleted = done.deleted;
+  }
+}
+
+/**
+ * Daglig opprydding (se filhode, punkt 3). Returnerer antall løste og slettede situasjoner. Situasjoner som er claimet/utført (act_idempotency_key satt) røres aldri.
+ *
+ * D-MEDIUM-1 (delta-review B): en situasjon som en av eierens beslutninger refererer (`decision_log.related_situation_id`, FK uten kaskade, 059) SLETTES ikke: beslutningen er eierens historikk og FK-en ville ellers rullet tilbake hele DELETE-en
+ * (23503) og dermed stoppet både slettingen og løsingen for hele rommet, daglig og stille. Den refererte situasjonen løses som vanlig (48 t), og slettes først når beslutningen er borte (eller via erasure). Sletting og løsing går i HVER SIN
+ * transaksjon, så en uforutsett feil i det ene aldri hindrer det andre; begge forsøkes alltid, og feilen kastes (`SignalRetentionFailedError`) etter det.
+ */
 export async function retireSignalSituations(pool: pg.Pool, tenantId: string, memorySpace: MemorySpace, options: SignalRetentionOptions = {}): Promise<{ resolved: number; deleted: number }> {
   const nowMs = options.nowMs ?? Date.now();
   const resolveHours = Math.min(24 * 30, Math.max(1, Math.floor(options.resolveAfterHours ?? DEFAULT_RESOLVE_AFTER_HOURS)));
   const base = clampDays(options.retentionDays, DEFAULT_SITUATION_RETENTION_DAYS);
   const days = { home: base, vision: Math.min(base, clampDays(options.visionDays, base)), health: Math.min(base, clampDays(options.healthDays, base)) };
   const iso = (daysAgo: number): string => new Date(nowMs - daysAgo * 86_400_000).toISOString();
-  return withMemoryTransaction(pool, tenantId, [memorySpace], async (client) => {
-    // Sletting FØR løsing: en rad som er gammel nok til å slettes skal ikke først «løses» og dermed få en ny levetid.
-    const del = await client.query(
-      `DELETE FROM situations
-       WHERE tenant_id = $1 AND memory_space_id = $2 AND ${SIGNAL_ORIGIN_SQL}
-         AND act_idempotency_key IS NULL
-         AND updated_at < CASE domain WHEN 'health' THEN $4::timestamptz WHEN 'vision' THEN $5::timestamptz ELSE $6::timestamptz END`,
-      [tenantId, memorySpace, [...SIGNAL_SITUATION_DOMAINS], iso(days.health), iso(days.vision), iso(days.home)]
-    );
-    // Løsing rører IKKE `updated_at`: levetiden regnes fra siste observasjon, ikke fra opprydningen.
-    const res = await client.query(
-      `UPDATE situations SET status = 'resolved', resolved_at = to_timestamp($4::double precision / 1000.0)
-       WHERE tenant_id = $1 AND memory_space_id = $2 AND ${SIGNAL_ORIGIN_SQL}
-         AND status = 'open' AND act_idempotency_key IS NULL AND stage IN ('ignore','remember','inform','suggest')
-         AND updated_at < $5::timestamptz`,
-      [tenantId, memorySpace, [...SIGNAL_SITUATION_DOMAINS], nowMs, new Date(nowMs - resolveHours * 3_600_000).toISOString()]
-    );
-    return { resolved: res.rowCount ?? 0, deleted: del.rowCount ?? 0 };
-  });
+  const done = { resolved: 0, deleted: 0 };
+  const failed: Array<"delete" | "resolve"> = [];
+  let firstCause: unknown;
+  // Sletting FØR løsing: en rad som er gammel nok til å slettes skal ikke først «løses» og dermed få en ny levetid.
+  try {
+    done.deleted = await withMemoryTransaction(pool, tenantId, [memorySpace], async (client) => {
+      const del = await client.query(
+        `DELETE FROM situations
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND ${SIGNAL_ORIGIN_SQL}
+           AND act_idempotency_key IS NULL
+           AND updated_at < CASE domain WHEN 'health' THEN $4::timestamptz WHEN 'vision' THEN $5::timestamptz ELSE $6::timestamptz END
+           AND NOT EXISTS (
+             SELECT 1 FROM decision_log d
+             WHERE d.tenant_id = situations.tenant_id AND d.memory_space_id = situations.memory_space_id AND d.related_situation_id = situations.situation_id
+           )`,
+        [tenantId, memorySpace, [...SIGNAL_SITUATION_DOMAINS], iso(days.health), iso(days.vision), iso(days.home)]
+      );
+      return del.rowCount ?? 0;
+    });
+  } catch (err) {
+    failed.push("delete");
+    firstCause = err;
+  }
+  // Løsing rører IKKE `updated_at`: levetiden regnes fra siste observasjon, ikke fra opprydningen.
+  try {
+    done.resolved = await withMemoryTransaction(pool, tenantId, [memorySpace], async (client) => {
+      const res = await client.query(
+        `UPDATE situations SET status = 'resolved', resolved_at = to_timestamp($4::double precision / 1000.0)
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND ${SIGNAL_ORIGIN_SQL}
+           AND status = 'open' AND act_idempotency_key IS NULL AND stage IN ('ignore','remember','inform','suggest')
+           AND updated_at < $5::timestamptz`,
+        [tenantId, memorySpace, [...SIGNAL_SITUATION_DOMAINS], nowMs, new Date(nowMs - resolveHours * 3_600_000).toISOString()]
+      );
+      return res.rowCount ?? 0;
+    });
+  } catch (err) {
+    failed.push("resolve");
+    firstCause ??= err;
+  }
+  if (failed.length > 0) throw new SignalRetentionFailedError(failed, done, firstCause);
+  return done;
 }

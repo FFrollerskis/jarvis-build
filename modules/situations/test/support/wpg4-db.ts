@@ -114,7 +114,8 @@ export async function startG4Db(label: string): Promise<G4Db> {
     },
     async reset() {
       const tenants = `'${TENANT_A}','${TENANT_B}'`;
-      for (const table of ["situation_signal_log", "situation_assessments", "situation_feedback", "situation_rule_tuning", "situation_subscriptions", "situations", "situation_autonomy_policies", "situation_notification_policies", "tool_executions"]) {
+      // `decision_log` FØR `situations`: beslutningslogger peker på situasjoner (FK uten kaskade, 059) og ville ellers stoppet oppryddingen (D-MEDIUM-1).
+      for (const table of ["decision_log", "situation_signal_log", "situation_assessments", "situation_feedback", "situation_rule_tuning", "situation_subscriptions", "situations", "situation_autonomy_policies", "situation_notification_policies", "tool_executions"]) {
         await adminPool.query(`DELETE FROM ${table} WHERE tenant_id IN (${tenants})`);
       }
       await adminPool.query(`DELETE FROM situation_domain_pauses`);

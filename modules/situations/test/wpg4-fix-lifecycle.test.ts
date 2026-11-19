@@ -4,8 +4,8 @@ import { withDomainAdvisoryLocks } from "../src/advisory-lock.ts";
 import type { HomeObservation } from "../src/home-bridge.ts";
 import { DEFAULT_QUEUE_LIMIT, SituationActStaleError, SituationAutonomyBindingChangedError } from "../src/service.ts";
 import { SituationSignalBus } from "../src/signal-bus.ts";
-import { retireSignalSituations, touchSituation } from "../src/signal-retention.ts";
-import { SituationSignalRunner, type SignalRunnerDeps, type SignalSourceReaders } from "../src/signal-runner.ts";
+import { retireSignalSituations, SignalRetentionFailedError, touchSituation } from "../src/signal-retention.ts";
+import { PURGE_RETRY_AFTER_FAILURE_MS, SituationSignalRunner, type SignalRunnerDeps, type SignalSourceReaders } from "../src/signal-runner.ts";
 import type { VisionObservation } from "../src/vision-bridge.ts";
 import { actorOwner, identity, minutesAgo, NOW, OWNER, startG4Db, TENANT_A, TENANT_B, type ActuatorSpy, type G4Db } from "./support/wpg4-db.ts";
 
@@ -30,6 +30,13 @@ const act = (options?: { maxAgeMs?: number }) => db.engine.autoActPending(TENANT
 const subGarage = () => db.registry.subscribe(TENANT_A, "home", { source: "home_assistant", event_type: "door_open_too_long", filter: { entities: [{ entity_id: "cover.garasje", role: "garage_door" }, { entity_id: "cover.port", role: "gate" }] } }, actorOwner);
 const age = (key: string, interval: string) => db.adminPool.query(`UPDATE situations SET updated_at = now() - interval '${interval}' WHERE detection_key = $1`, [key]);
 const row = async (key: string) => (await db.adminPool.query(`SELECT status, stage, updated_at, resolved_at, act_idempotency_key FROM situations WHERE detection_key = $1`, [key])).rows[0] as { status: string; stage: string; updated_at: Date; resolved_at: Date | null; act_idempotency_key: string | null } | undefined;
+
+/** Antall advisory-låser (innvilget/ventende) i klyngen akkurat nå; brukes til å vente på at en `actOn` faktisk står i kø på domenelåsen. */
+const lockCount = (granted: boolean) => db.adminPool.query(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND ${granted ? "" : "NOT "}granted`).then((r) => r.rows[0].n as number);
+const untilLocks = async (granted: boolean, atLeast: number): Promise<void> => {
+  for (let i = 0; i < 200 && (await lockCount(granted)) < atLeast; i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(await lockCount(granted)).toBeGreaterThanOrEqual(atLeast);
+};
 
 beforeAll(async () => { db = await startG4Db("fixlife"); }, 240_000);
 afterAll(async () => { await db?.stop(); }, 120_000);
@@ -130,6 +137,30 @@ describe("A-MEDIUM-4: auto-ACT krever en FERSK observasjon (og bindingen sjekkes
     expect(await pending).toMatchObject({ attempted: 0, succeeded: 0, skipped: 1 });
     expect(actuator.calls).toHaveLength(0);
     expect((await queue())[0]?.act_idempotency_key).toBeNull();
+  });
+
+  it("`SituationActStaleError` fra claim-vakten (situasjonen løses mens `actOn` står i kø på domenelåsen) er en hoppet-over-situasjon: sveipet fortsetter med neste og kaster ikke (D-INFO-1, delta-review A)", async () => {
+    await subGarage();
+    await bus().publishBatch(TENANT_A, "home", [garage(), gate()]);
+    await bind();
+    // sveipet går i rekkefølgen `opened_at`: garasjen først, porten sist
+    await db.adminPool.query(`UPDATE situations SET opened_at = now() - interval '2 minutes' WHERE detection_key LIKE 'home:opening:cover.garasje@%'`);
+    await db.adminPool.query(`UPDATE situations SET opened_at = now() - interval '1 minute' WHERE detection_key LIKE 'home:opening:cover.port@%'`);
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const holder = withDomainAdvisoryLocks(db.appPool, ["home"], async () => { await hold; });
+    await untilLocks(true, 1);
+    const pending = act(); // utvalg + re-verifisering OK for garasjen, så venter `actOn` på låsen
+    await untilLocks(false, 1);
+    await db.adminPool.query(`UPDATE situations SET status = 'resolved', resolved_at = now() WHERE detection_key LIKE 'home:opening:cover.garasje@%'`); // garasjen løses mens `actOn` venter
+    release();
+    await holder;
+    expect(await pending).toEqual({ attempted: 1, succeeded: 1, denied: 0, skipped: 1 }); // garasjen: `SituationActStaleError` -> hoppet over; porten: utført
+    const closes = actuator.calls.filter((c) => c.action === "close");
+    expect(closes).toHaveLength(1);
+    const gateSituation = (await queue()).find((s) => s.detection_key.startsWith("home:opening:cover.port@"))!;
+    expect(closes[0]!.parameters).toMatchObject({ situation_id: gateSituation.situation_id });
+    expect((await queue()).find((s) => s.detection_key.startsWith("home:opening:cover.garasje@"))).toMatchObject({ status: "resolved", act_idempotency_key: null }); // aldri claimet
   });
 
   it("løperen bruker ferskhetsvinduet: eksplisitt `autoActMaxAgeMs`, og standard = max(1 time, 3 x tikkintervall)", async () => {
@@ -392,5 +423,270 @@ describe("B-MEDIUM-3: getQueue har et tak", () => {
     expect(await db.engine.getQueue(TENANT_A, "home", { limit: 3 })).toHaveLength(3);
     expect(await db.engine.getQueue(TENANT_A, "home", { limit: 0 })).toHaveLength(1);
     expect(await db.engine.getQueue(TENANT_A, "home", { limit: 1_000_000 })).toHaveLength(501);
+  });
+});
+
+describe("D-MEDIUM-1 (delta-review B): en beslutning som refererer en gammel signalsituasjon velter ikke oppryddingen", () => {
+  async function seed(domain: string, key: string, space: "home" | "health" = "home"): Promise<string> {
+    return (await db.engine.evaluateCandidate(TENANT_A, space, { domain, detection_key: key, priority: "normal", reason: "r" }, NOW)).situation.situation_id;
+  }
+  const decide = (decisionId: string, situationId: string, space: "home" | "health" = "home") =>
+    db.adminPool.query(
+      `INSERT INTO decision_log (decision_id, tenant_id, memory_space_id, title, rationale, decision_maker, related_situation_id) VALUES ($1, $2, $3, 'Ignorer døralarm', 'eierens valg', 'owner', $4)`,
+      [decisionId, TENANT_A, space, situationId]
+    );
+  const decisions = async () => (await db.adminPool.query(`SELECT decision_id, related_situation_id FROM decision_log WHERE tenant_id = $1 ORDER BY decision_id`, [TENANT_A])).rows as Array<{ decision_id: string; related_situation_id: string | null }>;
+
+  it("den refererte situasjonen består (og løses som vanlig) mens alle ANDRE gamle rader slettes/løses i samme sveip - ingen 23503, og beslutningen er urørt", async () => {
+    const ref = await seed("home", "home:opening:referert@a");
+    await seed("home", "home:opening:gammel@a");
+    await seed("home", "home:opening:tre-dager@a");
+    await seed("health", "health:steps:low:2026-10-01", "health");
+    await age("home:opening:referert@a", "40 days");
+    await age("home:opening:gammel@a", "41 days");
+    await age("home:opening:tre-dager@a", "3 days");
+    await age("health:steps:low:2026-10-01", "40 days");
+    await decide("dec-1", ref);
+
+    expect(await retireSignalSituations(db.appPool, TENANT_A, "home", { retentionDays: 30 })).toEqual({ resolved: 2, deleted: 1 }); // løst: referert + tre-dager; slettet: kun den ureferte
+    expect(await row("home:opening:gammel@a")).toBeUndefined();
+    expect(await row("home:opening:referert@a")).toMatchObject({ status: "resolved" });
+    expect(await row("home:opening:tre-dager@a")).toMatchObject({ status: "resolved" });
+    expect(await decisions()).toEqual([{ decision_id: "dec-1", related_situation_id: ref }]); // eierens historikk er urørt og peker fortsatt på en eksisterende situasjon
+    // idempotent: den refererte raden velter heller ikke neste døgns sveip
+    expect(await retireSignalSituations(db.appPool, TENANT_A, "home", { retentionDays: 30 })).toEqual({ resolved: 0, deleted: 0 });
+    expect(await row("home:opening:referert@a")).toBeDefined();
+    // et annet rom røres aldri av hjem-sveipet
+    expect(await row("health:steps:low:2026-10-01")).toBeDefined();
+    // unntaket varer kun så lenge beslutningen: er den borte, slettes situasjonen av neste sveip
+    await db.adminPool.query(`DELETE FROM decision_log WHERE decision_id = 'dec-1'`);
+    expect(await retireSignalSituations(db.appPool, TENANT_A, "home", { retentionDays: 30 })).toEqual({ resolved: 0, deleted: 1 });
+    expect(await row("home:opening:referert@a")).toBeUndefined();
+  });
+
+  it("helse- og kameradomenene har samme unntak (en referert 40 d gammel helse-/kamerasituasjon blokkerer ikke 7 d-oppbevaringen for de andre)", async () => {
+    const health = await seed("health", "health:steps:low:2026-10-01", "health");
+    await seed("health", "health:steps:low:2026-10-02", "health");
+    const vision = await seed("vision", "vision:motion_detected:cam:referert");
+    await seed("vision", "vision:motion_detected:cam:uten-referanse");
+    for (const key of ["health:steps:low:2026-10-01", "health:steps:low:2026-10-02", "vision:motion_detected:cam:referert", "vision:motion_detected:cam:uten-referanse"]) await age(key, "40 days");
+    await decide("dec-h", health, "health");
+    await decide("dec-v", vision, "home");
+    expect(await retireSignalSituations(db.appPool, TENANT_A, "health", { retentionDays: 30, healthDays: 7 })).toEqual({ resolved: 1, deleted: 1 });
+    expect(await retireSignalSituations(db.appPool, TENANT_A, "home", { retentionDays: 30, visionDays: 7 })).toEqual({ resolved: 1, deleted: 1 });
+    expect(await row("health:steps:low:2026-10-01")).toMatchObject({ status: "resolved" });
+    expect(await row("health:steps:low:2026-10-02")).toBeUndefined();
+    expect(await row("vision:motion_detected:cam:referert")).toMatchObject({ status: "resolved" });
+    expect(await row("vision:motion_detected:cam:uten-referanse")).toBeUndefined();
+    expect((await decisions()).map((d) => d.decision_id)).toEqual(["dec-h", "dec-v"]);
+  });
+
+  it("skjemavakt: den ENESTE fremmednøkkelen mot `situations` uten kaskade er beslutningsloggens (som oppryddingen utelater); en ny slik nøkkel må håndteres i `retireSignalSituations`", async () => {
+    const { rows } = await db.adminPool.query(`SELECT conrelid::regclass::text AS child, conname, confdeltype FROM pg_constraint WHERE contype = 'f' AND confrelid = 'situations'::regclass ORDER BY 1, 2`);
+    const nonCascading = (rows as Array<{ child: string; conname: string; confdeltype: string }>).filter((r) => r.confdeltype !== "c");
+    expect(nonCascading).toEqual([{ child: "decision_log", conname: "decision_log_related_situation_scope_fk", confdeltype: "a" }]);
+    // G4s egne barnetabeller kaskaderer (slettingen tar logg, vurderinger og tilbakemeldinger med)
+    expect((rows as Array<{ child: string }>).map((r) => r.child)).toEqual(expect.arrayContaining(["situation_signal_log", "situation_assessments", "situation_feedback"]));
+  });
+
+  describe("en feilet opprydding er synlig, stopper ikke andre rom, og prøves igjen etter en time (ikke stille hvert døgn)", () => {
+    const dropTrigger = async () => {
+      await db.adminPool.query(`DROP TRIGGER IF EXISTS g4_block_home_delete_trg ON situations`);
+      await db.adminPool.query(`DROP TRIGGER IF EXISTS g4_block_home_update_trg ON situations`);
+      await db.adminPool.query(`DROP TRIGGER IF EXISTS g4_block_log_delete_trg ON situation_signal_log`);
+      await db.adminPool.query(`DROP FUNCTION IF EXISTS g4_block_home_delete()`);
+      await db.adminPool.query(`DROP FUNCTION IF EXISTS g4_block_log_delete()`);
+    };
+    // en uforutsett feil i DELETE for `home` (stand-in for en fremtidig FK): triggeren avviser sletting av rader i `home`
+    const blockHomeDelete = async () => {
+      await db.adminPool.query(`CREATE FUNCTION g4_block_home_delete() RETURNS trigger AS $$ BEGIN IF OLD.memory_space_id = 'home' THEN RAISE EXCEPTION 'g4 test: sletting blokkert'; END IF; IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`);
+      await db.adminPool.query(`CREATE TRIGGER g4_block_home_delete_trg BEFORE DELETE ON situations FOR EACH ROW EXECUTE FUNCTION g4_block_home_delete()`);
+    };
+    // ... og (i tillegg) i UPDATE for `home`, så begge oppryddingsstegene feiler
+    const blockHomeUpdate = async () => {
+      await db.adminPool.query(`CREATE TRIGGER g4_block_home_update_trg BEFORE UPDATE ON situations FOR EACH ROW EXECUTE FUNCTION g4_block_home_delete()`);
+    };
+    const runner = (clock: () => number, over: Partial<SignalRunnerDeps> = {}) => new SituationSignalRunner({
+      pool: db.appPool, bus: bus(), engine: db.engine, gateway, readers: {} as SignalSourceReaders, subscriptions: (t, s) => db.registry.listEnabled(t, s),
+      targets: [{ tenant_id: TENANT_A, memory_space: "home" }, { tenant_id: TENANT_A, memory_space: "health" }], identityFor: (t, s) => identity(t, s), guard: { blocked: async () => null }, intervalMs: 60_000, now: clock, ...over
+    } as SignalRunnerDeps);
+
+    it("SQL-feil i sletting av `home`: tikket teller feilen (`retention_failures`, `errors`), loggen har kode og årsakskode uten innhold, `health` ryddes likevel, 48 t-løsingen i `home` lyktes, og nytt forsøk skjer først etter en time", async () => {
+      await seed("home", "home:opening:gammel@a");
+      await seed("home", "home:opening:tre-dager@a");
+      await seed("health", "health:steps:low:2026-10-01", "health");
+      await age("home:opening:gammel@a", "40 days");
+      await age("home:opening:tre-dager@a", "3 days");
+      await age("health:steps:low:2026-10-01", "40 days");
+      await blockHomeDelete();
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      let clock = Date.now();
+      try {
+        const r = runner(() => clock);
+        const first = await r.tick();
+        expect(first.status).toBe("ok");
+        expect(first.retention_failures).toBe(1);
+        expect(first.errors).toEqual(["retention:signal_retention_failed:delete"]); // kort kode, aldri innhold
+        const lines = errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("situation_signal_retention_failed"));
+        expect(lines).toHaveLength(1);
+        expect(JSON.parse(lines[0]!)).toEqual({ msg: "situation_signal_retention_failed", tenant_id: TENANT_A, memory_space_id: "home", code: "signal_retention_failed:delete", cause: "pg_P0001" });
+        expect(lines[0]).not.toMatch(/home:opening|binary_sensor|inngang|sletting blokkert/); // verken nøkler, entiteter eller databasens meldingstekst
+        // en feil i `home` stopper ikke `health`, og løsingen i `home` lyktes selv om slettingen feilet (egne transaksjoner)
+        expect(await row("health:steps:low:2026-10-01")).toBeUndefined();
+        expect(await row("home:opening:tre-dager@a")).toMatchObject({ status: "resolved" });
+        expect(await row("home:opening:gammel@a")).toMatchObject({ status: "resolved" });
+        // neste tikk 30 minutter senere: ikke forsøkt på nytt ennå
+        clock += 30 * 60_000;
+        errors.mockClear();
+        expect((await r.tick()).retention_failures).toBe(0);
+        expect(errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("retention_failed"))).toEqual([]);
+        // feilen rettes; 61 minutter etter feilen prøves oppryddingen igjen (og lykkes) - ikke først neste døgn
+        await dropTrigger();
+        expect(await row("home:opening:gammel@a")).toBeDefined();
+        clock += 31 * 60_000;
+        const third = await r.tick();
+        expect(third.retention_failures).toBe(0);
+        expect(third.errors).toEqual([]);
+        expect(await row("home:opening:gammel@a")).toBeUndefined();
+        // etter en VELLYKKET opprydding venter den et døgn igjen
+        await seed("home", "home:opening:ny-gammel@a");
+        await age("home:opening:ny-gammel@a", "40 days");
+        clock += 2 * 3_600_000;
+        await r.tick();
+        expect(await row("home:opening:ny-gammel@a")).toBeDefined();
+        clock += 24 * 3_600_000;
+        await r.tick();
+        expect(await row("home:opening:ny-gammel@a")).toBeUndefined();
+      } finally {
+        errors.mockRestore();
+        await dropTrigger();
+      }
+    });
+
+    it("`retireSignalSituations` forsøker ALLTID begge stegene: feiler slettingen, løses likevel de gamle åpne radene, og feilen kastes etterpå med hvilke steg som feilet og hva som lyktes (aldri en tom suksess)", async () => {
+      await seed("home", "home:opening:gammel@a");
+      await seed("home", "home:opening:tre-dager@a");
+      await age("home:opening:gammel@a", "40 days");
+      await age("home:opening:tre-dager@a", "3 days");
+      await blockHomeDelete();
+      try {
+        const failure = await retireSignalSituations(db.appPool, TENANT_A, "home", { retentionDays: 30 }).then(() => null, (err: unknown) => err);
+        expect(failure).toBeInstanceOf(SignalRetentionFailedError);
+        expect(failure).toMatchObject({ message: "signal_retention_failed:delete", steps: ["delete"], deleted: 0, resolved: 2 });
+        expect((failure as Error).cause).toMatchObject({ code: "P0001" });
+        expect(await row("home:opening:gammel@a")).toMatchObject({ status: "resolved" });
+        expect(await row("home:opening:tre-dager@a")).toMatchObject({ status: "resolved" });
+      } finally {
+        await dropTrigger();
+      }
+    });
+
+    it("feiler BEGGE steg: meldingen og `steps` nevner begge (`delete.resolve`), ingenting lyktes, og feilen er den første årsaken", async () => {
+      await seed("home", "home:opening:gammel@a");
+      await seed("home", "home:opening:tre-dager@a");
+      await age("home:opening:gammel@a", "40 days");
+      await age("home:opening:tre-dager@a", "3 days");
+      await blockHomeDelete();
+      await blockHomeUpdate();
+      try {
+        const failure = await retireSignalSituations(db.appPool, TENANT_A, "home", { retentionDays: 30 }).then(() => null, (err: unknown) => err);
+        expect(failure).toBeInstanceOf(SignalRetentionFailedError);
+        expect(failure).toMatchObject({ message: "signal_retention_failed:delete.resolve", steps: ["delete", "resolve"], deleted: 0, resolved: 0 });
+        expect(await row("home:opening:gammel@a")).toMatchObject({ status: "open" });
+        expect(await row("home:opening:tre-dager@a")).toMatchObject({ status: "open" });
+      } finally {
+        await dropTrigger();
+      }
+    });
+
+    it("SQL-feil i LOGGoppryddingen (`purge`): egen feilkode `purge:<kode>` og egen loggmelding uten innhold, og situasjonsoppryddingen kjører likevel (uavhengige steg)", async () => {
+      const fresh = await seed("home", "home:opening:fersk@a");
+      await seed("home", "home:opening:gammel@a");
+      await age("home:opening:gammel@a", "40 days");
+      await db.adminPool.query(
+        `INSERT INTO situation_signal_log (signal_id, tenant_id, memory_space_id, source, event_type, domain, source_ref, detection_key, situation_id, occurred_at, outcome, stage_after, priority, notified, facts, person_id, recorded_at)
+         VALUES ('sig-gammel', $1, 'home', 'home_assistant', 'door_open_too_long', 'home', 'home:opening:fersk@a#L1', 'home:opening:fersk@a', $2, now() - interval '40 days', 'created', 'inform', 'normal', true, '{}', $3, now() - interval '40 days')`,
+        [TENANT_A, fresh, OWNER]
+      );
+      await db.adminPool.query(`CREATE FUNCTION g4_block_log_delete() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'g4 test: loggsletting blokkert'; END; $$ LANGUAGE plpgsql`);
+      await db.adminPool.query(`CREATE TRIGGER g4_block_log_delete_trg BEFORE DELETE ON situation_signal_log FOR EACH ROW EXECUTE FUNCTION g4_block_log_delete()`);
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const tick = await runner(() => Date.now()).tick();
+        expect(tick).toMatchObject({ status: "ok", retention_failures: 1, errors: ["purge:pg_P0001"] });
+        const lines = errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("situation_signal_purge_failed"));
+        expect(lines).toHaveLength(1);
+        expect(JSON.parse(lines[0]!)).toEqual({ msg: "situation_signal_purge_failed", tenant_id: TENANT_A, memory_space_id: "home", code: "pg_P0001" });
+        expect(lines[0]).not.toMatch(/home:opening|loggsletting blokkert/);
+        expect(await row("home:opening:gammel@a")).toBeUndefined(); // situasjonsoppryddingen lyktes selv om loggoppryddingen feilet
+        expect((await db.adminPool.query(`SELECT count(*)::int AS n FROM situation_signal_log WHERE signal_id = 'sig-gammel'`)).rows[0].n).toBe(1);
+      } finally {
+        errors.mockRestore();
+        await dropTrigger();
+      }
+    });
+
+    it("tilbakeføringsfristen etter en feilet opprydding er pinnet til én time", () => {
+      expect(PURGE_RETRY_AFTER_FAILURE_MS).toBe(60 * 60_000);
+    });
+  });
+});
+
+describe("D-LOW-3 (delta-review B): retensjonsmålene dekker rom uten påslått kilde (kun opprydding - ingen lesing, ingen levering), og kill switch stanser dem", () => {
+  async function seed(domain: string, key: string, space: "home" | "health" | "business", days: number): Promise<void> {
+    await db.engine.evaluateCandidate(TENANT_A, space, { domain, detection_key: key, priority: "normal", reason: "r" }, NOW);
+    await age(key, `${days} days`);
+  }
+  const all = [{ tenant_id: TENANT_A, memory_space: "home" as const }, { tenant_id: TENANT_A, memory_space: "health" as const }, { tenant_id: TENANT_A, memory_space: "business" as const }];
+  const runner = (over: Partial<SignalRunnerDeps>) => new SituationSignalRunner({
+    pool: db.appPool, bus: bus(), engine: db.engine, gateway, readers: {} as SignalSourceReaders, subscriptions: (t, s) => db.registry.listEnabled(t, s),
+    targets: [], retentionTargets: all, identityFor: (t, s) => identity(t, s), guard: { blocked: async () => null }, intervalMs: 60_000, now: () => Date.now(), ...over
+  } as SignalRunnerDeps);
+
+  it("uten ett eneste mål og uten abonnement ryddes gamle signalsituasjoner (hjem, kamera, helse) i alle retensjonsrom; ingenting leses eller leveres", async () => {
+    await seed("home", "home:opening:gammel@a", "home", 40);
+    await seed("vision", "vision:motion_detected:cam:gammel", "home", 40);
+    await seed("health", "health:steps:low:2026-10-01", "health", 40);
+    await seed("home", "home:opening:fersk@a", "home", 1);
+    const tick = await runner({}).tick();
+    expect(tick).toMatchObject({ status: "ok", spaces: 0, sources_read: 0, delivered: 0, auto_act_attempted: 0, retention_failures: 0, errors: [] });
+    expect(await row("home:opening:gammel@a")).toBeUndefined();
+    expect(await row("vision:motion_detected:cam:gammel")).toBeUndefined();
+    expect(await row("health:steps:low:2026-10-01")).toBeUndefined();
+    expect(await row("home:opening:fersk@a")).toMatchObject({ status: "open" });
+    expect(telegramCalls()).toBe(0);
+  });
+
+  it("uten `retentionTargets` ryddes ingenting for rom uten mål (løpere uten dem oppfører seg som før)", async () => {
+    await seed("home", "home:opening:gammel@a", "home", 40);
+    const tick = await runner({ retentionTargets: [] }).tick();
+    expect(tick).toMatchObject({ status: "ok", spaces: 0, retention_failures: 0 });
+    expect(await row("home:opening:gammel@a")).toBeDefined();
+  });
+
+  it("kill switch stanser oppryddingen: aktiv ved tikkstart -> `blocked` uten sletting; slått på MIDT i tikket (før første retensjonsmål) -> `blocked` uten sletting", async () => {
+    await seed("home", "home:opening:gammel@a", "home", 40);
+    const atStart = await runner({ guard: { blocked: async () => "kill_switch_active" } }).tick();
+    expect(atStart).toMatchObject({ status: "blocked", reason: "kill_switch_active" });
+    expect(await row("home:opening:gammel@a")).toBeDefined();
+    let calls = 0;
+    const midTick = await runner({ guard: { blocked: async () => (++calls > 1 ? "kill_switch_active" : null) } }).tick();
+    expect(midTick).toMatchObject({ status: "blocked", reason: "kill_switch_active" });
+    expect(await row("home:opening:gammel@a")).toBeDefined();
+  });
+
+  it("påslåtte mål og retensjonsmål overlapper uten problem: hvert rom ryddes (høyst) én gang per døgn", async () => {
+    await seed("home", "home:opening:gammel@a", "home", 40);
+    await seed("health", "health:steps:low:2026-10-01", "health", 40);
+    let clock = Date.now();
+    const r = runner({ targets: [all[0]!], now: () => clock });
+    expect(await db.registry.listEnabled(TENANT_A, "home")).toHaveLength(0);
+    expect((await r.tick()).retention_failures).toBe(0);
+    expect(await row("home:opening:gammel@a")).toBeUndefined();
+    expect(await row("health:steps:low:2026-10-01")).toBeUndefined();
+    await seed("home", "home:opening:ny-gammel@a", "home", 40);
+    clock += 60_000;
+    await r.tick();
+    expect(await row("home:opening:ny-gammel@a")).toBeDefined(); // døgnvakten gjelder også retensjonsmålene
   });
 });

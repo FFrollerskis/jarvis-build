@@ -25,7 +25,8 @@ import { parseFilter } from "./signal-bridges.ts";
  * og av leveringen/auto-ACT. Én kilde eller ett (tenant, space) som feiler velter aldri resten (telles og logges med kode, aldri innhold). Aldri to tikk samtidig; `tick()` kaster aldri.
  *
  * Frekvens: `cadence` er «hvert N-te tikk» per kilde (standard: hjem/kamera/hendelser hvert tikk, helse hvert 15. - baselines endrer seg langsomt og lesingen aggregerer over uker). `now` og tikk-teller er injiserbare.
- * Daglig opprydding av signalloggen kjøres av løperen (høyst én gang per 24 timer per prosess og (tenant, space)).
+ * Daglig opprydding av signalloggen og signalsituasjonene kjøres av løperen (høyst én gang per 24 timer per prosess og (tenant, space); en feilet opprydding prøves igjen etter en time og er synlig i tikkresultatet: `retention_failures`/`errors`).
+ * Oppryddingen dekker også rom uten påslått kilde (`retentionTargets`), så lenge løperen finnes (hovedbryteren på).
  *
  * FIKS-RUNDE (A-MEDIUM-2/3): (1) DETERMINISTISK FØRST: i fase 1 evalueres og leveres alt uten ett eneste modellkall (en vannlekkasje venter aldri på en modell); modellvurderingen (valgfri) kjøres i fase 2, ETTER at alle mål er evaluert og levert,
  * med tak per (tenant, rom) og ETT felles tidsbudsjett per tikk (`assistBudgetMs`, vegg-tid; et kall som ikke er ferdig avbrytes og regnes som `unavailable`). Et løft leveres umiddelbart etterpå. (2) PAUSE: en kilde der ALLE abonnementsdomener
@@ -65,6 +66,8 @@ export const MAX_HOME_ENTITIES = 50;
 /** Samlet vegg-tidsbudsjett for ALLE modellvurderinger i ett tikk (fase 2). Kall som ikke er ferdige da avbrytes; deterministisk evaluering og levering er allerede ferdig. */
 export const DEFAULT_ASSIST_TICK_BUDGET_MS = 20_000;
 const DAY_MS = 86_400_000;
+/** En vellykket daglig opprydding venter et døgn; en FEILET prøves igjen etter denne tiden (ikke først neste døgn, og ikke hvert tikk). */
+export const PURGE_RETRY_AFTER_FAILURE_MS = 60 * 60_000;
 
 export interface SignalRunnerDeps {
   pool: pg.Pool;
@@ -74,8 +77,13 @@ export interface SignalRunnerDeps {
   readers: SignalSourceReaders;
   /** Aktive abonnementer for (tenant, space) - kun disse styrer hva som leses. */
   subscriptions: (tenantId: string, memorySpace: MemorySpace) => Promise<readonly SituationSubscription[]>;
-  /** Hvilke (tenant, space) løperen betjener (i drift: kun eierens tenant og de rommene kildene bor i). */
+  /** Hvilke (tenant, space) løperen betjener (i drift: kun eierens tenant og de rommene PÅSLÅTTE kilder bor i). */
   targets: readonly SignalTarget[];
+  /**
+   * D-LOW-3 (delta-review B): (tenant, space) som får den daglige oppryddingen UAVHENGIG av om noen kilde er på. Uten denne ryddes kun rommene til påslåtte kilder, så en avslått kilde lot gamle signalrader stå utover kildens oppbevaring.
+   * I drift: eierens tenant i alle rom en kilde kan bo i (`SOURCE_SPACES`), så lenge hovedbryteren er på. Ingen lesing, ingen levering - kun opprydding, og kun når kill switch ikke er aktiv.
+   */
+  retentionTargets?: readonly SignalTarget[];
   identityFor: (tenantId: string, memorySpace: MemorySpace) => IdentityContext;
   guard: SignalRunnerGuard;
   intervalMs: number;
@@ -105,6 +113,8 @@ export interface SignalTickResult {
   /** Kilder som ikke ble lest fordi alle abonnementsdomenene (eller hele motoren) er pauset. */
   sources_skipped_paused: number;
   source_failures: number;
+  /** Daglige oppryddinger (signallogg, signalsituasjoner) som feilet i dette tikket. Telles og vises i `errors` (`purge:<kode>`/`retention:<kode>`, aldri innhold); oppryddingen prøves igjen etter en time. */
+  retention_failures: number;
   /** Ikke-fatale kildeadvarsler (korte koder, maks 20): ukjent/feilende entitet, avkortet entitetsliste. En kildefeil er `errors`; en advarsel er at noe stille ikke virker. */
   warnings: string[];
   delivered: number;
@@ -114,7 +124,11 @@ export interface SignalTickResult {
 
 const codeOf = (err: unknown): string => {
   const message = (err as Error | null)?.message;
-  return typeof message === "string" && /^[a-z0-9_:.-]{3,60}$/i.test(message) ? message : err instanceof Error && /^[A-Za-z0-9_]{3,60}$/.test(err.name) ? err.name : "signal_runner_error";
+  if (typeof message === "string" && /^[a-z0-9_:.-]{3,60}$/i.test(message)) return message;
+  // Databasefeil: SQLSTATE-koden (f.eks. `pg_23503`) er en kort kode uten innhold og sier mer enn feilklassens navn («error»).
+  const sqlState = (err as { code?: unknown } | null)?.code;
+  if (typeof sqlState === "string" && /^[0-9A-Z]{5}$/.test(sqlState)) return `pg_${sqlState}`;
+  return err instanceof Error && /^[A-Za-z0-9_]{3,60}$/.test(err.name) ? err.name : "signal_runner_error";
 };
 
 export class SituationSignalRunner {
@@ -180,7 +194,7 @@ export class SituationSignalRunner {
   }
 
   async tick(): Promise<SignalTickResult> {
-    const result: SignalTickResult = { status: "ok", tick: 0, spaces: 0, bus: emptyBatchResult(), sources_read: 0, sources_skipped_paused: 0, source_failures: 0, warnings: [], delivered: 0, auto_act_attempted: 0, errors: [] };
+    const result: SignalTickResult = { status: "ok", tick: 0, spaces: 0, bus: emptyBatchResult(), sources_read: 0, sources_skipped_paused: 0, source_failures: 0, retention_failures: 0, warnings: [], delivered: 0, auto_act_attempted: 0, errors: [] };
     if (this.running) {
       result.status = "blocked";
       result.reason = "tick_in_progress";
@@ -212,7 +226,7 @@ export class SituationSignalRunner {
           const subs = await this.deps.subscriptions(tenantId, space);
           if (subs.length === 0) {
             // Ingen påslåtte abonnementer: ingen lesing og ingen levering (eieren har slått alt av), men oppryddingen kjøres uavhengig (en 90 dager gammel loggrad skal ikke bli stående).
-            await this.maybePurge(tenantId, space);
+            await this.maybePurge(tenantId, space, result);
             continue;
           }
           result.spaces += 1;
@@ -267,11 +281,23 @@ export class SituationSignalRunner {
           } catch (err) {
             if (result.errors.length < 20) result.errors.push(`auto_act:${codeOf(err)}`);
           }
-          await this.maybePurge(tenantId, space);
+          await this.maybePurge(tenantId, space, result);
         } catch (err) {
           result.source_failures += 1;
           if (result.errors.length < 20) result.errors.push(`target:${codeOf(err)}`);
           console.error(JSON.stringify({ msg: "situation_signal_target_failed", tenant_id: tenantId, memory_space_id: space, code: codeOf(err) }));
+        }
+      }
+      // D-LOW-3 (delta-review B): opprydding for rom uten påslått kilde (oppryddingen har sin egen døgnvakt per (tenant, rom), så et rom som allerede er ryddet i dette tikket berøres ikke på nytt).
+      if (result.status === "ok") {
+        for (const target of this.deps.retentionTargets ?? []) {
+          const stop = await this.blockedReason();
+          if (stop !== null) {
+            result.status = "blocked";
+            result.reason = stop;
+            break;
+          }
+          await this.maybePurge(target.tenant_id, target.memory_space, result);
         }
       }
       // Fase 2 (A-MEDIUM-2): modellvurdering ETTER at alt deterministisk er evaluert og levert for alle mål.
@@ -310,15 +336,26 @@ export class SituationSignalRunner {
     }
   }
 
-  private async maybePurge(tenantId: string, space: MemorySpace): Promise<void> {
+  /**
+   * Daglig opprydding for ett (tenant, rom): signalloggen og signalsituasjonene. Feil er ALDRI stille (D-MEDIUM-1, delta-review B): hver feil telles i `result.retention_failures`, vises som `purge:<kode>`/`retention:<kode>` i `result.errors`
+   * og logges med kode (aldri innhold); en feil i det ene rommet stopper aldri de andre (hvert rom har sin egen try/catch), og et feilet rom prøves igjen etter en time i stedet for først neste døgn.
+   */
+  private async maybePurge(tenantId: string, space: MemorySpace, result: SignalTickResult): Promise<void> {
     const key = `${tenantId}|${space}`;
     const nowMs = this.now();
     if (nowMs - (this.lastPurge.get(key) ?? 0) < DAY_MS) return;
-    this.lastPurge.set(key, nowMs);
+    let failed = false;
+    const fail = (stage: "purge" | "retention", msg: string, err: unknown): void => {
+      failed = true;
+      result.retention_failures += 1;
+      if (result.errors.length < 20) result.errors.push(`${stage}:${codeOf(err)}`);
+      const cause = (err as { cause?: unknown } | null)?.cause;
+      console.error(JSON.stringify({ msg, tenant_id: tenantId, memory_space_id: space, code: codeOf(err), ...(cause !== undefined ? { cause: codeOf(cause) } : {}) }));
+    };
     try {
       await new SignalLogService(this.deps.pool).purge(tenantId, space, this.deps.logRetentionDays, nowMs);
     } catch (err) {
-      console.error(JSON.stringify({ msg: "situation_signal_purge_failed", tenant_id: tenantId, memory_space_id: space, code: codeOf(err) }));
+      fail("purge", "situation_signal_purge_failed", err);
     }
     // A-MEDIUM-4/B-MEDIUM-3: signalsituasjonene (kamera/helse/hjem) får samme oppryddingsrytme: gamle åpne løses, og alt eldre enn kildedataenes oppbevaring slettes (kaskade til logg, vurderinger og tilbakemeldinger).
     try {
@@ -339,8 +376,10 @@ export class SituationSignalRunner {
         ...(this.deps.resolveAfterHours !== undefined ? { resolveAfterHours: this.deps.resolveAfterHours } : {})
       });
     } catch (err) {
-      console.error(JSON.stringify({ msg: "situation_signal_retention_failed", tenant_id: tenantId, memory_space_id: space, code: codeOf(err) }));
+      fail("retention", "situation_signal_retention_failed", err);
     }
+    // Vellykket: neste forsøk om et døgn. Feilet: om en time (feilen er synlig i tikkresultatet, og en forbigående feil venter ikke et helt døgn).
+    this.lastPurge.set(key, failed ? nowMs - DAY_MS + PURGE_RETRY_AFTER_FAILURE_MS : nowMs);
   }
 
   status(): { running: boolean; tick: number; last: SignalTickResult | null } {
