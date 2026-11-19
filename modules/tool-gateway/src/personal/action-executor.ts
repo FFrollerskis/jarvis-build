@@ -82,38 +82,31 @@ function classify(result: { ok: true } | { ok: false; reason: string }, ledger: 
   return { status: "failed", outcome: "FAILED" };
 }
 
-/** Nøkkelen (tekst) for advisory-låsen per (tenant, domene, mål): to motstridende kommandoer mot SAMME mål serialiseres (fiks-runde review A LOW-10/11). */
-export const personalTargetLockKey = (tenantId: string, domain: string, target: string): string => `personal-action:${tenantId}:${domain}:${target}`;
-
-interface TargetLock { release(): Promise<void> }
+/**
+ * Nøkkelen for målets lås: (domene, mål) UTEN tenant (fiks-runde 2, review A NY-3). Home Assistant og bil er GLOBALE fysiske enheter per API-instans, så to tenanter som styrer SAMME lås (eller samme bil) må serialiseres - en lås per
+ * tenant ville latt `lock` fra den ene og `unlock` fra den andre nå utstyret samtidig. (Journalen og ledgeren forblir tenant-skopet: de er per-tenant bevis, ikke en lås.)
+ */
+export const personalTargetLockKey = (domain: string, target: string): string => `personal-action:${domain}:${target}`;
 
 /**
- * Prøver å ta advisory-låsen for målet (`pg_try_advisory_lock`, sesjonsnivå på en egen pool-forbindelse som holdes mens handlingen kjører). `null` = en annen handling mot SAMME mål kjører allerede (aldri to samtidige,
- * motstridende kommandoer: `lock` og `unlock` mot samme lås ville begge nådd Home Assistant og hver «verifisert» sin egen lesing). Slippes alltid; en forbindelse som ikke kan låses opp destrueres (da faller låsen med den).
+ * Målets lås er PROSESS-LOKAL og holder INGEN databaseforbindelse (fiks-runde 2, review A NY-1 HIGH). Forrige versjon tok en `pg_try_advisory_lock` på en egen forbindelse fra den DELTE poolen (max 10, ingen timeout) og holdt den HELE
+ * handlingen, mens journal/ledger/revisjon/varsel trengte flere forbindelser fra samme pool: N samtidige handlinger mot ulike mål = dødlås (idle 0, waiting N), og kommandoer som allerede var sendt til HA sto fast uten ferdigstilling
+ * og uten eier-varsel til prosessen ble startet på nytt. En lås som ikke holder noen ressurs mens den venter KAN IKKE dødlåse: `holdTarget` er ikke-blokkerende (opptatt = avvist umiddelbart, FØR noe sendes), holder kun en rad i et `Set`
+ * (ingen forbindelse, ingen kø), og slippes alltid (`finally`) - også når handlingen kaster. Etter at kommandoen er sendt trenger journal/ledger/varsel derfor aldri å vente på handlingens egne låser.
+ *
+ * Begrensning (ærlig, `DEFERRED`): låsen gjelder innen ÉN API-prosess - slik systemet kjøres (de kritiske handlingene registreres kun i API-prosessen). Kjørte flere API-instanser mot samme utstyr, trengtes en delt lås (egen liten lås-pool med
+ * tidsavbrudd, eller en lease via journalen); journalens idempotensnøkkel og gatewayens ledger hindrer uansett at SAMME forespørsel utføres to ganger.
  */
-async function acquireTargetLock(pool: pg.Pool, key: string): Promise<TargetLock | null> {
-  const client = await pool.connect();
-  try {
-    const { rows } = await client.query(`SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS acquired`, [key]);
-    if ((rows[0] as { acquired?: boolean } | undefined)?.acquired !== true) {
-      client.release();
-      return null;
-    }
-  } catch (err) {
-    client.release(true);
-    throw err;
-  }
-  return {
-    release: async () => {
-      try {
-        await client.query(`SELECT pg_advisory_unlock(hashtextextended($1, 0))`, [key]);
-        client.release();
-      } catch {
-        client.release(true);
-      }
-    }
-  };
+const heldTargets = new Set<string>();
+
+function holdTarget(key: string): (() => void) | null {
+  if (heldTargets.has(key)) return null;
+  heldTargets.add(key);
+  return () => { heldTargets.delete(key); };
 }
+
+/** Antall mål som akkurat nå har en handling i flukt i denne prosessen (diagnostikk og tester: etter en ferdig/feilet handling skal det ikke ligge igjen noen lås). */
+export const personalTargetLocksHeld = (): number => heldTargets.size;
 
 export async function executePersonalAction(deps: PersonalActionExecutorDeps, identity: IdentityContext, input: ExecutePersonalActionInput): Promise<ExecutePersonalActionResult> {
   const entry = deps.index.get(`${String(input.domain)}.${String(input.action)}`);
@@ -122,12 +115,12 @@ export async function executePersonalAction(deps: PersonalActionExecutorDeps, id
   if (typeof input.idempotency_key !== "string" || !KEY.test(input.idempotency_key)) throw new Error("personal_action_idempotency_key_invalid");
   const target = String(input.parameters[entry.op.targetParam] ?? "").slice(0, 200);
   if (target.length === 0) throw new Error("personal_action_target_missing");
-  const lock = await acquireTargetLock(deps.pool, personalTargetLockKey(identity.tenant_id, entry.domain, target));
-  if (lock === null) throw new Error("personal_action_target_busy");
+  const release = holdTarget(personalTargetLockKey(entry.domain, target));
+  if (release === null) throw new Error("personal_action_target_busy");
   try {
     return await executeLocked(deps, identity, input, entry, target);
   } finally {
-    await lock.release();
+    release();
   }
 }
 

@@ -289,7 +289,7 @@ async function handleActionRoute(ctx: PersonalRouteContext, actions: PersonalAct
     } catch (err) {
       // Kun VÅRE egne, bevisste feilkoder vises til eieren; alt annet logges og blir generisk.
       const reason = err instanceof Error ? err.message : "";
-      // `personal_action_target_busy` = en annen handling mot SAMME mål kjører (advisory-lås): 409, forsøk igjen når den er ferdig.
+      // `personal_action_target_busy` = en annen handling mot SAMME mål er i flukt (målets prosess-lokale lås): 409 «ikke utført, prøv igjen» - ingenting er sendt.
       if (/^personal_action_[a-z_]+(?::|$)/.test(reason)) ctx.json(reason === "personal_action_target_busy" ? 409 : 400, { error: "personal_action_rejected", reason: reason.slice(0, 80), request_id: ctx.requestId() });
       else ctx.domainFailure(400, "personal_action_rejected", err);
     }

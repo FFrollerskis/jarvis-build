@@ -3,7 +3,7 @@ import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import {
   HOME_CRITICAL_OPS, HomeAssistantCriticalTransport, PersonalActionJournal, ToolGateway, actionRequestDigest, executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions,
-  personalActionIndex, personalTargetLockKey, type ClassDNotification, type PersonalActionExecutorDeps, type SecretProvider
+  personalActionIndex, type ClassDNotification, type PersonalActionExecutorDeps, type SecretProvider
 } from "../src/index.ts";
 import { FakeHomeAssistant } from "./support/fake-home-assistant.ts";
 import { G2_TENANT, g2Owner, personalGateway, startPersonalDb, type PersonalDb } from "./support/personal-db-harness.ts";
@@ -14,7 +14,7 @@ import { G2_TENANT, g2Owner, personalGateway, startPersonalDb, type PersonalDb }
  *  - LOW-5: en samtidig forespørsel med samme nøkkel (taperen) gir det lagrede utfallet - aldri et databaseunntak, og skriver aldri en for tidlig `outcome_unknown` over en rad som snart blir `applied`.
  *  - LOW-6: journalens proveniens (task_id/session_id/trace_id/created_at, og completed_at etter terminal status) er uforanderlig.
  *  - LOW-8: et varsel som feiler ETTER handlingen lagres (`notified=false` + `notify_error`) - også for MISMATCH/UKJENT, der resultatet ikke bærer varslingsstatus.
- *  - LOW-10/11: to handlinger mot SAMME mål serialiseres (advisory-lås per (tenant, domene, mål)): den andre får `personal_action_target_busy` uten å røre utstyret.
+ *  - LOW-10/11: to handlinger mot SAMME mål serialiseres (prosess-lokal lås per (domene, mål), fiks-runde 2: ingen databaseforbindelse holdes): den andre får `personal_action_target_busy` uten å røre utstyret.
  * Hver test feller den gamle koden (se mutasjonsbeviset i rapporten).
  */
 let db: PersonalDb;
@@ -165,7 +165,7 @@ describe("B: samtidig dobbeltsending med samme nøkkel (LOW-5)", () => {
       const k = key(`b5${i}`);
       const settled = await Promise.allSettled([executePersonalAction(h.executor, owner, input(k)), executePersonalAction(h.executor, owner, input(k))]);
       for (const s of settled) {
-        // taperen får enten det lagrede utfallet eller `personal_action_target_busy` (advisory-låsen) - men aldri et databaseunntak
+        // taperen får enten det lagrede utfallet eller `personal_action_target_busy` (målets lås) - men aldri et databaseunntak
         if (s.status === "rejected") expect(String(s.reason)).toMatch(/personal_action_target_busy/);
       }
       expect(ha.serviceCalls().length).toBe(1);
@@ -236,10 +236,16 @@ describe("D: varsling som feiler ETTER handlingen lagres (LOW-8)", () => {
 });
 
 describe("E: to handlinger mot samme mål serialiseres (LOW-10/11)", () => {
+  /** En ANNEN handling mot målet er i flukt (gatewaykallet holdes til `release()`): målets lås holdes. (Selve låsen er bevist mot ekte HA og en pool med 4 forbindelser i `wpg2-fix2-executor-locks.test.ts`.) */
   async function holdLock(target: string): Promise<{ release(): Promise<void> }> {
-    const c = await db.appPool.connect();
-    await c.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [personalTargetLockKey(G2_TENANT, "home", target)]);
-    return { release: async () => { await c.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [personalTargetLockKey(G2_TENANT, "home", target)]); c.release(); } };
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => { open = resolve; });
+    let entered!: () => void;
+    const reached = new Promise<void>((resolve) => { entered = resolve; });
+    const holder: PersonalActionExecutorDeps = { ...standard().executor, gateway: { get: () => ({}) as never, execute: async () => { entered(); await gate; return { ok: false, reason: "tool_failed:test_hold" }; } } as never };
+    const run = executePersonalAction(holder, owner, input(key("hold"), { entity: target, locked: true } as Record<string, JsonValue>)).catch(() => undefined);
+    await reached;
+    return { release: async () => { open(); await run; } };
   }
 
   it("mens en annen handling holder målets lås: `personal_action_target_busy`, ingen HA-forespørsel og INGEN journalrad - så går den samme nøkkelen gjennom når låsen er sluppet", async () => {

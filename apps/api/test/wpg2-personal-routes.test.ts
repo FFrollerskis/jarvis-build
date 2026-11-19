@@ -107,6 +107,7 @@ function harness(opts: {
     calls.push("run");
     if (input.action === "boom") throw new Error("personal_action_idempotency_conflict");
     if (input.action === "crash") throw new Error("noe uventet med hemmelighet-123");
+    if (input.action === "busy") throw new Error("personal_action_target_busy");
     return { action: { action_id: "a1" } as never, outcome: "SUCCESS", reason: null, replayed: false };
   });
   const gatewayExecute = vi.fn(async () => { calls.push("gateway.execute"); return opts.readResult ?? { ok: true, output_trust: "untrusted", data: { entity_id: "lock.a", state: "locked", settled: true, usable: true } }; });
@@ -180,6 +181,16 @@ describe("B: /personal/actions/mutate - rekkefølge og porter (funksjonelt, med 
     await handlePersonalRoute(other.ctx);
     expect(other.responses).toEqual([{ status: 400, body: { error: "personal_action_rejected", generic: true } }]);
     expect(JSON.stringify(other.responses)).not.toContain("hemmelighet-123");
+  });
+
+  it("et opptatt mål (en annen handling mot SAMME mål er i flukt) gir 409 med den faste koden `personal_action_target_busy` - ikke et generisk 400 eller en feiltekst: «ikke utført, prøv igjen» (fiks-runde 2, review A NY-2)", async () => {
+    const busy = harness({ path: "/personal/actions/mutate", body: { ...body, action: "busy" } });
+    await handlePersonalRoute(busy.ctx);
+    expect(busy.responses).toEqual([{ status: 409, body: { error: "personal_action_rejected", reason: "personal_action_target_busy", request_id: "req-1" } }]);
+    // Andre egne koder forblir 400 (kun «opptatt» er et forsøk-igjen-svar).
+    const conflict = harness({ path: "/personal/actions/mutate", body: { ...body, action: "boom" } });
+    await handlePersonalRoute(conflict.ctx);
+    expect(conflict.responses[0]?.status).toBe(400);
   });
 
   it("ruter uten `deps.actions` håndteres ikke (false -> 404 hos kalleren), og ikke-POST/andre stier likeså", async () => {
