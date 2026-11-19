@@ -31,7 +31,8 @@ export interface SituationSignalsWiringDeps {
   incidents: { listIncidents(tenantId: string, memorySpace: MemorySpace, status: "all"): Promise<Array<{ incident_id: string; title: string; status: string; severity: string; opened_at: string | Date }>> };
   vision: { getRecentEvents(tenantId: string, memorySpace: MemorySpace, personId: string, filter: { sinceMs?: number }): Promise<Array<{
     observation_id: string; event_type: string; source_instance_id: string; source_event_id: string; observed_at: string | Date; object_label: string | null; classification_status: string }>> };
-  health: { getRecentMetrics(tenantId: string, personId: string, metricType: HealthSignalMetric, sinceMs?: number): Promise<Array<{ value: number; observed_at: string | Date }>> };
+  /** `value` er `unknown`: `health_metric_observations.value` er `numeric`, og node-postgres leverer det som STRENG (se `num()`). */
+  health: { getRecentMetrics(tenantId: string, personId: string, metricType: HealthSignalMetric, sinceMs?: number): Promise<Array<{ value: unknown; observed_at: string | Date }>> };
   /** HA-transporten (den samme som `home-assistant`-verktøyene bruker) for den nye lese-handlingen. */
   haTransport: ToolTransport;
   killSwitch: { isActiveDurable(): Promise<boolean> };
@@ -56,15 +57,29 @@ const iso = (value: string | Date): string | null => {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 };
 
+/**
+ * B-HIGH-2 (fiks-runde): `health_metric_observations.value` er `numeric`, og node-postgres leverer `numeric` som STRENG (ingen type-parser). `Number.isFinite("95")` er false, så ALLE rader ble droppet (tom serie, ingen signal, ingen feil).
+ * Tall og tallstrenger (`-?\d+(\.\d+)?`) godtas; alt annet (NaN, uendelig, tom/tekst, objekt) er ugyldig og hoppes over. Samme regel som G2s `num()` i personal-family-readers.
+ */
+export function num(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value.trim())) {
+    const n = Number(value.trim());
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 /** Aggregerer rå prøver til ÉN verdi per UTC-døgn (gjennomsnitt for hvilepuls, sum for søvn og skritt). De rå verdiene forlater aldri denne funksjonen. */
-export function aggregateDaily(metric: HealthSignalMetric, rows: ReadonlyArray<{ value: number; observed_at: string | Date }>): DailyPoint[] {
+export function aggregateDaily(metric: HealthSignalMetric, rows: ReadonlyArray<{ value: unknown; observed_at: string | Date }>): DailyPoint[] {
   const days = new Map<string, { sum: number; n: number }>();
   for (const row of rows) {
     const at = iso(row.observed_at);
-    if (at === null || !Number.isFinite(row.value)) continue;
+    const value = num(row.value);
+    if (at === null || value === null) continue;
     const day = at.slice(0, 10);
     const cur = days.get(day) ?? { sum: 0, n: 0 };
-    cur.sum += row.value;
+    cur.sum += value;
     cur.n += 1;
     days.set(day, cur);
   }
