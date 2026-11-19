@@ -201,6 +201,15 @@ export class VisionSnapshotService {
     });
   }
 
+  /**
+   * Rydder skriveresten adapteren kan etterlate når en `put` krasjer midt i (uten rad og uten gravstein: ingen annen mekanisme finner dem). Adapteren eier kunnskapen om hvordan slike rester ser ut
+   * (`StorageAdapter.purgeStaleTemp`); en adapter uten slike rester gir {0, 0}. Lagringen er ikke tenant-delt (én rotmappe), så dette kalles ÉN gang per full kjøring, ikke per tenant/space.
+   */
+  async purgeStaleTempFiles(olderThanMs: number): Promise<{ removed: number; failed: number }> {
+    if (this.storage.purgeStaleTemp === undefined) return { removed: 0, failed: 0 };
+    return this.storage.purgeStaleTemp(olderThanMs);
+  }
+
   /** Rydder 'pending'-rader som aldri ble fullført (krasj mellom steg 1 og 3). `olderThanMs` er en sikkerhetsmargin mot en skriving som pågår akkurat nå. */
   async reapPending(tenantId: string, memorySpace: MemorySpace, olderThanMs = 10 * 60_000): Promise<number> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {

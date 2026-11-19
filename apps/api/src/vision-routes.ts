@@ -24,6 +24,8 @@ export interface VisionMaintenanceStatus {
   tombstones_deleted: number;
   tombstones_failed: number;
   tombstones_stuck: number;
+  /** Foreldreløse skriverester fjernet av siste kjøring (kun den daglige FULLE kjøringen rydder dem; alltid 0 for lett vedlikehold). */
+  temp_files_purged: number;
 }
 
 /** Eierens helsebilde (review B-L8): poller, vedlikehold og hva som er koblet inn. Ingen vertsnavn, URL-er, tokens eller innhold - kun koder, tall og tidspunkt. */

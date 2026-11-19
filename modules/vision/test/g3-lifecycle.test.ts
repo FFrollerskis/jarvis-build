@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type pg from "pg";
@@ -419,6 +420,52 @@ describe("review B-L11 + B-L8: reaperen tømmer køen, og en gravstein som ikke 
     }
   });
 
+  describe("review delta LOW-D5/D1: markøren er STRENG (`tombstone_id > markør`) - en gravstein som feiler som SISTE rad i en batch forsøkes likevel høyst ÉN gang per kall", () => {
+    const attemptsOf = async (key: string): Promise<number> => (await db.admin.query(`SELECT attempts FROM vision_snapshot_tombstones WHERE storage_key = $1`, [key])).rows[0].attempts as number;
+    const repair = async (...keys: string[]): Promise<void> => {
+      for (const key of keys) await rm(join(root, key), { recursive: true });
+      await snapshots.reapTombstones(T.tenant, "home");
+    };
+
+    it("limit=1: hver batch er ÉN rad, så den feilende er alltid SIST i sin batch - attempts er nøyaktig 1 og kjøringen kommer videre (med `>=` sto den stille og ble forsøkt på nytt hver runde)", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await bulk("d1a-before", 1);
+        const key = await stuckDir("d1a-stuck");
+        await bulk("d1a-after", 2);
+        const result = await snapshots.reapTombstones(T.tenant, "home", { limit: 1, maxBatches: 40 });
+        expect(await attemptsOf(key)).toBe(1); // ikke ett forsøk per batch den står først i
+        expect(result.failed).toBe(1);
+        expect(await remaining("snapshots/bulk/d1a-%")).toBe(0); // radene bak den feilende ble også tømt (fremdrift)
+        expect(result.deleted).toBeGreaterThanOrEqual(3);
+        await repair(key);
+        expect(await remaining(key)).toBe(0);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it("limit=2 med to NABOER som feiler: uansett hvor batch-grensen faller er den ene av dem sist i en batch - begge har attempts = 1 etter ett kall", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const first = await stuckDir("d1b-first");
+        const second = await stuckDir("d1b-second");
+        await bulk("d1b-after", 3);
+        const result = await snapshots.reapTombstones(T.tenant, "home", { limit: 2, maxBatches: 40 });
+        expect([await attemptsOf(first), await attemptsOf(second)]).toEqual([1, 1]);
+        expect(result.failed).toBe(2);
+        expect(await remaining("snapshots/bulk/d1b-after-%")).toBe(0);
+        // Et nytt kall gir nøyaktig ETT nytt forsøk per gravstein (+1, ikke +2)
+        await snapshots.reapTombstones(T.tenant, "home", { limit: 2, maxBatches: 40 });
+        expect([await attemptsOf(first), await attemptsOf(second)]).toEqual([2, 2]);
+        await repair(first, second);
+        expect((await remaining(first)) + (await remaining(second))).toBe(0);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+  });
+
   it("B-L8: en gravstein som har nådd «stuck» (5 mislykkede forsøk) er en SVEIPEFEIL (failed-listen), ikke bare en teller - og feilen forsvinner når lagringen er reparert", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
@@ -433,6 +480,61 @@ describe("review B-L11 + B-L8: reaperen tømmer køen, og en gravstein som ikke 
       expect(second.failed).toEqual([]);
       expect(second.tombstones_stuck).toBe(0);
       expect(await remaining(key)).toBe(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe("review delta B LOW-D4: skriverester (krasj midt i en put) ryddes av den FULLE kjøringen - ikke den lette - og ingenting annet røres", () => {
+  const tmpName = (): string => `snap-orphan.tmp-${randomUUID()}`;
+  const age = async (path: string, hours: number): Promise<void> => {
+    const when = new Date(Date.now() - hours * 3_600_000);
+    await utimes(path, when, when);
+  };
+  const exists = async (path: string): Promise<boolean> => (await lstat(path).catch(() => null)) !== null;
+
+  it("full kjøring fjerner foreldreløse `.tmp-<uuid>` eldre enn 6 timer og teller dem (temp_files_purged); lett kjøring rører dem ikke; fersk temp og et ekte objekt står", async () => {
+    const dir = join(root, "snapshots", "orphan-tmp");
+    await mkdir(dir, { recursive: true });
+    const stale = join(dir, tmpName());
+    const fresh = join(dir, tmpName());
+    const real = join(dir, "snap-real-object");
+    for (const path of [stale, fresh, real]) await writeFile(path, "x");
+    await age(stale, 30);
+    await age(real, 30);
+    try {
+      const light = await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots }, { light: true });
+      expect(light.temp_files_purged).toBe(0);
+      expect(await exists(stale)).toBe(true); // lett kjøring: ikke rørt
+      const full = await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots });
+      expect(full.temp_files_purged).toBe(1);
+      expect(full.failed).toEqual([]);
+      expect(await exists(stale)).toBe(false);
+      expect(await exists(fresh)).toBe(true); // kan være en skriving som pågår
+      expect(await exists(real)).toBe(true); // ekte objekt: aldri rørt, uansett alder
+      expect((await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots })).temp_files_purged).toBe(0); // idempotent
+      // uten lagringstjeneste er det ingenting å rydde (og ingen feil)
+      expect((await runVisionMaintenanceSweepForAllTenants(db.app, {})).temp_files_purged).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rydding som feiler er en SVEIPEFEIL med stabil kode (failed) og velter ikke kjøringen: en adapter som kaster, og en som ikke får slettet enkeltfiler", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const adapter = (purge: () => Promise<{ removed: number; failed: number }>): StorageAdapter => ({
+        backend: "local_fs", put: () => Promise.resolve(), get: () => Promise.resolve(null), exists: () => Promise.resolve(false), delete: () => Promise.resolve({ existed: false }), purgeStaleTemp: purge
+      });
+      const throwing = adapter(() => Promise.reject(Object.assign(new Error("sti /var/secret er ulesbar"), { code: "EACCES" })));
+      const broken = await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots: new VisionSnapshotService(db.app, throwing, vision) });
+      expect(broken.failed).toEqual([{ tenant_id: "*", memory_space_id: "*", error: "temp_purge_failed:eacces" }]); // kun kode - aldri sti eller meldingstekst
+      expect(broken.temp_files_purged).toBe(0);
+      const partial = adapter(() => Promise.resolve({ removed: 2, failed: 3 }));
+      const some = await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots: new VisionSnapshotService(db.app, partial, vision) });
+      expect(some.temp_files_purged).toBe(2);
+      expect(some.failed).toEqual([{ tenant_id: "*", memory_space_id: "*", error: "temp_files_failed:3" }]);
     } finally {
       vi.restoreAllMocks();
     }

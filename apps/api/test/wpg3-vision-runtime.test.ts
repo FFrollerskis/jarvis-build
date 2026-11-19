@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -345,6 +345,20 @@ describe("buildVisionRuntime", () => {
     const ok = join(dir, "vision", "images");
     expect(buildVisionRuntime(stubs({ ...on, JARVIS_VISION_STORAGE_DIR: ok }))).not.toBeNull();
     expect(await readdir(ok)).toEqual([]);
+  });
+
+  it("review delta B LOW-D4: en lagringsmappe skrivetesten oppretter selv er 0700 (kun tjenestebrukeren) - også mellomliggende mapper; en eksisterende mappe (bind-mount, volum) røres ikke", async () => {
+    if (process.platform === "win32") return;
+    const base = await mkdtemp(join(tmpdir(), "jarvis-vision-mode-"));
+    const fresh = join(base, "a", "b");
+    assertStorageDirWritable(fresh);
+    for (const dir of [join(base, "a"), fresh]) expect((await stat(dir)).mode & 0o777, dir).toBe(0o700);
+    const existing = join(base, "existing");
+    await mkdir(existing);
+    await chmod(existing, 0o755);
+    assertStorageDirWritable(existing);
+    expect((await stat(existing)).mode & 0o777, "eierens egen mappe får beholde sine rettigheter").toBe(0o755);
+    expect(await readdir(existing)).toEqual([]); // prøvefilen er borte
   });
 
   it("review B-L4: kjøretiden gir opplastingsruten en egen per-IP-grense (20 per minutt) som er per klient-IP", () => {

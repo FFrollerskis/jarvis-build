@@ -391,6 +391,27 @@ describe("revisjon av eier-handlinger (review B-L3): en rad i audit_events i sam
     expect(removed?.payload).toMatchObject({ snapshots_removed: 2 });
   });
 
+  it("review delta LOW-D5/D7: en fjerning eller endring som gir 404 (ukjent kamera, eller en ANNEN persons kamera) skriver INGEN revisjonsrad - revisjon dokumenterer det som faktisk skjedde", async () => {
+    const count = async (type: string): Promise<number> => ((await db.admin.query(`SELECT count(*)::int AS n FROM audit_events WHERE tenant_id = $1 AND type = $2`, [T.tenant, type])).rows[0] as { n: number }).n;
+    const removedBefore = await count("vision.camera_removed");
+    const updatedBefore = await count("vision.camera_updated");
+    const ghost = "vis-cam-finnes-ikke";
+    const gone = await call("/vision/cameras/remove", "owner-signed", { camera_id: ghost, confirm: true, confirm_camera_id: ghost });
+    expect(gone).toMatchObject({ status: 404, body: { error: "camera_not_found" } });
+    expect(await call("/vision/cameras/update", "owner-signed", { camera_id: ghost, label: "x" })).toMatchObject({ status: 404, body: { error: "camera_not_found" } });
+    // En annen persons kamera i samme tenant/space: tjenesten er person-scopet og gir false/null - og skriver heller ingen rad (selv med audit-flagget satt).
+    const others = await cameras.registerCamera(T.tenant, "home", { person_id: T.other, label: "Annens", source_type: "iphone", source_ref: "iphone-annens-d7", zone_kind: "home", route_policy: "local_only" });
+    const provenance = { task_id: "t-d7", session_id: "s-d7", device_id: "d-d7", audit: true };
+    expect(await cameras.removeCamera(T.tenant, "home", T.owner, others.camera_id, { confirm: true, ...provenance })).toBe(false);
+    expect(await cameras.updateCamera(T.tenant, "home", T.owner, others.camera_id, { label: "y" }, provenance)).toBeNull();
+    expect(await count("vision.camera_removed")).toBe(removedBefore);
+    expect(await count("vision.camera_updated")).toBe(updatedBefore);
+    expect((await cameras.getCamera(T.tenant, "home", T.other, others.camera_id))?.label).toBe("Annens"); // og kameraet er urørt
+    // Kontroll (non-vakuitet): en ekte fjerning av kameraets egen eier skriver NØYAKTIG én rad.
+    expect(await cameras.removeCamera(T.tenant, "home", T.other, others.camera_id, { confirm: true, ...provenance })).toBe(true);
+    expect(await count("vision.camera_removed")).toBe(removedBefore + 1);
+  });
+
   it("samme transaksjon: feiler revisjonsraden, rulles endringen tilbake (ingen kamera uten revisjon)", async () => {
     await db.admin.query(`ALTER TABLE audit_events ADD CONSTRAINT zz_block_vision_register CHECK (type <> 'vision.camera_registered') NOT VALID`);
     try {
@@ -419,6 +440,18 @@ describe("ukjent rom ved kameraregistrering (review B-L5): 400 vision_validation
   });
 });
 
+describe("review delta LOW-D5/D22: bare rom-FK-en er en valideringsfeil", () => {
+  it("et FK-brudd mot en ANNEN fremmednøkkel (personen finnes ikke i tenanten) mappes IKKE til room_not_found: det er en ekte databasefeil som kastes videre", async () => {
+    const attempt = cameras.registerCamera(T.tenant, "home", { person_id: "person-finnes-ikke", label: "Spøkelse", source_type: "iphone", source_ref: "iphone-d22", zone_kind: "home", route_policy: "local_only" });
+    await expect(attempt).rejects.toMatchObject({ code: "23503", constraint: "vision_cameras_person_tenant_fkey" });
+    await attempt.catch((err: unknown) => {
+      expect((err as Error).name).not.toBe("VisionCameraValidationError");
+      expect((err as Error).message).not.toContain("room_not_found");
+    });
+    expect(((await db.admin.query(`SELECT count(*)::int AS n FROM vision_cameras WHERE source_ref = 'iphone-d22'`)).rows[0] as { n: number }).n).toBe(0);
+  });
+});
+
 describe("opplastingsruten (review B-L4 og B-L6)", () => {
   it("egen per-IP-grense FØR kroppen leses: etter grensen gir ruten 429 uten at grantet verifiseres, og øvrige ruter er upåvirket", async () => {
     const verified: string[] = [];
@@ -433,6 +466,26 @@ describe("opplastingsruten (review B-L4 og B-L6)", () => {
     expect((await post(base, "/vision/cameras/list", { grant_token: "owner-signed" })).status).toBe(200);
     // uten en konfigurert grense (andre servere) er ruten uendret
     expect((await post(url, "/vision/capture/upload", bogus)).status).toBe(403);
+  });
+
+  it("review delta LOW-D5/D10: grensen er PER KLIENT (nøkkel = klientadressen), ikke global - klient A som er stoppet påvirker ikke klient B, og hver klient har sin egen tidsskranke", async () => {
+    const base = await listen(makeDeps(true, { uploadLimiter: new RateLimiter(2, 60_000) }));
+    // Serveren lytter på loopback: `clientKey` bruker da SISTE element i x-forwarded-for som klientnøkkel (slik en omvendt proxy foran api-et setter det).
+    const asClient = (ip: string, body: unknown): Promise<Response> =>
+      fetch(`${base}/vision/capture/upload`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": ip }, body: JSON.stringify(body) });
+    const bogus = { grant_token: "bogus", data_base64: "A".repeat(500) };
+    expect((await asClient("203.0.113.10", bogus)).status).toBe(403);
+    expect((await asClient("203.0.113.10", bogus)).status).toBe(403);
+    const blocked = await asClient("203.0.113.10", bogus);
+    expect(blocked.status).toBe(429); // klient A er tom
+    expect(await blocked.json()).toMatchObject({ error: "rate_limited", reason: "upload_rate_limited" });
+    // Klient B (annen adresse) har full kvote: 2 kall slipper gjennom til grant-sjekken (403), først det tredje stoppes.
+    expect((await asClient("203.0.113.11", bogus)).status).toBe(403);
+    expect((await asClient("203.0.113.11", bogus)).status).toBe(403);
+    expect((await asClient("203.0.113.11", bogus)).status).toBe(429);
+    // En klient kan ikke flytte seg ut av grensen ved å legge en annen adresse FORAN sin egen (kun SISTE element teller, som proxyen setter).
+    expect((await asClient("198.51.100.99, 203.0.113.10", bogus)).status).toBe(429);
+    expect((await asClient("203.0.113.10, 203.0.113.12", bogus)).status).toBe(403);
   });
 
   it("et bilde som er STØRRE enn standard JSON-kropp (64 KiB base64) men innenfor maxUploadBytes godtas - det hevede kroppstaket virker; og taket er nøyaktig maxUploadBytes", async () => {
@@ -455,7 +508,7 @@ describe("opplastingsruten (review B-L4 og B-L6)", () => {
 describe("/vision/status (review B-L8): eierens helsebilde - kun lesing, kun eier, kun koder og tall", () => {
   const REPORT: VisionStatusReport = {
     poller: { enabled: true, last_tick_at: "2026-11-18T12:00:00.000Z", last_status: "ok", last_reason: null, last_source_error: "home_assistant_error_503", consecutive_failures: 3, next_delay_ms: 160_000 },
-    maintenance: { light: { at: "2026-11-18T12:05:00.000Z", failed: 1, tombstones_deleted: 4, tombstones_failed: 1, tombstones_stuck: 1 }, full: null },
+    maintenance: { light: { at: "2026-11-18T12:05:00.000Z", failed: 1, tombstones_deleted: 4, tombstones_failed: 1, tombstones_stuck: 1, temp_files_purged: 0 }, full: null },
     storage: { maintenance_enabled: true, writing_enabled: false },
     classifier: true,
     embeddings: false

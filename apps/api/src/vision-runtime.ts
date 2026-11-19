@@ -285,7 +285,8 @@ export interface VisionRuntime {
  */
 export function assertStorageDirWritable(dir: string): void {
   try {
-    mkdirSync(dir, { recursive: true });
+    // Review delta B LOW-D4: en mappe vi oppretter selv er kun for tjenestebrukeren (0700), som mappene adapteren oppretter under den. En eksisterende mappe (bind-mount, volum) røres ikke - eieren eier rettighetene.
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const probe = join(dir, `.write-probe-${process.pid}-${Date.now()}`);
     writeFileSync(probe, "ok", { flag: "wx", mode: 0o600 });
     unlinkSync(probe);
@@ -348,8 +349,12 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   // Review B-L8: siste vedlikeholdsutfall og pollerens helse samles til eierens helsebilde (`/vision/status`).
   const last: { light: VisionMaintenanceStatus | null; full: VisionMaintenanceStatus | null } = { light: null, full: null };
   const toStatus = (summary: Awaited<ReturnType<typeof runVisionMaintenanceSweepForAllTenants>>): VisionMaintenanceStatus => ({
-    at: new Date().toISOString(), failed: summary.failed.length, tombstones_deleted: summary.tombstones_deleted, tombstones_failed: summary.tombstones_failed, tombstones_stuck: summary.tombstones_stuck
+    at: new Date().toISOString(), failed: summary.failed.length, tombstones_deleted: summary.tombstones_deleted, tombstones_failed: summary.tombstones_failed, tombstones_stuck: summary.tombstones_stuck,
+    temp_files_purged: summary.temp_files_purged
   });
+  // Review delta B LOW-D4: aldri to lette vedlikeholdskjøringer samtidig i denne prosessen. En kjøring som varer lenger enn intervallet (stor kø, tregt volum) ellers overlapper neste timer-tikk, og to reapere
+  // sletter da de samme filene (de falske `failed` fra kappløpet er også fjernet i lagringsadapteren, men to reapere gjør uansett dobbelt arbeid og dobbelt støy). Den overlappende tikken hoppes over.
+  let lightRunning = false;
   const status = (): VisionStatusReport => ({
     poller: pollerHandle === null ? { enabled: false } : { enabled: true, ...pollerHandle.status(), consecutive_failures: pollerHandle.health().consecutive_failures, next_delay_ms: pollerHandle.health().next_delay_ms },
     maintenance: { light: last.light, full: last.full },
@@ -367,10 +372,16 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
     pollerHandle,
     status,
     async lightMaintenance(): Promise<void> {
-      const summary = await runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps, { light: true });
-      last.light = toStatus(summary);
-      // Review B-L8: en feil (inkl. «stuck» gravsteiner) skal ikke forsvinne i en teller: den kastes, og main.ts-timeren logger den (`vision_light_maintenance_failed`) i stedet for å late som alt gikk bra.
-      if (summary.failed.length > 0) throw new Error(`vision_maintenance_failed:${summary.failed.length}`);
+      if (lightRunning) return; // en forrige lett kjøring pågår fortsatt: hopp over denne tikken
+      lightRunning = true;
+      try {
+        const summary = await runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps, { light: true });
+        last.light = toStatus(summary);
+        // Review B-L8: en feil (inkl. «stuck» gravsteiner) skal ikke forsvinne i en teller: den kastes, og main.ts-timeren logger den (`vision_light_maintenance_failed`) i stedet for å late som alt gikk bra.
+        if (summary.failed.length > 0) throw new Error(`vision_maintenance_failed:${summary.failed.length}`);
+      } finally {
+        lightRunning = false; // også etter en feil (ellers ville én feilet kjøring stanse alt vedlikehold for alltid)
+      }
     },
     async fullMaintenance() {
       const summary = await runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps);

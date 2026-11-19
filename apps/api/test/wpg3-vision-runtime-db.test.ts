@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -217,6 +218,67 @@ describe("B-L8: vedlikeholdsfeil og stuck gravsteiner synes (kastes, full-kjøri
     down = false;
     await runtime.pollerHandle?.tick();
     expect(runtime.status().poller).toMatchObject({ enabled: true, last_status: "ok", last_source_error: null, consecutive_failures: 0, next_delay_ms: 20_000 });
+    runtime.stop();
+  });
+});
+
+describe("review delta B LOW-D4: lett vedlikehold overlapper aldri seg selv, og full kjøring rapporterer ryddede skriverester", () => {
+  const pause = (ms: number): Promise<"timeout"> => new Promise((resolve) => setTimeout(() => resolve("timeout"), ms));
+
+  it("mens en lett kjøring pågår hoppes en overlappende tikk over (ingen andre reaper, ingen ventende databasekall); vakten slippes etter suksess OG etter en feil, så neste tikk faktisk jobber", async () => {
+    const root = await mkdtemp(join(tmpdir(), "jarvis-vision-g3rt-overlap-"));
+    const runtime = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORAGE_DIR: root })));
+    // En eksklusiv lås på bildetabellen holder den første kjøringen fast i `reapPending` (første spørring mot tabellen) - deterministisk, uten å stole på tidsbruk.
+    const blocker = await db.admin.connect();
+    let first: Promise<void> | null = null;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("LOCK TABLE vision_snapshots IN ACCESS EXCLUSIVE MODE");
+      first = runtime.lightMaintenance();
+      first.catch(() => undefined); // ingen ubehandlet avvisning mens vi venter
+      const waiting = async (): Promise<number> => scalar(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%vision_snapshots%' AND pid <> pg_backend_pid()`);
+      for (let i = 0; i < 100 && (await waiting()) === 0; i += 1) await pause(50);
+      expect(await waiting(), "den første kjøringen står fast på låsen").toBe(1);
+      const second = await Promise.race([runtime.lightMaintenance().then(() => "skipped" as const), pause(1_500)]);
+      expect(second, "den overlappende tikken kom tilbake med en gang (uten vakt ville den også stått fast på låsen)").toBe("skipped");
+      expect(await waiting(), "ingen annen kjøring står og venter på tabellen").toBe(1);
+    } finally {
+      await blocker.query("ROLLBACK");
+      blocker.release();
+    }
+    await first; // den første kjøringen fullfører normalt når låsen slippes
+    // Vakten er sluppet etter suksess: en ny tikk rydder en gravstein for et objekt som ikke finnes (idempotent sletting).
+    await db.admin.query(`INSERT INTO vision_snapshot_tombstones (tenant_id, memory_space_id, storage_backend, storage_key) VALUES ($1, 'home', 'local_fs', 'snapshots/overlap/after-success')`, [T1.tenant]);
+    await runtime.lightMaintenance();
+    expect(await scalar(`SELECT count(*)::int AS n FROM vision_snapshot_tombstones WHERE storage_key = 'snapshots/overlap/after-success'`)).toBe(0);
+    // ... og etter en FEIL: en gravstein som er «stuck» (EISDIR) får lett kjøring til å kaste - og neste tikk kjører likevel (kaster igjen i stedet for å bli hoppet over).
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const key = "snapshots/overlap/stuck-dir";
+    await mkdir(join(root, key), { recursive: true });
+    await db.admin.query(`INSERT INTO vision_snapshot_tombstones (tenant_id, memory_space_id, storage_backend, storage_key, attempts) VALUES ($1, 'home', 'local_fs', $2, 4)`, [T1.tenant, key]);
+    await expect(runtime.lightMaintenance()).rejects.toThrow("vision_maintenance_failed:1");
+    await expect(runtime.lightMaintenance(), "vakten ble sluppet etter feilen: neste tikk kjørte og kastet igjen").rejects.toThrow("vision_maintenance_failed:1");
+    await rm(join(root, key), { recursive: true });
+    await runtime.lightMaintenance();
+    expect(await scalar(`SELECT count(*)::int AS n FROM vision_snapshot_tombstones WHERE storage_key = $1`, [key])).toBe(0);
+    runtime.stop();
+  });
+
+  it("full kjøring rydder en foreldreløs skriverest (eldre enn 6 t) og rapporterer den i status().maintenance.full.temp_files_purged; lett kjøring teller 0", async () => {
+    const root = await mkdtemp(join(tmpdir(), "jarvis-vision-g3rt-tmp-"));
+    const dir = join(root, "snapshots", "aa");
+    await mkdir(dir, { recursive: true });
+    const orphan = join(dir, `snap-1.tmp-${randomUUID()}`);
+    await writeFile(orphan, "halvskrevet");
+    const old = new Date(Date.now() - 10 * 3_600_000);
+    await utimes(orphan, old, old);
+    const runtime = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORAGE_DIR: root })));
+    await runtime.lightMaintenance();
+    expect(runtime.status().maintenance.light).toMatchObject({ temp_files_purged: 0 });
+    expect(await filesIn(root)).toEqual([orphan]); // lett kjøring rører den ikke
+    expect((await runtime.fullMaintenance()).failed).toEqual([]);
+    expect(runtime.status().maintenance.full).toMatchObject({ failed: 0, temp_files_purged: 1 });
+    expect(await filesIn(root)).toEqual([]);
     runtime.stop();
   });
 });

@@ -5,7 +5,7 @@ import type { VisionService } from "./service.ts";
 import type { VisionCaptureService } from "./capture.ts";
 import type { VisionEmbeddingService } from "./embeddings.ts";
 import type { VisionInventoryService } from "./inventory.ts";
-import type { VisionSnapshotService } from "./snapshots.ts";
+import { storageErrorCode, type VisionSnapshotService } from "./snapshots.ts";
 
 /**
  * UA-9 Vision & Physical World (D-153): periodisk retensjons-håndhevelse
@@ -100,6 +100,8 @@ export interface VisionMaintenanceSummary {
   tombstones_deleted: number;
   tombstones_failed: number;
   tombstones_stuck: number;
+  /** Foreldreløse skriverester (`<nøkkel>.tmp-<uuid>`) som den FULLE kjøringen fjernet (review delta B LOW-D4). Alltid 0 i en lett kjøring. */
+  temp_files_purged: number;
   inventory_purged: number;
   captures_expired: number;
   captures_deleted: number;
@@ -107,9 +109,12 @@ export interface VisionMaintenanceSummary {
   failed: VisionRetentionSweepFailure[];
 }
 
+/** En skriverest yngre enn dette kan være en skriving som pågår akkurat nå og røres aldri; eldre er foreldreløs (en `put` tar sekunder). */
+export const STALE_TEMP_FILE_MS = 6 * 3_600_000;
+
 export async function runVisionMaintenanceSweepForAllTenants(pool: pg.Pool, deps: VisionMaintenanceDeps, options: { light?: boolean } = {}): Promise<VisionMaintenanceSummary> {
   const summary: VisionMaintenanceSummary = {
-    spaces: 0, snapshots_purged: 0, pending_reaped: 0, tombstones_deleted: 0, tombstones_failed: 0, tombstones_stuck: 0,
+    spaces: 0, snapshots_purged: 0, pending_reaped: 0, tombstones_deleted: 0, tombstones_failed: 0, tombstones_stuck: 0, temp_files_purged: 0,
     inventory_purged: 0, captures_expired: 0, captures_deleted: 0, vectors_backfilled: 0, failed: []
   };
   const tenantIds = await listAllTenantIds(pool, 200);
@@ -158,6 +163,23 @@ export async function runVisionMaintenanceSweepForAllTenants(pool: pg.Pool, deps
         summary.failed.push(failure);
         console.error(JSON.stringify({ msg: "vision_maintenance_failed", ...failure }));
       }
+    }
+  }
+  // Review delta B LOW-D4: skriverester (krasj midt i en `put`) har verken rad eller gravstein og ryddes derfor av INGEN annen mekanisme. Lagringen er ikke tenant-delt, så dette skjer ÉN gang per FULL kjøring (daglig),
+  // etter tenant-løkka. En feil her er en sveipefeil som alle andre (synlig i `failed`), og velter aldri resten.
+  if (!options.light && deps.snapshots !== undefined) {
+    try {
+      const temp = await deps.snapshots.purgeStaleTempFiles(STALE_TEMP_FILE_MS);
+      summary.temp_files_purged += temp.removed;
+      if (temp.failed > 0) {
+        const failure: VisionRetentionSweepFailure = { tenant_id: "*", memory_space_id: "*", error: `temp_files_failed:${temp.failed}` };
+        summary.failed.push(failure);
+        console.error(JSON.stringify({ msg: "vision_maintenance_failed", ...failure }));
+      }
+    } catch (err) {
+      const failure: VisionRetentionSweepFailure = { tenant_id: "*", memory_space_id: "*", error: `temp_purge_failed:${storageErrorCode(err)}` };
+      summary.failed.push(failure);
+      console.error(JSON.stringify({ msg: "vision_maintenance_failed", ...failure }));
     }
   }
   return summary;
