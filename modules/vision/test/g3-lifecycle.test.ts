@@ -542,4 +542,29 @@ describe("review delta B LOW-D4: skriverester (krasj midt i en put) ryddes av de
       vi.restoreAllMocks();
     }
   });
+
+  it("review delta2 B LOW-E3: en AVKORTET temp-gang er SYNLIG (temp_files_truncated + én logglinje med kode, uten innhold) men er ikke en sveipefeil; en lett kjøring og en fullført gang rører ikke feltet", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const storageReturning = (result: { removed: number; failed: number; truncated?: true }): StorageAdapter => ({
+        backend: "local_fs", put: () => Promise.resolve(), get: () => Promise.resolve(null), exists: () => Promise.resolve(false), delete: () => Promise.resolve({ existed: false }), purgeStaleTemp: () => Promise.resolve(result)
+      });
+      const truncating = new VisionSnapshotService(db.app, storageReturning({ removed: 4, failed: 0, truncated: true }), vision);
+      const full = await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots: truncating });
+      expect(full.temp_files_truncated).toBe(true);
+      expect(full.temp_files_purged).toBe(4);
+      expect(full.failed).toEqual([]); // avkortet = ufullstendig opprydding, ikke en feil (ingen retry-storm)
+      const lines = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("vision_temp_purge_truncated"));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0] as string)).toEqual({ msg: "vision_temp_purge_truncated", code: "temp_purge_truncated", removed: 4 });
+      warn.mockClear();
+      const light = await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots: truncating }, { light: true });
+      expect(light.temp_files_truncated).toBe(false);
+      const complete = new VisionSnapshotService(db.app, storageReturning({ removed: 1, failed: 0 }), vision);
+      expect((await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots: complete })).temp_files_truncated).toBe(false);
+      expect(warn.mock.calls.filter((call) => String(call[0]).includes("vision_temp_purge_truncated"))).toEqual([]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
 });

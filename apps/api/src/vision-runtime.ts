@@ -328,7 +328,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   const last: { light: VisionMaintenanceStatus | null; full: VisionMaintenanceStatus | null } = { light: null, full: null };
   const toStatus = (summary: Awaited<ReturnType<typeof runVisionMaintenanceSweepForAllTenants>>): VisionMaintenanceStatus => ({
     at: new Date().toISOString(), failed: summary.failed.length, tombstones_deleted: summary.tombstones_deleted, tombstones_failed: summary.tombstones_failed, tombstones_stuck: summary.tombstones_stuck,
-    temp_files_purged: summary.temp_files_purged
+    temp_files_purged: summary.temp_files_purged, temp_files_truncated: summary.temp_files_truncated
   });
   // Review delta B LOW-D4: aldri to lette vedlikeholdskjøringer samtidig i denne prosessen. En kjøring som varer lenger enn intervallet (stor kø, tregt volum) ellers overlapper neste timer-tikk, og to reapere
   // sletter da de samme filene (de falske `failed` fra kappløpet er også fjernet i lagringsadapteren, men to reapere gjør uansett dobbelt arbeid og dobbelt støy). Den overlappende tikken hoppes over.

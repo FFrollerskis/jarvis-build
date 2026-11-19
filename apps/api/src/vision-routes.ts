@@ -26,6 +26,8 @@ export interface VisionMaintenanceStatus {
   tombstones_stuck: number;
   /** Foreldreløse skriverester fjernet av siste kjøring (kun den daglige FULLE kjøringen rydder dem; alltid 0 for lett vedlikehold). */
   temp_files_purged: number;
+  /** Review delta2 B LOW-E3: temp-sveipet nådde sin øvre grense for antall oppføringer og ble avbrutt (resten ryddes av en senere kjøring). Aldri stille: også én logglinje. Alltid false for lett vedlikehold. */
+  temp_files_truncated: boolean;
 }
 
 /** Eierens helsebilde (review B-L8): poller, vedlikehold og hva som er koblet inn. Ingen vertsnavn, URL-er, tokens eller innhold - kun koder, tall og tidspunkt. */

@@ -508,7 +508,7 @@ describe("opplastingsruten (review B-L4 og B-L6)", () => {
 describe("/vision/status (review B-L8): eierens helsebilde - kun lesing, kun eier, kun koder og tall", () => {
   const REPORT: VisionStatusReport = {
     poller: { enabled: true, last_tick_at: "2026-11-18T12:00:00.000Z", last_status: "ok", last_reason: null, last_source_error: "home_assistant_error_503", consecutive_failures: 3, next_delay_ms: 160_000 },
-    maintenance: { light: { at: "2026-11-18T12:05:00.000Z", failed: 1, tombstones_deleted: 4, tombstones_failed: 1, tombstones_stuck: 1, temp_files_purged: 0 }, full: null },
+    maintenance: { light: { at: "2026-11-18T12:05:00.000Z", failed: 1, tombstones_deleted: 4, tombstones_failed: 1, tombstones_stuck: 1, temp_files_purged: 0, temp_files_truncated: false }, full: null },
     storage: { maintenance_enabled: true, writing_enabled: false },
     classifier: true,
     embeddings: false

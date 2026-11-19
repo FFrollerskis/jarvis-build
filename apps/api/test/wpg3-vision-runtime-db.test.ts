@@ -274,10 +274,10 @@ describe("review delta B LOW-D4: lett vedlikehold overlapper aldri seg selv, og 
     await utimes(orphan, old, old);
     const runtime = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORAGE_DIR: root })));
     await runtime.lightMaintenance();
-    expect(runtime.status().maintenance.light).toMatchObject({ temp_files_purged: 0 });
+    expect(runtime.status().maintenance.light).toMatchObject({ temp_files_purged: 0, temp_files_truncated: false });
     expect(await filesIn(root)).toEqual([orphan]); // lett kjøring rører den ikke
     expect((await runtime.fullMaintenance()).failed).toEqual([]);
-    expect(runtime.status().maintenance.full).toMatchObject({ failed: 0, temp_files_purged: 1 });
+    expect(runtime.status().maintenance.full).toMatchObject({ failed: 0, temp_files_purged: 1, temp_files_truncated: false });
     expect(await filesIn(root)).toEqual([]);
     runtime.stop();
   });

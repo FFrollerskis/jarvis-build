@@ -102,6 +102,11 @@ export interface VisionMaintenanceSummary {
   tombstones_stuck: number;
   /** Foreldreløse skriverester (`<nøkkel>.tmp-<uuid>`) som den FULLE kjøringen fjernet (review delta B LOW-D4). Alltid 0 i en lett kjøring. */
   temp_files_purged: number;
+  /**
+   * Review delta2 B LOW-E3: temp-sveipet nådde sin øvre grense for antall oppføringer og ble AVBRUTT (resten ryddes av en senere kjøring, eller aldri hvis lagringen er større enn grensen). Ingen sveipefeil
+   * (opprydding pågår og alt som ble besøkt er ryddet), men heller aldri stille: feltet står i `/vision/status` og én logglinje (`vision_temp_purge_truncated`) skrives. Alltid false i en lett kjøring.
+   */
+  temp_files_truncated: boolean;
   inventory_purged: number;
   captures_expired: number;
   captures_deleted: number;
@@ -114,7 +119,7 @@ export const STALE_TEMP_FILE_MS = 6 * 3_600_000;
 
 export async function runVisionMaintenanceSweepForAllTenants(pool: pg.Pool, deps: VisionMaintenanceDeps, options: { light?: boolean } = {}): Promise<VisionMaintenanceSummary> {
   const summary: VisionMaintenanceSummary = {
-    spaces: 0, snapshots_purged: 0, pending_reaped: 0, tombstones_deleted: 0, tombstones_failed: 0, tombstones_stuck: 0, temp_files_purged: 0,
+    spaces: 0, snapshots_purged: 0, pending_reaped: 0, tombstones_deleted: 0, tombstones_failed: 0, tombstones_stuck: 0, temp_files_purged: 0, temp_files_truncated: false,
     inventory_purged: 0, captures_expired: 0, captures_deleted: 0, vectors_backfilled: 0, failed: []
   };
   const tenantIds = await listAllTenantIds(pool, 200);
@@ -171,6 +176,10 @@ export async function runVisionMaintenanceSweepForAllTenants(pool: pg.Pool, deps
     try {
       const temp = await deps.snapshots.purgeStaleTempFiles(STALE_TEMP_FILE_MS);
       summary.temp_files_purged += temp.removed;
+      if (temp.truncated === true) {
+        summary.temp_files_truncated = true;
+        console.warn(JSON.stringify({ msg: "vision_temp_purge_truncated", code: "temp_purge_truncated", removed: temp.removed }));
+      }
       if (temp.failed > 0) {
         const failure: VisionRetentionSweepFailure = { tenant_id: "*", memory_space_id: "*", error: `temp_files_failed:${temp.failed}` };
         summary.failed.push(failure);

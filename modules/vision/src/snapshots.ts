@@ -3,7 +3,7 @@ import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import type { SnapshotMediaType } from "./image.ts";
-import type { StorageAdapter } from "./storage.ts";
+import type { PurgeStaleTempResult, StorageAdapter } from "./storage.ts";
 import type { VisionService } from "./service.ts";
 
 /**
@@ -70,6 +70,9 @@ export class SnapshotQuotaError extends Error {
 /** Standard lagringstak per (tenant, space): 2 GiB. En støyende sensor eller en ondsinnet kilde kan ikke fylle eierens disk (`JARVIS_VISION_MAX_STORED_MB` setter den). */
 export const DEFAULT_MAX_STORED_SNAPSHOT_BYTES = 2 * 1024 * 1024 * 1024;
 
+/** Alle bildenøkler ligger under denne undermappen av lagringsroten (`snapshots/<tenant-hash>/<snapshot_id>`, se `storageKeyFor`). Temp-sveipet går KUN her (review delta2 B LOW-E3). */
+export const SNAPSHOT_KEY_PREFIX = "snapshots";
+
 /** Kort, stabil feilkode for gravsteiner (aldri meldingstekst - den kan inneholde stier). */
 export function storageErrorCode(err: unknown): string {
   const code = (err as { code?: unknown } | null)?.code;
@@ -94,7 +97,7 @@ export class VisionSnapshotService {
 
   /** Nøkkelen bygges av Jarvis (aldri av en kilde eller modell). Tenant-id hashes: ingen tenant-/personnavn i objektstien. */
   static storageKeyFor(tenantId: string, snapshotId: string): string {
-    return `snapshots/${createHash("sha256").update(tenantId).digest("hex").slice(0, 16)}/${snapshotId}`;
+    return `${SNAPSHOT_KEY_PREFIX}/${createHash("sha256").update(tenantId).digest("hex").slice(0, 16)}/${snapshotId}`;
   }
 
   /** Steg 1: 'pending'-rad. Finnes det allerede et bilde for samme kilde-hendelse, gis det tilbake (`existing: true`) - aldri et nytt. */
@@ -204,10 +207,12 @@ export class VisionSnapshotService {
   /**
    * Rydder skriveresten adapteren kan etterlate når en `put` krasjer midt i (uten rad og uten gravstein: ingen annen mekanisme finner dem). Adapteren eier kunnskapen om hvordan slike rester ser ut
    * (`StorageAdapter.purgeStaleTemp`); en adapter uten slike rester gir {0, 0}. Lagringen er ikke tenant-delt (én rotmappe), så dette kalles ÉN gang per full kjøring, ikke per tenant/space.
+   * Review delta2 B LOW-E3: sveipet går KUN `snapshots/` (`SNAPSHOT_KEY_PREFIX`), aldri resten av roten (en fremmed mappe som `lost+found` gir ellers `failed` hver kjøring), og en avkortet gang
+   * (`truncated: true`) gis videre slik at vedlikeholdet kan gjøre den synlig.
    */
-  async purgeStaleTempFiles(olderThanMs: number): Promise<{ removed: number; failed: number }> {
+  async purgeStaleTempFiles(olderThanMs: number): Promise<PurgeStaleTempResult> {
     if (this.storage.purgeStaleTemp === undefined) return { removed: 0, failed: 0 };
-    return this.storage.purgeStaleTemp(olderThanMs);
+    return this.storage.purgeStaleTemp(olderThanMs, { prefix: SNAPSHOT_KEY_PREFIX });
   }
 
   /** Rydder 'pending'-rader som aldri ble fullført (krasj mellom steg 1 og 3). `olderThanMs` er en sikkerhetsmargin mot en skriving som pågår akkurat nå. */

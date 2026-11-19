@@ -27,8 +27,26 @@ export interface StorageAdapter {
   /**
    * Valgfri (review delta B LOW-D4): fjerner halvferdige skriverester som verken en rad eller en gravstein peker på (adapteren vet selv hvordan slike ser ut), eldre enn `olderThanMs`. Et krasj
    * midt i `put` (eller en full disk) etterlater slike rester; uten dette ligger de for alltid. En adapter uten slike rester utelater metoden. Kalles av det daglige vedlikeholdet (sweep.ts), aldri per tenant.
+   * `truncated: true` (kun satt når det skjedde) betyr at sveipet nådde sin øvre grense for antall oppføringer og IKKE fullførte (review delta2 B LOW-E3): resten ryddes ikke før en senere kjøring.
    */
-  purgeStaleTemp?(olderThanMs: number): Promise<{ removed: number; failed: number }>;
+  purgeStaleTemp?(olderThanMs: number, options?: PurgeStaleTempOptions): Promise<PurgeStaleTempResult>;
+}
+
+export interface PurgeStaleTempOptions {
+  /**
+   * Kun denne undermappen av roten ryddes (en nøkkelprefiks som `snapshots`, den eneste Jarvis skriver under). Uten prefiks går sveipet HELE roten - da gir en fremmed, uleselig mappe (typisk `lost+found` når lagringsmappen er
+   * roten til en dedikert disk) `failed` hver kjøring (review delta2 B LOW-E3). Produksjonskallet (`VisionSnapshotService.purgeStaleTempFiles`) oppgir alltid prefikset.
+   */
+  prefix?: string;
+  /** Øvre grense for antall oppføringer sveipet besøker (standard 200 000); nås den, avbrytes sveipet og resultatet har `truncated: true`. Heltall >= 1. */
+  maxEntries?: number;
+}
+
+export interface PurgeStaleTempResult {
+  removed: number;
+  failed: number;
+  /** Kun med verdien `true`, og kun når sveipet nådde `maxEntries` og ble avbrutt (ikke tilstede ellers). */
+  truncated?: true;
 }
 
 /**
@@ -114,13 +132,25 @@ export class LocalFsStorageAdapter implements StorageAdapter {
   /**
    * Fjerner foreldreløse `<nøkkel>.tmp-<uuid>`-filer (skriverester) eldre enn `olderThanMs` (minst ett minutt, aldri en skriving som pågår). Rører KUN vanlige filer med akkurat dette navnemønsteret: aldri et ekte objekt,
    * aldri en symbolsk lenke (følges ikke) og aldri en katalog. En fil som ikke lar seg slette telles som `failed` (kaster ikke; resten ryddes likevel). Rotmappen kan mangle (ingenting er lagret ennå) = ingenting å rydde.
+   * Review delta2 B LOW-E3: med `options.prefix` går sveipet KUN den forventede strukturen (`<rot>/snapshots/<tenant-hash>/<id>`), ikke hele roten - en fremmed mappe i roten (`lost+found` på en dedikert disk, en
+   * sikkerhetskopimappe) leses aldri og gir aldri `failed`. En prefiks-mappe som ikke finnes, eller som er en symbolsk lenke (følges ikke), betyr ingenting å rydde. Når `maxEntries` nås avbrytes sveipet og
+   * resultatet har `truncated: true` (aldri stille avkorting).
    */
-  async purgeStaleTemp(olderThanMs: number): Promise<{ removed: number; failed: number }> {
+  async purgeStaleTemp(olderThanMs: number, options: PurgeStaleTempOptions = {}): Promise<PurgeStaleTempResult> {
     if (!Number.isFinite(olderThanMs) || olderThanMs < MIN_PURGE_AGE_MS) throw new Error("storage_purge_age_invalid");
+    const maxEntries = options.maxEntries ?? MAX_PURGE_ENTRIES;
+    if (!Number.isInteger(maxEntries) || maxEntries < 1) throw new Error("storage_purge_limit_invalid");
+    let start = this.root;
+    if (options.prefix !== undefined) {
+      start = join(this.root, assertSafeStorageKey(options.prefix));
+      const info = await lstat(start).catch((err: NodeJS.ErrnoException) => (err.code === "ENOENT" ? null : Promise.reject(err)));
+      if (info === null || !info.isDirectory()) return { removed: 0, failed: 0 }; // finnes ikke ennå, eller en symlenke/fil som aldri følges
+    }
     const cutoff = Date.now() - olderThanMs;
     let removed = 0;
     let failed = 0;
     let visited = 0;
+    let truncated = false;
     const walk = async (dir: string, depth: number): Promise<void> => {
       let entries: Dirent[];
       try {
@@ -132,7 +162,10 @@ export class LocalFsStorageAdapter implements StorageAdapter {
       }
       for (const entry of entries) {
         visited += 1;
-        if (visited > MAX_PURGE_ENTRIES) return;
+        if (visited > maxEntries) {
+          truncated = true; // grensen er passert og forblir passert: hver løkke over oss avbrytes ved sin neste oppføring
+          return;
+        }
         const path = join(dir, entry.name);
         if (entry.isDirectory()) {
           if (depth < MAX_PURGE_DEPTH) await walk(path, depth + 1);
@@ -150,8 +183,8 @@ export class LocalFsStorageAdapter implements StorageAdapter {
         }
       }
     };
-    await walk(this.root, 0);
-    return { removed, failed };
+    await walk(start, 0);
+    return truncated ? { removed, failed, truncated: true } : { removed, failed };
   }
 
   async get(key: string, maxBytes = 20 * 1024 * 1024): Promise<Uint8Array | null> {
