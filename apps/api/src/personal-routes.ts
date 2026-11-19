@@ -10,8 +10,9 @@ import { handleFinanceRead, type PersonalFinanceDeps } from "./personal-finance-
 
 /**
  * WP-G2 (D-464, UA-8 Personal Twin): HTTP-rutene under `/personal/*`. ALT er dormant: `deps.personal` finnes KUN når minst ett `JARVIS_PERSONAL_*`-flagg er på (se `personal-wiring.ts`), og hver rutefamilie finnes kun med sitt eget flagg
- * - uten dem er `/personal/*` en vanlig 404, identisk med main. Rutene omgår ingenting: eier-kun (`requireOwner`), enhetssignert økt for alt som endrer noe (`stepUpDenial`), og utførelsen går UTELUKKENDE via
- * `ToolGateway.execute()`/domenetjenestene (policy, mål-allowlist, step-up, klasse D-kjeden, journal). Identitet/tenant/memory space kommer fra det verifiserte grantet (`authed`), aldri fra kroppen.
+ * - uten dem er `/personal/*` en vanlig 404, identisk med main. Rutene omgår ingen vern de selv skal ha: eier-kun (`requireOwner`), enhetssignert økt for alt som endrer noe (`stepUpDenial`), og utførelsen er av TO slag. `/personal/actions/*` går UTELUKKENDE via
+ * `ToolGateway.execute()` (policy, kill switch, credential-revokering, mål-allowlist, step-up, klasse D-kjeden, journal). Familie, helse, økonomi og DAV er RUTER, ikke verktøy: de går via domenetjenestene/klienten UTENOM gatewayen og har derfor sine EGNE vern
+ * (grant-scope, eier-kun, step-up, revisjon, og for DAV en egen stoppvakt: kill switch + tilbakekalte credentials FØR hver utsendelse, se `personal-dav.ts`). Identitet/tenant/memory space kommer fra det verifiserte grantet (`authed`), aldri fra kroppen.
  * Modulen kjenner ikke `server.ts`: hjelpefunksjonene gis inn (`PersonalRouteContext`), slik at server.ts bare trenger ÉN kroklinje.
  */
 export interface PersonalActionDomainDeps {
