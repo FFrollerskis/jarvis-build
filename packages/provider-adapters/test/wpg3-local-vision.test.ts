@@ -174,10 +174,29 @@ describe("LocalOpenAiCompatibleAdapter - bytetak på svaret for visjonsidentitet
 
   it("en deklarert content-length over taket avvises uten å lese kroppen; ugyldig JSON og manglende choices er fortsatt invalid_response (uten too_large)", async () => {
     let cancelled = false;
-    const body = new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(new Uint8Array(1024)); }, cancel() { cancelled = true; } });
+    let pulled = 0;
+    const MAX_PULLS = 16 * 1024; // 16 MiB totalt (1 KiB per pull): strømmen er ALDRI uendelig - en mutant uten tak leser 16 MiB og feiler på assertionene i stedet for å velte testprosessen (OOM)
+    // highWaterMark 0: kroppen leses kun på etterspørsel (en klient som ikke leser, trekker ingenting), og `pulled` teller hva klienten faktisk leste.
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          if (pulled >= MAX_PULLS) {
+            controller.close();
+            return;
+          }
+          pulled += 1;
+          controller.enqueue(new Uint8Array(1024));
+        },
+        cancel() {
+          cancelled = true;
+        }
+      },
+      { highWaterMark: 0 }
+    );
     global.fetch = (async () => new Response(body, { status: 200, headers: { "content-length": String(50 * 1024 * 1024), "content-type": "application/json" } })) as unknown as typeof fetch;
     await expect(vision().complete({ messages: [message(TEXT)] })).rejects.toMatchObject({ kind: "invalid_response", message: "local_vision_response_too_large" });
     expect(cancelled).toBe(true);
+    expect(pulled).toBe(0); // den deklarerte lengden avvises UTEN at en eneste byte av kroppen leses
     global.fetch = (async () => new Response("ikke json", { status: 200 })) as unknown as typeof fetch;
     await expect(vision().complete({ messages: [message(TEXT)] })).rejects.toMatchObject({ kind: "invalid_response", message: "local_vision_invalid_response" });
     global.fetch = (async () => jsonResponse(200, { feil: true })) as unknown as typeof fetch;
