@@ -162,3 +162,67 @@ describe("E: samlings-URL-vernet (LOW-8) - et tastefeil-vern for eierens egen ko
     expect(normalizeCollectionUrl("https://dav.example.com./a/")).toBe("https://dav.example.com/a/"); // sluttpunktum på et vanlig navn normaliseres bort
   });
 });
+
+/**
+ * Fiks-runde 2 (delta-review B, NY-1): `TAG_TOKEN` var fortsatt kvadratisk (`<` + `a` x N uten `>`: 7,7 s på 128 KiB, 29 s på 256 KiB, minutter på 1 MiB) og `<![CDATA[` gjentatt uten lukking i `xmlDecode` tok 11,6 s på 1 MiB. Begge blokkerer
+ * event-loopen synkront (et AbortSignal avbryter ikke en regex). Kun en fiendtlig/kompromittert DAV-vert (eierens allowlist, TLS) kan sende det, men taket på 1 MiB skal da koste millisekunder, ikke minutter.
+ * `G2_REDOS_TAG_BYTES`/`G2_REDOS_CDATA_BYTES` finnes KUN for mutasjonsbeviset mot den gamle koden (en mindre inngang gjør den røde kjøringen kort); standard er 1 MiB for begge.
+ */
+describe("F: parseMultistatus er lineær også på `<` + navn uten `>` og ulukket CDATA (NY-1)", () => {
+  const TAG_BYTES = Number(process.env["G2_REDOS_TAG_BYTES"] ?? 1_048_576);
+  const CDATA_BYTES = Number(process.env["G2_REDOS_CDATA_BYTES"] ?? 1_048_576);
+  const BUDGET_MS = 2_000;
+  const wrap = (inner: string): string => `<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:response><D:href>/a.ics</D:href><D:propstat><D:prop><C:calendar-data>${inner}</C:calendar-data></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>`;
+  const timed = <T>(run: () => T): { value: T; ms: number } => { const started = Date.now(); const value = run(); return { value, ms: Date.now() - started }; };
+
+  it("`<` + `a` x 1 MiB uten `>`: ferdig på under 2 s og gir ingen elementer (originalen: minutter)", () => {
+    const { value, ms } = timed(() => parseMultistatus(`<D:multistatus xmlns:D="DAV:"><${"a".repeat(TAG_BYTES)}`));
+    expect(value).toEqual([]);
+    expect(ms).toBeLessThan(BUDGET_MS);
+  });
+
+  it("samme angrep etter en gyldig respons (fiendtlig hale uten `>`): lineært, og den gyldige responsen leses fortsatt med innholdet", () => {
+    const { value, ms } = timed(() => parseMultistatus(`${wrap("BEGIN:VCALENDAR")}<${"a".repeat(TAG_BYTES)}`));
+    expect(ms).toBeLessThan(BUDGET_MS);
+    expect(value.map((e) => [e.href, e.data, e.status])).toEqual([["/a.ics", "BEGIN:VCALENDAR", 200]]);
+  });
+
+  it("`<![CDATA[` x 1 MiB uten lukking i et element: ferdig på under 2 s (originalen: 11,6 s), teksten beholdes", () => {
+    const { value, ms } = timed(() => parseMultistatus(wrap("<![CDATA[".repeat(Math.floor(CDATA_BYTES / 9)))));
+    expect(ms).toBeLessThan(BUDGET_MS);
+    expect(value[0]?.href).toBe("/a.ics");
+    expect(value[0]?.data?.length).toBeGreaterThan(1_000);
+  });
+
+  it("andre fiendtlige former på 1 MiB er også lineære (og forblir det hvis noen endrer mønstrene): tagger uten navn/lukking, ulukkede åpninger, mange lukkede CDATA-par og `]]>` uten åpning", () => {
+    const n = 1_048_576;
+    const shapes: Record<string, string> = {
+      "<a<a<a...": "<a".repeat(n / 2),
+      "</</</...": "</".repeat(n / 2),
+      "<a b<a b...": "<a b".repeat(n / 4),
+      "<a:a:a:...": `<${"a:".repeat(n / 2)}`,
+      "<a + mellomrom uten >": `<a${" ".repeat(n)}`,
+      "mange ulukkede <D:response>": wrap("x").replace("</D:multistatus>", "") + "<D:response>".repeat(n / 12),
+      "mange ulukkede <D:href>": `<D:response>${"<D:href>".repeat(n / 8)}</D:response>`,
+      "mange lukkede CDATA-par": wrap("<![CDATA[x]]>".repeat(n / 13)),
+      "]]> uten åpning": wrap("]]>".repeat(n / 3))
+    };
+    for (const [name, xml] of Object.entries(shapes)) {
+      const { ms } = timed(() => parseMultistatus(xml));
+      expect(ms, name).toBeLessThan(BUDGET_MS);
+    }
+  });
+
+  it("CDATA-utpakkingen er uendret for små og skjeve inndata (differensialtest mot den gamle regex-implementasjonen): første `]]>` avslutter, ulukket beholdes, flere par, tomt par, entiteter utenfor CDATA dekodes", () => {
+    const oracle = (v: string): string => v.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+      .replace(/&#x([0-9a-fA-F]{1,6});/g, (_m, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16))).replace(/&#(\d{1,7});/g, (_m, dec: string) => String.fromCodePoint(Number(dec))).replace(/&amp;/g, "&");
+    const samples = [
+      "SUMMARY:plain", "<![CDATA[a]]>", "x<![CDATA[a b]]>y<![CDATA[c]]>z", "<![CDATA[]]>", "<![CDATA[a]]>]]>b", "<![CDATA[a", "q<![CDATA[a]]>r<![CDATA[b", "<![CDATA[<![CDATA[n]]>x]]>",
+      "SUMMARY:a &amp; b &lt;c&gt; &#65;&#x42;", "]]><![CDATA[a]]>", "<![CDATA[a]]><![CDATA[b]]>", "<![CDATA[x]]]>y", "<![CDATA[]]]>", "<![CDATA[a]]>b<![CDATA[", "<![CDATA[<![CDATA[<![CDATA[z]]>", "<![CDATA", "<![CDATA[a]]"
+    ];
+    for (const inner of samples) {
+      const [entry] = parseMultistatus(wrap(inner));
+      expect(entry?.data, inner).toBe(oracle(inner.trim()));
+    }
+  });
+});

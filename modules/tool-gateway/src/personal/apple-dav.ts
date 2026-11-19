@@ -352,8 +352,27 @@ export function itemFromResource(kind: DavKind, raw: string, href: string, etag:
 const xmlEscape = (v: string): string => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 /** Gyldig tegn fra en numerisk tegnreferanse (ikke surrogat, ikke utenfor Unicode); ellers tomt (aldri en kastet feil på fiendtlig input). */
 const charRef = (cp: number): string => (Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : "");
+/**
+ * Pakker ut `<![CDATA[...]]>`-seksjoner (første `]]>` etter åpningen avslutter; en ulukket åpning beholdes som den er). `indexOf`-løkke, LINJÆR: den gamle `/<!\[CDATA\[([\s\S]*?)\]\]>/g` lette etter `]]>` til slutten av teksten fra HVER ulukkede åpning,
+ * så `<![CDATA[` gjentatt uten lukking var kvadratisk (11,6 s på 1 MiB, delta-review B NY-1). Uten en lukking etter den første åpningen finnes ingen etter en senere heller, så løkken kan stoppe der.
+ */
+function stripCdata(v: string): string {
+  const OPEN = "<![CDATA[";
+  const CLOSE = "]]>";
+  let out = "";
+  let pos = 0;
+  for (;;) {
+    const open = v.indexOf(OPEN, pos);
+    if (open < 0) break;
+    const close = v.indexOf(CLOSE, open + OPEN.length);
+    if (close < 0) break;
+    out += v.slice(pos, open) + v.slice(open + OPEN.length, close);
+    pos = close + CLOSE.length;
+  }
+  return pos === 0 ? v : out + v.slice(pos);
+}
 /** `&amp;` sist (ellers dekodes `&amp;#xD;` dobbelt). Numeriske tegnreferanser (`&#xD;`, `&#13;`) dekodes - en server som sender `&#xD;&#10;` mellom linjene skal ikke gi `&#xD;`-haler (review B LOW-3). */
-const xmlDecode = (v: string): string => v.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+const xmlDecode = (v: string): string => stripCdata(v).replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'")
   .replace(/&#x([0-9a-fA-F]{1,6});/g, (_m, hex: string) => charRef(Number.parseInt(hex, 16))).replace(/&#(\d{1,7});/g, (_m, dec: string) => charRef(Number(dec))).replace(/&amp;/g, "&");
 
 export function reportBody(kind: DavKind, query: { from?: string; to?: string; text?: string; includeCompleted?: boolean }): string {
@@ -367,8 +386,12 @@ export function reportBody(kind: DavKind, query: { from?: string; to?: string; t
 }
 
 export interface MultistatusEntry { href: string; etag: string | null; data: string | null; status: number }
-/** Linje-token: ett tagg-token (`<tag ...>`, `</tag>`); `[^<>]*` krysser aldri en `<`, så hvert forsøk er begrenset til neste `<` og skanningen er LINJÆR (den gamle `[\s\S]*?`-regexen var kvadratisk: 12,8 s på 1 MiB uten lukking, review B LOW-3). */
-const TAG_TOKEN = /<(\/?)(?:[A-Za-z0-9]+:)?([A-Za-z0-9-]+)[^<>]*>/g;
+/**
+ * Linje-token: ett tagg-token (`<tag ...>`, `</tag>`). `[^<>]*` krysser aldri en `<`, så hvert forsøk er begrenset til neste `<` (den gamle `[\s\S]*?`-regexen var kvadratisk: 12,8 s på 1 MiB uten lukking, review B LOW-3). `(?![A-Za-z0-9-])` etter navnet
+ * hindrer at navnet gir fra seg tegn ett og ett: uten den prøvde motoren HVER kortere navnelengde, og `[^<>]*` skannet resten på nytt for hver (`<` + `a` x N uten `>` var fortsatt kvadratisk: 7,7 s på 128 KiB, minutter på 1 MiB, delta-review B NY-1).
+ * Treffene er identiske: det som følger et kortere navn er ellers `[^<>]*>`, som også følger det fulle navnet.
+ */
+const TAG_TOKEN = /<(\/?)(?:[A-Za-z0-9]+:)?([A-Za-z0-9-]+)(?![A-Za-z0-9-])[^<>]*>/g;
 
 /** Teksten i det FØRSTE elementet med dette lokale navnet (uten navnerom-prefiks), dekodet; `null` hvis det mangler eller ikke er lukket. Lineær i blokkens størrelse. */
 function elementText(block: string, name: string): string | null {
