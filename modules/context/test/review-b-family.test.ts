@@ -16,6 +16,7 @@ import { FamilyService, type FamilyActor, type SharedDataReaders } from "../src/
  *  - LOW-6: to samtidige `grantShare`/`grantDelegation` med samme innhold gir en idempotent retur (vinnerens rad), ikke en rå pg-feil 23505 (-> 500).
  *  - LOW-7: `setItemDone` skriver en revisjonsrad (aldri innholdet).
  *  - fiks-runde 2 (delta-review B INFO): fjerning/forlating forbruker OGSÅ personens åpne innrullingsbilletter i sirkel-tenanten, i samme transaksjon (ellers kunne et tidligere medlem rulle inn en NY enhet med en billett utstedt før fjerningen).
+ *  - fiks-runde 2b (delta-review B NY2-1): rekkefølgen mot en SAMTIDIG innrullering (billett FØRST, så enheter i løkke) - tre deterministiske kappløp (R-A billett, R-B deadlock, R-C device_proof).
  */
 let stop: (() => Promise<void>) | undefined;
 let admin: pg.Pool;
@@ -332,4 +333,100 @@ describe("E: fjerning og forlating forbruker personens åpne innrullingsbillette
       expect(acquired, how).toBe(1);
     }
   });
+});
+
+/**
+ * Delta-review B NY2-1 (adfa8308): fjerning er en SIKKERHETSKONTROLL og må være riktig også mot en SAMTIDIG innrullering. Den forrige rekkefølgen (liste og tilbakekalle enheter FØR billett-UPDATE, én gang) var motsatt av innrulleringens (billett, så enhet):
+ *  - R-A: en billett-innrullering som committer mellom enhetslistingen og billett-UPDATE ga en NY enhet som sto AKTIV hos et fjernet medlem;
+ *  - R-C: det samme via `device_proof` (den autoriserende enheten er låst `FOR UPDATE`, den nye settes inn ucommittet);
+ *  - R-B: innrullering av en EKSISTERENDE enhet med billett ga deadlock (40P01): fjerningen rullet tilbake (500) og medlemmet sto `active` (regresjon fra runde 2).
+ * Nå: billettene FØRST (samme låsrekkefølge som innrulleringen), så list + tilbakekall av enheter i en LØKKE til ingen aktive står igjen. Samtidigheten settes opp DETERMINISTISK (en åpen transaksjon holder radlåsen, og testen venter til fjerningen faktisk står blokkert).
+ */
+describe("F: fjerning mot en SAMTIDIG innrullering - ingen aktiv enhet overlever, ingen deadlock (delta-review B NY2-1)", () => {
+  const rawKey = (): string => generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString();
+  const issueTicket = async (tenant: string, person: string): Promise<string> => enrollmentTicketId((await createEnrollmentTicket(admin, { tenant_id: tenant, person_id: person })).ticket);
+  const isActive = async (deviceId: string): Promise<boolean | undefined> => ((await admin.query(`SELECT revoked_at IS NULL AS active FROM devices WHERE device_id = $1`, [deviceId])).rows[0] as { active: boolean } | undefined)?.active;
+  const memberStatus = async (c: Circle, person: string): Promise<string> => ((await admin.query(`SELECT status FROM family_members WHERE tenant_id = $1 AND person_id = $2`, [c.tenant, person])).rows[0] as { status: string }).status;
+  const outcome = (p: Promise<unknown>): Promise<string> => p.then(() => "ok", (e: unknown) => `ERR:${(e as { code?: string }).code ?? (e as Error).message.slice(0, 120)}`);
+  /** Aldri et hengende test: en deadlock/ventende fjerning gir en tydelig feil i stedet for en timeout i vitest. */
+  const within = <T>(p: Promise<T>, ms: number, what: string): Promise<T> => Promise.race([p, new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(`timeout: ${what}`)), ms))]);
+
+  it("R-A (billett): innrulleringen har konsumert billetten og satt inn en NY enhet, men er ikke committet når fjerningen starter - når fjerningen er ferdig er den nye enheten tilbakekalt (identitetssjekken gir `unknown_device`), medlemmet er `removed`", async () => {
+    const c = await mkFull();
+    const ticket = await issueTicket(c.tenant, c.adult);
+    const deviceId = `dev-race-a-${c.n}`;
+    const redeemer = await admin.connect();
+    try {
+      await redeemer.query("BEGIN");
+      const consumed = await redeemer.query(`UPDATE device_enrollment_tickets SET consumed_at = now(), consumed_device_id = $2 WHERE ticket_id = $1 AND consumed_at IS NULL RETURNING ticket_id`, [ticket, deviceId]);
+      expect(consumed.rowCount).toBe(1); // innrulleringens første steg (billett), så enheten - transaksjonen holdes ÅPEN
+      await redeemer.query(`INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem) VALUES ($1, $2, $3, 'phone', $4)`, [deviceId, c.tenant, c.adult, rawKey()]);
+      const removal = outcome(svc.removeMember(act(c, c.owner), c.adult));
+      await waitBlocked(1); // fjerningen står blokkert på billett-raden som innrulleringen holder
+      await redeemer.query("COMMIT");
+      expect(await within(removal, 20_000, "fjerningen ble ikke ferdig")).toBe("ok");
+    } finally {
+      await redeemer.query("ROLLBACK").catch(() => undefined);
+      redeemer.release();
+    }
+    expect(await memberStatus(c, c.adult)).toBe("removed");
+    expect(await isActive(deviceId), "den nye enheten er tilbakekalt").toBe(false);
+    expect(await authz(c.tenant, c.adult, deviceId)).toEqual({ ok: false, reason: "unknown_device" });
+    expect((await audits(c, "family.member_removed"))[0]).toMatchObject({ devices_revoked: 1 });
+  }, 60_000);
+
+  it("R-B (motsatt låsrekkefølge): innrullering av en EKSISTERENDE enhet med billett (billett, så enhet) mot fjerningen gir ingen deadlock - begge fullfører, fjerningen er ok, medlemmet `removed` og enheten tilbakekalt", async () => {
+    const c = await mkFull();
+    const deviceId = `dev-race-b-${c.n}`;
+    await mkDevice(c.tenant, c.adult, deviceId);
+    const ticket = await issueTicket(c.tenant, c.adult);
+    const redeemer = await admin.connect();
+    let results: [string, string] = ["", ""];
+    try {
+      await redeemer.query("BEGIN");
+      await redeemer.query(`UPDATE device_enrollment_tickets SET consumed_at = now(), consumed_device_id = $2 WHERE ticket_id = $1 AND consumed_at IS NULL`, [ticket, deviceId]);
+      const removal = outcome(svc.removeMember(act(c, c.owner), c.adult));
+      await waitBlocked(1); // fjerningen står blokkert (på billett-raden) - gammel kode har da allerede låst enheten
+      // innrulleringens neste steg: skriv den eksisterende enheten (nøkkelrotasjon). Gammel kode: deadlock mellom enheten (fjerningen) og billetten (innrulleringen).
+      const redeem = redeemer.query(`UPDATE devices SET public_key_pem = $3 WHERE device_id = $1 AND tenant_id = $2`, [deviceId, c.tenant, rawKey()]).then(
+        async () => { await redeemer.query("COMMIT"); return "ok"; },
+        async (e: unknown) => { await redeemer.query("ROLLBACK").catch(() => undefined); return `ERR:${(e as { code?: string }).code ?? "?"}`; }
+      );
+      results = await within(Promise.all([removal, redeem]), 30_000, "deadlock eller hengende fjerning");
+    } finally {
+      await redeemer.query("ROLLBACK").catch(() => undefined);
+      redeemer.release();
+    }
+    expect(results, "fjerning, innrullering").toEqual(["ok", "ok"]);
+    expect(await memberStatus(c, c.adult)).toBe("removed");
+    expect(await isActive(deviceId)).toBe(false);
+    expect(await authz(c.tenant, c.adult, deviceId)).toEqual({ ok: false, reason: "unknown_device" });
+  }, 60_000);
+
+  for (const how of ["removed", "left"] as const) {
+    it(`R-C (device_proof, ${how}): innrulleringen holder den autoriserende enheten (FOR UPDATE) og har satt inn en NY enhet (ucommittet) - den nye enheten er også tilbakekalt når ${how === "removed" ? "fjerningen" : "forlatelsen"} er ferdig`, async () => {
+      const c = await mkFull();
+      const authorizing = `dev-race-c1-${c.n}`;
+      const added = `dev-race-c2-${c.n}`;
+      await mkDevice(c.tenant, c.adult, authorizing);
+      const redeemer = await admin.connect();
+      try {
+        await redeemer.query("BEGIN");
+        await redeemer.query(`SELECT 1 FROM devices WHERE device_id = $1 AND tenant_id = $2 FOR UPDATE`, [authorizing, c.tenant]);
+        await redeemer.query(`INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem) VALUES ($1, $2, $3, 'phone', $4)`, [added, c.tenant, c.adult, rawKey()]);
+        const end = outcome(how === "removed" ? svc.removeMember(act(c, c.owner), c.adult) : svc.leave(act(c, c.adult)));
+        await waitBlocked(1); // står blokkert på den autoriserende enhetens rad
+        await redeemer.query("COMMIT");
+        expect(await within(end, 20_000, "fjerningen ble ikke ferdig")).toBe("ok");
+      } finally {
+        await redeemer.query("ROLLBACK").catch(() => undefined);
+        redeemer.release();
+      }
+      expect(await memberStatus(c, c.adult)).toBe(how);
+      expect(await isActive(authorizing)).toBe(false);
+      expect(await isActive(added), "den NYE enheten er tilbakekalt").toBe(false);
+      expect(await authz(c.tenant, c.adult, added)).toEqual({ ok: false, reason: "unknown_device" });
+      expect((await audits(c, how === "removed" ? "family.member_removed" : "family.member_left"))[0]).toMatchObject({ devices_revoked: 2 });
+    }, 60_000);
+  }
 });

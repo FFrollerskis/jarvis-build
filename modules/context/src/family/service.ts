@@ -314,20 +314,31 @@ export class FamilyService {
     // ALLE delinger og delegasjoner som involverer personen tilbakekalles i samme transaksjon (aldri en dinglende tilgang til et tidligere medlem).
     await client.query(`UPDATE family_shares SET revoked_at = $3, revoked_by_person_id = $4 WHERE tenant_id = $1 AND revoked_at IS NULL AND (subject_person_id = $2 OR viewer_person_id = $2)`, [actor.tenant_id, personId, now, actor.person_id]);
     await client.query(`UPDATE family_delegations SET revoked_at = $3, revoked_by_person_id = $4 WHERE tenant_id = $1 AND revoked_at IS NULL AND (principal_person_id = $2 OR agent_person_id = $2)`, [actor.tenant_id, personId, now, actor.person_id]);
-    // IDENTITETSNIVÅ (review B LOW-5): familieautoriteten alene stenger ikke et medlem ute - identitetsmodellen gir enhver person med medlemskap OG en innrullert enhet tilgang til HVERT rom i tenanten (Q-15), og sirkelen er en
-    // dedikert tenant (kun `shared`). Personens enheter i DENNE tenanten tilbakekalles derfor permanent (samme primitiv som eierens `revokeDevice`: nøkkelen kan ikke autorisere på nytt eller rulles inn igjen her) og utestående
-    // grants med dem. Enheter i personens ANDRE tenanter (egne data) røres ikke: RLS avgrenser `devices` til sirkel-tenanten. Å ta et tidligere medlem inn igjen krever en ny innrulling med en NY enhetsnøkkel.
-    const owned = await client.query(`SELECT device_id FROM devices WHERE tenant_id = $1 AND person_id = $2 AND revoked_at IS NULL ORDER BY device_id`, [actor.tenant_id, personId]);
-    let grantsRevoked = 0;
-    for (const row of owned.rows as Array<{ device_id: string }>) {
-      await this.devices.revokeDeviceKeyOn(client, { tenant_id: actor.tenant_id, device_id: row.device_id }, `family_member_${status}`);
-      grantsRevoked += await this.grants.revokeForDeviceOn(client, actor.tenant_id, row.device_id, this.now().getTime());
-    }
     // UTESTÅENDE innrullingsbilletter (`device_enrollment_tickets`) for personen i sirkel-tenanten forbrukes i samme transaksjon (delta-review B): en billett utstedt FØR fjerningen ville ellers latt det tidligere medlemmet rulle inn en NY enhet
     // med en ny nøkkel og få sirkelen tilbake uten at noen har invitert på nytt. Samme engangs-semantikk som en innrullering (`consumed_at`), men `consumed_device_id` står NULL: ingen enhet ble innrullert. Alle ubrukte billetter lukkes (også en som
     // nettopp har utløpt): et utløpsfilter ville gjort stengingen avhengig av klokkeforskjell mellom tjenesten og databasen. Billetter i personens ANDRE tenanter røres ikke (RLS + tenant_id).
+    // REKKEFØLGEN er sikkerhetskritisk (delta-review B NY2-1): billettene FØRST, siden en innrullering konsumerer billetten FØR den skriver enheten. Tok fjerningen enhetene først (og billetten sist), kunne (R-A) en billett-innrullering som committet
+    // mellom enhetslistingen og billett-UPDATE etterlate en NY, AKTIV enhet hos et fjernet medlem, og (R-B) innrullering av en eksisterende enhet gi deadlock (40P01: motsatt låsrekkefølge) som rullet fjerningen tilbake slik at medlemmet sto `active`. Med billetten først
+    // venter fjerningen på en innrullering som er i gang (og en som kommer etter får ingen gyldig billett: raden er konsumert), og låsrekkefølgen er den samme som innrulleringens (billett, så enhet).
     const tickets = await client.query(`UPDATE device_enrollment_tickets SET consumed_at = $3 WHERE tenant_id = $1 AND person_id = $2 AND consumed_at IS NULL`, [actor.tenant_id, personId, now]);
-    return { devices_revoked: owned.rows.length, grants_revoked: grantsRevoked, tickets_consumed: tickets.rowCount ?? 0 };
+    // IDENTITETSNIVÅ (review B LOW-5): familieautoriteten alene stenger ikke et medlem ute - identitetsmodellen gir enhver person med medlemskap OG en innrullert enhet tilgang til HVERT rom i tenanten (Q-15), og sirkelen er en
+    // dedikert tenant (kun `shared`). Personens enheter i DENNE tenanten tilbakekalles derfor permanent (samme primitiv som eierens `revokeDevice`: nøkkelen kan ikke autorisere på nytt eller rulles inn igjen her) og utestående
+    // grants med dem. Enheter i personens ANDRE tenanter (egne data) røres ikke: RLS avgrenser `devices` til sirkel-tenanten. Å ta et tidligere medlem inn igjen krever en ny innrulling med en NY enhetsnøkkel.
+    // LØKKE til ingen aktive enheter står igjen (delta-review B NY2-1, R-C): en `device_proof`-innrullering holder den autoriserende enhetens radlås (`FOR UPDATE`) mens den setter inn en NY enhet; fjerningen venter på den låsen, og enheten som innrulleringen så committer
+    // fantes ikke i første listing. Listingen gjentas derfor etter hver runde (en ny setning får et nytt øyeblikksbilde i READ COMMITTED) til den er tom. Løkken terminerer: billettene er konsumert, og en enhet kan bare autorisere en ny innrullering så lenge nøkkelen er aktiv - den er låst og
+    // tilbakekalt av oss, så bare innrulleringer som allerede hadde låst en autoriserende enhet FØR vi nådde den kan legge til én til (hver er én kort transaksjon).
+    let devicesRevoked = 0;
+    let grantsRevoked = 0;
+    for (;;) {
+      const owned = await client.query(`SELECT device_id FROM devices WHERE tenant_id = $1 AND person_id = $2 AND revoked_at IS NULL ORDER BY device_id`, [actor.tenant_id, personId]);
+      if (owned.rows.length === 0) break;
+      for (const row of owned.rows as Array<{ device_id: string }>) {
+        await this.devices.revokeDeviceKeyOn(client, { tenant_id: actor.tenant_id, device_id: row.device_id }, `family_member_${status}`);
+        grantsRevoked += await this.grants.revokeForDeviceOn(client, actor.tenant_id, row.device_id, this.now().getTime());
+      }
+      devicesRevoked += owned.rows.length;
+    }
+    return { devices_revoked: devicesRevoked, grants_revoked: grantsRevoked, tickets_consumed: tickets.rowCount ?? 0 };
   }
 
   async removeMember(actor: FamilyActor, personId: string): Promise<void> {
