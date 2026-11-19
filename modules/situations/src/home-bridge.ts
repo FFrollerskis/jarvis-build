@@ -8,8 +8,9 @@ import { assertMinimalFacts, parseIsoMs, ruleFor, type BridgeContext, type Bridg
  * fuktsensor = våt, `triggered` på et alarmpanel) er Home Assistants egne, dokumenterte tilstandsverdier (se runbook for verifiseringsstatus).
  *
  * ACT: broen setter KUN prioritet/konfidens. `suggest` (høy prioritet + konfidens >= 0,75) gis bare for deterministiske sikkerhetssignaler (lekkasje, utløst alarm) og for en lukkbar port/garasjeport som har stått åpen
- * lenge - og ACT skjer først når eieren selv har bundet en autonomi-handling for domenet `home` (`situation_autonomy_policies`) OG den kritiske kjeden (G2: mål-allowlist, step-up, readback) godtar kallet. En autonom
- * sveipe-identitet har ikke en enhetssignert økt, så kritiske HA-handlinger nektes av step-up (Q-55/D-468) og situasjonen blir `escalate` med den ærlige årsaken - fail-closed, aldri en stille omgåelse.
+ * lenge - og ACT skjer først når eieren selv har bundet en autonomi-handling for domenet `home` (`situation_autonomy_policies`). Fysiske/kritiske handlinger (lås, alarm, lys, klima, `critical_*`) kan ALDRI bindes eller utføres
+ * autonomt (`autonomy-guard.ts`, fiks-runde A-HIGH-1): en slik binding avvises ved bind-tid, og en binding fra før regelen hoppes over (situasjonen blir stående `suggest`). I tillegg nekter gatewayen sveipe-identiteten
+ * kritiske HA-handlinger via step-up (Q-55/D-468: ingen enhetssignert økt) hvis noen kaller den direkte - fail-closed, aldri en stille omgåelse.
  */
 export interface HomeObservation {
   source: "home_assistant";

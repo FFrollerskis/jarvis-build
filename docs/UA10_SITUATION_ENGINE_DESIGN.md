@@ -586,6 +586,18 @@ med direkte SQL (M05a/b/e/f), (12) tuning-lås per regel (A-LOW-10), (13) tak/ba
 kalenderdøgn, baseline-vakt og NØYTRAL helsetekst (B-LOW-9, Q-G4-6). Flaggavhengighet: alle nye valg er under
 `JARVIS_SITUATION_*` bortsett fra de strengere stegene i den UFLAGGEDE motorstien som er listet i runbook §15.
 
+**11.10 Delta-runde (to delta-reviews mot f2c70362: A = MERGE, B = MERGE ETTER FIKSER).** Se runbook §18 («Delta-runde») for
+tabell per punkt. Bærende endringer: (1) retensjonen sletter ikke en situasjon en beslutning refererer
+(`decision_log.related_situation_id`; en FK uten kaskade ville ellers rullet tilbake hele sveipet) og kjører sletting
+og løsing i hver sin transaksjon (D-MEDIUM-1); (2) en feilet opprydding er aldri stille (teller, `errors`, logg med
+SQLSTATE-kode, nytt forsøk etter en time) og stopper ikke andre rom; (3) oppryddingen dekker alle kilderom så lenge
+hovedbryteren er på, uavhengig av enkeltkilder (D-LOW-3); (4) person-scope erasure tar signallogg, vurderinger,
+tilbakemeldinger og abonnementer (INFO-9); (5) en ukjent situasjon i simuleringen er 404 (D-LOW-1), og revisjonsraden
+for stille-timer-valget og radene fra HTTP-ruten bærer økt og oppgave (D-LOW-2, regel 4). Ærlige grenser (ikke
+bygget): vakten fra A-HIGH-1 stenger kun `home-assistant`/`car` (andre verktøy kan bindes; runbook §5 punkt 11,
+Q-G4-11); haste-regler dempes aldri (§5 punkt 12); `pause_domain`/binding kan feile med `domain_lock_busy` etter 30 s
+(§5 punkt 13).
+
 ## 9. Oppdateringsplikt
 
 Dette notatet oppdateres FØR — ikke etter — hver ny hendelseskilde (en `business_open_loops`-bro,
