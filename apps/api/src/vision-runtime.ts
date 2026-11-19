@@ -13,6 +13,7 @@ import {
   type VisionModelGateway, type VisionPollerGuard, type VisionPollerHandle, type VisionService
 } from "@jarvis/vision";
 import { RateLimiter } from "./http-guard.ts";
+import { assertDbLimits, limitedPool, runWithDbLimits, type DbLimits } from "./vision-db-limits.ts";
 import { flagOn, visionFlagsFromEnv, type VisionFlags } from "./vision-flags.ts";
 import type { VisionApiDeps, VisionMaintenanceStatus, VisionStatusReport } from "./vision-routes.ts";
 
@@ -46,6 +47,21 @@ export { visionFlagsFromEnv, type VisionFlags } from "./vision-flags.ts";
 
 /** Opplastinger per klient-IP per minutt (review B-L4). */
 export const VISION_UPLOADS_PER_IP_PER_MINUTE = 20;
+
+/**
+ * Vedlikeholdsvakter (review delta2 B LOW-E2). Poolen har ingen `statement_timeout`/`lock_timeout` (og den delte `createPool` røres ikke), så et vedlikeholdskall som aldri returnerer holdt tidligere ALT senere lett
+ * vedlikehold fast til prosessen ble startet på nytt. To lag, begge kun for vedlikehold:
+ *   1. DATABASEGRENSER (`vision-db-limits.ts`): hver vedlikeholdstransaksjon starter med `SET LOCAL statement_timeout/lock_timeout`. En forlatt lås gir `55P03` etter `MAINTENANCE_LOCK_TIMEOUT_MS` i stedet for en evig venting;
+ *      kjøringen feiler synlig (`vision_maintenance_failed`) og vakten slippes.
+ *   2. STARTTID-VAKT for det databasegrenser ikke rekker (en hengt fil-/nettverksoperasjon): en lett kjøring som har gått lenger enn `LIGHT_MAINTENANCE_MAX_RUN_MS` regnes som FORLATT (logget:
+ *      `vision_light_maintenance_overrun`), og en erstatning tillates - høyst `MAX_ABANDONED_LIGHT_RUNS` forlatte kjøringer om gangen (hver kan holde en forbindelse/trådpool-plass), deretter hoppes tikken over.
+ * Hoppede tikk er SYNLIGE: teller + `running_since` i `/vision/status` (`maintenance.light_run`) og en rate-begrenset logglinje (`vision_light_maintenance_skipped`, kode og tall, aldri innhold).
+ */
+export const LIGHT_MAINTENANCE_MAX_RUN_MS = 30 * 60_000;
+export const MAINTENANCE_STATEMENT_TIMEOUT_MS = 5 * 60_000;
+export const MAINTENANCE_LOCK_TIMEOUT_MS = 15_000;
+export const MAX_ABANDONED_LIGHT_RUNS = 2;
+export const SKIP_LOG_INTERVAL_MS = 10 * 60_000;
 
 const LOCAL_SUFFIXES = [".local", ".lan", ".internal", ".home.arpa", ".localdomain"];
 
@@ -238,6 +254,11 @@ export interface VisionRuntimeDeps {
   fetchImpl?: VisionHttpFetch;
   /** Resultatet av `verifyVisionEndpoints` (navneoppløsningen av embedding-endepunktet, kjørt av main.ts ved oppstart). Utelatt = kun den syntaktiske sjekken. */
   embeddingBlockedReason?: string | null;
+  /**
+   * Test-injeksjon for vedlikeholdsvaktene (standard: konstantene `MAINTENANCE_*`/`LIGHT_MAINTENANCE_MAX_RUN_MS`/`SKIP_LOG_INTERVAL_MS`). `now` er en millisekundklokke; `sweep` erstatter selve vedlikeholdssveipet
+   * (slik at en test kan styre nøyaktig når en kjøring fullfører). Ugyldige grenser KASTER ved oppstart.
+   */
+  maintenance?: { maxRunMs?: number; statementTimeoutMs?: number; lockTimeoutMs?: number; skipLogIntervalMs?: number; now?: () => number; sweep?: typeof runVisionMaintenanceSweepForAllTenants };
 }
 
 export interface VisionRuntime {
@@ -283,12 +304,23 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   if (flags.storageDir !== undefined && !flags.storageDir.startsWith("/")) throw new VisionConfigError("storage_dir_not_absolute");
   if (flags.storeSnapshots && flags.storageDir !== undefined) assertStorageDirWritable(flags.storageDir);
 
-  const cameras = new VisionCameraService(deps.pool);
-  const inventory = new VisionInventoryService(deps.pool);
+  // Review delta2 B LOW-E2: ALLE visjonstjenestene bruker en pool som er gjennomsiktig utenfor `runWithDbLimits` og legger `statement_timeout`/`lock_timeout` på hver transaksjon INNE i vedlikeholdskjøringene (se
+  // `vision-db-limits.ts`). Den delte `createPool` og `deps.pool` er uendret. Ugyldige grenser kastes her, ved oppstart, ikke under en kjøring.
+  const maintenanceLimits: DbLimits = { statementTimeoutMs: deps.maintenance?.statementTimeoutMs ?? MAINTENANCE_STATEMENT_TIMEOUT_MS, lockTimeoutMs: deps.maintenance?.lockTimeoutMs ?? MAINTENANCE_LOCK_TIMEOUT_MS };
+  assertDbLimits(maintenanceLimits);
+  const maxRunMs = deps.maintenance?.maxRunMs ?? LIGHT_MAINTENANCE_MAX_RUN_MS;
+  const skipLogIntervalMs = deps.maintenance?.skipLogIntervalMs ?? SKIP_LOG_INTERVAL_MS;
+  if (!Number.isFinite(maxRunMs) || maxRunMs < 1 || !Number.isFinite(skipLogIntervalMs) || skipLogIntervalMs < 0) throw new Error("vision_maintenance_guard_invalid");
+  const clock = deps.maintenance?.now ?? Date.now;
+  const sweep = deps.maintenance?.sweep ?? runVisionMaintenanceSweepForAllTenants;
+  const pool = limitedPool(deps.pool);
+
+  const cameras = new VisionCameraService(pool);
+  const inventory = new VisionInventoryService(pool);
   // Review B-M1: lagringstjenesten bygges så snart STORAGE_DIR er satt - IKKE bare når STORE_SNAPSHOTS er på. Flagget styrer kun SKRIVING (se `storeSnapshots` på pipelinen under); sletting (retensjon, erasure,
   // kamera-fjerning, gravsteiner) MÅ fortsette selv om eieren har slått lagring av, ellers ligger bildefilene igjen for alltid mens radene er slettet.
   const snapshots = flags.storageDir !== undefined
-    ? new VisionSnapshotService(deps.pool, new LocalFsStorageAdapter(flags.storageDir), deps.vision, { maxStoredBytes: envInt("JARVIS_VISION_MAX_STORED_MB", 2048, { min: 16, max: 10_000_000 }, deps.env) * 1024 * 1024 })
+    ? new VisionSnapshotService(pool, new LocalFsStorageAdapter(flags.storageDir), deps.vision, { maxStoredBytes: envInt("JARVIS_VISION_MAX_STORED_MB", 2048, { min: 16, max: 10_000_000 }, deps.env) * 1024 * 1024 })
     : undefined;
   let embeddings: VisionEmbeddingService | undefined;
   // Review A-INFO-4: embedding-endepunktet minnet bruker valideres som privat/lokalt (samme regel som den lokale modellen; navneoppløsningen er allerede kontrollert av `verifyVisionEndpoints` og gitt hit i
@@ -298,7 +330,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
     console.error(JSON.stringify({ msg: "vision_embeddings_disabled", code: embeddingBlocked }));
   } else {
     try {
-      embeddings = new VisionEmbeddingService(deps.pool, deps.memoryEmbedding);
+      embeddings = new VisionEmbeddingService(pool, deps.memoryEmbedding);
     } catch (err) {
       // Kun lokal embedding (fail-closed): en sky-provider gir ingen objektvektorer - «sist sett» faller til eksakte treff.
       console.error(JSON.stringify({ msg: "vision_embeddings_disabled", code: (err as Error).name }));
@@ -306,9 +338,9 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   }
   // Review A-M2: tidsavbruddet fra JARVIS_VISION_MODEL_TIMEOUT_MS går inn i klassifisereren (per kall via gatewayen), ikke bare i adapterens konstruktør.
   const classifier = flags.classifier ? new VisionClassifier({ gateway: deps.gateway, timeoutMs: visionModelTimeoutMs(deps.env) }) : undefined;
-  const pipeline = new VisionIngestPipeline({ pool: deps.pool, vision: deps.vision, classifier, snapshots, embeddings, inventory, enabled: true, storeSnapshots: flags.storeSnapshots && snapshots !== undefined });
-  const capture = new VisionCaptureService(deps.pool, cameras, pipeline, deps.devices);
-  const lastSeen = new VisionLastSeenService(deps.pool, { ...(embeddings !== undefined ? { embeddings } : {}), inventory });
+  const pipeline = new VisionIngestPipeline({ pool, vision: deps.vision, classifier, snapshots, embeddings, inventory, enabled: true, storeSnapshots: flags.storeSnapshots && snapshots !== undefined });
+  const capture = new VisionCaptureService(pool, cameras, pipeline, deps.devices);
+  const lastSeen = new VisionLastSeenService(pool, { ...(embeddings !== undefined ? { embeddings } : {}), inventory });
 
   let poller: VisionPoller | null = null;
   let pollerHandle: VisionPollerHandle | null = null;
@@ -319,7 +351,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
       baseUrl: async () => (await deps.secrets.get("JARVIS_HA_BASE_URL")) ?? null,
       token: async () => (await deps.secrets.get("JARVIS_HA_TOKEN")) ?? null
     });
-    poller = new VisionPoller({ pool: deps.pool, cameras, pipeline, source, guard: createVisionPollerGuard(deps.ownerControls), tenantIds: [deps.ownerTenantId] });
+    poller = new VisionPoller({ pool, cameras, pipeline, source, guard: createVisionPollerGuard(deps.ownerControls), tenantIds: [deps.ownerTenantId] });
     pollerHandle = startVisionPoller(poller, envInt("JARVIS_VISION_POLL_INTERVAL_SECONDS", 20, { min: 5, max: 3600 }, deps.env) * 1000);
   }
 
@@ -332,10 +364,26 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   });
   // Review delta B LOW-D4: aldri to lette vedlikeholdskjøringer samtidig i denne prosessen. En kjøring som varer lenger enn intervallet (stor kø, tregt volum) ellers overlapper neste timer-tikk, og to reapere
   // sletter da de samme filene (de falske `failed` fra kappløpet er også fjernet i lagringsadapteren, men to reapere gjør uansett dobbelt arbeid og dobbelt støy). Den overlappende tikken hoppes over.
-  let lightRunning = false;
+  // Review delta2 B LOW-E2: vakten er TIDSBEGRENSET og SYNLIG. `lightRun` husker når den pågående kjøringen startet; en kjøring over `maxRunMs` er forlatt (en erstatning tillates, høyst `MAX_ABANDONED_LIGHT_RUNS`
+  // forlatte om gangen), og hver hoppede tikk telles og logges (rate-begrenset). Hver kjøring har en id, slik at en forlatt kjøring som til slutt fullfører aldri slipper en nyere kjøring sin vakt eller overskriver dens utfall.
+  let lightRun: { id: number; startedAtMs: number } | null = null;
+  let lightRunSeq = 0;
+  let abandonedRuns = 0;
+  let skippedTicks = 0;
+  let lastSkipLogAtMs: number | null = null;
+  const skipTick = (reason: "previous_run_in_progress" | "previous_runs_stuck", runningMs: number, nowMs: number): void => {
+    skippedTicks += 1;
+    if (lastSkipLogAtMs === null || nowMs - lastSkipLogAtMs >= skipLogIntervalMs) {
+      lastSkipLogAtMs = nowMs;
+      console.warn(JSON.stringify({ msg: "vision_light_maintenance_skipped", reason, running_ms: runningMs, skipped_ticks: skippedTicks }));
+    }
+  };
   const status = (): VisionStatusReport => ({
     poller: pollerHandle === null ? { enabled: false } : { enabled: true, ...pollerHandle.status(), consecutive_failures: pollerHandle.health().consecutive_failures, next_delay_ms: pollerHandle.health().next_delay_ms },
-    maintenance: { light: last.light, full: last.full },
+    maintenance: {
+      light: last.light, full: last.full,
+      light_run: { running_since: lightRun === null ? null : new Date(lightRun.startedAtMs).toISOString(), skipped_ticks: skippedTicks, abandoned_runs: abandonedRuns }
+    },
     ingest: pipeline.stats(),
     storage: { maintenance_enabled: snapshots !== undefined, writing_enabled: flags.storeSnapshots && snapshots !== undefined },
     classifier: classifier !== undefined,
@@ -351,19 +399,32 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
     pollerHandle,
     status,
     async lightMaintenance(): Promise<void> {
-      if (lightRunning) return; // en forrige lett kjøring pågår fortsatt: hopp over denne tikken
-      lightRunning = true;
+      const nowMs = clock();
+      if (lightRun !== null) {
+        const runningMs = nowMs - lightRun.startedAtMs;
+        if (runningMs < maxRunMs) return skipTick("previous_run_in_progress", runningMs, nowMs); // en forrige lett kjøring pågår fortsatt: hopp over denne tikken (synlig, se `skipTick`)
+        if (abandonedRuns >= MAX_ABANDONED_LIGHT_RUNS) return skipTick("previous_runs_stuck", runningMs, nowMs); // for mange hengte kjøringer: ikke stable flere
+        // Den pågående kjøringen har stått lenger enn grensen: regn den som forlatt (den kan fortsatt fullføre senere) og la denne tikken starte en ny.
+        abandonedRuns += 1;
+        console.error(JSON.stringify({ msg: "vision_light_maintenance_overrun", running_ms: runningMs, max_run_ms: maxRunMs, abandoned_runs: abandonedRuns }));
+        lightRun = null;
+      }
+      const run = { id: (lightRunSeq += 1), startedAtMs: nowMs };
+      lightRun = run;
+      lastSkipLogAtMs = null; // første hoppede tikk av HVER kjøring logges
       try {
-        const summary = await runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps, { light: true });
-        last.light = toStatus(summary);
+        const summary = await runWithDbLimits(maintenanceLimits, () => sweep(pool, maintenanceDeps, { light: true }));
+        if (lightRun === run) last.light = toStatus(summary); // en forlatt kjøring overskriver aldri en nyere kjørings utfall
         // Review B-L8: en feil (inkl. «stuck» gravsteiner) skal ikke forsvinne i en teller: den kastes, og main.ts-timeren logger den (`vision_light_maintenance_failed`) i stedet for å late som alt gikk bra.
         if (summary.failed.length > 0) throw new Error(`vision_maintenance_failed:${summary.failed.length}`);
       } finally {
-        lightRunning = false; // også etter en feil (ellers ville én feilet kjøring stanse alt vedlikehold for alltid)
+        // Også etter en feil (ellers ville én feilet kjøring stanse alt vedlikehold for alltid). En forlatt kjøring som til slutt er ferdig frigir sin plass, men rører ikke vakten til en nyere kjøring.
+        if (lightRun === run) lightRun = null;
+        else abandonedRuns = Math.max(0, abandonedRuns - 1);
       }
     },
     async fullMaintenance() {
-      const summary = await runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps);
+      const summary = await runWithDbLimits(maintenanceLimits, () => sweep(pool, maintenanceDeps));
       last.full = toStatus(summary);
       return summary;
     },

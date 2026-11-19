@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import {
-  LocalFsStorageAdapter, VisionCameraService, VisionClassifier, VisionEmbeddingService, VisionIngestPipeline, VisionInventoryService, VisionService, VisionSnapshotService, type VisionCamera, type VisionHttpFetch
+  LocalFsStorageAdapter, VisionCameraService, VisionClassifier, VisionEmbeddingService, VisionIngestPipeline, VisionInventoryService, VisionService, VisionSnapshotService, type VisionCamera, type VisionHttpFetch,
+  type VisionMaintenanceSummary
 } from "@jarvis/vision";
 import { detectionsJson, makeJpeg, ScriptedGateway, seedTenant, startVisionDb, type VisionDb } from "../../../modules/vision/test/support/harness.ts";
 import { buildVisionRuntime } from "../src/vision-runtime.ts";
@@ -165,7 +167,7 @@ describe("B-L8: vedlikeholdsfeil og stuck gravsteiner synes (kastes, full-kjøri
     await mkdir(join(root, key), { recursive: true });
     await db.admin.query(`INSERT INTO vision_snapshot_tombstones (tenant_id, memory_space_id, storage_backend, storage_key, attempts) VALUES ($1, 'home', 'local_fs', $2, 3)`, [T1.tenant, key]);
     const runtime = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORAGE_DIR: root })));
-    expect(runtime.status().maintenance).toEqual({ light: null, full: null });
+    expect(runtime.status().maintenance).toEqual({ light: null, full: null, light_run: { running_since: null, skipped_ticks: 0, abandoned_runs: 0 } });
 
     await runtime.lightMaintenance(); // forsøk 4: feilet, men ennå ikke «stuck» (grensen er 5)
     expect(runtime.status().maintenance.light).toMatchObject({ failed: 0, tombstones_failed: 1, tombstones_stuck: 0 });
@@ -189,7 +191,7 @@ describe("B-L8: vedlikeholdsfeil og stuck gravsteiner synes (kastes, full-kjøri
   it("status(): uten poller/lagring er alt av; med STORAGE_DIR (uten STORE_SNAPSHOTS) er KUN vedlikeholdet på, og med STORE_SNAPSHOTS også skrivingen - ingen stier, URL-er eller hemmeligheter i svaret", async () => {
     const off = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on" })));
     expect(off.status()).toEqual({
-      poller: { enabled: false }, maintenance: { light: null, full: null }, ingest: { inventory_label_invalid: 0, inventory_label_rejected: 0, last_inventory_skip_at: null },
+      poller: { enabled: false }, maintenance: { light: null, full: null, light_run: { running_since: null, skipped_ticks: 0, abandoned_runs: 0 } }, ingest: { inventory_label_invalid: 0, inventory_label_rejected: 0, last_inventory_skip_at: null },
       storage: { maintenance_enabled: false, writing_enabled: false }, classifier: false, embeddings: true
     });
     off.stop();
@@ -324,5 +326,256 @@ describe("review delta2 A LOW-E3 + B LOW-E1: hoppede inventarskrivinger er SYNLI
       await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${check} CHECK ${original}`);
       runtime.stop();
     }
+  });
+});
+
+describe("review delta2 B LOW-E2: lett vedlikehold kan ikke holdes fast for alltid - databasegrenser, tidsbegrenset vakt og SYNLIGE hoppede tikk", () => {
+  const pause = (ms: number): Promise<"timeout"> => new Promise((resolve) => setTimeout(() => resolve("timeout"), ms));
+  const waiting = (): Promise<number> => scalar(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%vision_snapshots%' AND pid <> pg_backend_pid()`);
+  const until = async (predicate: () => Promise<boolean>, what: string): Promise<void> => {
+    for (let i = 0; i < 200; i += 1) {
+      if (await predicate()) return;
+      await pause(50);
+    }
+    throw new Error(`tidsavbrudd: ventet på ${what}`);
+  };
+  /** Faller om `promise` ikke er ferdig innen `ms` - uten å etterlate en hengende timer eller en ubehandlet avvisning. */
+  const withDeadline = async <T>(promise: Promise<T>, ms: number, what: string): Promise<T> => {
+    promise.catch(() => undefined);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`HENGT: ${what}`)), ms); })]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+  const lockSnapshotsTable = async (): Promise<pg.PoolClient> => {
+    const blocker = await db.admin.connect();
+    await blocker.query("BEGIN");
+    await blocker.query("LOCK TABLE vision_snapshots IN ACCESS EXCLUSIVE MODE");
+    return blocker;
+  };
+  const release = async (blocker: pg.PoolClient): Promise<void> => {
+    await blocker.query("ROLLBACK").catch(() => undefined);
+    blocker.release();
+  };
+  const storageEnv = async (): Promise<Record<string, string>> => ({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORAGE_DIR: await mkdtemp(join(tmpdir(), "jarvis-vision-g3rt-e2-")) });
+  const emptySummary = (over: Partial<VisionMaintenanceSummary> = {}): VisionMaintenanceSummary => ({
+    spaces: 0, snapshots_purged: 0, pending_reaped: 0, tombstones_deleted: 0, tombstones_failed: 0, tombstones_stuck: 0, temp_files_purged: 0, temp_files_truncated: false,
+    inventory_purged: 0, captures_expired: 0, captures_deleted: 0, vectors_backfilled: 0, failed: [], ...over
+  });
+
+  it("lock_timeout: en forlatt tabell-lås gir en SYNLIG sveipefeil etter grensen i stedet for en evig venting (lett OG full kjøring); vakten er sluppet, og neste tikk kjører når låsen er borte", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const runtime = track(buildVisionRuntime(baseDeps(await storageEnv(), { maintenance: { lockTimeoutMs: 400 } })));
+    const blocker = await lockSnapshotsTable();
+    try {
+      await expect(withDeadline(runtime.lightMaintenance(), 25_000, "lett vedlikehold ble holdt fast av tabell-låsen")).rejects.toThrow(/^vision_maintenance_failed:\d+$/);
+      const failures = errors.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("vision_maintenance_failed"));
+      expect(failures.length).toBeGreaterThanOrEqual(1);
+      expect(failures.join("\n")).toMatch(/lock timeout/); // Postgres sin egen kode-tekst: ingen stier, ingen innhold
+      expect(runtime.status().maintenance.light_run).toEqual({ running_since: null, skipped_ticks: 0, abandoned_runs: 0 }); // vakten er sluppet etter feilen
+      const full = await withDeadline(runtime.fullMaintenance(), 25_000, "full vedlikeholdskjøring ble holdt fast av tabell-låsen"); // samme grenser (kaster ikke: failed-listen bærer feilene)
+      expect(full.failed.length).toBeGreaterThanOrEqual(1);
+      expect(full.failed.map((failure) => failure.error).join("\n")).toMatch(/lock timeout/);
+    } finally {
+      await release(blocker);
+    }
+    await runtime.lightMaintenance(); // låsen er borte: kjører og lykkes
+    expect(runtime.status().maintenance.light).toMatchObject({ failed: 0 });
+    runtime.stop();
+  }, 90_000);
+
+  it("ekte hengning (ingen databasegrenser): etter tidsgrensen regnes kjøringen som forlatt og en erstatning starter (og henger også); begge fullfører når låsen slippes, og alt nullstilles", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let fakeNow = Date.parse("2026-11-19T12:00:00.000Z");
+    const runtime = track(buildVisionRuntime(baseDeps(await storageEnv(), { maintenance: { maxRunMs: 60_000, statementTimeoutMs: 0, lockTimeoutMs: 0, now: () => fakeNow } })));
+    const runs: Array<Promise<unknown>> = [];
+    const startRun = (): void => {
+      const run = runtime.lightMaintenance();
+      run.catch(() => undefined);
+      runs.push(run);
+    };
+    const blocker = await lockSnapshotsTable();
+    try {
+      startRun();
+      await until(async () => (await waiting()) === 1, "den første kjøringen står fast på låsen");
+      fakeNow += 30_000;
+      await runtime.lightMaintenance(); // innenfor tidsgrensen: hoppes over (kommer tilbake med en gang)
+      expect(await waiting(), "ingen ny kjøring mot den låste tabellen").toBe(1);
+      expect(runtime.status().maintenance.light_run).toMatchObject({ skipped_ticks: 1, abandoned_runs: 0 });
+      fakeNow += 40_000; // 70 s siden første kjøring startet: over tidsgrensen på 60 s
+      startRun();
+      await until(async () => (await waiting()) === 2, "erstatningen står også fast på låsen (den første kjøringen er forlatt, ikke avbrutt)");
+      expect(runtime.status().maintenance.light_run).toEqual({ running_since: new Date(fakeNow).toISOString(), skipped_ticks: 1, abandoned_runs: 1 });
+    } finally {
+      await release(blocker);
+    }
+    await withDeadline(Promise.allSettled(runs), 30_000, "begge kjøringene fullfører når låsen er borte");
+    expect(runtime.status().maintenance.light_run).toEqual({ running_since: null, skipped_ticks: 1, abandoned_runs: 0 });
+    await runtime.lightMaintenance(); // vakten er fri
+    expect(runtime.status().maintenance.light_run.skipped_ticks).toBe(1);
+    runtime.stop();
+  }, 90_000);
+
+  describe("vaktens logikk (styrt sveip, injisert klokke: deterministisk)", () => {
+    type Pending = { resolve: (summary: VisionMaintenanceSummary) => void; reject: (err: Error) => void };
+    const harness = async (over: { maxRunMs?: number; skipLogIntervalMs?: number } = {}) => {
+      const pending: Pending[] = [];
+      let fakeNow = Date.parse("2026-11-19T12:00:00.000Z");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const sweep = (): Promise<VisionMaintenanceSummary> => new Promise((resolve, reject) => { pending.push({ resolve, reject }); });
+      const runtime = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on" }, { maintenance: { maxRunMs: over.maxRunMs ?? 60_000, skipLogIntervalMs: over.skipLogIntervalMs ?? 600_000, now: () => fakeNow, sweep } })));
+      const started: Array<Promise<void>> = [];
+      return {
+        runtime, pending,
+        advance: (ms: number): void => { fakeNow += ms; },
+        iso: (): string => new Date(fakeNow).toISOString(),
+        tick: (): Promise<void> => { const run = runtime.lightMaintenance(); run.catch(() => undefined); started.push(run); return run; },
+        run: (index: number): Promise<void> => started[index] as Promise<void>,
+        lightRun: () => runtime.status().maintenance.light_run,
+        skipLines: (): Array<Record<string, unknown>> => warn.mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>).filter((line) => line["msg"] === "vision_light_maintenance_skipped"),
+        overrunLines: (): Array<Record<string, unknown>> => errors.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("vision_light_maintenance_overrun")).map((line) => JSON.parse(line) as Record<string, unknown>)
+      };
+    };
+
+    it("startverdi: ingen kjøring pågår, ingen hoppede tikk, ingen forlatte; en kjøring som fullfører setter utfallet og frigir vakten (running_since null)", async () => {
+      const h = await harness();
+      expect(h.lightRun()).toEqual({ running_since: null, skipped_ticks: 0, abandoned_runs: 0 });
+      const start = h.iso();
+      void h.tick();
+      expect(h.pending).toHaveLength(1);
+      expect(h.lightRun()).toEqual({ running_since: start, skipped_ticks: 0, abandoned_runs: 0 });
+      h.pending[0]?.resolve(emptySummary({ tombstones_deleted: 5 }));
+      await h.run(0);
+      expect(h.lightRun()).toEqual({ running_since: null, skipped_ticks: 0, abandoned_runs: 0 });
+      expect(h.runtime.status().maintenance.light).toMatchObject({ failed: 0, tombstones_deleted: 5 });
+    });
+
+    it("en tikk innenfor tidsgrensen hoppes over og TELLES; første hopp logges (kode og tall, ingen innhold), neste innen logg-intervallet logges ikke, og etter intervallet logges det igjen", async () => {
+      const h = await harness({ maxRunMs: 3_600_000, skipLogIntervalMs: 600_000 });
+      void h.tick();
+      h.advance(30_000);
+      await h.tick();
+      expect(h.pending, "ingen ny kjøring").toHaveLength(1);
+      expect(h.lightRun()).toMatchObject({ skipped_ticks: 1 });
+      expect(h.skipLines()).toEqual([{ msg: "vision_light_maintenance_skipped", reason: "previous_run_in_progress", running_ms: 30_000, skipped_ticks: 1 }]);
+      h.advance(1_000);
+      await h.tick();
+      expect(h.lightRun()).toMatchObject({ skipped_ticks: 2 });
+      expect(h.skipLines(), "rate-begrenset: ikke en ny logglinje for hver tikk").toHaveLength(1);
+      h.advance(600_000);
+      await h.tick();
+      expect(h.lightRun()).toMatchObject({ skipped_ticks: 3 });
+      expect(h.skipLines().map((line) => line["skipped_ticks"])).toEqual([1, 3]);
+      h.pending[0]?.resolve(emptySummary());
+      await h.run(0);
+    });
+
+    it("første hoppede tikk av HVER kjøring logges, også innen logg-intervallet fra forrige kjørings hopp (en ny hengning skal ikke skjules av den forrige)", async () => {
+      const h = await harness({ maxRunMs: 3_600_000, skipLogIntervalMs: 600_000 });
+      void h.tick();
+      h.advance(10_000);
+      await h.tick();
+      expect(h.skipLines()).toHaveLength(1);
+      h.pending[0]?.resolve(emptySummary());
+      await h.run(0); // den første kjøringen er ferdig
+      const second = h.tick(); // en NY kjøring (som henger)
+      expect(h.pending).toHaveLength(2);
+      h.advance(10_000); // fortsatt langt innenfor logg-intervallet (600 s) fra forrige hopp
+      await h.tick();
+      expect(h.skipLines().map((line) => line["skipped_ticks"]), "det første hoppet i den nye kjøringen logges").toEqual([1, 2]);
+      h.pending[1]?.resolve(emptySummary());
+      await second;
+    });
+
+    it("over tidsgrensen regnes kjøringen som FORLATT (logget) og en erstatning starter; en forlatt kjøring som fullfører senere frigir ikke den nyes vakt og overskriver ikke dens utfall", async () => {
+      const h = await harness();
+      void h.tick();
+      h.advance(61_000);
+      const replacementStart = h.iso();
+      void h.tick();
+      expect(h.pending, "erstatningen startet").toHaveLength(2);
+      expect(h.lightRun()).toEqual({ running_since: replacementStart, skipped_ticks: 0, abandoned_runs: 1 });
+      expect(h.overrunLines()).toEqual([{ msg: "vision_light_maintenance_overrun", running_ms: 61_000, max_run_ms: 60_000, abandoned_runs: 1 }]);
+      // Den FORLATTE kjøringen fullfører først (med et utfall som ikke skal bli stående): vakten til erstatningen og statusen er urørt.
+      h.pending[0]?.resolve(emptySummary({ tombstones_deleted: 7 }));
+      await h.run(0);
+      expect(h.lightRun()).toEqual({ running_since: replacementStart, skipped_ticks: 0, abandoned_runs: 0 });
+      expect(h.runtime.status().maintenance.light, "en forlatt kjøring overskriver aldri en nyere kjørings utfall").toBeNull();
+      h.advance(1_000);
+      await h.tick();
+      expect(h.pending, "vakten til erstatningen holder fortsatt: den forlattes ferdigstilling slapp den ikke").toHaveLength(2);
+      expect(h.lightRun()).toMatchObject({ skipped_ticks: 1 });
+      // Erstatningen fullfører: NÅ settes utfallet og vakten frigis.
+      h.pending[1]?.resolve(emptySummary({ tombstones_deleted: 9 }));
+      await h.run(1);
+      expect(h.lightRun()).toEqual({ running_since: null, skipped_ticks: 1, abandoned_runs: 0 });
+      expect(h.runtime.status().maintenance.light).toMatchObject({ tombstones_deleted: 9 });
+    });
+
+    it("høyst to forlatte kjøringer om gangen: den fjerde tikken starter ingenting (`previous_runs_stuck`, logget og talt), og alt nullstilles når kjøringene fullfører (også i en annen rekkefølge)", async () => {
+      const h = await harness();
+      void h.tick(); // A
+      h.advance(61_000);
+      void h.tick(); // B (A forlatt)
+      h.advance(61_000);
+      void h.tick(); // C (B forlatt)
+      expect(h.pending).toHaveLength(3);
+      expect(h.lightRun()).toMatchObject({ abandoned_runs: 2 });
+      h.advance(61_000);
+      await h.tick(); // D: nektes
+      expect(h.pending, "ingen fjerde kjøring").toHaveLength(3);
+      expect(h.lightRun()).toMatchObject({ abandoned_runs: 2, skipped_ticks: 1 });
+      expect(h.skipLines()).toEqual([{ msg: "vision_light_maintenance_skipped", reason: "previous_runs_stuck", running_ms: 61_000, skipped_ticks: 1 }]);
+      expect(h.overrunLines().map((line) => line["abandoned_runs"])).toEqual([1, 2]);
+      // De fullfører i omvendt rekkefølge: den nyeste (C) først. Vakten frigis, de to forlatte teller ned når de blir ferdige.
+      h.pending[2]?.resolve(emptySummary());
+      await h.run(2);
+      expect(h.lightRun()).toEqual({ running_since: null, skipped_ticks: 1, abandoned_runs: 2 });
+      h.pending[0]?.resolve(emptySummary());
+      h.pending[1]?.resolve(emptySummary());
+      await Promise.all([h.run(0), h.run(1)]);
+      expect(h.lightRun()).toEqual({ running_since: null, skipped_ticks: 1, abandoned_runs: 0 });
+      // Vakten er fri igjen: en ny tikk starter en ny kjøring.
+      const fresh = h.tick();
+      expect(h.pending).toHaveLength(4);
+      h.pending[3]?.resolve(emptySummary());
+      await fresh;
+    });
+
+    it("en kjøring som FEILER (kastet feil eller failed-liste) frigir vakten, og feilen kastes videre som før; en forlatt kjøring som feiler senere påvirker ikke den nyes vakt", async () => {
+      const h = await harness();
+      void h.tick();
+      h.pending[0]?.resolve(emptySummary({ failed: [{ tenant_id: "t", memory_space_id: "home", error: "tombstones_stuck:1" }] }));
+      await expect(h.run(0)).rejects.toThrow("vision_maintenance_failed:1");
+      expect(h.runtime.status().maintenance.light).toMatchObject({ failed: 1 }); // utfallet er satt selv om kjøringen kastet
+      expect(h.lightRun()).toEqual({ running_since: null, skipped_ticks: 0, abandoned_runs: 0 });
+      void h.tick(); // frisk kjøring
+      h.pending[1]?.reject(new Error("tilkobling_brutt"));
+      await expect(h.run(1)).rejects.toThrow("tilkobling_brutt");
+      expect(h.lightRun()).toEqual({ running_since: null, skipped_ticks: 0, abandoned_runs: 0 });
+      // forlatt kjøring som feiler mens erstatningen pågår
+      void h.tick(); // A (index 2)
+      h.advance(61_000);
+      void h.tick(); // B (index 3): A forlatt
+      const bStart = h.iso();
+      h.pending[2]?.reject(new Error("sent_feil"));
+      await expect(h.run(2)).rejects.toThrow("sent_feil");
+      expect(h.lightRun()).toEqual({ running_since: bStart, skipped_ticks: 0, abandoned_runs: 0 });
+      h.pending[3]?.resolve(emptySummary());
+      await h.run(3);
+      expect(h.lightRun().running_since).toBeNull();
+    });
+  });
+
+  it("ugyldige vaktverdier kastes ved oppstart, ikke først under en kjøring (maxRunMs < 1, negative/ikke-heltall databasegrenser)", async () => {
+    const env = { JARVIS_VISION_ENABLED: "on" };
+    expect(() => buildVisionRuntime(baseDeps(env, { maintenance: { maxRunMs: 0 } }))).toThrow("vision_maintenance_guard_invalid");
+    expect(() => buildVisionRuntime(baseDeps(env, { maintenance: { skipLogIntervalMs: -1 } }))).toThrow("vision_maintenance_guard_invalid");
+    expect(() => buildVisionRuntime(baseDeps(env, { maintenance: { lockTimeoutMs: -1 } }))).toThrow("vision_db_limits_invalid");
+    expect(() => buildVisionRuntime(baseDeps(env, { maintenance: { statementTimeoutMs: 1.5 } }))).toThrow("vision_db_limits_invalid");
   });
 });

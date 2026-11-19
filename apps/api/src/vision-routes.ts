@@ -33,7 +33,15 @@ export interface VisionMaintenanceStatus {
 /** Eierens helsebilde (review B-L8): poller, vedlikehold og hva som er koblet inn. Ingen vertsnavn, URL-er, tokens eller innhold - kun koder, tall og tidspunkt. */
 export interface VisionStatusReport {
   poller: { enabled: false } | { enabled: true; last_tick_at: string | null; last_status: string | null; last_reason: string | null; last_source_error: string | null; consecutive_failures: number; next_delay_ms: number };
-  maintenance: { light: VisionMaintenanceStatus | null; full: VisionMaintenanceStatus | null };
+  maintenance: {
+    light: VisionMaintenanceStatus | null;
+    full: VisionMaintenanceStatus | null;
+    /**
+     * Review delta2 B LOW-E2: vakten rundt lett vedlikehold er synlig. `running_since` = starttidspunktet til kjøringen som holder vakten akkurat nå (`null` = ingen pågår; en gammel verdi betyr at en kjøring henger),
+     * `skipped_ticks` = tikk som ble hoppet over fordi en kjøring pågikk (kumulativt siden prosessstart), `abandoned_runs` = kjøringer som har stått lenger enn tidsgrensen og er regnet som forlatt (ikke ferdige ennå).
+     */
+    light_run: { running_since: string | null; skipped_ticks: number; abandoned_runs: number };
+  };
   /**
    * Kumulativt siden prosessen startet (kun tall og tidspunkt): inventarskrivinger som ble hoppet over i LAGREDE hendelser (review delta2 A LOW-E3 + B LOW-E1). `invalid` = etiketten har ikke inventarform,
    * `rejected` = databasen avviste en etikett JS-regelen godtok (drift mellom regelsettene). Hendelsene er lagret i begge tilfeller; det er inventaret for den etiketten som mangler. Aldri etikettinnhold.
