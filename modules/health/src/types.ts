@@ -15,16 +15,28 @@ import { z } from "zod";
  * settet utvides NÅR en faktisk kilde/brukstilfelle krever det (samme
  * mønster som `consent_decisions.purpose`/`operations_vendors.category` -
  * se `049_health.sql`).
+ *
+ * WP-G2 (D-464) P1d, migrasjon 128: LUKKET utvidelse fra 4 til 10 metrikker (listen er fortsatt lukket - en ny metrikk er en migrasjon + en verifisert rad i `METRIC_HEALTHKIT_SOURCE` + en test, aldri en konfigurasjon).
+ * De seks nye er hver verifisert mot Apples offisielle dokumentasjon 2026-11-18; se `METRIC_HEALTHKIT_SOURCE`.
  */
-export const MetricTypeSchema = z.enum(["heart_rate", "steps", "sleep_duration_minutes", "weight_kg"]);
+export const MetricTypeSchema = z.enum([
+  "heart_rate", "steps", "sleep_duration_minutes", "weight_kg",
+  "resting_heart_rate", "heart_rate_variability_ms", "oxygen_saturation_percent", "respiratory_rate", "active_energy_kcal", "exercise_minutes"
+]);
 export type MetricType = z.infer<typeof MetricTypeSchema>;
 
-/** Ett kanonisk enhet per `metric_type` (v1: ingen multi-enhet-støtte, f.eks. lb vs kg - konvertering er en FREMTIDIG utvidelse, ikke bygget her). */
+/** Ett kanonisk enhet per `metric_type` (v1: ingen multi-enhet-støtte, f.eks. lb vs kg - konvertering er en FREMTIDIG utvidelse, ikke bygget her; appen konverterer FØR den sender). */
 export const METRIC_CANONICAL_UNITS: Readonly<Record<MetricType, string>> = Object.freeze({
   heart_rate: "bpm",
   steps: "count",
   sleep_duration_minutes: "minutes",
-  weight_kg: "kg"
+  weight_kg: "kg",
+  resting_heart_rate: "bpm",
+  heart_rate_variability_ms: "ms",
+  oxygen_saturation_percent: "percent",
+  respiratory_rate: "breaths_per_min",
+  active_energy_kcal: "kcal",
+  exercise_minutes: "minutes"
 });
 
 /**
@@ -39,7 +51,54 @@ export const METRIC_VALUE_BOUNDS: Readonly<Record<MetricType, { min: number; max
   heart_rate: { min: 1, max: 300 },
   steps: { min: 0, max: 200_000 },
   sleep_duration_minutes: { min: 0, max: 1440 },
-  weight_kg: { min: 1, max: 500 }
+  weight_kg: { min: 1, max: 500 },
+  resting_heart_rate: { min: 20, max: 220 },
+  heart_rate_variability_ms: { min: 0, max: 2000 },
+  // 50-100: HealthKit gir oksygenmetning som en BRØK (0.0-1.0, `HKUnit.percent()`); appen skal gange med 100. En brøk som ved en feil sendes uten omregning (f.eks. 0.97) faller under grensen og AVVISES synlig i stedet for å lagres feil.
+  oxygen_saturation_percent: { min: 50, max: 100 },
+  respiratory_rate: { min: 1, max: 100 },
+  // Kumulative målinger (energi, treningsminutter) kommer som delprøver med start/slutt: grensene gjelder ÉN prøve.
+  active_energy_kcal: { min: 0, max: 10_000 },
+  exercise_minutes: { min: 0, max: 1440 }
+});
+
+/**
+ * WP-G2 (D-464) P1d: kilde-sporbarhet for den LUKKEDE metrikklisten mot Apples OFFISIELLE HealthKit-dokumentasjon (hentet 2026-11-18, `developer.apple.com/documentation/healthkit/hkquantitytypeidentifier/<identifikator>`).
+ * VERIFISERT mot dokumentasjonen: identifikatoren finnes, enhetsfamilien og aggregeringsstilen (discrete/cumulative) står som angitt, og `HKUnit.percent()` er en verdi mellom 0.0 og 1.0.
+ * IKKE verifisert (appen finnes ikke, `BLOCKED_EXTERNAL`): de konkrete `HKUnit`-konstruktørene appen bruker for omregningen til Jarvis' kanoniske enhet (`app_conversion`), og at samme `uuid` beholdes når en prøve synkroniseres mellom enheter.
+ * `sleep_duration_minutes` er en KATEGORI-prøve (`HKCategoryTypeIdentifier.sleepAnalysis`, verdiene i `HKCategoryValueSleepAnalysis`) - appen summerer søvnvarigheten (`allAsleepValues`; stadiene overlapper ikke hverandre) til minutter.
+ */
+export const HEALTHKIT_DOC_VERIFIED_AT = "2026-11-18";
+export interface MetricHealthKitSource {
+  /** HealthKit-identifikator (Swift-navn). */
+  healthkit_identifier: string;
+  aggregation: "discrete" | "cumulative" | "category_derived";
+  /** Enhetsfamilien Apple oppgir (ikke nødvendigvis Jarvis' kanoniske enhet). */
+  apple_unit_family: string;
+  /** Appens omregning til Jarvis' kanoniske enhet (ubekreftet: appen er BLOCKED_EXTERNAL). */
+  app_conversion: string;
+}
+export const METRIC_HEALTHKIT_SOURCE: Readonly<Record<MetricType, MetricHealthKitSource>> = Object.freeze({
+  heart_rate: { healthkit_identifier: "HKQuantityTypeIdentifier.heartRate", aggregation: "discrete", apple_unit_family: "count/time", app_conversion: "count/min -> bpm (ingen omregning)" },
+  steps: { healthkit_identifier: "HKQuantityTypeIdentifier.stepCount", aggregation: "cumulative", apple_unit_family: "count", app_conversion: "ingen omregning; delprøver (kan slås sammen av HealthKit)" },
+  sleep_duration_minutes: {
+    healthkit_identifier: "HKCategoryTypeIdentifier.sleepAnalysis", aggregation: "category_derived", apple_unit_family: "kategori-prøver (start/slutt)",
+    app_conversion: "summer varigheten av prøvene i HKCategoryValueSleepAnalysis.allAsleepValues for natten, i minutter"
+  },
+  weight_kg: { healthkit_identifier: "HKQuantityTypeIdentifier.bodyMass", aggregation: "discrete", apple_unit_family: "mass", app_conversion: "-> kg" },
+  resting_heart_rate: {
+    healthkit_identifier: "HKQuantityTypeIdentifier.restingHeartRate", aggregation: "discrete", apple_unit_family: "count/time",
+    app_conversion: "count/min -> bpm; Apple kan SLETTE og erstatte tidligere estimater samme/forrige dag (send slettede prøver i `deleted_external_sample_ids`)"
+  },
+  heart_rate_variability_ms: {
+    healthkit_identifier: "HKQuantityTypeIdentifier.heartRateVariabilitySDNN", aggregation: "discrete", apple_unit_family: "time (typisk millisekunder)", app_conversion: "-> ms (SDNN, ikke RMSSD)"
+  },
+  oxygen_saturation_percent: {
+    healthkit_identifier: "HKQuantityTypeIdentifier.oxygenSaturation", aggregation: "discrete", apple_unit_family: "percent (HKUnit.percent(): 0.0-1.0)", app_conversion: "brøk 0.0-1.0 -> prosent 0-100 (gang med 100)"
+  },
+  respiratory_rate: { healthkit_identifier: "HKQuantityTypeIdentifier.respiratoryRate", aggregation: "discrete", apple_unit_family: "count/time", app_conversion: "count/min -> breaths_per_min" },
+  active_energy_kcal: { healthkit_identifier: "HKQuantityTypeIdentifier.activeEnergyBurned", aggregation: "cumulative", apple_unit_family: "energy", app_conversion: "-> kcal; delprøver (kan slås sammen av HealthKit)" },
+  exercise_minutes: { healthkit_identifier: "HKQuantityTypeIdentifier.appleExerciseTime", aggregation: "cumulative", apple_unit_family: "time", app_conversion: "-> minutes" }
 });
 
 /**

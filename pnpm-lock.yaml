@@ -41,6 +41,9 @@ importers:
       '@jarvis/consent':
         specifier: workspace:*
         version: link:../../modules/consent
+      '@jarvis/context':
+        specifier: workspace:*
+        version: link:../../modules/context
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
