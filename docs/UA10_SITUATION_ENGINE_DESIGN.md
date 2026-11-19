@@ -9,6 +9,14 @@ selv (det er en TILSTANDSMASKIN over allerede-eksisterende, allerede-styrte forh
 notatet dekker likevel D-64-porten, retensjon/erasure og sikkerhetsgrensene eksplisitt, samme
 disiplin som enhver ny UA.
 
+**WP-G4 (D-466, §11):** samlet hendelsesabonnement (hjem, kamera, helse, hendelser), rene broer,
+modellassistert vurdering (aldri ACT alene), tilbakemeldingslæring, kontrafaktisk simulering og
+anomali-revisjon er BYGGET som `DORMANT` (AV bak `JARVIS_SITUATION_*`) og `NOT VERIFIED` (ingenting
+er kjørt mot ekte Home Assistant/kamera/helse/lokal modell/NAS). Det som under står som «ikke
+behandlet»/«bevisst utsatt» for hjem/helse/kamera, modellvurdering, simulering og tilbakemelding er
+HISTORIKK fra P0/P1 og er nå besvart i §11; gjenstående `DEFERRED` står i §11.8 og i runbooken
+`docs/runbooks/WPG4_SITUATION_BRIDGES.md`.
+
 **Arkitekt-review runde 1 (PR #85, opprinnelig HEAD 767d100):** 6 P1-funn (atomisk kollisjonsdomene/
 identitets-konflikt i `evaluateCandidate()`, scope-safe `source_open_loop_id`, atomisk claim +
 eksakt-én-gang i `actOn()`, manglende `ToolResult.ok`-sjekk på Telegram-varselet, stille-timer-hull
@@ -153,11 +161,14 @@ pipeline/support/deadlines/spend/product/operations, uttømmende kartlagt i `ope
 faktisk leveranse av INFORM/SUGGEST-varsler via `telegram.notify`, og auto-ACT UTELUKKENDE under en
 eier-bundet policy.
 
-**Ikke behandlet i dag (eksplisitt, ikke stilltiende utelatt):** INGEN ny anomali-detektor for
-infra/home/health (ingen eksisterende signalkilde — se §5). INGEN modell-assistert klassifisering
-(`computeTargetStage()` er REN, deterministisk regel-logikk — ingen ModelGateway/AI Council-kall).
-INGEN counterfactual/simulation/feedback-learning. INGEN auto-ACT uten en eksplisitt eier-policy
-(`actOn()` uten policy krever fortsatt en EKSPLISITT kaller).
+**Ikke behandlet i P0/P1 (eksplisitt, ikke stilltiende utelatt; HISTORIKK - fra og med WP-G4 er
+hjem/helse/kamera-broer, modellvurdering, simulering og tilbakemelding bygget som `DORMANT` bak
+flagg, se §11):** INGEN ny anomali-detektor for infra/home/health (ingen eksisterende signalkilde —
+se §5). INGEN modell-assistert klassifisering
+(`computeTargetStage()` er REN, deterministisk regel-logikk — ingen ModelGateway/AI Council-kall; med
+G4 er modellvurderingen et valgfritt LØFT `low` -> `normal` utenfor `computeTargetStage()`, aldri
+ACT). INGEN counterfactual/simulation/feedback-learning (G4: §11.6). INGEN auto-ACT uten en
+eksplisitt eier-policy (`actOn()` uten policy krever fortsatt en EKSPLISITT kaller; uendret).
 
 ## 3. Tilstandsmaskinen
 
@@ -219,6 +230,12 @@ en er business-open-loop-spesifikk) - en ny, generalisert `SituationEngine.resol
 (tenantId, memorySpace, domain, activeDetectionKeys)` resolverer alt åpent i domenet som kilden ikke
 lenger rapporterer som aktivt. Home/health forblir UENDRET deferred - ingen signalkilde finnes ennå for
 dem. Se `docs/IMPLEMENTATION_PLAN.md` sin "UA-10 infra-slice"-seksjon for full leveranse/testliste.
+
+**WP-G4 (D-466):** signalkildene for hjem (HA-tilstander), kamera (WP-G3-hendelser) og helse
+(WP-G2-inntaket) finnes nå (G2/G3 er bygget), og er koblet til motoren gjennom EGNE rene broer og én
+inntaksbuss (§11) - fortsatt gjennom SAMME `evaluateCandidate()`-kontrakt. Anomali-revisjonen (P2e)
+fant at spend/pipeline/frister er dekket av open-loop-typene og infra av incidents; to hull
+(kostnadssprang, stilnet planlagt jobb) er bygget som rene detektorer (`BUILT_UNWIRED`, §11.7).
 
 ## 6. ACT — komponert, ikke oppfunnet
 
@@ -386,9 +403,9 @@ eksplisitt her, ikke silently arvet.
 | Kapabilitet | Port som må kjøres først |
 |---|---|
 | Live bro fra `business_open_loops` til `situations` | **LUKKET i P1 (D-160, §10)** — `runSituationSweep()`/`open-loop-bridge.ts`. Vision-/helse-/lokasjonskilder: fortsatt egne, senere wiring-slicer mot SAMME `evaluateCandidate()`-kontrakt |
-| Nye anomali-detektorer for infra/home/health | **infra LUKKET (D-195, se §5)** — `infra-incident-bridge.ts` mot `modules/incidents` (UA-5). home/health forblir egne, separate slicer PER domene (fortsatt ingen eksisterende signalkilde for dem, se §5) |
-| Modell-assistert klassifisering | Krever ModelGateway/AI Council — en leverandøravhengighet, egen D-64/D-41-port |
-| Counterfactual/simulation, feedback learning | ML-tungt, masterplanens egen "where useful"-kvalifikator — egen, senere slice |
+| Nye anomali-detektorer for infra/home/health | **infra LUKKET (D-195, se §5)** — `infra-incident-bridge.ts` mot `modules/incidents` (UA-5). **home/health/kamera: bygget i WP-G4 (D-466, §11) som `DORMANT`/`NOT VERIFIED`** (egne rene broer + inntaksbuss, bak `JARVIS_SITUATION_*`) |
+| Modell-assistert klassifisering | **WP-G4 (D-466, §11.5):** via `ModelGateway` (ingen ny leverandør; D-64-porten er kjørt, `CORE_DEPENDENCY_DECISION_REQUIRED=false`): aldri ACT alene, ubetrodd utdata, begrensede data kun lokal modell. `DORMANT` bak `JARVIS_SITUATION_MODEL_ASSIST` |
+| Counterfactual/simulation, feedback learning | **WP-G4 (D-466, §11.6):** kontrafaktisk simulering er en REN funksjon (ingen sideeffekt); tilbakemeldingslæring justerer ETT tall per regel innenfor harde grenser (revidert, tilbakestillbart, ingen selvmodifikasjon - D-397). `DORMANT` bak `JARVIS_SITUATION_FEEDBACK` |
 | Autonom/tidsstyrt auto-ACT | **LUKKET i P1 (D-160, §10) med en EKSPLISITT grense:** auto-ACT skjer KUN for situasjoner i `suggest` hvis domene har en AKTIVERT, eier-bundet `situation_autonomy_policies`-rad. Uten policy: ingenting. Domene-pause, global KillSwitch, PolicyGateway og hele ToolGateway-preflight-/postcondition-pipelinen gjelder UENDRET for hvert kall |
 | Wiring inn i `apps/api/src/main.ts`/en kontrollflate | **LUKKET i P1 (D-160, §10)** — motor + durable pause (`restore()` ved oppstart) + `situations`-verktøyet + `situation-sweep`-jobben er wiret i komposisjons-roten |
 
@@ -477,9 +494,71 @@ auto-ACT-feil ble bokført som vellykket daglig jobb. RETTET: `assertSituationSw
 scheduler-avsnittet over); bevist med en EKTE `DailyScheduler` mot embedded Postgres — evidensmismatch
 og transportfeil lar `completed_at` stå NULL, et sunt sveip setter det.
 
+## 11. WP-G4 (D-466) — samlet hendelsesabonnement, broer, modellvurdering, tilbakemelding og simulering (`DORMANT`, `NOT VERIFIED`)
+
+Full driftsbeskrivelse, kilde-/bro-tabell, NAS-verifisering og `DEFERRED`-liste: `docs/runbooks/WPG4_SITUATION_BRIDGES.md`. Her kun designets bærende valg.
+
+**11.1 D-64 Core-vs-Adapter-porten (kjørt FØR bygging).** `CAPABILITY` = proaktiv situasjonsmotor over
+sanntidshendelser. `SYSTEM_OF_RECORD = JARVIS_CANONICAL` (domenemodellen, tilstanden, orkestreringen,
+policyen og tverr-domene-resonneringen eies av Jarvis). Hendelseskildene (Home Assistant, WP-G3
+kamerahendelser, WP-G2 helseinntak, UA-5 incidents) er KILDER bak porter (`SignalSourceReaders`),
+aldri stedet intelligensen bor. Ingen ny ekstern leverandør, ingen kjerneavhengighet
+(`CORE_DEPENDENCY_DECISION_REQUIRED=false`); modellkall går kun gjennom `ModelGateway` (adapter).
+`CAN_RUN_WITHOUT_PROVIDER = true`: alt er AV som standard, og uten en leser/abonnement skjer ingenting.
+
+**11.2 Hva som lagres (migrasjon 139).** `situation_subscriptions` (eierens abonnement: kilde, hendelsestype,
+LUKKET filter, på/av), `situation_signal_log` (minimert logg per signal: kilde, type, nøkkel, nivå,
+begrensede `facts` - aldri rå verdier, bilder, etiketter eller fritekst; oppbevaring 30 dager som standard),
+`situation_feedback` (eierens «nyttig»/«støy», append-only bortsett fra `consumed_at`), `situation_rule_tuning`
+(ETT tall per regel), `situation_assessments` (modellens vurdering, ubetrodd tekst, kuttet og renset), samt
+additive kolonner `situation_notification_policies.critical_bypass_quiet` og
+`situation_autonomy_policies.expires_at`. FORCE RLS (tenant + space), sammensatte FK-er med `tenant_id`,
+alle rader merket person/kilde/`task_id`/`session_id`, alle fem registrert i erasure-planen og i
+`PROCESSING_INVENTORY.md` (D-420). Mottakere: Telegram (eierens egen kanal, innholdsfri tekst for helse/kamera)
+og modellen (kun lukkede felt; begrensede data kun lokal modell).
+
+**11.3 Flyt og dedupe.** observasjon (minimert) -> lukket hendelsestype -> abonnementssjekk (ingen
+abonnement = forkastet) -> ren bro -> pausesjekk (prosess-cache OG varig `situation_domain_pauses`) -> valgfri
+modellvurdering -> `evaluateCandidate()` -> idempotent logg (UNIK per kilde + `source_ref`). Samme fysiske
+hendelse via to kilder deler `detection_key` (`home:opening:<entitet>@<ISO>`; `infra_incident:<id>`), så
+dedupe/undertrykking/stille timer i motoren gir ÉN situasjon og ETT varsel uten ny mekanikk.
+
+**11.4 ACT-autoritet (deterministisk kode).** ACT krever ALLTID eierens eksplisitte, tilbakekallbare binding
+(`situation_autonomy_policies`, valgfri `expires_at` <= 365 dager, re-verifisert rett før hvert kall).
+`health` og `vision` kan aldri få ACT (`NEVER_ACT_DOMAINS`: avvist ved binding, i `actOn()` og i SQL for
+auto-ACT). Hjemhandlinger går gjennom G2 D-kjeden (mål-allowlist, step-up, readback, umiddelbart varsel med
+gjenopprettingstekst); den autonome sveipe-identiteten har ikke en signert enhetsøkt og nektes derfor av
+step-up (målt mot de ekte G2-definisjonene): situasjonen eskalerer ærlig, aldri en stille omgåelse.
+
+**11.5 Modellassistert vurdering.** Inngangen er et lukket JSON-objekt (regel, domene, prioritet, minimerte
+fakta), utdata er UBETRODD data (lukkede sett, ukjent = laveste nivå). Eneste virkning: `low` -> `normal`
+(`remember` -> `inform`). Aldri `high`, aldri konfidens, aldri stadium, aldri ACT. Begrensede data
+(`SECRET_RESTRICTED`: helse, kamera): `mode: LOCAL`, ingen betalt/sky-modell, leverandørverifisering mot lokale
+navn, og INGEN sky-fallback - er den lokale modellen nede, uteblir vurderingen.
+
+**11.6 Tilbakemeldingslæring og kontrafaktisk simulering.** Læring flytter ETT tall per (tenant, space, regel)
+ett steg etter tre enige, ubrukte stemmer, høyst ett steg per døgn, innenfor harde grenser i kode
+(`RULES`, dypt fryst), revidert i samme transaksjon og tilbakestillbart; sikkerhetsregler er ikke tunbare;
+ingen regel, kode, prompt eller modellvekt endres (D-397). Simuleringen er en REN funksjon over registrerte
+rader (tid spart kun fra observerte, løste varigheter, eksplisitte antakelser/forbehold/hindringer) og vises
+som SUGGEST-bevis - den utfører og endrer ingenting.
+
+**11.7 Anomali-revisjon (P2e).** spend/pipeline/frister dekkes av de 26 open-loop-typene, infra av incidents
+(D-195; nå også i «sanntid» via bussen med samme nøkkel). To hull ble bygget som rene detektorer
+(`modules/situations/src/anomaly-detectors.ts`): kostnadssprang mot egen baseline og stilnet planlagt jobb -
+`BUILT_UNWIRED` (ingen leser mater dem; krever eierbeslutning). D-klasse-handlinger ved autonom ACT gir
+umiddelbart varsel + gjenopprettingskontekst gjennom D-kjedens `ClassDNotifier` (og utføres aldri uten klar
+varsler).
+
+**11.8 `DEFERRED` / `BLOCKED_EXTERNAL`.** HA-push (i dag polling), eier-flate for abonnementer, lært energi-baseline,
+tidssone-bevisste helsedøgn, kommunikasjon/forretning som kilder, «borte»-bevisst bevegelse, sanntids-løsning av
+incidents, kobling av anomali-detektorene, kontrollsenter-side. `BLOCKED_EXTERNAL`: ACT/ACT+NOTIFY observert på
+NAS, lokal modell på NAS, ekte HA/kamera/helsedata.
+
 ## 9. Oppdateringsplikt
 
 Dette notatet oppdateres FØR — ikke etter — hver ny hendelseskilde (en `business_open_loops`-bro,
 nye infra-/home-/health-detektorer), modell-assistert klassifisering, eller autonom auto-ACT-wiring.
+(Oppdatert for WP-G4, D-466: se §11.)
 Samme regel som `PROCESSOR_REGION_MATRIX.md` sin egen: et kapittel som ikke er fylt ut, er ikke i
 produksjonsbruk.
