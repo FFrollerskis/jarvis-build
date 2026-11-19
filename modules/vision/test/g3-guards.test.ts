@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -114,10 +115,28 @@ function subwords(text: string): string[] {
     .filter((w) => w.length > 0);
 }
 
-/** Biometri-/ansiktsgjenkjenningsord (hele delord - «surface» og «facebook» er IKKE treff). */
-const isBiometricWord = (w: string): boolean => /^(faces?|facial|faceprints?|faceid|ansikt\w*|biometri\w*|voiceprints?|gait)$/.test(w);
-/** Ekstra for visjonsmodulen: gjenkjenning/identifisering av personer. («fingerprint» er hash-fingeravtrykk i flere moduler og er bevisst IKKE med.) */
-const isRecognitionWord = (w: string): boolean => /^(recogni[sz](e|es|ed|ing|ition)|identify|identifies|identified|identifying|identification)$/.test(w);
+/**
+ * Biometri-/ansiktsgjenkjenningsord (hele delord - «surface» og «facebook» er IKKE treff). Review A-L4: også de sammensatte ordene `subwords()` ikke deler (facematch, facerec*, facedetect*, faceembed*, ...)
+ * og person-gjenidentifisering (reid*). Disse vaktene er NAIVE BRUDD-VAKTER (de felles rene, utilsiktede innføringer med de vanlige navnene), ikke en garanti: en forsettlig omgåelse med et helt annet navn fanges ikke.
+ */
+const isBiometricWord = (w: string): boolean => /^(faces?|facial|faceprints?|faceid|face(match|rec|recog|detect|embed|template|ident|cluster)\w*|ansikt\w*|biometri\w*|voiceprints?|gait|reid\w*)$/.test(w);
+/**
+ * Ekstra for visjonsmodulen: gjenkjenning/identifisering av personer. («fingerprint» er hash-fingeravtrykk i flere moduler og er bevisst IKKE med.) Review A-L4: også norsk
+ * (gjenkjenn*, identifiser*) - modellen/prompten/teksten kan være norsk.
+ */
+const isRecognitionWord = (w: string): boolean => /^(recogni[sz](e|es|ed|ing|ition)|identify|identifies|identified|identifying|identification|gjenkjenn\w*|identifiser\w*)$/.test(w);
+const PERSON_NOUNS: ReadonlySet<string> = new Set(["person", "people", "human"]);
+const IDENTITY_NOUNS: ReadonlySet<string> = new Set(["name", "names", "identity", "identities", "embedding", "embeddings", "template", "templates", "match", "matches", "signature", "descriptor", "descriptors", "vector"]);
+/**
+ * Review A-L4 (kun visjonsomfanget): en identifikator/kolonne som PARER en person med et identitetsord (`person_name`, `personEmbedding`, `PersonTemplate`, `person_match`) eller skriver person-gjenidentifisering
+ * (`re_id`, `reIdentify`). `person_id`/`person_present` er IKKE treff (id/present er ikke identitetsord).
+ */
+function isPersonIdentityIdentifier(id: string): boolean {
+  const words = subwords(id);
+  if (words.some((w) => PERSON_NOUNS.has(w)) && words.some((w) => IDENTITY_NOUNS.has(w))) return true;
+  for (let i = 0; i + 1 < words.length; i += 1) if (words[i] === "re" && /^(id|identif\w*)$/.test(words[i + 1] as string)) return true;
+  return false;
+}
 
 function scanIdentifiers(source: string, extra: (w: string) => boolean = () => false): string[] {
   const code = strip(source, false);
@@ -126,19 +145,49 @@ function scanIdentifiers(source: string, extra: (w: string) => boolean = () => f
   return [...hits];
 }
 
+const STRING_LITERAL = /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/g;
+
 function scanLiterals(source: string): string[] {
   const code = strip(source, true);
-  const literals = code.match(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/g) ?? [];
+  const literals = code.match(STRING_LITERAL) ?? [];
   return literals.filter((literal) => subwords(literal).some(isBiometricWord));
 }
 
+/** Review A-L4: identifikatorer som parer en person med et identitetsord (`person_name`, `PersonEmbedding`) eller skriver re-identifisering (`reId`). Brukes kun i visjonsomfanget. */
+function scanPersonIdentityIdentifiers(source: string): string[] {
+  const hits = new Set<string>();
+  for (const id of strip(source, false).match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) if (isPersonIdentityIdentifier(id)) hits.add(id);
+  return [...hits];
+}
+
+/**
+ * Review A-L4: streng-literaler som nevner biometri/gjenkjenning/identifisering (engelsk eller norsk) eller ber modellen navngi/beskrive/identifisere en person («Identify the person by name»).
+ * Brukes kun i visjonsomfanget; de granskede forbudslistene står i allowlisten under.
+ */
+function scanRecognitionLiterals(source: string): string[] {
+  const literals = strip(source, true).match(STRING_LITERAL) ?? [];
+  return literals.filter((literal) => subwords(literal).some((w) => isBiometricWord(w) || isRecognitionWord(w)) || /\b(name|describe|identify)\s+(the|this|each|any|a)\s+(person|people|man|woman|face)/i.test(literal));
+}
+
+const cleanSql = (sql: string): string => sql.replace(/\/\*[\s\S]*?\*\//g, "").split("\n").map((line) => line.replace(/--.*$/, "")).join("\n");
+
 /** SQL: kommentarer fjernes; ALLE ord (også streng-verdier i CHECK) delord-skannes. `scope` begrenser til setninger som nevner visjons-/vektortabeller. */
 function scanSql(sql: string, scope: "all" | "vision"): string[] {
-  const clean = sql.replace(/\/\*[\s\S]*?\*\//g, "").split("\n").map((line) => line.replace(/--.*$/, "")).join("\n");
   const hits = new Set<string>();
-  for (const statement of clean.split(";")) {
+  for (const statement of cleanSql(sql).split(";")) {
     if (scope === "vision" && !/vision_|memory_vectors/i.test(statement)) continue;
     for (const word of subwords(statement)) if (isBiometricWord(word)) hits.add(word);
+  }
+  return [...hits];
+}
+
+/** Review A-L4: i setninger som berører vision-tabeller (vision_ + navn) og memory_vectors: gjenkjennings-/identifiseringsord og identifikatorer som parer en person med et identitetsord (kolonnen `person_name`). */
+function scanSqlIdentity(sql: string): string[] {
+  const hits = new Set<string>();
+  for (const statement of cleanSql(sql).split(";")) {
+    if (!/vision_|memory_vectors/i.test(statement)) continue;
+    for (const word of subwords(statement)) if (isRecognitionWord(word)) hits.add(word);
+    for (const id of statement.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) if (isPersonIdentityIdentifier(id)) hits.add(id);
   }
   return [...hits];
 }
@@ -167,6 +216,8 @@ function productionSources(): string[] {
 }
 
 const visionSources = (): string[] => [...walk(VISION_SRC, (f) => f.endsWith(".ts")), ...(existsSync(join(ROOT, "apps/api/src")) ? [...walk(join(ROOT, "apps/api/src"), (f) => /\/vision[a-z-]*\.ts$/.test(f))] : [])];
+/** Review A-L4: ALLE produksjonsfiler som nevner «camera» (kode eller literaler) - også utenfor visjonsmodulen (en senere HA-/kameraverktøy-fil i tool-gateway ville havnet her). */
+const cameraScopedSources = (): string[] => productionSources().filter((file) => /camera/i.test(strip(readFileSync(file, "utf8"), true)));
 const rel = (file: string): string => relative(ROOT, file);
 const migrations = (): Array<{ name: string; sql: string }> =>
   readdirSync(join(ROOT, "modules/core/src/db/migrations")).filter((f) => f.endsWith(".sql")).sort().map((name) => ({ name, sql: readFileSync(join(ROOT, "modules/core/src/db/migrations", name), "utf8") }));
@@ -212,6 +263,33 @@ describe("no_biometric: ingen kolonne/tabell/modelloppgave for ansiktsgjenkjenni
       expect(scanSql(migration.sql, "vision")).toEqual([]);
     }
     expect(offenders).toEqual([]);
+  });
+
+  it("visjonsomfanget (review A-L4): ingen identifikator som parer en person med et identitetsord (person_name, personEmbedding, reId ...) og ingen streng-literal om gjenkjenning/identifisering utenfor den granskede forbudslisten", () => {
+    const LITERALS_OK: Readonly<Record<string, string>> = { "modules/vision/src/classifier.ts": "systemprompten FORBYR å identifisere/gjenkjenne personer (frosset av pinnen under); PERSON_WORDS er forbudslisten" };
+    const identifierOffenders: string[] = [];
+    const literalFlagged = new Set<string>();
+    for (const file of visionSources()) {
+      const source = readFileSync(file, "utf8");
+      const ids = scanPersonIdentityIdentifiers(source);
+      if (ids.length > 0) identifierOffenders.push(`${rel(file)}: ${ids.join(", ")}`);
+      if (scanRecognitionLiterals(source).length > 0) literalFlagged.add(rel(file));
+    }
+    expect(identifierOffenders).toEqual([]);
+    expect([...literalFlagged].sort()).toEqual(Object.keys(LITERALS_OK).sort());
+  });
+
+  it("migrasjoner (review A-L4): ingen setning om vision_*/memory_vectors har person+identitetsord (kolonnen person_name) eller gjenkjennings-/identifiseringsord", () => {
+    const offenders: string[] = [];
+    for (const migration of migrations()) {
+      const hits = scanSqlIdentity(migration.sql);
+      if (hits.length > 0) offenders.push(`${migration.name}: ${hits.join(", ")}`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("systemprompten er FROSSET (review A-L4): enhver endring - også en liten «Identify the person ...»-linje - feller denne pinnen og krever en bevisst oppdatering av den og av DPIA-en", () => {
+    expect(createHash("sha256").update(VISION_SYSTEM_PROMPT).digest("hex")).toBe("9ba927473947dd0ecca89599f5737c85451ad440af81be456719d9c1b2dd584f");
   });
 
   it("den lukkede hendelsesmengden har ingen biometrisk/identitetstype", () => {
@@ -267,6 +345,22 @@ describe("no_biometric: ingen kolonne/tabell/modelloppgave for ansiktsgjenkjenni
     expect(scanSql("CREATE TABLE unrelated (face int);", "vision")).toEqual([]); // utenfor vision-scope fanges av «all»
     expect(scanSql("CREATE TABLE unrelated (face int);", "all")).toEqual(["face"]);
   });
+
+  it("NON-VAKUITET (review A-L4): de utvidede skannerne feller de omgåelsene reviewer A fant (facematch, person_name, «Identify the person by name», norske ord) - og ikke uskyldige navn", () => {
+    expect(scanIdentifiers("const facematch = 1; function facerecognition() {} const reidentify = 2; const faceembedding = 3;").sort()).toEqual(["faceembedding", "facematch", "facerecognition", "reidentify"]);
+    expect(scanIdentifiers("const resident = 1; const reliable = 2; const reid = 3; const faceted = 4; const facetime = 5;")).toEqual(["reid"]);
+    expect(scanPersonIdentityIdentifiers("const person_name = 1; type PersonEmbedding = {}; const reId = 2; function reIdentify() {} const personMatch = 3;").sort()).toEqual(["PersonEmbedding", "personMatch", "person_name", "reId", "reIdentify"]);
+    expect(scanPersonIdentityIdentifiers("const person_id = 1; const person_present = 2; type PersonTenants = {}; const PERSON_WORDS = []; const object_label = 3; const already = 4; const reading = 5;")).toEqual([]);
+    expect(scanRecognitionLiterals('const p = "Identify the person by name and describe them";')).toHaveLength(1);
+    expect(scanRecognitionLiterals('const m = "Jeg kan ikke gjenkjenne personer";')).toHaveLength(1);
+    expect(scanRecognitionLiterals('const u = "identifiser personen";')).toHaveLength(1);
+    expect(scanRecognitionLiterals('const t = "Please describe the face in the image";')).toHaveLength(1);
+    expect(scanRecognitionLiterals('const ok = "object_detected"; const k = "keys"; const j = `${a}/api/camera_proxy/${b}`;')).toEqual([]);
+    expect(scanSqlIdentity("ALTER TABLE vision_event_observations ADD COLUMN person_name text;")).toEqual(["person_name"]);
+    expect(scanSqlIdentity("CREATE TABLE vision_x (identification text, recognised boolean);").sort()).toEqual(["identification", "recognised"]);
+    expect(scanSqlIdentity("CREATE TABLE unrelated (person_name text);")).toEqual([]);
+    expect(scanSqlIdentity("-- person_name er forbudt\nCREATE TABLE vision_x (person_id text);")).toEqual([]);
+  });
 });
 
 /* ------------------------------- 2. ingen kontinuerlig rå video ------------------------------- */
@@ -295,6 +389,21 @@ describe("ingen kontinuerlig rå video: kun hendelses-øyeblikksbilder", () => {
       if (hits.length > 0) offenders.push(`${rel(file)}: ${hits.join("; ")}`);
     }
     expect(offenders).toEqual([]);
+  });
+
+  it("repo-bredt (review A-L4): ingen produksjonsfil som nevner «camera» - uansett modul - har strøm-/opptaks-/video-kode, og HA-bildehentingen (camera_proxy) finnes kun i ha-source.ts", () => {
+    const scoped = cameraScopedSources();
+    expect(scoped.map(rel)).toEqual(expect.arrayContaining(["apps/api/src/server.ts", "modules/erasure/src/plan.ts", "modules/vision/src/pipeline.ts", "modules/vision/src/ha-source.ts"]));
+    const offenders: string[] = [];
+    const proxyUsers: string[] = [];
+    for (const file of scoped) {
+      const source = readFileSync(file, "utf8");
+      const hits = scanVideo(source);
+      if (hits.length > 0) offenders.push(`${rel(file)}: ${hits.join("; ")}`);
+      if (/camera_proxy/.test(strip(source, true))) proxyUsers.push(rel(file));
+    }
+    expect(offenders).toEqual([]);
+    expect(proxyUsers).toEqual(["modules/vision/src/ha-source.ts"]);
   });
 
   it("kildeadapteren HA har kun lese-/bildehentingsmetoder (ingen subscribe/stream/record/styring)", () => {
@@ -384,6 +493,16 @@ describe("visjonsmodulen har ingen egen nettverksvei og ingen leverandør-SDK (a
     expect(offenders).toEqual([]);
   });
 
+  it("repo-bredt (review A-L4): produksjonsfiler som nevner «camera» har ingen bar fetch/globalThis.fetch/XMLHttpRequest (kamerakode henter kun via en innsatt, vaktet fetch)", () => {
+    const offenders: string[] = [];
+    for (const file of cameraScopedSources()) {
+      // Rå node-moduler (node:http m.fl.) er ikke med her: api-serveren (server.ts) nevner «camera» via visjonsrutene og SERVERER over node:http - det er ingen utgående kamerabane.
+      const hits = scanNetwork(readFileSync(file, "utf8")).filter((label) => !label.startsWith("node:"));
+      if (hits.length > 0) offenders.push(`${rel(file)}: ${hits.join("; ")}`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
   it("kun tillatte importer (relative, node:crypto/fs/path, pg, zod, @jarvis/contracts|core|memory) - aldri leverandør-SDK eller @jarvis/provider-adapters (modellkall går via ModelGateway-porten)", () => {
     const offenders: string[] = [];
     for (const file of walk(VISION_SRC, (f) => f.endsWith(".ts"))) {
@@ -416,5 +535,61 @@ describe("visjonsmodulen har ingen egen nettverksvei og ingen leverandør-SDK (a
     expect(scanNetwork('import type { Socket } from "node:net"; import { request } from "node:http";')).toHaveLength(1);
     expect(disallowedImports('import OpenAI from "openai"; import { x } from "@jarvis/provider-adapters"; import a from "@anthropic-ai/sdk"; import b from "./ok.ts"; import c from "zod"; import d from "node:crypto";').sort()).toEqual(["@anthropic-ai/sdk", "@jarvis/provider-adapters", "openai"]);
     expect(disallowedImports('const m = await import("undici"); const r = require("axios");').sort()).toEqual(["axios", "undici"]);
+  });
+});
+
+/* ------------------- 4. kamerabilder når ingen skyadapter (review A-L2) ------------------- */
+
+describe("hver adapterfil med bildemapping har assertNoRestrictedMedia (review A-L2: lag 3 er ikke bare to filer)", () => {
+  const ADAPTER_SRC = join(ROOT, "packages/provider-adapters/src");
+  /** Uttrykk som BYGGER eller LESER en bildedel mot en leverandør. Ren tekstskanning av koden (kommentarer fjernet, streng-literaler beholdt). */
+  const IMAGE_TOKENS: ReadonlyArray<readonly [string, RegExp]> = [
+    ["type: \"image\" (bildedel i en forespørsel)", /\btype\s*:\s*["']image["']/],
+    ["type === \"image\" (leser en bildedel)", /\btype\s*[=!]==?\s*["']image["']/],
+    ["inlineData / inline_data (Gemini-bilde)", /\binline_?[dD]ata\b/],
+    ["image_url (OpenAI-format)", /\bimage_url\b/],
+    ["input_image (OpenAI Responses-format)", /\binput_image\b/],
+    ["mimeType (bildedel)", /\bmimeType\b/],
+    ["base64 data-URL", /;base64,/]
+  ];
+  /** Bildemapping er tillatt UTEN assertNoRestrictedMedia kun her: typefila (definerer ContentPart og selve låsen) og den LOKALE adapteren (begrensede bilder er lov kun til lokal modell, og kun med `vision: true`). */
+  const ALLOWLIST: Readonly<Record<string, string>> = {
+    "packages/provider-adapters/src/types.ts": "definerer ContentPart-typen, hasRestrictedMedia og selve assertNoRestrictedMedia",
+    "packages/provider-adapters/src/local-llm.ts": "LOKAL adapter: sender image_url med data-URL kun til et lokalt endepunkt, og kun når `vision: true` (se vakten under)"
+  };
+  const adapterFiles = (): string[] => readdirSync(ADAPTER_SRC).filter((f) => f.endsWith(".ts")).map((f) => join(ADAPTER_SRC, f));
+  const scanImageMapping = (source: string): { tokens: string[]; guarded: boolean } => ({
+    tokens: IMAGE_TOKENS.filter(([, pattern]) => pattern.test(strip(source, true))).map(([label]) => label),
+    guarded: /\bassertNoRestrictedMedia\s*\(/.test(strip(source, false))
+  });
+
+  it("enhver adapterfil som mapper bilder (type: \"image\", inlineData, image_url ...) kaller assertNoRestrictedMedia - ellers kunne en ny skyadapter sende et kamerabilde", () => {
+    const offenders: string[] = [];
+    const guarded: string[] = [];
+    for (const file of adapterFiles()) {
+      const { tokens, guarded: ok } = scanImageMapping(readFileSync(file, "utf8"));
+      if (tokens.length === 0 || ALLOWLIST[rel(file)] !== undefined) continue;
+      if (ok) guarded.push(rel(file));
+      else offenders.push(`${rel(file)}: ${tokens.join("; ")}`);
+    }
+    expect(offenders).toEqual([]);
+    // non-vakuitet mot det ekte repoet: de to skyadapterne med ekte bildestøtte er funnet og vokter - en ny bildeadapter må dukke opp her bevisst
+    expect(guarded.sort()).toEqual(["packages/provider-adapters/src/anthropic.ts", "packages/provider-adapters/src/gemma.ts"]);
+  });
+
+  it("allowlisten er ikke foreldet: begge filene finnes og har fortsatt bildemapping - og kun den lokale adapteren konstrueres med `vision: true`, kun under navnet local_vision og kun i vision-runtime.ts", () => {
+    for (const path of Object.keys(ALLOWLIST)) expect(scanImageMapping(readFileSync(join(ROOT, path), "utf8")).tokens.length, path).toBeGreaterThan(0);
+    const constructors = productionSources().filter((file) => /\bvision\s*:\s*true\b/.test(strip(readFileSync(file, "utf8"), false)));
+    expect(constructors.map(rel)).toEqual(["apps/api/src/vision-runtime.ts"]);
+    expect(strip(readFileSync(join(ROOT, "apps/api/src/vision-runtime.ts"), "utf8"), true)).toMatch(/"local_vision", undefined, \{ vision: true \}/);
+  });
+
+  it("NON-VAKUITET: skanneren feller en syntetisk skyadapter med bildemapping uten låsen, godtar en som har den, og ser ikke kommentarer", () => {
+    const naive = 'const part = { type: "image", source: { data } }; const g = { inlineData: { mimeType, data } }; const o = { type: "image_url", image_url: { url: `data:${t};base64,${d}` } };';
+    expect(scanImageMapping(naive)).toMatchObject({ guarded: false });
+    expect(scanImageMapping(naive).tokens).toHaveLength(5);
+    expect(scanImageMapping('assertNoRestrictedMedia(this.name, request); const part = { type: "image" };')).toEqual({ tokens: ["type: \"image\" (bildedel i en forespørsel)"], guarded: true });
+    expect(scanImageMapping("// assertNoRestrictedMedia(x) er ikke et kall, og { type: \"image\", image_url } står i en kommentar\nconst ok = 1;")).toEqual({ tokens: [], guarded: false });
+    expect(scanImageMapping('const x = { type: "text", text }; const y = parts.filter((p) => p.type === "text");').tokens).toEqual([]);
   });
 });
