@@ -151,6 +151,21 @@ async function visionDependents(): Promise<string[]> {
   return dependents;
 }
 
+/**
+ * WP-G4 (D-466): migrasjoner (139: abonnement, signallogg, tilbakemelding, regeltuning, vurderinger + to additive kolonner) som BYGGER PÅ objektene 057 oppretter (`situation_autonomy_policies`, `inform_message`,
+ * `inform_delivered_at`; kommentarer ignoreres). En host som ikke har kjørt 057 kan ikke ha anvendt dem - i bane C følger de derfor med 057 (første kjøring uten dem, andre kjøring legger til 057 og dem i katalogrekkefølge).
+ * Samme mønster som `visionDependents()`; uten dette feilet bane C med «relation situation_autonomy_policies does not exist».
+ */
+async function activationDependents(): Promise<string[]> {
+  const dependents: string[] = [];
+  for (const file of await sortedMigrationFiles()) {
+    if (file <= ACTIVATION) continue; // kun migrasjoner ETTER 057 kan bygge på den
+    const sql = (await readFile(join(MIGRATIONS_DIR, file), "utf8")).split("\n").map((line) => line.replace(/--.*$/, "")).join("\n");
+    if (/\bsituation_autonomy_policies\b|\binform_message\b|\binform_delivered_at\b/.test(sql)) dependents.push(file);
+  }
+  return dependents;
+}
+
 describe("Migrasjonskatalogen har ÉN deterministisk rekkefølge (ren vakt)", () => {
   it("ingen dupliserte 3-sifrede prefikser; 055_vision står umiddelbart før 056_situations", async () => {
     const files = await sortedMigrationFiles();
@@ -225,6 +240,7 @@ describe("Banen «main (055+056) så KUN 057» gir samme skjema som fersk instal
   let freshApplied: string[] = [];
   let hostFirstApplied: string[] = [];
   let hostSecondApplied: string[] = [];
+  let dependents: string[] = [];
   const tempDirs: string[] = [];
 
   beforeAll(async () => {
@@ -236,11 +252,12 @@ describe("Banen «main (055+056) så KUN 057» gir samme skjema som fersk instal
     tempDirs.push(fullDir);
     freshApplied = await runMigrations(fresh.pool, fullDir);
 
-    // B: en host som allerede kjører dagens main (055 og 056 anvendt, uten 057) ...
-    const withoutActivation = await migrationDirCopy([ACTIVATION]);
+    // B: en host som allerede kjører dagens main (055 og 056 anvendt, uten 057 og uten migrasjonene som bygger på 057) ...
+    dependents = await activationDependents();
+    const withoutActivation = await migrationDirCopy([ACTIVATION, ...dependents]);
     tempDirs.push(withoutActivation);
     hostFirstApplied = await runMigrations(host.pool, withoutActivation);
-    // ... og deretter deployes PR #86: KUN 057 legges til.
+    // ... og deretter deployes PR #86: KUN 057 (og det som bygger på den) legges til.
     hostSecondApplied = await runMigrations(host.pool, fullDir);
   });
 
@@ -250,13 +267,14 @@ describe("Banen «main (055+056) så KUN 057» gir samme skjema som fersk instal
     for (const dir of tempDirs) await rm(dir, { recursive: true, force: true });
   });
 
-  it("bane A kjørte 055 -> 056 -> 057 i rekkefølge; bane B kjørte 055+056 først og deretter NØYAKTIG 057 alene", () => {
+  it("bane A kjørte 055 -> 056 -> 057 i rekkefølge; bane B kjørte 055+056 først og deretter NØYAKTIG 057 (pluss migrasjonene som bygger på den) alene", () => {
     expect(freshApplied.indexOf(SITUATIONS)).toBe(freshApplied.indexOf(VISION) + 1);
     expect(freshApplied.indexOf(ACTIVATION)).toBe(freshApplied.indexOf(SITUATIONS) + 1);
     expect(hostFirstApplied).toContain(VISION);
     expect(hostFirstApplied).toContain(SITUATIONS);
     expect(hostFirstApplied).not.toContain(ACTIVATION);
-    expect(hostSecondApplied).toEqual([ACTIVATION]);
+    for (const file of dependents) expect(hostFirstApplied, file).not.toContain(file);
+    expect(hostSecondApplied).toEqual([ACTIVATION, ...dependents]);
   });
 
   it("katalog-snapshotene er identiske og inneholder vision, situations OG aktiveringsflaten (057)", async () => {

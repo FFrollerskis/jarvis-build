@@ -839,7 +839,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-G4 (D-466, UA-10): samlet hendelsesabonnement (abonnementsregister, inntaksbuss, hendelsesløper, kildeporter). ALT er AV som standard: uten `JARVIS_SITUATION_SIGNALS=on` er `tools` tom, `runner` null og ingenting logges
   // (verktøylister, utvalg, intents, rate-grenser, ruter og det daglige sveipet er identiske med main). Helse-/visjonsporten tas strukturelt inn fra de ALLEREDE konstruerte tjenestene (denne filen er en godkjent helse-importør).
   const situationSignals = createSituationSignalsWiring({
-    env: process.env, pool, engine: situationEngine, domainPauses: situationDomainPauses, gateway: toolGateway, modelGateway: gateway, ownerIdentity, ownerTenantId: owner.tenant_id,
+    env: process.env, pool, engine: situationEngine, domainPauses: situationDomainPauses, gateway: toolGateway, modelGateway: gateway, ownerIdentity, ownerTenant: owner.tenant_id,
     ownerPersonId: owner.owner_person_id, incidents: incidentService, vision: visionService, health: healthService, killSwitch,
     haTransport: new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))
   });
@@ -1131,8 +1131,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // D-388 (JARVIS-061): Home Assistant-verktøyene (definert siden fase 9, aldri registrert) registreres nå med den
       // ekte transporten fra `transports`-recorden over - samme ene register-løkke som resten.
       ...homeAssistantTools(new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))),
-      // WP-G4: `autonomyExpiry` gir `set_autonomy_policy` et valgfritt `expires_at` KUN med hovedbryteren på (ellers er skjemaet identisk med main).
-      ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses), { autonomyExpiry: situationSignals.flags.signals }),
+      ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
       // WP-H2: tjenesten legger seg i `executiveRef` (`holder`) så Drift-/Verdi-sentrene kan lese rapportene dens (late funksjoner over); `run_golden_suite` og `revoke_autonomy_binding` registreres KUN med sine flagg.
       ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER],
         selfModel: {
@@ -1239,13 +1238,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // WP-D3 (UA-4 Growth): kun med flaggene på (se over). Eier-eksklusive navnerom (`growth_*`) som aldri står på en modellflate; skriving går alltid gjennom step-up + klasse D-kjeden.
       ...(growthWriteEnabled ? growthWriteToolDefinitions(growthWriteConfig, growthWriteTransports) : []),
       ...(growthExperimentRegistry ? growthExperimentToolDefinitions(new GrowthExperimentTransport(growthExperimentRegistry)) : []),
+      // WP-G4 (D-466): kontrollhandlinger for hendelsesabonnementet på `situations` (eier-eksklusivt navnerom), HA-lesehandlingen `read_state_detail` og `set_autonomy_policy` med valgfri `expires_at` (erstatter den tidligere
+      // definisjonen med samme navn; står bevisst ETTER `situationsToolDefinitions(...)`). Tom liste uten `JARVIS_SITUATION_SIGNALS=on` = identisk med main. Står FØR comms/personal: kildevaktene krever at de to står sist.
+      ...situationSignals.tools,
       // WP-G1 (D-463, UA-7): `comms.*` (felles utgående kommunikasjon - klasse D `outbound_message`, eier-kun, aldri en modellflate) registreres KUN med JARVIS_COMMS_OUTBOUND=on. Flagg AV = tom liste = identisk med main
       // (ingen verktøy, ingen utvalgstreff, ingen rate-endring). Samme ene register-løkke som resten - ingen parallell registreringsvei.
       ...commsRuntime.tools,
       // WP-G2 (D-464): personlig-domenet (tom liste uten flagg). Eier-/step-up-krevende, aldri på en modellflate.
-      ...personal.tools,
-      // WP-G4 (D-466): kontrollhandlinger for hendelsesabonnementet på `situations` (eier-eksklusivt navnerom) og HA-lesehandlingen `read_state_detail`. Tom liste uten `JARVIS_SITUATION_SIGNALS=on`.
-      ...situationSignals.tools
+      ...personal.tools
     ]
   }))) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE

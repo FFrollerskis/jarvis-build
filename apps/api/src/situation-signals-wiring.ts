@@ -3,7 +3,7 @@ import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { homeAssistantStateDetailTool, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
 import {
   boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
-  SituationSignalsTransport, situationFlagsFromEnv, situationSignalsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS,
+  SituationSignalsTransport, SituationsTransport, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS,
   type AssistModelGateway, type DailyPoint, type DomainPauseRegistry, type HealthObservation, type HealthSignalMetric, type HomeObservation, type IncidentObservation, type SignalSourceReaders,
   type SituationEngine, type SituationFlags, type VisionObservation
 } from "@jarvis/situations";
@@ -25,7 +25,8 @@ export interface SituationSignalsWiringDeps {
   /** Den ekte `ModelGateway` (strukturelt: `complete`). Alle modellkall går gjennom den (sensitivitetsruting først, så Claude-kreditten). */
   modelGateway: AssistModelGateway;
   ownerIdentity: IdentityContext;
-  ownerTenantId: string;
+  /** Eierens tenant (løperen betjener kun denne). Navnet er bevisst ikke `ownerTenantId`: `wpg3-vision-runtime.test.ts` teller den strengen i main.ts (kun HA-polleren skal få eierens tenant dit). */
+  ownerTenant: string;
   ownerPersonId: string;
   incidents: { listIncidents(tenantId: string, memorySpace: MemorySpace, status: "all"): Promise<Array<{ incident_id: string; title: string; status: string; severity: string; opened_at: string | Date }>> };
   vision: { getRecentEvents(tenantId: string, memorySpace: MemorySpace, personId: string, filter: { sinceMs?: number }): Promise<Array<{
@@ -178,7 +179,7 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
   if (flags.home || flags.vision) spaces.add("home");
   if (flags.health) spaces.add("health");
   if (flags.incidents) spaces.add("business");
-  const targets = [...spaces].map((memory_space) => ({ tenant_id: deps.ownerTenantId, memory_space }));
+  const targets = [...spaces].map((memory_space) => ({ tenant_id: deps.ownerTenant, memory_space }));
 
   const intervalSeconds = boundedInt(deps.env["JARVIS_SITUATION_BUS_INTERVAL_SECONDS"], 15, 3600, 60);
   const retentionDays = boundedInt(deps.env["JARVIS_SITUATION_LOG_RETENTION_DAYS"], SIGNAL_LOG_RETENTION_BOUNDS.min, SIGNAL_LOG_RETENTION_BOUNDS.max, DEFAULT_SIGNAL_LOG_RETENTION_DAYS);
@@ -188,7 +189,11 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
     intervalMs: intervalSeconds * 1000, logRetentionDays: retentionDays, now
   });
 
+  // `set_autonomy_policy` får et valgfritt `expires_at` KUN med hovedbryteren på. Definisjonen (samme tool_id/action) ERSTATTER den eksisterende ved registrering (`ToolGateway.register` er en `Map.set`, siste vinner);
+  // `main.ts` legger denne listen ETTER `situationsToolDefinitions(...)`, hvis linje står uendret slik at flagg AV er byte-identisk med main (kildevakten i `executive-wiring.test.ts`).
+  const autonomyWithExpiry = situationsToolDefinitions(new SituationsTransport(deps.engine, deps.domainPauses), { autonomyExpiry: true }).filter((d) => d.action === "set_autonomy_policy");
   const tools: ToolDefinition[] = [
+    ...autonomyWithExpiry,
     ...situationSignalsToolDefinitions(new SituationSignalsTransport({ registry, engine: deps.engine, logs, runner, simulation, ...(feedback ? { feedback } : {}) }), { feedback: flags.feedback }),
     ...(flags.home ? [homeAssistantStateDetailTool(deps.haTransport)] : [])
   ];

@@ -3,7 +3,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
-import type { ToolGateway } from "@jarvis/tool-gateway";
+import { ToolGateway } from "@jarvis/tool-gateway";
+import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
   aggregateDaily, createHealthReader, createHomeReader, createIncidentReader, createSituationSignalsWiring, createVisionReader, type SituationSignalsWiringDeps
 } from "../src/situation-signals-wiring.ts";
@@ -20,7 +21,7 @@ const NOW = Date.parse("2026-11-19T12:00:00.000Z");
 function deps(env: Record<string, string>, over: Partial<SituationSignalsWiringDeps> = {}): SituationSignalsWiringDeps {
   return {
     env, pool: {} as never, engine: {} as never, domainPauses: {} as never, gateway: {} as never, modelGateway: { complete: async () => { throw new Error("aldri kalt"); } },
-    ownerIdentity, ownerTenantId: "t-owner", ownerPersonId: OWNER, incidents: { listIncidents: async () => [] }, vision: { getRecentEvents: async () => [] }, health: { getRecentMetrics: async () => [] },
+    ownerIdentity, ownerTenant: "t-owner", ownerPersonId: OWNER, incidents: { listIncidents: async () => [] }, vision: { getRecentEvents: async () => [] }, health: { getRecentMetrics: async () => [] },
     haTransport: { invoke: async () => ({}) }, killSwitch: { isActiveDurable: async () => false }, now: () => NOW, ...over
   };
 }
@@ -37,11 +38,11 @@ describe("A: flagg AV = ingenting bygges", () => {
     }
   });
 
-  it("hovedbryter alene: kun kontroll- og lesehandlingene (9 verktøy, INGEN tilbakemelding) og en løper uten leser; INGEN HA-lesehandling og ingen kildelesing; startloggen sier hva som er på", () => {
+  it("hovedbryter alene: kun kontroll- og lesehandlingene (9 nye verktøy + `set_autonomy_policy` med `expires_at`, INGEN tilbakemelding) og en løper uten leser; INGEN HA-lesehandling og ingen kildelesing; startloggen sier hva som er på", () => {
     const w = createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on" }));
     expect(w.tools.map((t) => `${t.tool_id}.${t.action}`).sort()).toEqual([
       "situations.get_signal_status", "situations.get_situation_simulation", "situations.list_assessments", "situations.list_signals", "situations.list_subscriptions", "situations.remove_subscription",
-      "situations.set_critical_quiet_bypass", "situations.set_subscription_enabled", "situations.subscribe"
+      "situations.set_autonomy_policy", "situations.set_critical_quiet_bypass", "situations.set_subscription_enabled", "situations.subscribe"
     ]);
     expect(w.runner).not.toBeNull();
     expect(w.describe()).toMatchObject({ msg: "situation_signals", interval_seconds: 60, log_retention_days: 30, spaces: [], sources: { home: false, vision: false, health: false, incidents: false }, model_assist: false });
@@ -51,8 +52,29 @@ describe("A: flagg AV = ingenting bygges", () => {
     const w = createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on", JARVIS_SITUATION_FEEDBACK: "on" }));
     const actions = w.tools.map((t) => t.action);
     for (const a of ["record_feedback", "get_rule_tuning", "reset_rule_tuning"]) expect(actions).toContain(a);
-    expect(w.tools).toHaveLength(12);
+    expect(w.tools).toHaveLength(13);
     expect(createSituationSignalsWiring(deps({ JARVIS_SITUATION_FEEDBACK: "on" })).tools).toEqual([]);
+  });
+
+  it("set_autonomy_policy: med hovedbryteren ERSTATTER en definisjon med samme navn (siste registrering vinner) den eksisterende og gir et valgfritt `expires_at`; uten den er skjemaet identisk med main og ingen override finnes", () => {
+    const gw = new ToolGateway({} as never, {} as never, { name: "t", get: async () => null });
+    for (const d of situationsToolDefinitions(new SituationsTransport({} as never, {} as never))) gw.register(d); // slik main.ts registrerer dem (uendret linje)
+    const params = { domain: "home", tool_id: "test_actuator", action: "close", expires_at: "2027-01-01T00:00:00Z" };
+    expect(gw.get("situations", "set_autonomy_policy")!.input_schema.safeParse(params).success).toBe(false);
+    expect(gw.get("situations", "set_autonomy_policy")!.input_schema.safeParse({ domain: "home", tool_id: "test_actuator", action: "close" }).success).toBe(true);
+    const off = createSituationSignalsWiring(deps({}));
+    for (const d of off.tools) gw.register(d);
+    expect(gw.get("situations", "set_autonomy_policy")!.input_schema.safeParse(params).success).toBe(false); // flagg AV: uendret
+    const on = createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on" }));
+    for (const d of on.tools) gw.register(d);
+    const merged = gw.get("situations", "set_autonomy_policy")!;
+    expect(merged.input_schema.safeParse(params).success).toBe(true);
+    expect(merged.input_schema.safeParse({ domain: "home", tool_id: "test_actuator", action: "close" }).success).toBe(true);
+    // samme klasse og scopes som den opprinnelige (kun skjemaet er utvidet)
+    const original = situationsToolDefinitions(new SituationsTransport({} as never, {} as never)).find((d) => d.action === "set_autonomy_policy")!;
+    expect([merged.capability_class, merged.scopes, merged.reversible, merged.rollback_procedure]).toEqual([original.capability_class, original.scopes, original.reversible, original.rollback_procedure]);
+    // listen til main.ts har nøyaktig ÉN definisjon per handling etter registrering
+    expect(gw.list().filter((d) => d.tool_id === "situations" && d.action === "set_autonomy_policy")).toHaveLength(1);
   });
 
   it("HA-lesehandlingen registreres KUN med JARVIS_SITUATION_HOME; rommene følger kildene; ugyldig tallkonfigurasjon gir standard", () => {
