@@ -21,7 +21,7 @@ import {
   type SituationPriority,
   type SituationStage
 } from "./types.ts";
-import { withDomainAdvisoryLocks } from "./advisory-lock.ts";
+import { DomainLockBusyError, withDomainAdvisoryLocks } from "./advisory-lock.ts";
 import { ALL_DOMAINS, type DomainPauseRegistry } from "./domain-pause.ts";
 import { NEVER_ACT_DOMAINS } from "./signal-types.ts";
 import { autonomyActionBlocker, SituationActActionForbiddenError } from "./autonomy-guard.ts";
@@ -1694,7 +1694,9 @@ export class SituationEngine {
           err instanceof SituationActDomainForbiddenError ||
           err instanceof SituationActActionForbiddenError ||
           err instanceof SituationAutonomyBindingChangedError ||
-          err instanceof SituationActStaleError
+          err instanceof SituationActStaleError ||
+          // A-MEDIUM-5: domenelåsen er opptatt for lenge (kø full/ventetid) - ikke utført, prøves igjen neste tikk
+          err instanceof DomainLockBusyError
         ) {
           result.skipped += 1;
           continue;
