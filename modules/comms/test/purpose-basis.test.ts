@@ -15,7 +15,7 @@ const cold = (over: Partial<OutboundPolicyState> = {}): OutboundPolicyState => (
   account_authorized: true, recipient_opted_out: false, sends_last_24h_to_recipient: 0, calls_last_24h_to_recipient: 0, sends_last_hour_from_account: 0, last_inbound_at: null,
   recipient_identity: null, target: null, marketing: { prior_consent: false, reservation_register: "unverified" }, ...over
 });
-const warm = cold({ recipient_identity: { identity_id: "id-1", confidence: 1 } });
+const warm = cold({ recipient_identity: { identity_id: "id-1", confidence: 1, match_method: "exact_phone_e164" } });
 const sms = (over: Partial<OutboundRequest> = {}): OutboundRequest => ({
   kind: "message", channel: "sms", account_ref: "+4791000000", recipient: "+4790000000", purpose: "transactional", content: { text: "Hei, timen din er bekreftet." }, ...over
 });

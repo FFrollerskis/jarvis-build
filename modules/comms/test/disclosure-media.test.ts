@@ -72,7 +72,7 @@ describe("A-M1 (policy): bildetekst med opplysningen er påkrevd for ALLE media-
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: COMMS_CHANNELS.join(","), JARVIS_COMMS_MEDIA_URL_HOSTS: "cdn.example.com" });
   const state: OutboundPolicyState = {
     account_authorized: true, recipient_opted_out: false, sends_last_24h_to_recipient: 0, calls_last_24h_to_recipient: 0, sends_last_hour_from_account: 0,
-    last_inbound_at: new Date("2026-11-17T10:00:00Z").toISOString(), recipient_identity: { identity_id: "id-1", confidence: 1 }, target: null, marketing: { prior_consent: false, reservation_register: "unverified" }
+    last_inbound_at: new Date("2026-11-17T10:00:00Z").toISOString(), recipient_identity: { identity_id: "id-1", confidence: 1, match_method: "exact_phone_e164" }, target: null, marketing: { prior_consent: false, reservation_register: "unverified" }
   };
   const NOON = new Date("2026-11-17T11:00:00Z");
   const req = (kind: "image" | "document" | "audio" | "video", url = "https://cdn.example.com/f.bin", caption?: string): OutboundRequest => ({

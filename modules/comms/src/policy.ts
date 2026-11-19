@@ -31,6 +31,18 @@ export const PURPOSE_BASES = [
 ] as const;
 export type PurposeBasis = (typeof PURPOSE_BASES)[number];
 
+/**
+ * A-M2 (LEDER-AVGJØRELSE, delta-review A): hva som regnes som RELASJONSBEVIS for en mottaker som IKKE har skrevet til oss siste `reply_window_days`. Før telte HVER løst identitet - også en `manual`-lenke med confidence 0,05, og en
+ * kontakt eieren selv har i kontaktboken (`contact_sync`) - og fjernet dermed `purpose_basis`-kravet. Nå teller KUN en lenke som eieren har konfigurert eller som er EKSAKT (`exact_email`, `exact_phone_e164`, `exact_handle`,
+ * `owner_configured`) med confidence >= 0,9. `contact_sync` (eierens kontaktbok sier ikke at DENNE mottakeren har et forhold til oss), `manual` og lav confidence teller ikke: mottakeren er da fortsatt «kald».
+ */
+export const RELATIONSHIP_LINK_METHODS: readonly string[] = ["exact_email", "exact_phone_e164", "exact_handle", "owner_configured"];
+export const RELATIONSHIP_MIN_CONFIDENCE = 0.9;
+/** `confidence` er `real` (float4) i databasen: en liten toleranse så 0,9 lagret som float4 aldri faller under terskelen. */
+export function isRelationshipEvidence(identity: { readonly confidence: number; readonly match_method: string }): boolean {
+  return Number(identity.confidence) + 1e-6 >= RELATIONSHIP_MIN_CONFIDENCE && RELATIONSHIP_LINK_METHODS.includes(identity.match_method);
+}
+
 export interface TemplateContent {
   readonly name: string;
   readonly language: string;
@@ -79,7 +91,8 @@ export interface OutboundPolicyState {
   readonly sends_last_hour_from_account: number;
   /** ISO-tidspunkt for mottakerens siste VERIFISERTE innkommende melding til denne kontoen (kun signaturverifiserte webhook-hendelser), ellers `null`. */
   readonly last_inbound_at: string | null;
-  readonly recipient_identity: { readonly identity_id: string; readonly confidence: number } | null;
+  /** Mottakerens løste identitet med den BESTE lenken (en som teller som relasjonsbevis hvis noen gjør det). Policyen avgjør selv om den teller (`isRelationshipEvidence`): en identitet alene er ikke et bevis. */
+  readonly recipient_identity: { readonly identity_id: string; readonly confidence: number; readonly match_method: string } | null;
   /** For `edit`/`delete`: er målet en melding Jarvis selv har sendt fra DENNE kontoen (journalen). */
   readonly target: { readonly own_sent: boolean; readonly same_account: boolean } | null;
   readonly marketing: { readonly prior_consent: boolean; readonly reservation_register: ReservationRegisterStatus };
@@ -96,6 +109,8 @@ export interface RecipientProof {
   readonly method: "inbound_thread" | "identity_link" | "explicit_param";
   readonly identity_id: string | null;
   readonly confidence: number | null;
+  /** A-M2: metoden til den beste lenken (en løst identitet som IKKE teller som bevis står her også, så revisjonssporet viser hvorfor mottakeren likevel var «kald»). */
+  readonly identity_match_method?: string | null;
   readonly last_inbound_age_minutes: number | null;
   /** A-M2: eierens erklærte grunnlag/notat for denne forespørselen (journalføres i det forsterkede revisjonssporet sammen med mottakerbeviset). */
   readonly purpose_basis?: PurposeBasis;
@@ -229,11 +244,12 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
   const inboundAgeMin = ageMinutes(state.last_inbound_at, now);
   const proofMethod: RecipientProof["method"] = inboundAgeMin !== null && inboundAgeMin <= config.reply_window_days * 24 * 60
     ? "inbound_thread"
-    : state.recipient_identity !== null ? "identity_link" : "explicit_param";
+    : state.recipient_identity !== null && isRelationshipEvidence(state.recipient_identity) ? "identity_link" : "explicit_param";
   const recipient_proof: RecipientProof = {
     method: proofMethod,
     identity_id: state.recipient_identity?.identity_id ?? null,
     confidence: state.recipient_identity?.confidence ?? null,
+    ...(state.recipient_identity !== null ? { identity_match_method: state.recipient_identity.match_method } : {}),
     last_inbound_age_minutes: inboundAgeMin === null ? null : Math.round(inboundAgeMin),
     ...(request.purpose_basis !== undefined ? { purpose_basis: request.purpose_basis } : {}),
     ...(request.purpose_basis_note !== undefined ? { purpose_basis_note: request.purpose_basis_note } : {})

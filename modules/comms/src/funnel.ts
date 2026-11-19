@@ -6,7 +6,7 @@ import { afterAcceptedMutation, isIndeterminateTransportError, isOutcomeUnknownM
 import { ProviderRejectedError, type AdapterMap } from "./adapters.ts";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel, type CommsProvider } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
-import { PURPOSE_BASES, evaluateOutboundPolicy, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
+import { PURPOSE_BASES, evaluateOutboundPolicy, isRelationshipEvidence, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
 import type { Actor, AuthorizedAccount, BeginResult, Clock, CommsStore, JournalEntryInput, JournalSource } from "./store.ts";
 
 /**
@@ -233,8 +233,11 @@ export class OutboundFunnel {
     return { parsed, decision, account, provider, recipient_hash: hash, recipient_hint: hint, state, target_log_id: targetRow?.log_id ?? null };
   }
 
-  /** Mottakerens løste identitet (kun EKSAKT treff i Conversation Graph; ukjent forblir ukjent). Aldri en feil: en identitet er et bevis, ikke en forutsetning. */
-  private async resolveRecipientIdentity(ctx: FunnelContext, req: OutboundRequest): Promise<{ identity_id: string; confidence: number } | null> {
+  /**
+   * Mottakerens løste identitet (kun EKSAKT treff i Conversation Graph; ukjent forblir ukjent) med den BESTE lenken: en som teller som relasjonsbevis (`isRelationshipEvidence`) hvis en finnes, ellers den med høyest confidence.
+   * Aldri en feil: en identitet er et bevis, ikke en forutsetning. Om identiteten TELLER som bevis (A-M2) avgjør policyen.
+   */
+  private async resolveRecipientIdentity(ctx: FunnelContext, req: OutboundRequest): Promise<{ identity_id: string; confidence: number; match_method: string } | null> {
     const { graph } = this.deps;
     try {
       let identityId: string | null = null;
@@ -250,9 +253,10 @@ export class OutboundFunnel {
       }
       if (identityId === null) return null;
       const links = await graph.listChannelLinks(ctx.tenantId, ctx.space, identityId);
-      const matching = links.filter((l) => l.status === "active" && l.channel_identifier === identifier);
-      const confidence = matching.length === 0 ? 0 : Math.max(...matching.map((l) => l.confidence));
-      return { identity_id: identityId, confidence };
+      const matching = links.filter((l) => l.status === "active" && l.channel_identifier === identifier).map((l) => ({ confidence: Number(l.confidence), match_method: String(l.match_method) }));
+      const pool = matching.some(isRelationshipEvidence) ? matching.filter(isRelationshipEvidence) : matching;
+      const best = pool.reduce<{ confidence: number; match_method: string } | null>((acc, l) => (acc === null || l.confidence > acc.confidence ? l : acc), null);
+      return { identity_id: identityId, confidence: best?.confidence ?? 0, match_method: best?.match_method ?? "none" };
     } catch {
       return null;
     }
