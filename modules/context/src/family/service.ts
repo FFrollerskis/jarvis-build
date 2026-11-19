@@ -307,7 +307,7 @@ export class FamilyService {
     });
   }
 
-  private async endMembership(client: Client, actor: FamilyActor, personId: string, status: "left" | "removed"): Promise<{ devices_revoked: number; grants_revoked: number }> {
+  private async endMembership(client: Client, actor: FamilyActor, personId: string, status: "left" | "removed"): Promise<{ devices_revoked: number; grants_revoked: number; tickets_consumed: number }> {
     const now = this.now().toISOString();
     const { rowCount } = await client.query(`UPDATE family_members SET status = $3, ended_at = $4, updated_at = $4 WHERE tenant_id = $1 AND person_id = $2 AND status = 'active'`, [actor.tenant_id, personId, status, now]);
     if (rowCount !== 1) throw new FamilyError("not_found");
@@ -323,7 +323,11 @@ export class FamilyService {
       await this.devices.revokeDeviceKeyOn(client, { tenant_id: actor.tenant_id, device_id: row.device_id }, `family_member_${status}`);
       grantsRevoked += await this.grants.revokeForDeviceOn(client, actor.tenant_id, row.device_id, this.now().getTime());
     }
-    return { devices_revoked: owned.rows.length, grants_revoked: grantsRevoked };
+    // UTESTÅENDE innrullingsbilletter (`device_enrollment_tickets`) for personen i sirkel-tenanten forbrukes i samme transaksjon (delta-review B): en billett utstedt FØR fjerningen ville ellers latt det tidligere medlemmet rulle inn en NY enhet
+    // med en ny nøkkel og få sirkelen tilbake uten at noen har invitert på nytt. Samme engangs-semantikk som en innrullering (`consumed_at`), men `consumed_device_id` står NULL: ingen enhet ble innrullert. Alle ubrukte billetter lukkes (også en som
+    // nettopp har utløpt): et utløpsfilter ville gjort stengingen avhengig av klokkeforskjell mellom tjenesten og databasen. Billetter i personens ANDRE tenanter røres ikke (RLS + tenant_id).
+    const tickets = await client.query(`UPDATE device_enrollment_tickets SET consumed_at = $3 WHERE tenant_id = $1 AND person_id = $2 AND consumed_at IS NULL`, [actor.tenant_id, personId, now]);
+    return { devices_revoked: owned.rows.length, grants_revoked: grantsRevoked, tickets_consumed: tickets.rowCount ?? 0 };
   }
 
   async removeMember(actor: FamilyActor, personId: string): Promise<void> {

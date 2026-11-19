@@ -5,7 +5,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, DeviceService, fingerprintPem, IdentityService, RevokedDeviceKeyError, runMigrations, withTenantTransaction } from "@jarvis/core";
+import { createEnrollmentTicket, createPool, DeviceEnrollmentService, DeviceService, enrollmentTicketId, fingerprintPem, IdentityService, RevokedDeviceKeyError, runMigrations, SessionGrantService, withTenantTransaction } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { FamilyService, type FamilyActor, type SharedDataReaders } from "../src/index.ts";
@@ -15,6 +15,7 @@ import { FamilyService, type FamilyActor, type SharedDataReaders } from "../src/
  *  - LOW-5: fjerning/forlating tilbakekaller OGSÅ personens enheter og grants i sirkel-tenanten (identitetsnivået ga ellers fortsatt tilgang til sirkelens `shared`-rom).
  *  - LOW-6: to samtidige `grantShare`/`grantDelegation` med samme innhold gir en idempotent retur (vinnerens rad), ikke en rå pg-feil 23505 (-> 500).
  *  - LOW-7: `setItemDone` skriver en revisjonsrad (aldri innholdet).
+ *  - fiks-runde 2 (delta-review B INFO): fjerning/forlating forbruker OGSÅ personens åpne innrullingsbilletter i sirkel-tenanten, i samme transaksjon (ellers kunne et tidligere medlem rulle inn en NY enhet med en billett utstedt før fjerningen).
  */
 let stop: (() => Promise<void>) | undefined;
 let admin: pg.Pool;
@@ -132,7 +133,7 @@ describe("A: fjerning og forlating tilbakekaller identitetsnivået i sirkel-tena
     const c = await mkFull();
     await mkDevice(c.tenant, c.owner, `dev-owner-${c.n}`);
     await svc.removeMember(act(c, c.owner), c.child);
-    expect((await audits(c, "family.member_removed"))[0]).toMatchObject({ devices_revoked: 0, grants_revoked: 0 });
+    expect((await audits(c, "family.member_removed"))[0]).toMatchObject({ devices_revoked: 0, grants_revoked: 0, tickets_consumed: 0 });
     await expect(svc.leave(act(c, c.owner))).rejects.toMatchObject({ code: "owner_cannot_leave" });
     await expect(svc.removeMember(act(c, c.owner), c.owner)).rejects.toMatchObject({ code: "cannot_remove_owner" });
     expect(await authz(c.tenant, c.owner, `dev-owner-${c.n}`)).toEqual({ ok: true });
@@ -243,5 +244,92 @@ describe("D: subjektets rolle sjekkes også ved lesing av en helsedeling (INFO-1
     await reading.grantShare(act(c, c.adult), { viewer_person_id: c.owner, category: "health_summary" });
     expect(await reading.readShared(act(c, c.owner), c.adult, "health_summary")).toMatchObject({ category: "health_summary", steps_today: 4200 });
     expect(calls).toEqual([c.adult]);
+  });
+});
+
+describe("E: fjerning og forlating forbruker personens åpne innrullingsbilletter i sirkel-tenanten (delta-review B INFO)", () => {
+  /** En ekte billett fra samme funksjon som eier-CLI-en bruker: den rå billetten (til innrullering) og radens ID (SHA-256). `ttl_minutes: -5` gir en billett som nettopp har utløpt uten å ha vært brukt. */
+  const issue = async (tenant: string, person: string, opts: { device_id?: string; ttl_minutes?: number } = {}): Promise<{ ticket: string; id: string }> => {
+    const created = await createEnrollmentTicket(admin, { tenant_id: tenant, person_id: person, ...(opts.device_id !== undefined ? { device_id: opts.device_id } : {}), ...(opts.ttl_minutes !== undefined ? { ttl_minutes: opts.ttl_minutes } : {}) });
+    return { ticket: created.ticket, id: enrollmentTicketId(created.ticket) };
+  };
+  const ticketRow = async (id: string): Promise<{ consumed_at: Date | null; consumed_device_id: string | null }> =>
+    (await admin.query(`SELECT consumed_at, consumed_device_id FROM device_enrollment_tickets WHERE ticket_id = $1`, [id])).rows[0] as { consumed_at: Date | null; consumed_device_id: string | null };
+  const enrollWith = (c: Circle, person: string, ticket: string, deviceId: string) =>
+    new DeviceEnrollmentService({ pool: app, devices: new DeviceService(app), grants: new SessionGrantService(app) }).enroll({
+      tenant_id: c.tenant, person_id: person,
+      device: { device_id: deviceId, kind: "phone", public_key_pem: generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString() },
+      enrollment: { kind: "enrollment_ticket", ticket }
+    });
+
+  for (const how of ["removed", "left"] as const) {
+    it(`${how}: personens åpne billetter i sirkelen forbrukes (også en enhetsbundet og en som nettopp har utløpt uten å bli brukt); en allerede brukt billett, personens billett i EGEN tenant og andres billetter røres ikke; revisjonen teller`, async () => {
+      const c = await mkFull();
+      const wildcard = await issue(c.tenant, c.adult);
+      const narrowed = await issue(c.tenant, c.adult, { device_id: `dev-narrow-${c.n}` });
+      const expired = await issue(c.tenant, c.adult, { ttl_minutes: -5 });
+      const used = await issue(c.tenant, c.adult);
+      await admin.query(`UPDATE device_enrollment_tickets SET consumed_at = '2026-01-01T00:00:00Z', consumed_device_id = 'dev-old' WHERE ticket_id = $1`, [used.id]);
+      const ownTenant = await issue(c.adultData, c.adult); // personens egne data: en ANNEN tenant
+      const ownerTicket = await issue(c.tenant, c.owner);
+      const childTicket = await issue(c.tenant, c.child);
+
+      if (how === "removed") await svc.removeMember(act(c, c.owner), c.adult);
+      else await svc.leave(act(c, c.adult));
+
+      for (const [name, t] of [["jokertegn", wildcard], ["enhetsbundet", narrowed], ["utløpt", expired]] as const) {
+        const row = await ticketRow(t.id);
+        expect(row.consumed_at, name).not.toBeNull();
+        expect(row.consumed_device_id, name).toBeNull(); // forbrukt av fjerningen, ikke av en innrullering: ingen enhet ble innrullert
+      }
+      const usedRow = await ticketRow(used.id);
+      expect(usedRow.consumed_device_id).toBe("dev-old"); // en allerede brukt billett forblir uendret
+      expect(new Date(usedRow.consumed_at as Date).toISOString()).toBe("2026-01-01T00:00:00.000Z");
+      for (const [name, t] of [["egen tenant", ownTenant], ["eier", ownerTicket], ["barn", childTicket]] as const) expect((await ticketRow(t.id)).consumed_at, name).toBeNull();
+
+      const [audit] = await audits(c, how === "removed" ? "family.member_removed" : "family.member_left");
+      expect(audit).toMatchObject({ person_id: c.adult, tickets_consumed: 3 });
+    });
+  }
+
+  it("hele veien: en billett utstedt FØR fjerningen kan ikke lenger rulle inn en ny enhet (`enrollment_ticket_invalid`, ingen enhet skrevet) - og billetter virker som vanlig FØR fjerningen", async () => {
+    const c = await mkFull();
+    const control = await issue(c.tenant, c.adult);
+    const before = await issue(c.tenant, c.adult);
+    expect(await enrollWith(c, c.adult, control.ticket, `dev-control-${c.n}`)).toMatchObject({ ok: true }); // billetter virker (ellers sier testen under ingenting)
+    await svc.removeMember(act(c, c.owner), c.adult);
+    expect(await enrollWith(c, c.adult, before.ticket, `dev-after-${c.n}`)).toEqual({ ok: false, reason: "enrollment_ticket_invalid" });
+    expect((await admin.query(`SELECT 1 FROM devices WHERE device_id = $1`, [`dev-after-${c.n}`])).rowCount).toBe(0);
+    expect(await authz(c.tenant, c.adult, `dev-after-${c.n}`)).toEqual({ ok: false, reason: "unknown_device" });
+  });
+
+  it("en avvist fjerning forbruker ingen billetter (eier kan ikke fjernes; ikke-eier kan ikke fjerne), og en billett utstedt ETTER fjerningen (nytt medlemskap) er ikke berørt", async () => {
+    const c = await mkFull();
+    const ownerTicket = await issue(c.tenant, c.owner);
+    const adultTicket = await issue(c.tenant, c.adult);
+    await expect(svc.removeMember(act(c, c.owner), c.owner)).rejects.toMatchObject({ code: "cannot_remove_owner" });
+    await expect(svc.removeMember(act(c, c.adult), c.child)).rejects.toMatchObject({ code: "role_not_allowed" });
+    await expect(svc.leave(act(c, c.owner))).rejects.toMatchObject({ code: "owner_cannot_leave" });
+    expect((await ticketRow(ownerTicket.id)).consumed_at).toBeNull();
+    expect((await ticketRow(adultTicket.id)).consumed_at).toBeNull();
+    await svc.removeMember(act(c, c.owner), c.adult);
+    expect((await ticketRow(adultTicket.id)).consumed_at).not.toBeNull();
+    const reissued = await issue(c.tenant, c.adult); // utstedt etter fjerningen: en bevisst, ny handling av eieren
+    expect((await ticketRow(reissued.id)).consumed_at).toBeNull();
+  });
+
+  it("billettene forbrukes i SAMME transaksjon som fjerningen: hele fjerningen (medlemskap, delinger, enheter, grants, billetter, revisjon) bruker nøyaktig én forbindelse fra poolen", async () => {
+    for (const how of ["removed", "left"] as const) {
+      const c = await mkFull();
+      await issue(c.tenant, c.adult);
+      let acquired = 0;
+      const onAcquire = (): void => { acquired += 1; };
+      app.on("acquire", onAcquire);
+      try {
+        if (how === "removed") await svc.removeMember(act(c, c.owner), c.adult);
+        else await svc.leave(act(c, c.adult));
+      } finally { app.off("acquire", onAcquire); }
+      expect(acquired, how).toBe(1);
+    }
   });
 });
