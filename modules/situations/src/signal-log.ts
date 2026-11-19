@@ -26,6 +26,8 @@ export interface SignalLogEntry {
   priority: SituationPriority;
   notified: boolean;
   facts: SignalFacts;
+  /** Abonnementets eier (den som autoriserte kilden). */
+  person_id: string;
   task_id: string | null;
   session_id: string | null;
 }
@@ -33,6 +35,7 @@ export interface SignalLogEntry {
 export interface AssessmentEntry {
   assessment_id: string;
   situation_id: string;
+  person_id: string;
   status: "applied" | "rejected";
   category: string | null;
   priority_hint: string | null;
@@ -75,27 +78,11 @@ export class SignalLogService {
   async assessments(tenantId: string, memorySpace: MemorySpace, situationId: string): Promise<AssessmentEntry[]> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
-        `SELECT assessment_id, situation_id, status, category, priority_hint, explanation, provider, model, created_at
+        `SELECT assessment_id, situation_id, person_id, status, category, priority_hint, explanation, provider, model, created_at
          FROM situation_assessments WHERE tenant_id = $1 AND memory_space_id = $2 AND situation_id = $3 ORDER BY created_at DESC LIMIT 20`,
         [tenantId, memorySpace, situationId]
       );
       return rows as AssessmentEntry[];
-    });
-  }
-
-  /** Logginnslag for en LISTE av regler (`source:event_type`) siden et tidspunkt - grunnlaget for simulering over registrerte hendelser. */
-  async forRules(tenantId: string, memorySpace: MemorySpace, ruleKeys: readonly string[], sinceMs: number, limit = 500): Promise<SignalLogEntry[]> {
-    if (ruleKeys.length === 0) return [];
-    const pairs = ruleKeys.map((k) => k.split(":") as [string, string]);
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const { rows } = await client.query(
-        `SELECT * FROM situation_signal_log
-         WHERE tenant_id = $1 AND memory_space_id = $2 AND occurred_at >= $3
-           AND (source, event_type) IN (SELECT * FROM unnest($4::text[], $5::text[]))
-         ORDER BY occurred_at ASC LIMIT $6`,
-        [tenantId, memorySpace, new Date(sinceMs).toISOString(), pairs.map((p) => p[0]), pairs.map((p) => p[1]), Math.min(Math.max(limit, 1), 2000)]
-      );
-      return rows as SignalLogEntry[];
     });
   }
 

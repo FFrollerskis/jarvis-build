@@ -73,15 +73,21 @@ CREATE TABLE situation_signal_log (
   notified            boolean NOT NULL DEFAULT false,
   facts               jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (jsonb_typeof(facts) = 'object' AND pg_column_size(facts) <= 2048),
+  -- Fiks-runde (CLAUDE.md regel 4): raden er merket med PERSONEN (abonnementets eier) i tillegg til tenant/space/kilde/task_id/session_id.
+  person_id           text NOT NULL REFERENCES people (person_id),
   task_id             text,
   session_id          text,
   UNIQUE (tenant_id, memory_space_id, source, source_ref),
+  CONSTRAINT situation_signal_log_person_scope_fk
+    FOREIGN KEY (person_id, tenant_id) REFERENCES person_tenants (person_id, tenant_id),
   CONSTRAINT situation_signal_log_situation_scope_fk
     FOREIGN KEY (situation_id, tenant_id, memory_space_id)
     REFERENCES situations (situation_id, tenant_id, memory_space_id) ON DELETE CASCADE
 );
 CREATE INDEX situation_signal_log_key_idx ON situation_signal_log (tenant_id, memory_space_id, detection_key, occurred_at);
 CREATE INDEX situation_signal_log_retention_idx ON situation_signal_log (tenant_id, recorded_at);
+-- Fiks-runde (B-LOW-10): oppslag per situasjon (forklarbarhet, simulering, tilbakemelding) uten full gjennomgang av loggen.
+CREATE INDEX situation_signal_log_situation_idx ON situation_signal_log (tenant_id, memory_space_id, situation_id);
 
 -- 4) Eierens tilbakemelding ("nyttig"/"stoey") paa en situasjon. Append-only bortsett fra `consumed_at` (kolonne-grant, aldri verdict): en
 --    endret mening er en NY rad. En stemme som har utloest en terskelendring (eller blitt nullstilt av en tilbakestilling) markeres brukt og
@@ -106,6 +112,7 @@ CREATE TABLE situation_feedback (
     REFERENCES situations (situation_id, tenant_id, memory_space_id) ON DELETE CASCADE
 );
 CREATE INDEX situation_feedback_rule_idx ON situation_feedback (tenant_id, memory_space_id, rule_key, created_at);
+CREATE INDEX situation_feedback_situation_idx ON situation_feedback (tenant_id, memory_space_id, situation_id);
 
 -- 5) Regeltuning: gjeldende terskel per (tenant, space, regel) etter eierens tilbakemelding. Verdien klemmes ALLTID mot kodens harde
 --    graenser ved bruk (`resolveRuleThreshold`), uansett hva som staar her. Hver endring revideres i `audit_events` i samme
@@ -118,6 +125,9 @@ CREATE TABLE situation_rule_tuning (
   threshold           numeric NOT NULL CHECK (threshold > 0 AND threshold <= 100000),
   reason              text NOT NULL CHECK (length(reason) BETWEEN 1 AND 200),
   updated_by_person_id text NOT NULL REFERENCES people (person_id),
+  -- Fiks-runde (regel 4): tuning-raden baerer ogsaa oppgave-/oekt-id fra aktoeren som utloeste endringen.
+  task_id             text,
+  session_id          text,
   updated_at          timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, memory_space_id, rule_key),
   CONSTRAINT situation_rule_tuning_actor_scope_fk
@@ -139,17 +149,23 @@ CREATE TABLE situation_assessments (
   explanation         text CHECK (explanation IS NULL OR length(explanation) <= 400),
   provider            text CHECK (provider IS NULL OR length(provider) <= 80),
   model               text CHECK (model IS NULL OR length(model) <= 120),
+  -- Fiks-runde (regel 4): vurderingen er gjort paa vegne av PERSONEN (abonnementets eier).
+  person_id           text NOT NULL REFERENCES people (person_id),
   task_id             text,
   session_id          text,
   created_at          timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, memory_space_id, situation_id, input_digest),
+  CONSTRAINT situation_assessments_person_scope_fk
+    FOREIGN KEY (person_id, tenant_id) REFERENCES person_tenants (person_id, tenant_id),
   CONSTRAINT situation_assessments_situation_scope_fk
     FOREIGN KEY (situation_id, tenant_id, memory_space_id)
     REFERENCES situations (situation_id, tenant_id, memory_space_id) ON DELETE CASCADE
 );
 
 -- Rettigheter (minste privilegium per tabell) og RLS som resten av situasjonsmotoren (056).
-GRANT SELECT, INSERT, UPDATE, DELETE ON situation_subscriptions TO jarvis_app;
+-- Fiks-runde (B-INFO-11): abonnementet er uforanderlig bortsett fra av/paa (kolonne-GRANT, ikke tabell-UPDATE): kilde, type, filter og eier kan aldri omskrives paa en eksisterende rad.
+GRANT SELECT, INSERT, DELETE ON situation_subscriptions TO jarvis_app;
+GRANT UPDATE (enabled, updated_at) ON situation_subscriptions TO jarvis_app;
 GRANT SELECT, INSERT, DELETE ON situation_signal_log TO jarvis_app;
 GRANT SELECT, INSERT, DELETE ON situation_feedback TO jarvis_app;
 GRANT UPDATE (consumed_at) ON situation_feedback TO jarvis_app;

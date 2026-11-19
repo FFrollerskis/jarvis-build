@@ -212,34 +212,36 @@ export class SituationSignalBus {
 
   private async persist(
     tenantId: string, memorySpace: MemorySpace, bridge: BridgeResult, facts: SignalFacts, situation: Situation, created: boolean, newlyActionable: boolean,
-    subscriptionId: string, ctx: PublishContext, assessed: { digest: string; outcome: AssistOutcome } | null, held: boolean
+    sub: SituationSubscription, ctx: PublishContext, assessed: { digest: string; outcome: AssistOutcome } | null, held: boolean
   ): Promise<void> {
+    // Fiks-runde (CLAUDE.md regel 4): hver rad er merket med PERSONEN = abonnementets eier (den som autoriserte kilden), i tillegg til tenant/space/kilde/task_id/session_id.
+    const personId = sub.created_by_person_id;
     await withMemoryTransaction(this.deps.pool, tenantId, [memorySpace], async (client) => {
       // B-HIGH-1: et holdt signal (stille timer) logges IKKE - ellers ville neste tikk svare `duplicate` og varselet aldri gå ut. Vurderingen (modellkallet) lagres likevel, så den ikke gjentas hvert tikk.
       if (!held) await client.query(
         `INSERT INTO situation_signal_log
            (signal_id, tenant_id, memory_space_id, source, event_type, domain, source_ref, detection_key, situation_id, subscription_id,
-            occurred_at, outcome, stage_after, priority, notified, facts, task_id, session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18)
+            occurred_at, outcome, stage_after, priority, notified, facts, person_id, task_id, session_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19)
          ON CONFLICT (tenant_id, memory_space_id, source, source_ref) DO NOTHING`,
         [
           `sig-${randomUUID()}`, tenantId, memorySpace, bridge.source, bridge.event_type, bridge.candidate.domain, bridge.source_ref, bridge.candidate.detection_key,
-          situation.situation_id, subscriptionId, bridge.occurred_at, created ? "created" : "updated", situation.stage, situation.priority, newlyActionable,
-          JSON.stringify(facts), ctx.task_id ?? null, ctx.session_id ?? null
+          situation.situation_id, sub.subscription_id, bridge.occurred_at, created ? "created" : "updated", situation.stage, situation.priority, newlyActionable,
+          JSON.stringify(facts), personId, ctx.task_id ?? null, ctx.session_id ?? null
         ]
       );
       if (assessed !== null && (assessed.outcome.status === "assessed" || assessed.outcome.status === "rejected")) {
         const a = assessed.outcome.status === "assessed" ? assessed.outcome.assessment : null;
         await client.query(
           `INSERT INTO situation_assessments
-             (assessment_id, tenant_id, memory_space_id, situation_id, input_digest, status, category, priority_hint, explanation, provider, model, task_id, session_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             (assessment_id, tenant_id, memory_space_id, situation_id, input_digest, status, category, priority_hint, explanation, provider, model, person_id, task_id, session_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
            ON CONFLICT (tenant_id, memory_space_id, situation_id, input_digest) DO NOTHING`,
           [
             `asm-${randomUUID()}`, tenantId, memorySpace, situation.situation_id, assessed.digest, a === null ? "rejected" : "applied",
             a?.category ?? null, a?.priority_hint ?? null, a?.explanation ?? null,
             a?.provider ?? (assessed.outcome.status === "rejected" ? assessed.outcome.provider ?? null : null),
-            a?.model ?? (assessed.outcome.status === "rejected" ? assessed.outcome.model ?? null : null), ctx.task_id ?? null, ctx.session_id ?? null
+            a?.model ?? (assessed.outcome.status === "rejected" ? assessed.outcome.model ?? null : null), personId, ctx.task_id ?? null, ctx.session_id ?? null
           ]
         );
       }
@@ -330,7 +332,7 @@ export class SituationSignalBus {
       const created = ctx.createdHint ?? before === null;
       const held = heldByQuietHours(evaluated, candidate.priority);
       // Et signal som venter på modellvurdering (fase 1) logges først når fase 2 er ferdig (ellers ville fase 2 svart `duplicate` og aldri fått løftet). Kræsjer prosessen imellom, evalueres signalet på nytt neste tikk (idempotent).
-      await this.persist(tenantId, memorySpace, bridge, facts, evaluated.situation, created, evaluated.newly_actionable, sub.subscription_id, ctx, assessed, held || assistPending);
+      await this.persist(tenantId, memorySpace, bridge, facts, evaluated.situation, created, evaluated.newly_actionable, sub, ctx, assessed, held || assistPending);
       if (assistPending) ctx.pendingAssist?.push({ observation, created });
       return { status: "evaluated", situation: evaluated.situation, created, newly_actionable: evaluated.newly_actionable, uplifted, held, assist_pending: assistPending };
     } catch (err) {

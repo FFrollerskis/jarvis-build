@@ -294,8 +294,8 @@ describe("B-MEDIUM-3: retensjon - gamle åpne signalsituasjoner løses, og signa
     // signalloggrad på en situasjon som slettes: skal følge med (kaskade)
     const doomed = (await db.adminPool.query(`SELECT situation_id FROM situations WHERE detection_key = 'home:opening:fire-tiar@a'`)).rows[0].situation_id as string;
     await db.adminPool.query(
-      `INSERT INTO situation_signal_log (signal_id, tenant_id, memory_space_id, source, event_type, domain, source_ref, detection_key, situation_id, occurred_at, outcome, stage_after, priority, notified, facts)
-       VALUES ('sig-x', '${TENANT_A}', 'home', 'home_assistant', 'door_open_too_long', 'home', 'home:opening:fire-tiar@a#L1', 'home:opening:fire-tiar@a', $1, now(), 'created', 'inform', 'normal', true, '{}')`, [doomed]
+      `INSERT INTO situation_signal_log (signal_id, tenant_id, memory_space_id, source, event_type, domain, source_ref, detection_key, situation_id, occurred_at, outcome, stage_after, priority, notified, facts, person_id)
+       VALUES ('sig-x', '${TENANT_A}', 'home', 'home_assistant', 'door_open_too_long', 'home', 'home:opening:fire-tiar@a#L1', 'home:opening:fire-tiar@a', $1, now(), 'created', 'inform', 'normal', true, '{}', '${OWNER}')`, [doomed]
     );
     const before = (await row("home:opening:tre-dager@a"))!.updated_at;
 

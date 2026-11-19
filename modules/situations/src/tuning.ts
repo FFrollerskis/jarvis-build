@@ -185,6 +185,9 @@ export class FeedbackService implements RuleThresholdSource {
       const rule = ruleByKey(ruleKey);
       if (!this.tuningEnabled || rule === undefined) return { feedback_id: feedbackId, rule_key: ruleKey, tuning: { action: "none", reason: "not_tunable" } as TuningDecision };
 
+      // A-LOW-10 (fiks-runde): `FOR UPDATE` under låser kun en rad som FINNES - ved første tuning av en regel finnes ingen, så samtidige kall leste de samme tre stemmene og skrev hvert sitt steg og sin egen
+      // `situation.rule_tuned`-rad (30 samtidige ga 10 duplikater). En transaksjons-advisory-lås per (tenant, rom, regel) tas FØR stemmene leses: neste kall venter, ser stemmene som brukt og gjør ingenting.
+      await this.lockRule(client, tenantId, memorySpace, ruleKey);
       // Regelens gjeldende tuning og de siste stemmene (siste 3 holder; vi henter litt flere for vinduet). Raden låses for å hindre to samtidige endringer.
       const { rows: tuneRows } = await client.query(
         `SELECT threshold, updated_at FROM situation_rule_tuning WHERE tenant_id = $1 AND memory_space_id = $2 AND rule_key = $3 FOR UPDATE`,
@@ -202,10 +205,11 @@ export class FeedbackService implements RuleThresholdSource {
         await this.consumeVotes(client, tenantId, memorySpace, ruleKey, nowMs);
         const reason = decision.reason === "three_noise_votes" ? "tre siste tilbakemeldinger: støy" : "tre siste tilbakemeldinger: nyttig";
         await client.query(
-          `INSERT INTO situation_rule_tuning (tenant_id, memory_space_id, rule_key, threshold, reason, updated_by_person_id, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::double precision / 1000.0))
-           ON CONFLICT (tenant_id, memory_space_id, rule_key) DO UPDATE SET threshold = EXCLUDED.threshold, reason = EXCLUDED.reason, updated_by_person_id = EXCLUDED.updated_by_person_id, updated_at = EXCLUDED.updated_at`,
-          [tenantId, memorySpace, ruleKey, decision.to, reason, personId, nowMs]
+          `INSERT INTO situation_rule_tuning (tenant_id, memory_space_id, rule_key, threshold, reason, updated_by_person_id, task_id, session_id, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $8, $9, to_timestamp($7::double precision / 1000.0))
+           ON CONFLICT (tenant_id, memory_space_id, rule_key) DO UPDATE SET threshold = EXCLUDED.threshold, reason = EXCLUDED.reason, updated_by_person_id = EXCLUDED.updated_by_person_id,
+             task_id = EXCLUDED.task_id, session_id = EXCLUDED.session_id, updated_at = EXCLUDED.updated_at`,
+          [tenantId, memorySpace, ruleKey, decision.to, reason, personId, nowMs, actor.task_id ?? null, actor.session_id ?? null]
         );
         await writeAudit(client, { tenant_id: tenantId, person_id: personId, ...(actor.session_id !== undefined ? { session_id: actor.session_id } : {}) }, {
           type: "situation.rule_tuned", decision: decision.action, reason: decision.reason, tool_id: "situations", action: "record_feedback", capability_class: "B",
@@ -214,6 +218,14 @@ export class FeedbackService implements RuleThresholdSource {
       }
       return { feedback_id: feedbackId, rule_key: ruleKey, tuning: decision };
     });
+  }
+
+  /**
+   * Transaksjons-advisory-lås per (tenant, rom, regel): serialiserer `submit` og `resetTuning` for SAMME regel (andre regler og andre tenants påvirkes ikke). Egen 64-bit nøkkel med eget frø (7340466 = D-466), så den
+   * aldri kolliderer med domenelåsene (`hashtext(domene)`, session-nivå) i `advisory-lock.ts`. Frigjøres automatisk ved commit/rollback.
+   */
+  private async lockRule(client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, ruleKey: string): Promise<void> {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340466))", [`situation-tuning|${tenantId}|${memorySpace}|${ruleKey}`]);
   }
 
   /** Markerer alle ubrukte stemmer for regelen som brukt (kun kolonnen `consumed_at` kan endres; selve stemmen består som historikk). */
@@ -234,6 +246,7 @@ export class FeedbackService implements RuleThresholdSource {
     if (ruleByKey(ruleKey) === undefined) throw new FeedbackValidationError("rule_unknown");
     const nowMs = this.now();
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      await this.lockRule(client, tenantId, memorySpace, ruleKey); // samme lås som `submit`: en tilbakestilling og en stemme for samme regel kan ikke flettes
       const { rows } = await client.query(
         `DELETE FROM situation_rule_tuning WHERE tenant_id = $1 AND memory_space_id = $2 AND rule_key = $3 RETURNING threshold`,
         [tenantId, memorySpace, ruleKey]
