@@ -333,6 +333,11 @@ export interface ToolInvocationContext {
    */
   task_id?: string;
   trace_id?: string;
+  /**
+   * WP-G2 (D-464, fiks-runde A-L12): gatewayens idempotensnøkkel for DETTE kallet (klasse C/D krever den), slik at en transport hvis leverandør støtter idempotensnøkkel kan sende SAMME nøkkel videre i stedet for å finne på en ny
+   * (en leverandør-side dobbeltkommando hindres da også utenfor Jarvis' ledger). Settes KUN av gatewayen fra `request.idempotency_key`, aldri fra `parameters`. Mangler for kall uten nøkkel (klasse A).
+   */
+  idempotency_key?: string;
 }
 
 /**
@@ -887,6 +892,7 @@ export class ToolGateway {
       ...(request.approval !== undefined ? { approval: request.approval } : {}),
       ...(request.servingModel !== undefined ? { servingModel: request.servingModel } : {}),
       ...(request.contentOrigin !== undefined ? { contentOrigin: request.contentOrigin } : {}),
+      ...(request.idempotency_key !== undefined ? { idempotency_key: request.idempotency_key } : {}),
       // WP-K (JARVIS-054): nøstede kall fra transporten (system-synk via `business.sync_business_events`) bærer samme korrelasjon videre.
       ...corr
     };

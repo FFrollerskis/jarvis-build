@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { CarAdapterError, type CarAdapter, type CarState } from "../../src/personal/car-adapter.ts";
+import { CAR_COMMAND_SKEW_MS, CarAdapterError, type CarAdapter, type CarState } from "../../src/personal/car-adapter.ts";
+import { ISO_INSTANT } from "../../src/personal/critical-ops.ts";
 
 /**
  * WP-G2 P1b: KONTRAKTSTESTEN en fremtidig ekte `CarAdapter` må bestå (mot leverandørens SANDBOX - aldri mot eierens produksjonsbil, blast radius). Den sjekker ikke hva leverandøren kan, men at adapteren oppfører seg
@@ -61,6 +62,20 @@ export function carAdapterContract(name: string, make: () => CarContractFixture)
       const after = await f.adapter.command(f.knownVehicle, { kind: "unlock" }, { idempotencyKey: "contract-key-4" }).catch((e: unknown) => e);
       expect(after).toBeInstanceOf(CarAdapterError);
       expect((after as CarAdapterError).outcomeKnown).toBe(false);
+    });
+
+    it("review A (MEDIUM-2): en FERSK tilstand bærer et strengt ISO-`observed_at`, og en fersk observasjon ETTER en akseptert kommando er ikke eldre enn kommandoen (minus skjevheten) - ellers kan den aldri bekrefte noe", async () => {
+      const f = make();
+      const first = (await f.adapter.readState(f.knownVehicle)) as CarState;
+      if (first.fresh) expect(first.observed_at, "fersk tilstand uten observed_at kan ikke bevises").toMatch(ISO_INSTANT);
+      const commandedAt = Date.now();
+      await f.adapter.command(f.knownVehicle, { kind: "lock" }, { idempotencyKey: "contract-key-6" });
+      for (let i = 0; i < 5; i += 1) {
+        const state = (await f.adapter.readState(f.knownVehicle)) as CarState;
+        if (!state.fresh) continue;
+        expect(state.observed_at, "fersk tilstand etter kommando uten observed_at").toMatch(ISO_INSTANT);
+        expect(Date.parse(state.observed_at as string), "en fersk observasjon etter kommandoen kan ikke være eldre enn kommandoen").toBeGreaterThanOrEqual(commandedAt - CAR_COMMAND_SKEW_MS);
+      }
     });
 
     it("etter en akseptert kommando kan tilstanden leses på nytt og er fortsatt normalisert (utførelsen bevises av readback, aldri av «akseptert»)", async () => {
