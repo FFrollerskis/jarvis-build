@@ -184,7 +184,7 @@ describe("LocalOpenAiCompatibleAdapter - bytetak på svaret for visjonsidentitet
     await expect(vision().complete({ messages: [message(TEXT)] })).rejects.toMatchObject({ message: "local_vision_invalid_response" });
   });
 
-  it("en endeløs kropp fra en ekte lokal server stoppes ved taket: klienten avbryter og serveren skriver ikke videre i det uendelige", async () => {
+  it("en svært stor kropp fra en ekte lokal server stoppes ved taket: klienten avbryter og serveren skriver ikke videre", async () => {
     global.fetch = originalFetch;
     const { createServer } = await import("node:http");
     let sent = 0;
@@ -194,6 +194,12 @@ describe("LocalOpenAiCompatibleAdapter - bytetak på svaret for visjonsidentitet
       res.write("{\"choices\":[{\"message\":{\"content\":\"");
       const chunk = "a".repeat(64 * 1024);
       timer = setInterval(() => {
+        // Serveren avslutter selv gyldig JSON ved 32 MiB: uten taket i adapteren ville klienten lest ALT og godtatt svaret (testen feiler da på assertionen, uten å tømme minnet).
+        if (sent >= 32 * 1024 * 1024) {
+          clearInterval(timer);
+          res.end("\"}}]}");
+          return;
+        }
         sent += chunk.length;
         res.write(chunk);
       }, 1);
@@ -208,7 +214,7 @@ describe("LocalOpenAiCompatibleAdapter - bytetak på svaret for visjonsidentitet
       const afterAbort = sent;
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(sent).toBe(afterAbort); // serveren ser at forbindelsen er lukket og slutter å skrive
-      expect(sent).toBeLessThan(64 * 1024 * 1024);
+      expect(sent).toBeLessThan(32 * 1024 * 1024); // klienten avbrøt langt før serveren var ferdig
     } finally {
       if (timer !== undefined) clearInterval(timer);
       server.closeAllConnections();
