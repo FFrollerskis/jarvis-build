@@ -65,22 +65,57 @@ export type SweepForm = keyof typeof SQL_FORMS;
 
 export const JS_FORMS: Record<SweepForm, (ch: string) => string> = { wrapped: (ch) => `a${ch}a`, bare: (ch) => ch, prefix: (ch) => `${ch}b`, suffix: (ch) => `b${ch}` };
 
+/**
+ * ORDTELLING (review delta2 A LOW-E1): kodepunktet står ved kanten av en etikett med NØYAKTIG fire ord (`edgeLead`, `edgeTrail`) eller limt mellom to ord (`glued`). Kun ASCII-mellomrom (U+0020) skal skille
+ * ord og trimmes - et Unicode-mellomrom (NBSP, U+2003, U+3000 ...) er en vanlig tegnverdi. Med JS sin `trim()`/`\s` ga NBSP + «b c d e» fire ord i JS og fem i databasen (skjemaet godtok, CHECK-en avviste, 23514).
+ * Alle tre formene har ASCII-bokstaver, så bokstavkravet (der JS er Unicode-bevisst og SQL ASCII-basert) aldri avgjør utfallet: forskjellen mellom JS og SQL skal være NØYAKTIG null.
+ */
+export const SQL_WORD_FORMS = {
+  edgeLead: `(chr(g.cp) || ' b c d e')`,
+  edgeTrail: `('b c d e ' || chr(g.cp))`,
+  glued: `('a' || chr(g.cp) || 'b c d e')`
+} as const;
+export type WordForm = keyof typeof SQL_WORD_FORMS;
+export const JS_WORD_FORMS: Record<WordForm, (ch: string) => string> = { edgeLead: (ch) => `${ch} b c d e`, edgeTrail: (ch) => `b c d e ${ch}`, glued: (ch) => `a${ch}b c d e` };
+
+export type AnyForm = SweepForm | WordForm;
+const SQL_ANY_FORM: Record<AnyForm, string> = { ...SQL_FORMS, ...SQL_WORD_FORMS };
+const JS_ANY_FORM: Record<AnyForm, (ch: string) => string> = { ...JS_FORMS, ...JS_WORD_FORMS };
+
 /** Kodepunktene constraint-uttrykket avviser i den gitte formen (standard: midt i et ellers gyldig navn, `a<tegn>a`, der KUN tegnet avgjør utfallet). Hele rommet i én spørring. */
-export async function rejectedCodePoints(admin: pg.Pool, constraint: string, form: SweepForm = "wrapped"): Promise<number[]> {
+export async function rejectedCodePoints(admin: pg.Pool, constraint: string, form: AnyForm = "wrapped"): Promise<number[]> {
   const expr = await constraintExpression(admin, constraint);
   const res = await admin.query(
     `SELECT cp FROM (SELECT generate_series(1, 55295) AS cp UNION ALL SELECT generate_series(57344, 1114111)) g,
-       LATERAL (SELECT ${SQL_FORMS[form]} AS object_label) s
+       LATERAL (SELECT ${SQL_ANY_FORM[form]} AS object_label) s
       WHERE NOT COALESCE(${expr}, true) ORDER BY cp`
   );
   return (res.rows as Array<{ cp: number }>).map((r) => r.cp);
 }
 
 /** JS-regelens avviste kodepunkter i samme form (for sammenligning mot `rejectedCodePoints`). */
-export function jsRejectedCodePoints(rule: (label: string) => boolean, form: SweepForm = "wrapped"): number[] {
+export function jsRejectedCodePoints(rule: (label: string) => boolean, form: AnyForm = "wrapped"): number[] {
   const rejected: number[] = [];
-  for (const cp of scalarValues()) if (!rule(JS_FORMS[form](String.fromCodePoint(cp)))) rejected.push(cp);
+  for (const cp of scalarValues()) if (!rule(JS_ANY_FORM[form](String.fromCodePoint(cp)))) rejected.push(cp);
   return rejected;
+}
+
+/** Utfallsvektorer for en mengde strenger i konstraint-uttrykket (true = godtatt). Brukes av fuzzen: én spørring per 25 000 strenger. Ingen skriving. */
+export async function constraintVerdicts(admin: pg.Pool, constraint: string, labels: readonly string[], chunkSize = 25_000): Promise<boolean[]> {
+  const rejected = new Set(await rejectedIndexes(admin, constraint, labels, chunkSize));
+  return labels.map((_, index) => !rejected.has(index));
+}
+
+/** Liten deterministisk PRNG (mulberry32): fuzzen skal gi samme strenger i hver kjøring, så en feil kan gjentas. */
+export function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 /** Lesbar, kort beskrivelse av avvikere (kodepunkt, ikke rå tegn: utskriften skal aldri inneholde kontroll-/bidi-tegn). */

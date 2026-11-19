@@ -45,8 +45,11 @@ export function normalizeObjectLabel(raw: unknown): string | null {
  * (en sveip over HELE Unicode-rommet mot selve CHECK-en i databasen), og samme regel brukes i inngangsskjemaet (types.ts). Usynlige tegn bygges av kodepunkter (ingen tegnescape i kilden).
  * Det er IKKE et navnefilter (se avsnittet over): regelen sier kun at strengen har formen til et kort objektnavn.
  * Merk (review delta D1): begge CHECK-ene er skrevet UTEN locale-avhengige POSIX-klasser. Den milde CHECK-ens bokstavkrav er «noe annet enn ASCII-sifre, -mellomrom og -tegnsetting» (ikke-ASCII tegn som ikke
- * er forbudt teller som bokstavlike) og ordene telles på ASCII-mellomrom, så databasen er et NETT som aldri er strengere enn normaliseringen; denne JS-regelen er (Unicode-bevisst) STRAMMERE for en etikett av KUN
- * ikke-ASCII tegnsetting/symboler («»), som skjemaet derfor avviser før databasen ser den. Bevist med sveip over alle kodepunkt i to locales (g3-label-locale.test.ts).
+ * er forbudt teller som bokstavlike), så databasen er et NETT som aldri er strengere enn normaliseringen; denne JS-regelen er (Unicode-bevisst) STRAMMERE for en etikett av KUN ikke-ASCII tegnsetting/symboler
+ * («»), som skjemaet derfor avviser før databasen ser den. Bevist med sveip over alle kodepunkt i to locales (g3-label-locale.test.ts).
+ * Merk (review delta2 A-E1): ORD TELLES PÅ ASCII-MELLOMROM (U+0020) I BÅDE JS OG DATABASEN. Et Unicode-mellomrom (NBSP, U+2003, U+3000 ...) er en vanlig tegnverdi, ikke et skille og ikke noe `btrim` fjerner; JS sin
+ * `trim()`/`\s` ville telt det annerledes (en etikett av et NBSP, et ASCII-mellomrom og så «a b c d» ga fire ord i JS og fem i databasen: skjemaet godtok, CHECK-en avviste, og skrivingen feilet med 23514).
+ * Tab..CR (U+0009-000D) er forbudt uansett, så ASCII-mellomrom er det eneste skillet som kan forekomme i en etikett som passerer tegnklassen.
  */
 // Usynlige/formaterende tegn: soft hyphen, combining grapheme joiner, Arabic letter mark, Hangul-fyllere, Khmer-vokaler, Mongolian-velgere, null-bredde og bidi (200B-200F, 202A-202E),
 // ordforbinder/usynlige operatorer (2060-206F), variasjonsvelgere, BOM, halvbredde-fyller, tegn for interlinear annotasjon og Unicode «tag»-tegn (E0000-E0FFF: «ASCII smuggling»).
@@ -60,13 +63,16 @@ const FORBIDDEN_STORED = new RegExp(
   "u"
 );
 const HAS_LETTERISH = /[^0-9\s\p{P}\p{S}]/u;
+// Ordtelling på ASCII-mellomrom (identisk med `btrim(object_label)` + `regexp_split_to_array(.., '[\x09-\x0d\x20]+')` i migrasjon 133): kun U+0020 trimmes og skiller (review delta2 A-E1).
+const EDGE_ASCII_SPACES = /^ +| +$/g;
+const ASCII_SPACE_RUN = / +/;
 
 export function isStorableObjectLabel(label: unknown): label is string {
   if (typeof label !== "string") return false;
   const length = [...label].length;
   if (length < 1 || length > MAX_OBJECT_LABEL_CHARS) return false;
   if (FORBIDDEN_STORED.test(label) || !HAS_LETTERISH.test(label)) return false;
-  return label.trim().split(/\s+/).length <= MAX_OBJECT_LABEL_WORDS;
+  return label.replace(EDGE_ASCII_SPACES, "").split(ASCII_SPACE_RUN).length <= MAX_OBJECT_LABEL_WORDS;
 }
 
 /**

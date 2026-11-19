@@ -110,6 +110,29 @@ describe("isStorableObjectLabel: lagringsregelen er FORMEN til et kort objektnav
     expect(VisionObservationInputSchema.safeParse({ ...base, object_label: "nøkler" }).success).toBe(true);
     expect(VisionObservationInputSchema.safeParse({ ...base }).success).toBe(true);
   });
+
+  it("ORDTELLING (delta2 A-E1): kun ASCII-mellomrom skiller og trimmes - et Unicode-mellomrom er en vanlig tegnverdi (lik migrasjon 133: btrim + deling på ASCII-mellomrom)", () => {
+    const nbsp = String.fromCodePoint(0xa0);
+    const emSpace = String.fromCodePoint(0x2003);
+    const ideographic = String.fromCodePoint(0x3000);
+    // Flere ASCII-mellomrom på rad er ETT skille, og ledende/etterfølgende ASCII-mellomrom trimmes.
+    for (const label of ["a  b c d", "a b  c d", "a   b   c   d", " a b c d", "a b c d ", "  a b c d  ", " a  b c d "]) expect(isStorableObjectLabel(label), JSON.stringify(label)).toBe(true);
+    for (const label of ["a b c d e", "a  b c d  e", "  a b c d e  ", " a b  c d e"]) expect(isStorableObjectLabel(label), JSON.stringify(label)).toBe(false);
+    // Et Unicode-mellomrom limt til et ord er ikke et skille: fire ord selv om `\s` ville sett fem (JS gjorde dette feil før: skjemaet avviste en etikett databasen godtar - trygg retning, men ulikt).
+    for (const space of [nbsp, emSpace, ideographic]) {
+      expect(isStorableObjectLabel(`a${space}b c d e`), `limt ${space.codePointAt(0)}`).toBe(true);
+      expect(isStorableObjectLabel(`${space}a b c d`), `ledende limt ${space.codePointAt(0)}`).toBe(true);
+      expect(isStorableObjectLabel(`a b c d${space}`), `etterfølgende limt ${space.codePointAt(0)}`).toBe(true);
+    }
+    // Et Unicode-mellomrom SKILT fra fire ord med ASCII-mellomrom er et FEMTE ord for databasen (btrim fjerner det ikke): JS godtok dette via `trim()`, og skrivingen feilet med 23514.
+    for (const space of [nbsp, emSpace, ideographic]) {
+      expect(isStorableObjectLabel(`${space} a b c d`), `ledende ${space.codePointAt(0)}`).toBe(false);
+      expect(isStorableObjectLabel(`a b c d ${space}`), `etterfølgende ${space.codePointAt(0)}`).toBe(false);
+    }
+    const base = { event_type: "object_detected", source_event_id: "e1", observed_at: "2026-01-01T00:00:00Z", source_type: "t", source_instance_id: "i" } as const;
+    expect(VisionObservationInputSchema.safeParse({ ...base, object_label: `${nbsp} a b c d` }).success).toBe(false);
+    expect(VisionObservationInputSchema.safeParse({ ...base, object_label: `a${nbsp}b c d e` }).success).toBe(true);
+  });
 });
 
 describe("isInventoryLabel: den strenge inventarregelen bruker eksplisitte kodepunktområder (ikke POSIX-klasser) og avviser aldri noe normaliseringen lager (review delta D1)", () => {

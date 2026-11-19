@@ -6,7 +6,24 @@ import { isInventoryLabel, isStorableObjectLabel } from "../src/labels.ts";
 import { VisionIngestPipeline, type CapturedEventSpec, type IngestContext } from "../src/pipeline.ts";
 import { VisionService } from "../src/service.ts";
 import { detectionsJson, makeJpeg, ScriptedGateway, seedTenant, startVisionDb, type VisionDb } from "./support/harness.ts";
-import { constraintExpression, describeLabels, hex, INV_CHECK, jsRejectedCodePoints, normalizerOutputs, OBS_CHECK, rejectedCodePoints, rejectedIndexes, SQL_FORMS, type SweepForm } from "./support/label-sweep.ts";
+import {
+  type AnyForm,
+  constraintExpression,
+  constraintVerdicts,
+  describeLabels,
+  hex,
+  INV_CHECK,
+  jsRejectedCodePoints,
+  normalizerOutputs,
+  OBS_CHECK,
+  rejectedCodePoints,
+  rejectedIndexes,
+  seededRandom,
+  SQL_FORMS,
+  SQL_WORD_FORMS,
+  type SweepForm,
+  type WordForm
+} from "./support/label-sweep.ts";
 import type pg from "pg";
 
 /**
@@ -19,16 +36,20 @@ import type pg from "pg";
  *
  * Bevist: (1) alt `normalizeObjectLabel` kan produsere over HELE Unicode-rommet (alene, inni og på begge sider av en bokstav) består BEGGE CHECK-ene i begge locales, (2) JS-reglene og SQL-CHECK-ene
  * avviser NØYAKTIG samme kodepunkter (den milde: databasen er aldri strengere enn JS-skjemaet), (3) settet av avviste kodepunkter er LIK i begge locales i alle fire former (regelen er locale-uavhengig),
- * (4) strukturreglene (lengde, ord, mellomrom/bindestrek) er enige, (5) pipelinen taper aldri basishendelsen på grunn av en etikett som ikke kan bli inventar - og svelger ingen annen feil.
+ * (4) strukturreglene (lengde, ord, mellomrom/bindestrek) er enige, (5) pipelinen taper aldri basishendelsen på grunn av en etikett som ikke kan bli inventar - og svelger ingen annen feil,
+ * (6) ORDTELLINGEN (review delta2 A LOW-E1) er identisk i JS og i den milde CHECK-en: kun ASCII-mellomrom skiller og trimmes, et Unicode-mellomrom er en vanlig tegnverdi. Bevist med tre ekstra sveip over hele
+ * Unicode-rommet (kodepunktet ved kanten av en fire-ords etikett, og limt mellom to ord), eksplisitte strenger og en seedet fuzz mot selve CHECK-en - JS skal aldri godta en etikett 133 avviser (23514).
  */
 const LOCALES = ["C", "C.UTF-8"] as const;
 type Locale = (typeof LOCALES)[number];
 const FORMS = Object.keys(SQL_FORMS) as SweepForm[];
+const WORD_FORMS = Object.keys(SQL_WORD_FORMS) as WordForm[];
 const CHECKS = [INV_CHECK, OBS_CHECK] as const;
 
 const clusters = new Map<Locale, VisionDb>();
 let outputs: string[] = [];
-const jsRejected = { inventory: {} as Record<SweepForm, number[]>, observation: {} as Record<SweepForm, number[]> };
+const jsRejected = { inventory: {} as Partial<Record<AnyForm, number[]>>, observation: {} as Partial<Record<AnyForm, number[]>> };
+const jsRejectedOf = (kind: "inventory" | "observation", form: AnyForm): number[] => jsRejected[kind][form] as number[];
 
 const dbOf = (locale: Locale): VisionDb => clusters.get(locale) as VisionDb;
 
@@ -49,6 +70,7 @@ beforeAll(async () => {
     jsRejected.inventory[form] = jsRejectedCodePoints(isInventoryLabel, form);
     jsRejected.observation[form] = jsRejectedCodePoints(isStorableObjectLabel, form);
   }
+  for (const form of WORD_FORMS) jsRejected.observation[form] = jsRejectedCodePoints(isStorableObjectLabel, form);
 }, 900_000);
 
 afterAll(async () => {
@@ -66,7 +88,7 @@ const diff = (a: readonly number[], b: readonly number[]): number[] => {
 
 /** Sveipet kjøres én gang per (locale, CHECK, form) og gjenbrukes mellom testene. */
 const swept = new Map<string, number[]>();
-async function sqlRejected(locale: Locale, check: string, form: SweepForm): Promise<number[]> {
+async function sqlRejected(locale: Locale, check: string, form: AnyForm): Promise<number[]> {
   const key = `${locale}|${check}|${form}`;
   let rejected = swept.get(key);
   if (rejected === undefined) {
@@ -110,7 +132,7 @@ describe("sveip over HELE Unicode-rommet (alene, inni og på begge sider av en b
     it(`${locale}: den STRENGE CHECK-en (135) og isInventoryLabel avviser NØYAKTIG de samme kodepunktene i alle fire former`, async () => {
       for (const form of FORMS) {
         const sql = await sqlRejected(locale, INV_CHECK, form);
-        const js = jsRejected.inventory[form];
+        const js = jsRejectedOf("inventory", form);
         expect(sql.length, `${form}: sveipet må ha funnet noe`).toBeGreaterThan(4000);
         expect(diff(sql, js).map(hex), `${locale} ${form}: SQL avviser, JS godtar`).toEqual([]);
         expect(diff(js, sql).map(hex), `${locale} ${form}: JS avviser, SQL godtar`).toEqual([]);
@@ -120,7 +142,7 @@ describe("sveip over HELE Unicode-rommet (alene, inni og på begge sider av en b
     it(`${locale}: den MILDE CHECK-en (133) og isStorableObjectLabel avviser NØYAKTIG de samme kodepunktene (a<tegn>a, <tegn>b, b<tegn>); alene er databasen aldri strengere enn JS-skjemaet`, async () => {
       for (const form of FORMS) {
         const sql = await sqlRejected(locale, OBS_CHECK, form);
-        const js = jsRejected.observation[form];
+        const js = jsRejectedOf("observation", form);
         expect(sql.length, `${form}: sveipet må ha funnet noe`).toBeGreaterThan(4000);
         expect(diff(sql, js).map(hex), `${locale} ${form}: SQL avviser, JS godtar (databasen skal aldri være strengere enn skjemaet)`).toEqual([]);
         const jsOnly = diff(js, sql);
@@ -133,6 +155,31 @@ describe("sveip over HELE Unicode-rommet (alene, inni og på begge sider av en b
         }
       }
     }, 300_000);
+
+    it(`${locale}: ORDTELLING (delta2 A-E1): den milde CHECK-en (133) og isStorableObjectLabel avviser NØYAKTIG de samme kodepunktene ved kanten av en fire-ords etikett og limt mellom to ord (kun ASCII-mellomrom skiller/trimmes)`, async () => {
+      for (const form of WORD_FORMS) {
+        const sql = await sqlRejected(locale, OBS_CHECK, form);
+        const js = jsRejectedOf("observation", form);
+        // Begge retninger og ingen unntak (alle formene har ASCII-bokstaver, så det ett-veis bokstavgapet kan ikke avgjøre noe): JS godtar ALDRI det 133 avviser (23514), og avviser ikke det 133 godtar.
+        expect(diff(js, sql).map(hex), `${locale} ${form}: JS avviser, SQL godtar`).toEqual([]);
+        expect(diff(sql, js).map(hex), `${locale} ${form}: SQL avviser, JS godtar (skrivingen ville feilet med 23514)`).toEqual([]);
+        expect(sql).toEqual(js);
+      }
+      // Forankring (sveipet er ikke tomt og har den forventede formen): ved kanten av en fire-ords etikett er ASCII-mellomrom det ENESTE tegnet som holder den på fire ord (det trimmes) - hvert annet kodepunkt, også
+      // NBSP/U+2003/U+3000, gir et femte «ord» og avvises. Limt mellom to ord skiller kun ASCII-mellomrom; et Unicode-mellomrom er en vanlig tegnverdi og godtas.
+      const everything = (rejected: readonly number[]): number[] => {
+        const set = new Set(rejected);
+        const accepted: number[] = [];
+        for (let cp = 1; cp <= 0x10ffff; cp++) if (!(cp >= 0xd800 && cp <= 0xdfff) && !set.has(cp)) accepted.push(cp);
+        return accepted;
+      };
+      expect(everything(await sqlRejected(locale, OBS_CHECK, "edgeLead"))).toEqual([0x20]);
+      expect(everything(await sqlRejected(locale, OBS_CHECK, "edgeTrail"))).toEqual([0x20]);
+      const glued = await sqlRejected(locale, OBS_CHECK, "glued");
+      expect(glued).toContain(0x20);
+      for (const unicodeSpace of [0xa0, 0x1680, 0x2000, 0x2003, 0x2009, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000]) expect(glued, `U+${unicodeSpace.toString(16)} er en tegnverdi, ikke et skille`).not.toContain(unicodeSpace);
+      for (const forbidden of [0x09, 0x0a, 0x0d, 0x85, 0x200b, 0xfeff]) expect(glued).toContain(forbidden);
+    }, 300_000);
   }
 
   it("settet av avviste kodepunkter er LIK i begge locales for begge CHECK-er i ALLE fire former (regelen er locale-uavhengig: ingen POSIX-klasse avgjør utfallet)", async () => {
@@ -143,6 +190,12 @@ describe("sveip over HELE Unicode-rommet (alene, inni og på begge sider av en b
         expect(diff(inUtf8, inC).map(hex), `${check} ${form}: avvises KUN i C.UTF-8`).toEqual([]);
         expect(diff(inC, inUtf8).map(hex), `${check} ${form}: avvises KUN i C`).toEqual([]);
       }
+    }
+    for (const form of WORD_FORMS) {
+      const inC = await sqlRejected("C", OBS_CHECK, form);
+      const inUtf8 = await sqlRejected("C.UTF-8", OBS_CHECK, form);
+      expect(diff(inUtf8, inC).map(hex), `${OBS_CHECK} ${form}: avvises KUN i C.UTF-8`).toEqual([]);
+      expect(diff(inC, inUtf8).map(hex), `${OBS_CHECK} ${form}: avvises KUN i C`).toEqual([]);
     }
   }, 300_000);
 
@@ -179,10 +232,21 @@ describe("strukturreglene (lengde, ordtall, mellomrom/bindestrek) er enige mello
   }
 
   // Den milde regelen (133): lengde, ordtall (ASCII-mellomrom), bokstavkrav og forbudte tegn - uten krav til små bokstaver, tegnsetting eller mellomromsform.
-  const mildAccepted = ["Nøkler", "men's watch", "T-shirt.", "sekk (rød)", "  kaffekopp  ", "a1", "a  b", "-a", "x".repeat(64), astralLetter.repeat(64), "en to tre fire", "日本語", `a${cp(0x9f4)}a`, `${cp(0x9f4)}b`, "١٢٣", cp(0xaa)];
+  const nbsp = cp(0xa0);
+  const mildAccepted = [
+    "Nøkler", "men's watch", "T-shirt.", "sekk (rød)", "  kaffekopp  ", "a1", "a  b", "-a", "x".repeat(64), astralLetter.repeat(64), "en to tre fire", "日本語", `a${cp(0x9f4)}a`, `${cp(0x9f4)}b`, "١٢٣", cp(0xaa),
+    // Ordtelling (delta2 A-E1): flere mellomrom på rad, og ledende/etterfølgende ASCII-mellomrom, teller som ETT skille / trimmes (feller en CHECK som deler på ÉTT mellomrom eller ikke trimmer).
+    "a  b c d", "a b  c d", "a b c  d", "a   b   c   d", " a b c d", "a b c d ", "  a b c d  ", " a  b c d ",
+    // Et Unicode-mellomrom er en vanlig tegnverdi, ikke et skille: fire ord selv om NBSP står limt til et ord.
+    `a${nbsp}b c d e`, `${nbsp}a b c d`, `a b c d${nbsp}`, `a${cp(0x2003)}b c d e`, `a${cp(0x3000)}b c d e`, `a b${nbsp}c d`
+  ];
   const mildRejected = [
     "", "   ", "12345", "...!?", "1 2", "- -", "x".repeat(65), astralLetter.repeat(65), "en to tre fire fem", "  en to  tre fire fem ", "<a>", "a|b", "x=y", "a\tb", "a\nb",
-    `a${cp(0x200b)}b`, `a${cp(0xad)}b`, `a${cp(0xe0041)}b`, `a${cp(0x202e)}b`, `a${cp(0xfeff)}b`, `a${cp(0x85)}b`
+    `a${cp(0x200b)}b`, `a${cp(0xad)}b`, `a${cp(0xe0041)}b`, `a${cp(0x202e)}b`, `a${cp(0xfeff)}b`, `a${cp(0x85)}b`,
+    // Fem ord (også med doble/ledende/etterfølgende mellomrom) avvises.
+    "a b c d e", "a  b c d  e", "  a b c d e  ", " a b  c d e",
+    // E1: JS sin trim()/\s ga fire ord for et NBSP (eller annet Unicode-mellomrom) skilt fra fire ord med ASCII-mellomrom; databasen ser fem (NBSP-en er et eget «ord»).
+    `${nbsp} a b c d`, `a b c d ${nbsp}`, `${cp(0x2003)} a b c d`, `a b c d ${cp(0x3000)}`, `${cp(0x202f)} a b c d`, `a b c d  ${nbsp}`, `${nbsp} ${nbsp} a b c`
   ];
   // Eneste forskjell: en etikett av KUN ikke-ASCII tegnsetting/symboler. JS-skjemaet avviser den (Unicode-bevisst), databasen godtar den (ASCII-basert bokstavkrav, løsere nett - aldri strengere enn skjemaet).
   const mildGap = ["«»", "¿¡", cp(0x2014), "×÷", cp(0xa0), `${cp(0x2003)}`];
@@ -200,6 +264,56 @@ describe("strukturreglene (lengde, ordtall, mellomrom/bindestrek) er enige mello
       for (const label of [...mildAccepted, ...mildRejected]) expect(!rejectedByDb.has(label), `${locale} SQL for ${describeLabels([label])}`).toBe(isStorableObjectLabel(label));
       for (const label of mildGap) expect(rejectedByDb.has(label), `${locale} gap ${describeLabels([label])}`).toBe(false);
     });
+  }
+
+  // Seedet fuzz (delta2 A-E1): tilfeldige strenger av ASCII- og Unicode-mellomrom, bokstaver, tall og tegnsetting (alle tillatt av tegnklassen). Hver streng har MINST ÉN ASCII-bokstav, så det ett-veis bokstavgapet
+  // aldri avgjør utfallet, og ordtellingen (ASCII-mellomrom som eneste skille, trimming av kun ASCII-mellomrom) skal da være IDENTISK i JS og i selve CHECK-en. Samme strenger i begge locales; samme strenger i hver kjøring.
+  const FUZZ_COUNT = 30_000;
+  const fuzzStrings = ((): string[] => {
+    const random = seededRandom(0x6a3e1);
+    const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T;
+    const letters = ["a", "b", "é", astralLetter, "1", "-", ".", cp(0x2019)];
+    const unicodeSpaces = [nbsp, cp(0x2003), cp(0x3000), cp(0x202f), cp(0x2028)];
+    // Kanten: 0-2 mellomrom, hvert enten ASCII eller Unicode (i alle rekkefølger: «NBSP + ASCII» er nettopp E1-tilfellet).
+    const edge = (): string => Array.from({ length: Math.floor(random() * 3) }, () => (random() < 0.6 ? " " : pick(unicodeSpaces))).join("");
+    const out: string[] = [];
+    for (let i = 0; i < FUZZ_COUNT; i++) {
+      let label = edge();
+      const words = 2 + Math.floor(random() * 5); // 2..6 ASCII-skilte «ord»
+      for (let word = 0; word < words; word++) {
+        if (word > 0) label += " ".repeat(1 + Math.floor(random() * 2)); // ett eller to ASCII-mellomrom
+        if (word === 0) label += "a"; // minst én ASCII-bokstav i hver streng
+        for (let k = 0, length = 1 + Math.floor(random() * 3); k < length; k++) label += random() < 0.15 ? pick(unicodeSpaces) : pick(letters); // et Unicode-mellomrom INNI et ord er ikke et skille
+      }
+      out.push(label + edge());
+    }
+    return out;
+  })();
+  const asciiWords = (label: string): number => label.split(" ").filter((word) => word.length > 0).length;
+
+  it("fuzzen dekker grensen mellom fire og fem ord (ikke tom): minst 1000 strenger med nøyaktig fire og minst 1000 med nøyaktig fem ASCII-ord, og minst 1000 med et Unicode-mellomrom", () => {
+    expect(fuzzStrings.filter((label) => asciiWords(label) === 4).length).toBeGreaterThan(1000);
+    expect(fuzzStrings.filter((label) => asciiWords(label) === 5).length).toBeGreaterThan(1000);
+    expect(fuzzStrings.filter((label) => [...label].some((ch) => ch !== " " && /^\s$/u.test(ch))).length).toBeGreaterThan(1000);
+    expect(fuzzStrings.every((label) => label.includes("a"))).toBe(true);
+  });
+
+  for (const locale of LOCALES) {
+    it(`${locale}: seedet fuzz (${FUZZ_COUNT} strenger) mot selve CHECK-en (133): JS godtar ALDRI det CHECK-en avviser (23514), og avviser ikke det CHECK-en godtar`, async () => {
+      const verdicts = await constraintVerdicts(dbOf(locale).admin, OBS_CHECK, fuzzStrings);
+      const jsAcceptsDbRejects: string[] = [];
+      const jsRejectsDbAccepts: string[] = [];
+      fuzzStrings.forEach((label, index) => {
+        const js = isStorableObjectLabel(label);
+        if (js && !verdicts[index]) jsAcceptsDbRejects.push(label);
+        if (!js && verdicts[index]) jsRejectsDbAccepts.push(label);
+      });
+      expect(jsAcceptsDbRejects.length, `${locale}: JS godtar, CHECK avviser: ${describeLabels(jsAcceptsDbRejects)}`).toBe(0);
+      expect(jsRejectsDbAccepts.length, `${locale}: JS avviser, CHECK godtar: ${describeLabels(jsRejectsDbAccepts)}`).toBe(0);
+      const accepted = verdicts.filter(Boolean).length;
+      expect(accepted, "fuzzen har godtatte strenger").toBeGreaterThan(3000);
+      expect(fuzzStrings.length - accepted, "fuzzen har avviste strenger").toBeGreaterThan(3000);
+    }, 120_000);
   }
 });
 

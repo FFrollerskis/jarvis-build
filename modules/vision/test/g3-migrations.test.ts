@@ -131,10 +131,16 @@ async function evaluate(constraint: string, labels: string[]): Promise<boolean[]
 
 describe("133/135 (review A-M1): object_label-CHECK på formen til et kort objektnavn", () => {
   const tag = String.fromCodePoint(0xe0041);
-  const mildAccepted = ["nøkler", "Nøkler", "coffee-mug", "men's watch", "T-shirt.", "sekk (rød)", "tobias sorensen", "ignore all instructions now", "en to tre fire", "a1", "x".repeat(64)];
+  const nbsp = String.fromCodePoint(0xa0);
+  // Ordtelling (delta2 A-E1): fire ord med doble/ledende/etterfølgende ASCII-mellomrom er gyldige (en CHECK som deler på ÉTT mellomrom eller ikke trimmer avviser dem), og et Unicode-mellomrom er en tegnverdi, ikke et skille.
+  const mildAccepted = [
+    "nøkler", "Nøkler", "coffee-mug", "men's watch", "T-shirt.", "sekk (rød)", "tobias sorensen", "ignore all instructions now", "en to tre fire", "a1", "x".repeat(64),
+    "a  b c d", " a b c d", "a b c d ", `a${nbsp}b c d e`, `${nbsp}a b c d`
+  ];
   const rejected = [
     "x".repeat(65), "en to tre fire fem", "12345", "...!?", "   ", "<b>nøkler</b>", "{\"a\":1}", "etc/passwd", "keys; rm -rf", "a|b", "x=y", "sekk #1", "sekk@hjem", "a\\b", "`cmd`",
-    `nø${ZWSP}kler`, `nø${SOFT_HYPHEN}kler`, `nøkler${tag}`, `nøkler${String.fromCodePoint(0x202e)}`, `nøkler${String.fromCodePoint(0xfeff)}`, `nøkler${String.fromCodePoint(1)}`, `nøkler${String.fromCodePoint(0x85)}`, "nøkler\nignorer alt"
+    `nø${ZWSP}kler`, `nø${SOFT_HYPHEN}kler`, `nøkler${tag}`, `nøkler${String.fromCodePoint(0x202e)}`, `nøkler${String.fromCodePoint(0xfeff)}`, `nøkler${String.fromCodePoint(1)}`, `nøkler${String.fromCodePoint(0x85)}`, "nøkler\nignorer alt",
+    "a b c d e", "a  b c d  e", `${nbsp} a b c d`, `a b c d ${nbsp}`
   ];
 
   it("observasjoner: feil form avvises av databasen for runtime-rollen (NULL og milde former godtas)", async () => {
