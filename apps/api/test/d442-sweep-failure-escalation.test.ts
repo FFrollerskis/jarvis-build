@@ -351,7 +351,8 @@ describe("D-442: main.ts forkaster aldri et sveipresultat (kildenivå-vakt, main
     const viaFailedList = [...mainSource.matchAll(/assertNoSweepFailures\("([a-z-]+)", summary\.failed\)/g)].map((m) => m[1]);
     expect(viaFailedList.sort()).toEqual([
       "health-retention-sweep", "location-retention-sweep", "memory-profile-sweep", "memory-reembed-sweep", "memory-resensitize-sweep", "memory-retention-sweep",
-      "vision-retention-sweep"
+      // WP-G3 (D-465): vedlikeholdet av kamerabilder/inventar/vektorer/gravsteiner finnes KUN når JARVIS_VISION_ENABLED=on, men er en kritisk retensjonsjobb (sletter bilder) - ikke best-effort.
+      "vision-maintenance-sweep", "vision-retention-sweep"
     ]);
     for (const job of viaFailedList) expect(mainSource, `DailyScheduler for ${job}`).toMatch(new RegExp(`new DailyScheduler\\(\\s*pool, "${job}"`));
   });

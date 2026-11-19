@@ -12,7 +12,7 @@ import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarv
  */
 type Pool = Pick<pg.Pool, "query"> & Partial<Pick<pg.Pool, "connect">>;
 
-const LOCAL_PROVIDERS = new Set(["gemma_local", "local_llm", "ollama", "scripted"]);
+const LOCAL_PROVIDERS = new Set(["gemma_local", "local_llm", "ollama", "scripted", "local_vision"]);
 export const MAINTENANCE_KINDS = ["incident", "credential_rotation", "api_change", "manual_fix", "upgrade", "outage", "other"] as const;
 
 export interface RunRateReport {

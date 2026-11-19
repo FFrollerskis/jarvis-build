@@ -7,7 +7,8 @@ import type { EmbeddingProvider } from "./embedding.ts";
  * sammenlignes. pgvector-kolonnen `vec` finnes kun i Docker-PG (embedded test-PG mangler utvidelsen) - da brukes
  * `cosine_sim(real[], real[])` (008) med identisk resultat, bare uten HNSW.
  */
-export type VectorRefKind = "item" | "episode" | "summary";
+/** WP-G3 (D-465, 135): `vision_event` = objekt-/hendelsesvektor for UA-9 (ref_id = vision_event_observations.observation_id); en trigger fjerner den når hendelsen slettes. */
+export type VectorRefKind = "item" | "episode" | "summary" | "vision_event";
 
 const pgVectorByPool = new WeakMap<object, boolean>();
 

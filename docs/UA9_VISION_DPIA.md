@@ -1,151 +1,128 @@
 # UA-9 — DPIA / data-governance-notat (Vision & Physical World)
 
-**Status:** UA-9 «Vision & Physical World» — provider-uavhengig P0-kjerne bygget (D-153, 2026-09-15).
-Dette notatet dekker den ENE nye persondata-kategorien D-153 introduserer: hendelses-/
-romobservasjoner (`vision_rooms`/`vision_event_observations`). Samme form og disiplin som
-`UA8_PERSONAL_TWIN_DPIA.md`/`UA3_BUSINESS_DPIA.md`: kort og teknisk, ikke juridisk teater — og det
-utfyller, erstatter ikke, `docs/security/DPIA_DRAFT.md`.
+**Status:** UA-9 «Vision & Physical World» — P0-kjerne (D-153, 2026-09-15) + **WP-G3 (D-465, 2026-11-18): live kilder, lokal klassifisering,
+bilde-lagring med oppbevaring, embeddings, inventar, «sist sett» og iPhone-opptak på forespørsel — bygget DORMANT/AV bak `JARVIS_VISION_*`-flagg
+og IKKE verifisert mot ekte kamera, ekte Home Assistant eller ekte lokal modell** (se `docs/runbooks/WPG3_VISION.md` for hva som er verifisert og ikke).
+Samme form og disiplin som `UA8_PERSONAL_TWIN_DPIA.md`/`UA3_BUSINESS_DPIA.md`: kort og teknisk, ikke juridisk teater — og det utfyller,
+erstatter ikke, `docs/security/DPIA_DRAFT.md`.
 
-> **Jarvis avgjør ALDRI selv et rettslig grunnlag.** Samme prinsipp som `modules/consent` (D-91) og
-> `UA8_PERSONAL_TWIN_DPIA.md` (D-130). Ingenting i dette notatet er en påstand fra Jarvis om at et
-> gitt grunnlag faktisk er gyldig.
+> **Jarvis avgjør ALDRI selv et rettslig grunnlag.** Samme prinsipp som `modules/consent` (D-91) og `UA8_PERSONAL_TWIN_DPIA.md` (D-130).
+> Ingenting i dette notatet er en påstand fra Jarvis om at et gitt grunnlag faktisk er gyldig.
+>
+> **Dette er et UTKAST. Ingen juridisk gjennomgang er gjort.** Kameraer i hjemmet, hos andre personer (familie, gjester, tilsatte, leietakere) og på en arbeidsplass
+> reiser særskilte krav (personvernforordningen/GDPR og norsk rett om kameraovervåking, herunder regler om kontroll og overvåking i arbeidsforhold). Notatet viser
+> hva systemet teknisk gjør og hvilke garantier som er bygget; det konkluderer ikke på lovligheten av noe enkelt oppsett. Se §3 og §7.
 
 ## 1. Hvilke data behandles (faktisk, ikke planlagt)
 
-| Datakategori | Tabell | Hva som faktisk lagres |
-|---|---|---|
-| **Hendelses-/romobservasjoner** | `vision_event_observations`/`vision_rooms` (`055_vision.sql`) | Allerede KLASSIFISERTE hendelser (`event_type`, valgfri `object_label`/`confidence`/`room_id`), PEKER til kilde (`source_type`, PÅKREVD `source_instance_id`), en PÅKREVD kilde-stabil `source_event_id` (sammen med `source_instance_id` det eksplisitte dedupe-kollisjonsdomenet, se §6.8), en intern `payload_fingerprint` (replay-integritet, se §6.9), `observed_at`. Eier-definerte navngitte rom (`vision_rooms`) uten geometri. |
+Alt under er **AV som standard** og finnes bare når eieren selv slår på `JARVIS_VISION_ENABLED=on` (og de enkelte underbryterne). Uten dem skrives, hentes og lagres ingenting.
 
-**Ikke behandlet i dag (eksplisitt, ikke stilltiende utelatt):** INGEN live kamera-/leverandør-
-tilkobling (ingen iPhone-kamera, ingen Home Assistant kamera-events, ingen dørklokke-/
-sikkerhetssystem-API) — kun den kanoniske, provider-nøytrale ingestion-/lagringskontrakten. INGEN
-faktisk bilde-/objektklassifiseringsmodell er koblet til — `event_type`/`object_label`/`confidence`
-forutsettes PRODUSERT av en fremtidig, ikke bygget adapter/modell-pipeline før de når denne tjenesten.
-INGEN rå bilde-/videobytes lagres NOEN steder i denne sliceen. **`snapshot_ref` (bildepeker) er
-FORBUDT i denne P0-sliceen** (strukturelt, DB-CHECK `IS NULL` + fjernet fra input-schemaet, se
-ARKITEKT-REVIEW-FIKS i §6.9) - ingen levetids-eid snapshot-lagringsadapter finnes ennå som faktisk
-sletter/tilbakekaller et eksternt referert objekt når en observasjon purges/eraseres, så denne
-sliceen unngår helt å skape en peker den ikke kan love å rydde opp etter. INGEN biometrisk
-ansiktsgjenkjenning (eksplisitt utenfor masterplan v4.0 UA-9 med mindre separat besluttet og lovlig
-implementert). Se §5.
+| Datakategori | Tabell / sted | Hva som faktisk lagres |
+|---|---|---|
+| **Hendelses-/romobservasjoner** | `vision_event_observations`/`vision_rooms` (`055`, utvidet av `133`/`137`) | KLASSIFISERTE hendelser (`event_type` fra et LUKKET sett: `motion_detected`, `doorbell_event`, `object_detected`, `person_present`, `security_alert`, `opening_detected`; valgfri normalisert `object_label`/`confidence`/`room_id`), PEKER til kilde (`source_type`, `source_instance_id`, kilde-stabil `source_event_id`), `payload_fingerprint`, `observed_at`, og merking per regel 4: `task_id`/`session_id`/`classification_status`/`classifier` (leverandør/modell-id, aldri innhold). |
+| **Kamera-register** | `vision_cameras` (`133`) | Eierens KONFIGURASJON: `label`, `source_type` (`home_assistant`/`iphone`), `source_ref` (HA `camera.*`-entity eller enhets-id), `trigger_entities`, valgfritt rom, **`zone_kind`** (`home`/`workplace`/`shared`), **`route_policy`** (`discard`/`local_only`/`store_snapshot` — ingen standard, ingen sky-verdi), `cooldown_seconds`, `enabled`. Ingen bilder, ingen credentials. |
+| **Hendelsesbilde (stillbilde)** | `vision_snapshots` (`134`) + selve bildet i en LOKAL `StorageAdapter` (diskmappe `JARVIS_VISION_STORAGE_DIR`, katalog 0700/fil 0600) | ETT stillbilde (JPEG/PNG/WebP, ≤ 5 MiB, ≤ 20 MiB DB-CHECK) per hendelse — **aldri video, aldri en strøm**. Kun når (a) kameraets sone er `home`, (b) policyen er `store_snapshot` og (c) `JARVIS_VISION_STORE_SNAPSHOTS=on`. Metadata: `sha256`, `byte_length`, `media_type`, ugjennomsiktig `storage_key`, utløpstid. Behandles som **BEGRENSET** data (`SECRET_RESTRICTED`). |
+| **Slette-gravsteiner** | `vision_snapshot_tombstones` (`134`) | Kun lagringsnøkler for objekter som skal slettes fra disk (operasjonelt; innholdsfritt). Fjernes først når lagringen har bekreftet sletting. |
+| **Objekt-embeddings** | `memory_vectors` med `ref_kind = 'vision_event'` (`135`; den EKSISTERENDE minne-vektorlagringen, ingen ny vektorleverandør) | En vektor av den NORMALISERTE objekt-etiketten (f.eks. «nøkler») — **aldri av bildet**, aldri av modellens rå tekst. Kun lokal embedding-leverandør (`assertLocalEmbedding`). |
+| **Inventar** | `vision_inventory_items` (`135`) | Per (person, rom, etikett): blandet `confidence` som forfaller med tid (halveringstid 24 t), `seen_count`, `first_seen_at`/`last_seen_at`, `expires_at`. «Sist sett i rommet der kameraet står» — ikke visuell romgjenkjenning. |
+| **iPhone-opptaksforespørsler** | `vision_capture_requests` (`136`) | Livssyklus (`pending`→`fulfilled`/`expired`/`cancelled`/`rejected`), `device_id`, idempotensnøkkel, `upload_sha256`. Selve bildet går gjennom samme pipeline som alle andre. |
+| **Midlertidig i minnet** | api-prosessen | Bildebytes mens ETT bilde behandles (validering, lokal klassifisering). Bildet sendes som base64 `data:`-URL til et LOKALT modell-endepunkt (`JARVIS_VISION_LOCAL_URL`, validert som loopback/privat/.local ved oppstart), aldri som ekstern URL. |
+
+**Ikke behandlet (eksplisitt, ikke stilltiende utelatt):**
+- **Ingen kontinuerlig video** — hverken innhenting, lagring eller visning. Kilden kan bare hente ETT stillbilde per hendelse (`camera_proxy`); `camera_proxy_stream`/MJPEG/HLS/RTSP/WebRTC/opptakstjenester brukes ikke, og en byggevakt (`g3-guards.test.ts`) feller bygget hvis slik kode introduseres.
+- **Ingen biometrisk identifikasjon** — ingen ansiktsgjenkjenning, ingen ansikts-/stemmeavtrykk, ingen kolonne eller modell for identitet. Modellen får kun si «en person er synlig» (`person_present`, uten etikett) og generiske gjenstandsnavn; generiske personord («man», «woman», «child», «face», «ansikt» ...) filtreres bort. **Ærlig grense (review A-M1):** et objektnavn er et ÅPENT ordforråd fra en lokal modell og kan i praksis være et personnavn eller instruksjonslignende tekst («tobias sorensen», «ignore all instructions now») - det finnes ingen teknisk garanti mot det, se §7 punkt 10. En `no_biometric`-vakt feller bygget ved enhver kolonne/tabell/CHECK-verdi/identifikator for biometri.
+- **Ingen kamerabilder til sky** — se §4.
+- **Ingen lyd.** Ingen lagring av modellens rå tekst. Ingen HA-attributter utover to lukkede nøkler (`device_class`, tilstand/tidspunkt) — `friendly_name` og annen fritekst leses aldri.
+- **Ingen kamerastyring** (PTZ, av/på, opptak) — DEFERRED, ikke bygget.
 
 ## 2. Retensjon
 
 | Data | Retensjon | Håndhevet av |
 |---|---|---|
-| Vision-hendelsesobservasjoner | Eier-KONFIGURERT vindu per (tenant, space) (`vision_retention_policies`, mirrorer `location_retention_policies`-mønsteret) — i FRAVÆR av konfigurasjon brukes et KORTERE, personvern-beskyttende standardvindu (30 dager, KORTERE enn lokasjon sitt 90-dagers-vindu — kamera-/hendelsesdata avslører BÅDE tilstedeværelse OG aktivitet). **Utløpet ANKRES på `recorded_at`/`now()` (databasens EGEN, BETRODDE mottakstid), IKKE på det ubetrodde, kilde-produserte `observed_at`** (ARKITEKT-REVIEW-FIKS, se §6.9) — en feilkonfigurert/ondsinnet kilde kan derfor IKKE omgå vinduet med et fremtidig tidsstempel | `VisionService.purgeExpiredObservations()`, kjørt daglig via `DailyScheduler` (`vision-retention-sweep`, `apps/api/src/main.ts`) |
-| Vision-rom (`vision_rooms`) | INGEN egen tids-basert retensjon (strukturell definisjonstabell, samme som `location_zones` — et rom slettes eksplisitt via eier-handling eller Q-20-erasure, ikke automatisk over tid) | Q-20/erasure-fundament (`modules/erasure/src/plan.ts`) |
+| Vision-hendelsesobservasjoner | Eier-KONFIGURERT vindu per (tenant, space) (`vision_retention_policies`) — i fravær av konfigurasjon **30 dager**. Utløpet ankres på `recorded_at`/`now()` (databasens betrodde klokke), ikke på kildens `observed_at`. | `VisionService.purgeExpiredObservations()`, daglig (`vision-retention-sweep`, `JARVIS_VISION_RETENTION_SWEEP_HOUR`, standard 02) |
+| **Hendelsesbilder** | **`min(snapshot_retention_days ?? 7, retention_days)`** — standard **7 dager**, aldri lengre enn hendelsene. Ankret på databaseklokken. Når siste observasjon som peker på et bilde slettes, slettes bildet også (trigger). | `purgeExpiredSnapshots` + gravsteiner/reaper (se §6.16), daglig full kjøring (`vision-maintenance-sweep`, `JARVIS_VISION_MAINTENANCE_HOUR`, standard 03) og lett kjøring hvert kvarter (`JARVIS_VISION_MAINTENANCE_INTERVAL_MINUTES`) |
+| Embeddings | Følger hendelsen: slettes av trigger når observasjonen slettes (ingen foreldreløs vektor). | DB-trigger `vision_observation_release_vector` (`135`) |
+| Inventar | `expires_at` = siste observasjon + hendelsesretensjonen (standard 30 dager), forankret på databaseklokken; forfalt `confidence` regnes ikke som «til stede». | `VisionInventoryService.purgeExpired`, daglig full kjøring |
+| Opptaksforespørsler | Levetid 30 s – 15 min (standard 5 min); utløpte markeres `expired`; oppgjorte slettes etter 7 dager. | `VisionCaptureService.maintain`, lett + full kjøring |
+| Kamera-register | Ingen tidsbasert retensjon (eierens konfigurasjon); fjerning krever typet bekreftelse og sletter kameraets bilder (kaskade + gravstein). | `removeCamera`, Q-20-erasure |
+| Slette-gravsteiner | Fjernes når lagringen har bekreftet sletting; «stuck»-antall rapporteres (ingen stille opphoping). | `reapTombstones` |
 
-Q-20-sletting treffer begge tabellene direkte (ikke bare via retensjonsvinduet) — se §6.
+Q-20-sletting (person-/space-erasure) treffer ALLE vision-tabellene (barn før foreldre) inkludert vektorer (via trigger) og bildeobjekter (via gravstein), bevist end-to-end i `modules/erasure/test/vision-g3-erasure.test.ts`. Gravsteiner slettes bevisst IKKE av erasure (de er innholdsfrie og er selve mekanismen som sletter objektene; `d395` baseline `OPERATIONAL`).
 
 ## 3. Rettsgrunnlag
 
 | Behandling | Registrert grunnlag | Merknad |
 |---|---|---|
-| Eierens egen vision-/hendelsesdata i eget system | Eierens egen behandling av egne data i eget system | Ingen tredjepart involvert i denne sliceen (ingen ekstern kamera-/klassifiseringsleverandør koblet til) |
-| Multi-space (D-153, IKKE health-stil enkelt-låst space) | Generell RESTRICTIVE RLS-space-policy (samme mekanisme som `location_*`) | Ingen ny 'vision'-verdi i den kanoniske `memory_spaces`-enumereringen — se D-153 for begrunnelsen (unngår et unødvendig stort, urelatert migrasjons-blast-radius) |
-| Fremtidig ekstern kamera-/klassifiseringsleverandør (iPhone-kamera, Home Assistant, dørklokke-/sikkerhetssystem) | **INGEN registrert ennå** — kapabiliteten finnes ikke i denne sliceen | Får ikke bygges før en D-64/D-41-port er kjørt PER provider (samme presedens som Apple Health/lokasjonstjeneste) og — for kamera-/hendelsesdata spesifikt — dette notatet er utvidet FØR bygging |
+| Eierens egne kameraer i eget hjem, eget system, egen maskin | Eierens egen behandling av egne data i eget system (husholdningsunntaket forutsetter at ingen andre berøres på en måte unntaket ikke dekker) | **Utkast.** Kamera som også fanger andre personer (familie, gjester, naboer, leverandører, barn) eller som peker mot offentlig sted/felles areal er IKKE avklart her |
+| Kamera på arbeidsplass (`zone_kind = workplace`) | **Ingen registrert.** | Tekniske rammer: bilder LAGRES ALDRI (DB-CHECK `vision_cameras_zone_storage_rule` + policy-ruter nedgraderer til `local_only`); klassifisering skjer lokalt og kun hendelsen/objektet skrives. Regler for kontroll og overvåking i arbeidsforhold og ev. samtykke/drøfting er IKKE vurdert — krever juridisk gjennomgang før bruk |
+| Delt sone (`zone_kind = shared`) | **Ingen registrert.** | Samme tekniske rammer som arbeidsplass (aldri lagring) |
+| Lokal bildeklassifisering (visjonsmodell på eierens maskin) | Samme som første rad; ingen tredjepart mottar noe | Modell og vekter er eierens valg og må vurderes separat (lisens, kjente feil/skjevheter). Modellens svar er UBETRODD data |
+| iPhone-opptak på forespørsel | Eieren ber selv om opptaket på sin egen enhet | Krever iPhone-appen (BLOCKED_EXTERNAL, ikke bygget); serverkontrakten er bygget og testet mot en fake enhet |
+| Multi-space | Generell RESTRICTIVE RLS-space-policy (som `location_*`) | Se D-153 |
 
 ## 4. Databehandlere
 
-**Ingen.** Denne sliceen kobler INGEN ekstern databehandler til for vision-/hendelsesdata.
-`VisionEventSource`-adapterkontrakten (`modules/vision/src/types.ts`) er et provider-nøytralt
-GRENSESNITT — kun `FakeVisionEventSource` (test-only) implementerer den i dag.
-`docs/security/PROCESSOR_REGION_MATRIX.md` skal utvides med en rad FØRST når en faktisk leverandør
-velges og kobles til (samme regel D-122/D-130 etablerte: en `TBD`-rad ved siden av et live
-leverandørkall er en usann rad — men her finnes INGEN live kall ennå, så INGEN rad er lagt til enda
-heller, per samme prinsipp motsatt vei).
+**Ingen tredjeparts databehandler mottar kamerabilder eller observasjoner.**
 
-## 5. Bevisst utsatt innenfor UA-9 (`DEFERRED_WITHIN_UA9_BY_DEPENDENCY`)
+- **Home Assistant** (eierens egen instans, lokalt nett) er en KILDE som Jarvis leser fra (`GET /api/states`, `GET /api/camera_proxy`). Jarvis sender ingenting til HA utover disse lesingene, og bruker den EKSISTERENDE HA-connectorens credential (`JARVIS_HA_TOKEN`/`JARVIS_HA_BASE_URL`, vault-kjeden). HA-tokenet er et langlevd token UTEN scope-begrensning på HA-siden — anbefaling i runbooken: egen HA-bruker med minimale rettigheter.
+- **Lokal visjonsmodell** (Ollama/llama.cpp/tilsvarende på eierens maskin/LAN) mottar bildet. URL-en valideres deterministisk ved oppstart (loopback/privat/`.local`/enkelt-label — en offentlig adresse stopper oppstarten), redirects følges aldri, og kamerabilder har tre uavhengige lag mot sky: (1) `ModelGateway` låser bilder merket `restricted` til `SECRET_RESTRICTED` + lokal modus og nekter betalte modeller FØR ruting, (2) utførelseslåsen i `executePlan` blokkerer enhver ikke-lokal kandidat uavhengig av ruteren, (3) skyadapterne (`anthropic`, `gemma_hosted`) kaster før noe sendes. Det finnes ingen overstyring, og ingen sky-fallback når den lokale modellen er nede (klassifiseringen feiler lukket).
+- **Ingen ny leverandør** er valgt (D-64): Jarvis eier domenemodellen, tilstanden, retensjonen og proveniensen (`JARVIS_CANONICAL`); HA og iPhone er kilder/transporter (`EXTERNAL_CANONICAL`), den lokale modellen er en utskiftbar adapter bak `ModelGateway`. `CORE_DEPENDENCY_DECISION_REQUIRED` er ikke utløst.
 
-| Kapabilitet | Port som må kjøres først |
-|---|---|
-| Live iPhone-kamera-integrasjon | Fysisk iPhone + kamera-/bildebehandlings-entitlement (ekstern/fysisk gate) + D-64/D-41-port. `VisionEventSource`-kontrakten finnes klar til å implementeres mot |
-| Live Home Assistant kamera-/dørklokke-/sikkerhetsevents | Fysisk kamera-/dørklokke-maskinvare koblet til Home Assistant + D-64/D-41-port |
-| Faktisk objekt-/hendelsesklassifisering (den egentlige ML-modell-inferensen på et kamerabilde) | En valgt, koblet modell-pipeline (D-64/D-41-port) — denne sliceen lagrer KUN det strukturerte RESULTATET, produserer det ALDRI selv |
-| Biometrisk ansiktsgjenkjenning | Eksplisitt UTENFOR masterplan v4.0 UA-9 med mindre separat besluttet og lovlig implementert — INGEN kode/kolonne/felt i denne sliceen forbereder dette |
-| Kontinuerlig rå videolagring | Eksplisitt UTENFOR masterplan v4.0 UA-9 ("event snapshots by default instead of continuous raw video") |
-| Enkeltbilde-øyeblikksbilder (`snapshot_ref`) | En levetids-eid snapshot-lagringsadapter med transaksjonell/kompenserende sletting av det refererte objektet ved purge/erasure (D-64/D-41-port) — FORBUDT strukturelt (DB-CHECK) inntil dette finnes, se ARKITEKT-REVIEW-FIKS §6.9 |
+`docs/security/PROCESSOR_REGION_MATRIX.md` trenger ingen ny rad så lenge dette er sant; velger eieren en skybasert visjonsmodell til kamerabilder er det forbudt av koden (ikke en konfigurasjonsvalg) og ville krevd en ny, eksplisitt beslutning.
+
+## 5. Bevisst utsatt innenfor UA-9 (`DEFERRED`/`BLOCKED_EXTERNAL`)
+
+| Kapabilitet | Status | Port som må kjøres først |
+|---|---|---|
+| iPhone-appen (kamera-capture i forgrunnen, enhetssignering, APNs-varsling) | **BLOCKED_EXTERNAL** | Fysisk iPhone, Apple-entitlements, app-bygg. Serverkontrakten (`/vision/capture/*`) er bygget og testet mot en fake enhet |
+| Verifisering mot ekte Home Assistant / ekte kamera / ekte lokal visjonsmodell | **NOT VERIFIED** | Fysisk maskinvare; stegvis plan i runbooken |
+| HA WebSocket-push (sanntid i stedet for polling) | DEFERRED | Persistent kanal må godkjennes bevisst (vakten feller `new WebSocket` til den oppdateres) |
+| Modellvendt vision-verktøy (chat kan spørre «hvor er nøklene?») | DEFERRED | Restricted-/utførelsesvern mot skymodeller (OVERRIDES 6c, kjent åpent hull N1), intents, connector-manifest og baselines |
+| Visuell romgjenkjenning, utleding av fravær («nøklene er borte») | DEFERRED | Egen beslutning; i dag er rom = kameraets plassering |
+| Bildeembeddinger (CLIP e.l.) | DEFERRED | Ville vært en ny modellleverandør (D-64) |
+| Kryptering av lagrede bilder på applikasjonsnivå | DEFERRED | I dag: filrettigheter 0700/0600 + diskkryptering på verten (eierens ansvar) |
+| Kamerakontroll (PTZ/av-på/opptak), HA-skriving | DEFERRED (D-41: lesing er klasse A, skriving ikke bygget) | D-41-gjennomgang per handling |
+| Biometrisk ansiktsgjenkjenning | **Utenfor planen** | Ikke bygget, ikke forberedt; felles byggevakt `no_biometric` |
+| Kontinuerlig rå videolagring | **Utenfor planen** | Ikke bygget; byggevakt |
+| Samtykke-/orienteringskontroller for andre personer (JARVIS-084) | Utenfor dette arbeidspakken | Egen WP |
 
 ## 6. Hva som er STRUKTURELT håndhevet (ikke bare skrevet)
 
-1. **Tenant+space-isolasjon** — `ENABLE`/`FORCE ROW LEVEL SECURITY` + tenant-policy + RESTRICTIVE
-   space-policy på BEGGE nye tabeller (samme mønster som `location_*`, D-91/D-129). Bevist med ekte
-   RLS-sesjonstester (ikke applikasjonslag-filter), inkl. et negativt kontrolltilfelle.
-2. **Kryss-tenant/kryss-space/kryss-person relasjons-integritet for rom** —
-   `vision_event_observations` bruker en sammensatt `(tenant_id, memory_space_id, person_id, room_id)`-
-   fremmednøkkel mot `vision_rooms` (D-129-lærdommen anvendt direkte på ny kode) — bevist med rå
-   cross-scope/cross-person-INSERT-tester som viser ekte Postgres FK-avvisning (`23503`).
-3. **Composite membership FK** — `person_id` er sammensatt FKet mot `person_tenants (person_id,
-   tenant_id)` på begge tabeller, IKKE en enkel `people`-FK — en person må være et EKTE registrert
-   medlem av tenanten en rad hevder å tilhøre.
-4. **Retensjon er reell sletting, ikke en udokumentert kolonne** — `purgeExpiredObservations()` er
-   faktisk koblet inn i `DailyScheduler` (`apps/api/src/main.ts`, `vision-retention-sweep`, daglig),
-   ikke bare skrevet og aldri kalt. Multi-space fan-out (`listAllTenantIds` +
-   `listTenantMemorySpaces`, location-mønsteret) — IKKE health sitt enkelt-space-mønster.
-5. **Ingen sensordata uten kilde-peker** — `source_type`/`source_instance_id` er PEKERE, aldri en
-   kopi av rå leverandør-payload (samme "peker, aldri kopi"-prinsipp som `location_observations`/
-   `health_metric_observations`).
-6. **Append-only** — `vision_event_observations`/`vision_rooms` har INGEN `UPDATE`-grant (samme
-   strukturelle, ikke bare konvensjonelle, disiplin som `health_metric_observations`).
-7. **Q-20-erasure dekker faktisk vision-domenet** — `modules/erasure/src/plan.ts` sin `planPerson()`/
-   `planMemorySpace()` registrerer BÅDE `vision_event_observations` (barn-FK FØRST) OG `vision_rooms`,
-   BEVISST med `vision_retention_policies` utelatt (tenant/space-nivå policy-konfigurasjon, ikke
-   person-eid data) — bevist end-to-end mot en ekte `ErasureService.executeErasure()`-kjøring, IKKE
-   kun en kode-lesning av `plan.ts`.
-8. **Idempotent, atomisk kilde-ingestion med et eksplisitt kollisjonsdomene (ARKITEKT-REVIEW-FIKS,
-   PR #83, RUNDE 1+2, 2026-09-15)** — PÅKREVD, kilde-stabile `source_event_id` OG `source_instance_id`
-   + en DB-håndhevet scoped UNIQUE-nøkkel (`vision_event_observations_source_dedupe_key` på
-   `(tenant, space, person, source_type, source_instance_id, source_event_id)`) gjør
-   `INSERT ... ON CONFLICT DO NOTHING` (+ hent-eksisterende-rad-ved-konflikt) til den FAKTISKE
-   skriveveien - et overlappende poll-vindu, en transport-retry, eller samtidig duplikat-levering av
-   SAMME kilde-hendelse skriver ALDRI en ny rad. `source_instance_id` er BEVISST MED i nøkkelen
-   (RUNDE 2-fiksen) - UTEN den kunne to uavhengige enheter bak samme `source_type` (f.eks. to
-   kameraer) begge produsere en lokal `event_id` som kolliderer, og den andre enhetens EKTE,
-   DISTINKTE hendelse ville blitt stille tapt som en falsk "replay". `ingestFromSource()` validerer
-   HELE den innhentede batchen FØR noen INSERT kjøres OG skriver den DERETTER i ÉN DELT transaksjon -
-   en `[gyldig, ugyldig]`-batch committer INGEN rader, ikke et delvis prefiks en retry ville duplisert.
-9. **Payload-verifisert replay (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 2, P1, 2026-09-15)** — en
-   deterministisk `payload_fingerprint` (av `event_type`/`room_id`/`object_label`/`confidence`/
-   `observed_at`) lagres per rad og sammenlignes ved HVER `ON CONFLICT`-replay: stemmer den med den
-   nye forsøkte payloaden, er det en genuin, trygg replay (eksisterende rad returneres). Stemmer den
-   IKKE (nøkkel-gjenbruk med et FAKTISK annet innhold - en kilde-bug eller datakorrupsjon), kastes en
-   typet `VisionReplayConflictError` - fail-closed, ALDRI en stille retur av en annen hendelse enn
-   den kalleren faktisk sendte.
-10. **Snapshot-forbud + betrodd retensjons-klokke (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 1, P1, 2026-09-15)** —
-   `snapshot_ref` er strukturelt FORBUDT (DB-CHECK `IS NULL`, fjernet fra input-schemaet) inntil en
-   ekte, levetids-eid snapshot-lagringsadapter med transaksjonell/kompenserende sletting finnes -
-   denne sliceen hevder ALDRI håndhevet retensjon/sletting for et eksternt objekt Jarvis ikke selv
-   eier. `retention_expires_at` beregnes fra `recorded_at`/`now()` (databasens EGEN mottakstid),
-   IKKE fra det ubetrodde, kilde-produserte `observed_at` - en feilkonfigurert/ondsinnet kilde kan
-   derfor ikke omgå retensjonsvinduet med et fremtidig tidsstempel; `observed_at` sin proveniens er
-   uendret for alt annet.
+1. **Tenant+space-isolasjon** — `ENABLE`/`FORCE ROW LEVEL SECURITY` + tenant-policy + RESTRICTIVE space-policy på ALLE vision-tabeller (også de fem nye i `133`–`136`: kameraer, bilder, gravsteiner, inventar, opptaksforespørsler); bevist med ekte RLS-sesjonstester.
+2. **Kryss-tenant/kryss-space/kryss-person integritet** — sammensatte fremmednøkler med `tenant_id` i hver nøkkel (rom, kamera, bilde, forespørsel); `person_id` mot `person_tenants`.
+3. **Retensjon er reell sletting** — `purgeExpiredObservations`, `purgeExpiredSnapshots`, `purgeExpired` (inventar) og `maintain` er koblet inn i `DailyScheduler` (+ lett intervall) i `apps/api/src/main.ts` — kun når flagget er på.
+4. **Ingen sensordata uten kilde-peker; append-only** for observasjoner (uendret fra P0).
+5. **Q-20-erasure dekker hele vision-domenet** (se §2).
+6. **Idempotent, atomisk kilde-ingestion** (§6.8 fra P0) — nå også «idempotens FØR kost»: en gjentatt poll av samme HA-tilstand gir samme `source_event_id` og en duplikat uten at bilde hentes eller modell kalles.
+7. **Payload-verifisert replay** (P0).
+8. **Datapolicy-ruteren (P2e) er en ren funksjon** (`modules/vision/src/policy.ts`): `egress` er bokstavelig `"none"`; en kontinuerlig strøm forkastes alltid; lagring kun for sone `home` + policy `store_snapshot` + global lagring på; enhver manglende forutsetning gjør avgjørelsen STRENGERE; alle kombinasjoner er testet. DB-CHECK `vision_cameras_zone_storage_rule` hindrer en inkonsistent rad.
+9. **Kamerabilder er BEGRENSET data** og når aldri en skymodell (§4): tre uavhengige lag + app-nivå-test med den ekte `ModelGateway` og skyspioner (`apps/api/test/wpg3-vision-runtime.test.ts`).
+10. **Modellens svar er UBETRODD** (regel 7): streng parser (lukket nøkkelsett, kun `object_detected`/`person_present`, ukjente typer forkastes, person med etikett avvises, generiske personord filtreres, etiketter med strukturtegn (tagger, JSON, kode, stier, kommandotegn) forkastes i sin helhet, maks 8 objekter, normalisert etikett på 1-64 tegn og høyst 4 ord) og en DB-CHECK på lengde/tegnklasse/ordtall (`133`/`135`, bevist mot alle Unicode-kodepunkt). Ingenting fra modellen utføres; det er data i observasjonen. **Dette er IKKE et navne- eller instruksjonsfilter** - se §7 punkt 10.
+11. **Bilde-validering før alt annet** (`image.ts`): magic bytes avgjør formatet (JPEG/PNG/WebP; MP4/WebM/AVI/GIF/SVG/HTML/HEIC avvises), størrelsesgrense, lesing med hard bytegrense, deklarert type brukes kun som konsistenssjekk.
+12. **HA-kilden** (`ha-source.ts`): kun GET mot `/api/states/<entity>` og `/api/camera_proxy/<camera>`; entity-id-er valideres mot et lukket tegnsett FØR de settes i en URL; token kun som header og aldri i feil/logg; alle feil er stabile koder; redirects følges ikke; global `fetch` brukes aldri (injisert `guardedFetch`).
+13. **iPhone-opptak** (`capture.ts`): engangsforespørsel (betinget forbruk), enhetssignert (Ed25519 over request/tenant/person/enhet/hash/lengde/type/tid), signaturen er bundet til forespørselen, ±5 min skjevhet, `device_id` kommer fra grantet (aldri kroppen), personbundet, maks 3 åpne per kamera, idempotensnøkkel.
+14. **Eier-kontroller** — polleren leser KUN eierens tenant (HA-credentialen tilhører eieren; ingen kryss-tenant-lesing via en delt credential), sjekker kill switch, frosset `home-assistant`-connector og tilbakekalt `JARVIS_HA_TOKEN` før første lesing og før hvert space; en kastet feil tolkes som stanset (fail-closed). Skriving i `/vision/*` krever eier + signert enhetsøkt (step-up); sletting av kamera krever typet bekreftelse.
+15. **Lagringstak** — bilder har et mykt tak per (tenant, space) (standard 2 GiB, `JARVIS_VISION_MAX_STORED_MB`): over taket lagres bildet ikke og hendelsen skrives uten bilde, slik at en støyende sensor eller en ondsinnet kilde ikke kan fylle eierens disk (bevist i `g3-lifecycle.test.ts`). Øvrige flomvern: cooldown per kamera og hendelsestype (5-3600 s), 60 s maks alder for bilde, idempotens på kilde-hendelse.
+16. **Endelig konsistent bildesletting** — rad slettes → BEFORE DELETE-trigger skriver gravstein → reaper sletter objektet via `StorageAdapter` (idempotent, med forsøkstelling og «stuck»-rapport) og fjerner graven først etter bekreftelse. Kameraet kan fjernes uten foreldreløse filer.
+17. **Byggevakter** (`g3-guards.test.ts`): `no_biometric`, ingen kontinuerlig video, ingen egen nettverksvei/leverandør-SDK i visjonsmodulen — hver med non-vakuitetstester og mutasjonsbevis.
 
-Bevist i `modules/vision/test/{service-rls,room-scope-integrity}.test.ts` og
-`modules/erasure/test/vision-erasure.test.ts` (se PROJECT_STATUS.md for eksakte, oppdaterte tall).
+Bevist i `modules/vision/test/*`, `modules/erasure/test/vision-g3-erasure.test.ts`, `modules/model-gateway/test/wpg3-restricted-media.test.ts`, `packages/provider-adapters/test/wpg3-local-vision.test.ts` og `apps/api/test/wpg3-vision-*.test.ts` (eksakte tall: se runbooken/rapporten). Alt er testet mot falske kilder/servere — **ikke mot ekte kamera, ekte HA eller en ekte visjonsmodell**.
+
+**Historisk (P0, erstattet):** P0 forbød `snapshot_ref` strukturelt fordi ingen lagringsadapter fantes. `134` fjerner CHECK-en og erstatter den med en FK til `vision_snapshots` (`ON DELETE SET NULL (snapshot_ref)`), og punkt 15 over er adapteren med faktisk sletting.
 
 ## 7. Kjent, dokumentert restrisiko (ikke skjult)
 
-1. **Ingen live kamera-/klassifiseringsleverandør betyr denne sliceens praktiske eksponering er lav**
-   — men modellen/RLS/retensjon er bygget NÅ, FØR en leverandør kobles til, nettopp for at koblingen
-   senere ikke skal presse frem en hastig, uferdig datamodell (samme rekkefølge-disiplin som D-64
-   krever generelt).
-2. **`memory_spaces` er tenant-scoped, ikke person-scoped** (samme kjente funn som Q-15/Q-31 (D-130) i
-   `OPEN_QUESTIONS.md`, gjentatt her for vision) — en "delt husholdnings-space" gir i dag samme
-   tilgang til alle personer med medlemskap+registrert enhet i tenanten, ingen finere per-person-ACL.
-   Relevant her fordi kamera-/hendelsesdata er en spesielt sensitiv kategori — flagget eksplisitt,
-   ikke silently akseptert som "godt nok".
-3. **`getLastSeen()`/`object_label` forutsetter at oppstrøms klassifisering allerede er korrekt** —
-   denne tjenesten validerer STRUKTUR (gyldig `event_type`, `confidence` i [0,1], gyldig tidsstempel),
-   ALDRI det semantiske INNHOLDET i en `object_label`-streng (det er en fremtidig adapter/modell-
-   pipelines ansvar, ikke bygget her) — dokumentert grense, ikke skjult som en falsk "vet"-tilstand.
-4. **Ingen finere per-rom-tilgangsstyring i P0** — `vision_rooms` er person-eid (samme mønster som
-   `location_zones`); en fremtidig DELT husholdnings-rom-liste er en SEPARAT, senere beslutning.
+1. **Ikke verifisert mot virkeligheten.** HA-svarformatet for `event.*`-entiteter, `last_changed`-semantikk, `camera_proxy`-oppførsel, og Ollama/llama.cpp-bildeformatet (`image_url` med base64 `data:`-URL) er verifisert via søk/dokumentasjonsutdrag og mot falske servere, ikke mot ekte instanser (`unverified`).
+2. **Øyeblikksbildet er «nå», ikke «ved hendelsen».** HA `camera_proxy` leverer gjeldende bilde; vi bruker ikke `?time=`. Derfor får hendelser eldre enn 60 s ikke bilde (kun hendelsen skrives).
+3. **Modellens treffsikkerhet er ukjent og ikke validert.** Gjenstandsetiketten er et forslag fra en lokal modell; «sist sett» er «sist en kameraplassering så en gjenstand med dette navnet», ikke en fakta-påstand. Svaret bærer forbehold (`based_on_camera_events_only`, `room_from_camera_placement_not_visual_recognition`, `model_classification_is_untrusted`).
+4. **Andre personer i bildet.** Selv uten identifikasjon kan et lagret stillbilde vise personer. Lagring er derfor begrenset til sone `home` + eksplisitt policy + global bryter, kort standardretensjon (7 dager), og BEGRENSET klassifisering. Krav til orientering/samtykke for andre personer er IKKE bygget (JARVIS-084) og ikke vurdert juridisk.
+5. **Lagrede bilder ligger ukryptert på applikasjonsnivå** (filrettigheter + verts-diskkryptering er eierens ansvar). Docker-volumet for `JARVIS_VISION_STORAGE_DIR` må monteres av eieren (eierskap/rettigheter er ikke verifisert i container).
+6. **HA-tokenet er bredt** (HA har ikke scoped tokens). Anbefalt HA-side-begrensning er eierens oppsett.
+7. **`memory_spaces` er tenant-scoped, ikke person-scoped** (Q-15/Q-31): en delt husholdnings-space gir like tilgang til alle medlemmer — spesielt relevant for kameradata.
+8. **Lokalt endepunkt kan peke utenfor via DNS.** URL-valideringen er syntaktisk (ingen DNS-oppløsning); et lokalt navn som i praksis peker utenfor er eierens nettverksoppsett. Redirects følges aldri.
+9. **Modellvendt tilgang er ikke bygget** — så lenge den ikke er det, kan ingen chat/modell be om kameradata; `/vision/*` er kun eier-API. Når det bygges må det gå gjennom restricted-/utførelsesvernet (N1).
+10. **Objektnavn er åpent ordforråd (review A-M1).** Normaliseringen slipper gjennom alt som består av bokstaver/tall/mellomrom/bindestrek innenfor 64 tegn og 4 ord: «tobias sorensen», «bearded-man», «ignore all instructions now» og «drop table users» er gyldige etiketter og lagres i `vision_event_observations`, `vision_inventory_items` og `memory_vectors` (embedding av navnet). Kun generiske personord og strukturtegn filtreres, og databasen avviser etiketter med feil form (lengde, tegnklasse, ordtall) - ikke etiketter med feil innhold. Etiketten er derfor UBETRODD DATA: ingen Jarvis-kode handler på et objektnavn (ingen modellvendt tilgang, punkt 9), og den må rammes inn som `untrusted` når en modellvendt vei bygges. Det finnes INGEN garanti for at en etikett ikke er et personnavn. Mulig senere herding er et LUKKET ordforråd (eier-beslutning: gir tryggere data, men færre «sist sett»-treff).
 
 ## 8. Oppdateringsplikt
 
-Dette notatet oppdateres FØR — ikke etter — hver ny kamera-/hendelses-/klassifiseringsdatabehandler
-tas i bruk: iPhone-kamera, Home Assistant kamera-/dørklokke-/sikkerhetsevents, en valgt
-objektklassifiseringsmodell-pipeline, eller enhver annen ekstern kilde/sluk for denne kategorien.
-Samme regel som `PROCESSOR_REGION_MATRIX.md` sin egen: en rad som ikke er fylt ut, er ikke i
-produksjonsbruk.
+Dette notatet oppdateres FØR — ikke etter — hver ny kamera-/hendelses-/klassifiseringsdatabehandler eller kilde tas i bruk: ekte iPhone-app, HA WebSocket, en annen visjonsmodell/-leverandør, kamerakontroll, delte/arbeidsplass-kameraer i drift, eller enhver endring som lagrer mer enn ett stillbilde per hendelse. Samme regel som `PROCESSOR_REGION_MATRIX.md`: en rad som ikke er fylt ut, er ikke i produksjonsbruk.
