@@ -19,8 +19,45 @@ beforeAll(async () => {
   // to par kontoer: ett par for mottakertestene, ett par for kontotaket (så tellerne ikke påvirker hverandre)
   await authorizeAll(chain, [["sms", "+4791000000", "twilio"], ["sms", "+4796000000", "twilio"]]);
   await authorizeAll(chain, [["sms", "+4795000000", "twilio"], ["sms", "+4797000000", "twilio"]], projectOwner);
+  await authorizeAll(chain, [["sms", "+4798000000", "twilio"], ["sms", "+4799000000", "twilio"]]); // to kontoer i SAMME rom (A-N4)
 }, 240_000);
 afterAll(async () => { await chain?.stop(); }, 120_000);
+
+describe("A-N4: mottakerlåsen (delta-review A): to KONTOER i samme rom mot samme mottaker", () => {
+  it("10 samtidige sendinger til SAMME kalde mottaker fra TO ulike kontoer (samme kanal, samme rom) gir ÉN sending - kontolåsene alene serialiserer ikke på tvers av kontoer", async () => {
+    const n = chain.phone();
+    const before = sends();
+    const rs = await Promise.all(Array.from({ length: 10 }, (_, i) => chain.act("send", params(n, i % 2 === 0 ? "+4798000000" : "+4799000000"), chain.key("n4"))));
+    expect(rs.filter((r) => r.ok)).toHaveLength(1);
+    expect(sends() - before).toBe(1);
+  });
+
+  it("DETERMINISTISK kappløp: de to første kallene (én per konto) møtes i `beginAttempt` og går inn SAMTIDIG - kun mottakerlåsen (ikke kontolåsene) gir ÉN sending", async () => {
+    const n = chain.phone();
+    const before = sends();
+    const store = chain.store as unknown as { beginAttempt: (...a: unknown[]) => Promise<unknown> };
+    const orig = store.beginAttempt.bind(store);
+    let waiting: Array<() => void> = [];
+    let meetings = 2;
+    store.beginAttempt = async (...args) => {
+      if (meetings > 0) {
+        meetings -= 1;
+        await new Promise<void>((resolve) => {
+          waiting.push(resolve);
+          if (waiting.length === 2) { const all = waiting; waiting = []; for (const r of all) r(); } else setTimeout(resolve, 2000); // sikkerhetsventil: aldri vranglås
+        });
+      }
+      return orig(...args);
+    };
+    try {
+      const rs = await Promise.all([chain.act("send", params(n, "+4798000000"), chain.key("n4a")), chain.act("send", params(n, "+4799000000"), chain.key("n4b"))]);
+      expect(rs.filter((r) => r.ok), JSON.stringify(rs)).toHaveLength(1);
+      expect(sends() - before).toBe(1);
+    } finally {
+      store.beginAttempt = orig;
+    }
+  });
+});
 
 describe("A-H2 rest: per-mottaker-døgntaket gjelder på tvers av rom", () => {
   it("10 SAMTIDIGE sendinger til samme kalde mottaker - 5 via konto i `business` og 5 via konto i `project` - gir ÉN sending og ÉN journalrad", async () => {

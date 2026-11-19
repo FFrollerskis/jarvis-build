@@ -47,6 +47,9 @@ describe("A-M4: feil ETTER at leverandøren har akseptert er ukjent utfall - ald
       expect(JSON.stringify(first)).toContain("outcome_unknown");
       expect(await ledgerStatus(k)).toBe("unverified");
       expect(await journalStatus(k)).toBe("outcome_unknown");
+      // A-N3: leverandøren AKSEPTERTE sendingen, så id-en lagres også ved ukjent utfall (ellers kan den ikke avstemmes mot leverandøren)
+      const stored = (await chain.db.admin.query("SELECT provider_message_id FROM comms_outbound_log WHERE request_id = $1 AND status <> 'denied'", [sk("send", k)])).rows[0] as { provider_message_id: string | null };
+      expect(stored.provider_message_id).toMatch(/^msg-\d+$/);
       expect(chain.notifications.some((n) => n.action === "send" && n.outcome !== "executed")).toBe(true);
       // gjenspilling med samme nøkkel sender ALDRI en gang til (ledger unverified blokkerer)
       const replay = await chain.act("send", smsP(recipient), k);

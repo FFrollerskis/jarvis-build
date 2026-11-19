@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { JsonValue } from "@jarvis/contracts";
-import { CommsWebhookService, ProviderRejectedError, WEBHOOK_SECRET_REFS, optOutHash, twilioSignatureBase, type WebhookRequest } from "../src/index.ts";
+import { CommsWebhookService, ProviderRejectedError, WEBHOOK_SECRET_REFS, commsToolDefinitions, optOutHash, twilioSignatureBase, type WebhookRequest } from "../src/index.ts";
 import { TENANT_A } from "./support/harness.ts";
 import { authorizeAll, startChain, type Chain } from "./support/chain.ts";
 
@@ -138,5 +138,17 @@ describe("A-N1: STOP-rader per (kanal, kilde) - en senere STOP absorberes aldri"
     const all = await chain.store.listOptOuts(TENANT_A, "business", 500);
     expect(new Set(all.map((r) => r.account_ref))).toEqual(new Set(["*"]));
     expect(new Set(all.filter((r) => r.status === "active").map((r) => r.source))).toEqual(new Set(["inbound_stop_keyword", "owner_recorded"]));
+  });
+});
+
+describe("A-N5: verktøyteksten for record_opt_out stemmer med koden", () => {
+  it("beskriver en EIERREGISTRERT avmelding som aldri løftes (verken av eieren eller av en START) - ikke «kun mottakerens START»; rollback-teksten sier det samme", () => {
+    const def = commsToolDefinitions({ transport: {} as never, store: {} as never }).find((d) => d.action === "record_opt_out")!;
+    expect(def.description).toContain("EIERREGISTRERT");
+    expect(def.description).toContain("ALDRI");
+    expect(def.description).not.toContain("kun mottakerens egen START på kanalen");
+    expect(def.rollback_procedure).toContain("verken oppheves av eieren eller av en START");
+    expect(def.rollback_procedure).not.toContain("oppheves kun av mottakerens egen START");
+    expect(def.reversible).toBe(false);
   });
 });
