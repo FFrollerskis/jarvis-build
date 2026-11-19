@@ -111,18 +111,25 @@ describe("C: flagg AV = identisk med main - skjemaet for set_autonomy_policy og 
     expect(situationsToolDefinitions(transport).map((t) => `${t.tool_id}.${t.action}`)).toEqual(situationsToolDefinitions(transport, { autonomyExpiry: true }).map((t) => `${t.tool_id}.${t.action}`));
   });
 
-  it("de nye handlingene er eier-eksklusive (ingen modellflate), klasse A/C, og manifest-invariantene består", () => {
-    const defs = [...situationsToolDefinitions(transport), ...situationSignalsToolDefinitions(new SituationSignalsTransport({} as never))];
+  it("de nye handlingene er eier-eksklusive (ingen modellflate), klasse A/B/C, og manifest-invariantene består (også med tilbakemeldingshandlingene: navnene må ikke utledes som pay/control)", () => {
+    const signalDefs = situationSignalsToolDefinitions(new SituationSignalsTransport({} as never), { feedback: true });
+    const defs = [...situationsToolDefinitions(transport), ...signalDefs];
     const manifest = buildToolManifest(defs);
     expect(() => assertManifestInvariants(manifest, { ignoreUnregisteredGrants: true })).not.toThrow();
-    for (const def of situationSignalsToolDefinitions(new SituationSignalsTransport({} as never))) {
+    for (const def of signalDefs) {
       const entry = manifest.get(`situations.${def.action}`)!;
       expect(entry.surfaces, def.action).toEqual([]);
-      expect(["A", "C"]).toContain(def.capability_class);
+      expect(["A", "B", "C"]).toContain(def.capability_class);
       expect(def.tool_id).toBe("situations");
+      // ingen av de nye handlingene utledes som betaling (`submit_*`), og ingen er klasse D
+      expect(entry.effect, def.action).not.toBe("pay");
+      expect(def.capability_class, def.action).not.toBe("D");
     }
     const names = situationSignalsToolDefinitions(new SituationSignalsTransport({} as never)).map((d) => d.action).sort();
-    expect(names).toEqual(["get_signal_status", "list_signals", "list_subscriptions", "remove_subscription", "set_critical_quiet_bypass", "set_subscription_enabled", "subscribe"]);
+    expect(names).toEqual(["get_signal_status", "get_situation_simulation", "list_assessments", "list_signals", "list_subscriptions", "remove_subscription", "set_critical_quiet_bypass", "set_subscription_enabled", "subscribe"]);
+    // tilbakemeldingshandlingene finnes KUN med `feedback: true` (JARVIS_SITUATION_FEEDBACK)
+    const withFeedback = situationSignalsToolDefinitions(new SituationSignalsTransport({} as never), { feedback: true }).map((d) => d.action).sort();
+    expect(withFeedback).toEqual([...names, "get_rule_tuning", "record_feedback", "reset_rule_tuning"].sort());
     // ingen kollisjon med eksisterende handlinger
     const existing = new Set(situationsToolDefinitions(transport).map((d) => d.action));
     for (const n of names) expect(existing.has(n), n).toBe(false);

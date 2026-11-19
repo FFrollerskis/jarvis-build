@@ -67,14 +67,15 @@ export interface AssistModelCall {
   mode?: "LOCAL";
   sensitivity: "SECRET_RESTRICTED" | "BUSINESS_CONFIDENTIAL";
   paid_models_allowed?: false;
-  required_capabilities: ["structured_output"];
+  /** Kun for lokalt-kun-kall: en lokal modell med strukturert utdata. Ikke-begrensede kall krever ingen spesiell evne (svaret tolkes strengt som tekst-JSON), så en vanlig skymodell kan brukes. */
+  required_capabilities?: ["structured_output"];
   timeoutMs: number;
   request: {
     system: string;
     messages: Array<{ role: "user"; content: string }>;
     max_tokens: number;
     temperature: number;
-    structured_schema: Record<string, unknown>;
+    structured_schema?: Record<string, unknown>;
   };
 }
 
@@ -195,14 +196,15 @@ export class ModelSignalAssist implements SignalAssist {
       purpose: "QUICK_CLASSIFICATION",
       ...(localOnly ? { mode: "LOCAL" as const, paid_models_allowed: false as const } : {}),
       sensitivity: localOnly ? "SECRET_RESTRICTED" : "BUSINESS_CONFIDENTIAL",
-      required_capabilities: ["structured_output"],
+      // Lokalt-kun: strukturert utdata fra en lokal modell (ruteren krever evnen). Ellers ingen schema og ingen evnekrav (routeren ville ellers stengt de fleste skymodeller ute); svaret tolkes uansett strengt.
+      ...(localOnly ? { required_capabilities: ["structured_output"] as ["structured_output"] } : {}),
       timeoutMs: this.timeoutMs,
       request: {
         system: ASSIST_SYSTEM_PROMPT,
         messages: [{ role: "user", content: buildAssistUserContent(input) }],
         max_tokens: 300,
         temperature: 0,
-        structured_schema: ASSIST_OUTPUT_SCHEMA as unknown as Record<string, unknown>
+        ...(localOnly ? { structured_schema: ASSIST_OUTPUT_SCHEMA as unknown as Record<string, unknown> } : {})
       }
     };
     let result: AssistModelResultLike;

@@ -384,7 +384,8 @@ describe("F: modellassistert klassifisering - aldri ACT alene", () => {
     const out = await assist.assess(input());
     expect(out).toMatchObject({ status: "assessed", assessment: { category: "attention", priority_hint: "normal", provider: "ollama" } });
     const call = calls[0] as AssistModelCall;
-    expect(call).toMatchObject({ sensitivity: "SECRET_RESTRICTED", mode: "LOCAL", paid_models_allowed: false, purpose: "QUICK_CLASSIFICATION", tenant_id: "t-1" });
+    expect(call).toMatchObject({ sensitivity: "SECRET_RESTRICTED", mode: "LOCAL", paid_models_allowed: false, purpose: "QUICK_CLASSIFICATION", tenant_id: "t-1", required_capabilities: ["structured_output"] });
+    expect(call.request.structured_schema).toMatchObject({ type: "object", additionalProperties: false, required: ["category", "priority", "explanation"] });
     expect(call.task_id).toMatch(/^situation-assist:[0-9a-f]{16}$/);
     expect(call).not.toHaveProperty("session_id");
     expect(call.request.messages[0]?.content).toBe(buildAssistUserContent(input()));
@@ -420,6 +421,9 @@ describe("F: modellassistert klassifisering - aldri ACT alene", () => {
     expect(calls[0]).toMatchObject({ sensitivity: "BUSINESS_CONFIDENTIAL" });
     expect(calls[0]).not.toHaveProperty("mode");
     expect(calls[0]).not.toHaveProperty("paid_models_allowed");
+    // ingen evnekrav og ingen schema (ellers stenger ruteren de fleste skymodeller ute); svaret tolkes strengt som tekst
+    expect(calls[0]).not.toHaveProperty("required_capabilities");
+    expect(calls[0]!.request).not.toHaveProperty("structured_schema");
   });
 
   it("feil, tidsavbrudd og søppelsvar gir fail-closed uten å kaste: unavailable/rejected, aldri et løft", async () => {

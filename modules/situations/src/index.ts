@@ -18,3 +18,5 @@ export * from "./signal-log.ts";
 export * from "./signal-runner.ts";
 export * from "./signals-transport.ts";
 export * from "./flags.ts";
+export * from "./tuning.ts";
+export * from "./simulation.ts";

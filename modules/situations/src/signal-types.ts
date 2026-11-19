@@ -74,14 +74,18 @@ export interface RuleDefinition {
   readonly tunable: TunableThreshold | null;
 }
 
-const rule = (source: SignalSource, event_type: string, domain: string, props: Pick<RuleDefinition, "urgent" | "assist" | "tunable">): RuleDefinition => ({
-  rule_key: `${source}:${event_type}`,
-  source,
-  event_type,
-  domain,
-  restricted: RESTRICTED_DOMAINS.has(domain),
-  ...props
-});
+// Regelregisteret er DYPT FRYST: hverken tilbakemelding, modell eller feil kode kan flytte en terskel, en grense eller en egenskap i en kjørende prosess (D-397: ingen selvmodifikasjon).
+const rule = (source: SignalSource, event_type: string, domain: string, props: Pick<RuleDefinition, "urgent" | "assist" | "tunable">): RuleDefinition =>
+  Object.freeze({
+    rule_key: `${source}:${event_type}`,
+    source,
+    event_type,
+    domain,
+    restricted: RESTRICTED_DOMAINS.has(domain),
+    urgent: props.urgent,
+    assist: props.assist,
+    tunable: props.tunable === null ? null : Object.freeze({ ...props.tunable })
+  });
 
 export const RULES: readonly RuleDefinition[] = Object.freeze([
   rule("home_assistant", "door_open_too_long", "home", { urgent: false, assist: false, tunable: { name: "open_minutes", unit: "min", default: 15, min: 5, max: 120, step: 5 } }),

@@ -83,7 +83,9 @@ CREATE TABLE situation_signal_log (
 CREATE INDEX situation_signal_log_key_idx ON situation_signal_log (tenant_id, memory_space_id, detection_key, occurred_at);
 CREATE INDEX situation_signal_log_retention_idx ON situation_signal_log (tenant_id, recorded_at);
 
--- 4) Eierens tilbakemelding ("nyttig"/"stoey") paa en situasjon. Append-only i praksis (ingen UPDATE-grant): en endret mening er en NY rad.
+-- 4) Eierens tilbakemelding ("nyttig"/"stoey") paa en situasjon. Append-only bortsett fra `consumed_at` (kolonne-grant, aldri verdict): en
+--    endret mening er en NY rad. En stemme som har utloest en terskelendring (eller blitt nullstilt av en tilbakestilling) markeres brukt og
+--    teller ikke mer - hvert steg krever tre NYE, enige stemmer, og en tilbakestilling kan ikke omgaas av gamle stemmer.
 CREATE TABLE situation_feedback (
   feedback_id         text PRIMARY KEY,
   tenant_id           text NOT NULL REFERENCES tenants (tenant_id),
@@ -96,6 +98,7 @@ CREATE TABLE situation_feedback (
   task_id             text,
   session_id          text,
   created_at          timestamptz NOT NULL DEFAULT now(),
+  consumed_at         timestamptz,
   CONSTRAINT situation_feedback_actor_scope_fk
     FOREIGN KEY (actor_person_id, tenant_id) REFERENCES person_tenants (person_id, tenant_id),
   CONSTRAINT situation_feedback_situation_scope_fk
@@ -149,6 +152,7 @@ CREATE TABLE situation_assessments (
 GRANT SELECT, INSERT, UPDATE, DELETE ON situation_subscriptions TO jarvis_app;
 GRANT SELECT, INSERT, DELETE ON situation_signal_log TO jarvis_app;
 GRANT SELECT, INSERT, DELETE ON situation_feedback TO jarvis_app;
+GRANT UPDATE (consumed_at) ON situation_feedback TO jarvis_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON situation_rule_tuning TO jarvis_app;
 GRANT SELECT, INSERT, DELETE ON situation_assessments TO jarvis_app;
 

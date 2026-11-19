@@ -30,6 +30,19 @@ export interface SignalLogEntry {
   session_id: string | null;
 }
 
+export interface AssessmentEntry {
+  assessment_id: string;
+  situation_id: string;
+  status: "applied" | "rejected";
+  category: string | null;
+  priority_hint: string | null;
+  /** UBETRODD modelltekst (renset og kuttet). */
+  explanation: string | null;
+  provider: string | null;
+  model: string | null;
+  created_at: string;
+}
+
 export const DEFAULT_SIGNAL_LOG_RETENTION_DAYS = 30;
 export const SIGNAL_LOG_RETENTION_BOUNDS = { min: 7, max: 365 } as const;
 
@@ -55,6 +68,18 @@ export class SignalLogService {
         params
       );
       return rows as SignalLogEntry[];
+    });
+  }
+
+  /** Modellens vurderinger for en situasjon (UBETRODD data: forklaringen er modelltekst og må vises som sitert data, aldri tolkes som instruks). */
+  async assessments(tenantId: string, memorySpace: MemorySpace, situationId: string): Promise<AssessmentEntry[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT assessment_id, situation_id, status, category, priority_hint, explanation, provider, model, created_at
+         FROM situation_assessments WHERE tenant_id = $1 AND memory_space_id = $2 AND situation_id = $3 ORDER BY created_at DESC LIMIT 20`,
+        [tenantId, memorySpace, situationId]
+      );
+      return rows as AssessmentEntry[];
     });
   }
 

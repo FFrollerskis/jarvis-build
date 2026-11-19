@@ -37,13 +37,22 @@ describe("A: flagg AV = ingenting bygges", () => {
     }
   });
 
-  it("hovedbryter alene: kun kontrollhandlingene (7 verktøy) og en løper uten leser; INGEN HA-lesehandling og ingen kildelesing; startloggen sier hva som er på", () => {
+  it("hovedbryter alene: kun kontroll- og lesehandlingene (9 verktøy, INGEN tilbakemelding) og en løper uten leser; INGEN HA-lesehandling og ingen kildelesing; startloggen sier hva som er på", () => {
     const w = createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on" }));
     expect(w.tools.map((t) => `${t.tool_id}.${t.action}`).sort()).toEqual([
-      "situations.get_signal_status", "situations.list_signals", "situations.list_subscriptions", "situations.remove_subscription", "situations.set_critical_quiet_bypass", "situations.set_subscription_enabled", "situations.subscribe"
+      "situations.get_signal_status", "situations.get_situation_simulation", "situations.list_assessments", "situations.list_signals", "situations.list_subscriptions", "situations.remove_subscription",
+      "situations.set_critical_quiet_bypass", "situations.set_subscription_enabled", "situations.subscribe"
     ]);
     expect(w.runner).not.toBeNull();
     expect(w.describe()).toMatchObject({ msg: "situation_signals", interval_seconds: 60, log_retention_days: 30, spaces: [], sources: { home: false, vision: false, health: false, incidents: false }, model_assist: false });
+  });
+
+  it("tilbakemeldingshandlingene (record_feedback, get_rule_tuning, reset_rule_tuning) registreres KUN med JARVIS_SITUATION_FEEDBACK under hovedbryteren", () => {
+    const w = createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on", JARVIS_SITUATION_FEEDBACK: "on" }));
+    const actions = w.tools.map((t) => t.action);
+    for (const a of ["record_feedback", "get_rule_tuning", "reset_rule_tuning"]) expect(actions).toContain(a);
+    expect(w.tools).toHaveLength(12);
+    expect(createSituationSignalsWiring(deps({ JARVIS_SITUATION_FEEDBACK: "on" })).tools).toEqual([]);
   });
 
   it("HA-lesehandlingen registreres KUN med JARVIS_SITUATION_HOME; rommene følger kildene; ugyldig tallkonfigurasjon gir standard", () => {

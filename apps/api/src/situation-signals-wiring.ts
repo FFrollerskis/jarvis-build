@@ -2,8 +2,8 @@ import type pg from "pg";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { homeAssistantStateDetailTool, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
 import {
-  boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, ModelSignalAssist, SignalLogService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry, SituationSignalsTransport,
-  situationFlagsFromEnv, situationSignalsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS,
+  boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
+  SituationSignalsTransport, situationFlagsFromEnv, situationSignalsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS,
   type AssistModelGateway, type DailyPoint, type DomainPauseRegistry, type HealthObservation, type HealthSignalMetric, type HomeObservation, type IncidentObservation, type SignalSourceReaders,
   type SituationEngine, type SituationFlags, type VisionObservation
 } from "@jarvis/situations";
@@ -162,7 +162,10 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
   const logs = new SignalLogService(deps.pool);
   const identityFor = (tenantId: string, space: MemorySpace): IdentityContext => ({ ...deps.ownerIdentity, tenant_id: tenantId, memory_space_id: space, session_id: `${deps.ownerIdentity.session_id}-situation-signals` });
   const assist = flags.modelAssist ? new ModelSignalAssist({ gateway: deps.modelGateway }) : null;
-  const bus = new SituationSignalBus({ pool: deps.pool, engine: deps.engine, domainPauses: deps.domainPauses, subscriptions: (t, s) => registry.listEnabled(t, s), assist, now });
+  // Tilbakemeldingslæring (P2d) KUN med `JARVIS_SITUATION_FEEDBACK=on`: uten flagget finnes verken handlingene eller en terskelkilde (alle regler bruker standard). Simulering er ren lesing og følger hovedbryteren.
+  const feedback = flags.feedback ? new FeedbackService(deps.pool, authority, true, now) : undefined;
+  const simulation = new SimulationService(deps.pool, (toolId, action) => (deps.gateway.get(toolId, action)?.capability_class as "A" | "B" | "C" | "D" | undefined) ?? null, now);
+  const bus = new SituationSignalBus({ pool: deps.pool, engine: deps.engine, domainPauses: deps.domainPauses, subscriptions: (t, s) => registry.listEnabled(t, s), ...(feedback ? { tuning: feedback } : {}), assist, now });
 
   const readers: SignalSourceReaders = {
     ...(flags.home ? { home: createHomeReader({ gateway: deps.gateway, identityFor }) } : {}),
@@ -186,7 +189,7 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
   });
 
   const tools: ToolDefinition[] = [
-    ...situationSignalsToolDefinitions(new SituationSignalsTransport({ registry, engine: deps.engine, logs, runner })),
+    ...situationSignalsToolDefinitions(new SituationSignalsTransport({ registry, engine: deps.engine, logs, runner, simulation, ...(feedback ? { feedback } : {}) }), { feedback: flags.feedback }),
     ...(flags.home ? [homeAssistantStateDetailTool(deps.haTransport)] : [])
   ];
 
