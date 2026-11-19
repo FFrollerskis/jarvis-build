@@ -261,9 +261,16 @@ describe("inspectImage: mål fra bildehodet (review A-L6) - en liten fil kan dek
       ["JPEG 65535x65535", jpegBytes({ width: 65_535, height: 65_535 })],
       ["JPEG 8193x1", jpegBytes({ width: 8193, height: 1 })],
       ["JPEG 8192x8192 (67 MP)", jpegBytes({ width: 8192, height: 8192 })],
-      ["WebP VP8X 16777216x16777216", webpBytes("vp8x", { width: 16_777_216, height: 16_777_216 })],
+      ["WebP VP8X 16384x16384 (lerret = VP8L-ramme)", webpBytes("vp8x", { width: 16_384, height: 16_384 })],
+      ["WebP VP8X 8193x1 (smalt og bredt)", webpBytes("vp8x", { width: 8193, height: 1 })],
       ["WebP VP8L 16384x16384", webpBytes("vp8l", { width: 16_384, height: 16_384 })],
-      ["WebP VP8 16383x16383", webpBytes("vp8", { width: 16_383, height: 16_383 })]
+      ["WebP VP8 16383x16383", webpBytes("vp8", { width: 16_383, height: 16_383 })],
+      // Review delta A LOW-D3 (b): ET HØYT, SMALT bilde har få piksler, så KUN høydegrensen (ikke arealgrensen) kan avvise det. Hver bildetype, begge retninger.
+      ["PNG 1x8193 (høyt og smalt)", pngBytes({ width: 1, height: 8193 })],
+      ["JPEG 1x8193 (høyt og smalt)", jpegBytes({ width: 1, height: 8193 })],
+      ["WebP VP8L 1x8193 (høyt og smalt)", webpBytes("vp8l", { width: 1, height: 8193 })],
+      ["WebP VP8 1x8193 (høyt og smalt)", webpBytes("vp8", { width: 1, height: 8193 })],
+      ["WebP VP8X 1x8193 (høyt og smalt)", webpBytes("vp8x", { width: 1, height: 8193 })]
     ];
     for (const [name, bytes] of bombs) {
       expect(bytes.length, name).toBeLessThan(2_000);
@@ -271,8 +278,59 @@ describe("inspectImage: mål fra bildehodet (review A-L6) - en liten fil kan dek
     }
     expect(dims(jpegBytes({ width: 8064, height: 6048 }))).toEqual([8064, 6048]);
     expect(dims(pngBytes({ width: 8192, height: 6000 }))).toEqual([8192, 6000]);
+    // Nøyaktig på grensen er greit i BEGGE retninger (høyde 8192 og bredde 8192 med få piksler)
+    expect(dims(jpegBytes({ width: 1, height: 8192 }))).toEqual([1, 8192]);
+    expect(dims(jpegBytes({ width: 8192, height: 1 }))).toEqual([8192, 1]);
+    expect(dims(pngBytes({ width: 1, height: 8192 }))).toEqual([1, 8192]);
     expect(MAX_IMAGE_SIDE).toBe(8192);
     expect(MAX_IMAGE_PIXELS).toBe(50_000_000);
+  });
+
+  it("kallerens maxSide gjelder begge akser (en høy og smal bilde avvises av høydegrensen alene)", () => {
+    expect(() => inspectImage(jpegBytes({ width: 100, height: 2000 }), { maxSide: 1000 })).toThrowError(/dimensions_too_large/);
+    expect(() => inspectImage(jpegBytes({ width: 2000, height: 100 }), { maxSide: 1000 })).toThrowError(/dimensions_too_large/);
+    expect(inspectImage(jpegBytes({ width: 100, height: 1000 }), { maxSide: 1000 }).height).toBe(1000);
+  });
+
+  describe("WebP VP8X (review delta A LOW-D3): den første BILDECHUNKEN må ha lerretets mål - et uskyldig lerret kan ikke skjule en pikselbombe", () => {
+    const unreadable = (bytes: Uint8Array, name: string): void => expect(() => inspectImage(bytes), name).toThrowError(/dimensions_unreadable/);
+
+    it("konsistente filer godtas: VP8L eller VP8 som bildechunk, og ALPH/ICCP/EXIF/XMP før bildet hoppes over (også med oddetallslengde, som polstres)", () => {
+      expect(dims(webpBytes("vp8x", { width: 3000, height: 2000 }))).toEqual([3000, 2000]);
+      expect(dims(webpBytes("vp8x", { width: 640, height: 480, inner: "vp8" }))).toEqual([640, 480]);
+      expect(dims(webpBytes("vp8x", { width: 800, height: 600, inner: "vp8", before: [{ fourcc: "ICCP", size: 7 }, { fourcc: "ALPH", size: 100 }, { fourcc: "EXIF", size: 5 }, { fourcc: "XMP ", size: 4 }] }))).toEqual([800, 600]);
+      expect(dims(webpBytes("vp8x", { width: 123, height: 456, before: Array.from({ length: 20 }, () => ({ fourcc: "JUNK", size: 3 })) }))).toEqual([123, 456]); // 20 ukjente chunker er innenfor grensen
+    });
+
+    it("lerret 100x100 med en indre VP8L/VP8 på 16384x16384 (A sin repro) avvises, og det samme gjelder enhver forskjell mellom lerret og ramme - også en ramme som er MINDRE", () => {
+      unreadable(webpBytes("vp8x", { width: 16_384, height: 16_384, canvas: { width: 100, height: 100 } }), "VP8L 16384² bak lerret 100²");
+      unreadable(webpBytes("vp8x", { width: 16_383, height: 16_383, canvas: { width: 100, height: 100 }, inner: "vp8" }), "VP8 16383² bak lerret 100²");
+      unreadable(webpBytes("vp8x", { width: 100, height: 100, canvas: { width: 200, height: 200 } }), "ramme mindre enn lerret");
+      unreadable(webpBytes("vp8x", { width: 100, height: 101, canvas: { width: 100, height: 100 } }), "høyden avviker med 1");
+      unreadable(webpBytes("vp8x", { width: 101, height: 100, canvas: { width: 100, height: 100 } }), "bredden avviker med 1");
+      unreadable(webpBytes("vp8x", { width: 16_384, height: 16_384, canvas: { width: 16_777_216, height: 16_777_216 } }), "lerret 2^24² uten tilsvarende ramme (den gamle VP8X-bomben)");
+    });
+
+    it("VP8X uten bildechunk, med animasjon (flagg, ANIM eller ANMF), feil VP8X-lengde, avkortet bildechunk, ødelagt startkode/signatur, for mange chunker før bildet eller en chunk som peker utenfor filen avvises", () => {
+      unreadable(webpBytes("vp8x", { size: 0, inner: "none" }), "ingen bildechunk (kun VP8X)");
+      unreadable(webpBytes("vp8x", { size: 0, inner: "none", before: [{ fourcc: "ICCP", size: 6 }] }), "bare en ICCP-chunk");
+      unreadable(webpBytes("vp8x", { animation: true }), "animasjonsflagget");
+      unreadable(webpBytes("vp8x", { inner: "anim" }), "ANIM før bildet");
+      unreadable(webpBytes("vp8x", { inner: "anmf" }), "ANMF der bildet skulle stå");
+      unreadable(webpBytes("vp8x", { vp8xSize: 12 }), "VP8X-lengde 12");
+      unreadable(webpBytes("vp8x", { size: 0 }).slice(0, 36), "bildechunkens hode er avkortet");
+      unreadable(webpBytes("vp8x", { size: 0 }).slice(0, 40), "bildechunkens nyttelast er avkortet");
+      unreadable(webpBytes("vp8x", { width: 50, height: 50, before: Array.from({ length: 40 }, () => ({ fourcc: "JUNK", size: 2 })) }), "40 chunker før bildet (grensen er 32)");
+      const lossy = webpBytes("vp8x", { width: 50, height: 50, inner: "vp8" });
+      lossy.set([0, 0, 0], 41); // startkoden 9d 01 2a er ødelagt (VP8-chunken starter på 30, nyttelast på 38, startkode på 41)
+      unreadable(lossy, "VP8 uten startkode bak VP8X");
+      const lossless = webpBytes("vp8x", { width: 50, height: 50 });
+      lossless[38] = 0x00; // VP8L-signaturen (0x2f) er borte
+      unreadable(lossless, "VP8L uten signatur bak VP8X");
+      const huge = webpBytes("vp8x", { width: 50, height: 50, before: [{ fourcc: "ALPH", size: 4 }] });
+      huge.set([0xff, 0xff, 0xff, 0xff], 34); // ALPH-chunkens lengde peker 4 GiB frem: ingen bildechunk innenfor filen
+      unreadable(huge, "chunk-lengde utenfor filen");
+    });
   });
 
   it("grensene kan senkes av kalleren, aldri heves", () => {
@@ -284,7 +342,15 @@ describe("inspectImage: mål fra bildehodet (review A-L6) - en liten fil kan dek
   });
 
   it("ulesbare mål avvises fail-closed: avkortet hode, SOS før SOF, ugyldig markørstruktur, PNG uten IHDR, WebP med ukjent chunk/startkode, null-mål", () => {
+    // En gyldig SOF0 (16x16) og SOS-segment: «lokkeduer» som viser at parseren stopper ved SOS/EOI i stedet for å lete videre i bildedataene (review delta A LOW-D3 (c)).
+    const sof16 = [0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x10, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01];
+    const sos = [0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3f, 0x00];
+    expect(inspectImage(Uint8Array.from([0xff, 0xd8, ...sof16, 1, 2, 3])), "non-vakuitet: lokkeduen er en gyldig SOF").toMatchObject({ width: 16, height: 16 });
     const bad: Array<[string, Uint8Array]> = [
+      ["JPEG SOS før SOF, med en gyldig SOF-lignende markør i bildedataene etterpå", Uint8Array.from([0xff, 0xd8, ...sos, ...sof16])],
+      ["JPEG EOI før SOF, med en gyldig SOF-lignende markør etterpå", Uint8Array.from([0xff, 0xd8, 0xff, 0xd9, ...sof16])],
+      ["JPEG segmentlengde 0 rett før en gyldig SOF", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, ...sof16])],
+      ["JPEG segmentlengde 1 rett før en gyldig SOF", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x01, ...sof16])],
       ["JPEG kun SOI + APP0", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1])],
       ["JPEG SOS før SOF", Uint8Array.from([0xff, 0xd8, 0xff, 0xda, 0, 12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 1, 2, 3, 4])],
       ["JPEG uten markør (ikke FF)", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 4, 1, 2, 0x12, 0x34, 0x56, 0x78, 0x9a])],

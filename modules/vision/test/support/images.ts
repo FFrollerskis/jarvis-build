@@ -47,13 +47,37 @@ export function pngBytes(options: ImageOptions = {}): Uint8Array {
 
 export type WebpKind = "vp8" | "vp8l" | "vp8x";
 
-/** WebP: RIFF-hode og én av de tre chunk-formene med målene. */
-export function webpBytes(kind: WebpKind = "vp8x", options: ImageOptions = {}): Uint8Array {
+export interface WebpOptions extends ImageOptions {
+  /** Kun vp8x: lerretets mål (standard = bildets mål). Satt til noe annet enn bildets mål gir en INKONSISTENT fil (lerret og ramme avviker). */
+  canvas?: { width: number; height: number };
+  /** Kun vp8x: chunken som bærer bildet etter VP8X og `before` (standard `vp8l`, med bildets mål). `none` = ingen bildechunk, `anim`/`anmf` = animasjonschunk der bildechunken skulle stått. */
+  inner?: "vp8" | "vp8l" | "none" | "anim" | "anmf";
+  /** Kun vp8x: chunker FØR bildechunken (ALPH, ICCP, EXIF, ... ) med gitt nyttelastlengde; en oddetallslengde gir et polstringsbyte, slik formatet krever. */
+  before?: Array<{ fourcc: string; size: number }>;
+  /** Kun vp8x: animasjonsflagget (0x02) i VP8X-flaggene. */
+  animation?: boolean;
+  /** Kun vp8x: VP8X-chunkens lengdefelt (standard 10). */
+  vp8xSize?: number;
+}
+
+function webpImageChunk(kind: "vp8" | "vp8l", width: number, height: number, size: number): number[] {
+  if (kind === "vp8l") return [...ascii("VP8L"), ...le32(size + 5), 0x2f, ...le32(((width - 1) & 0x3fff) | (((height - 1) & 0x3fff) << 14))];
+  return [...ascii("VP8 "), ...le32(size + 10), 0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, ...le16(width & 0x3fff), ...le16(height & 0x3fff)];
+}
+
+/**
+ * WebP: RIFF-hode og én av de tre chunk-formene med målene. `vp8x` er det UTVIDEDE formatet: VP8X-chunk (lerret) FULGT AV en ekte bildechunk (standard VP8L med samme mål), slik en dekoder krever -
+ * se `WebpOptions` for å bygge inkonsistente/animerte/avkortede filer.
+ */
+export function webpBytes(kind: WebpKind = "vp8x", options: WebpOptions = {}): Uint8Array {
   const { width = 64, height = 48, size = 256 } = options;
   const riff = [...ascii("RIFF"), ...le32(size + 30), ...ascii("WEBP")];
-  let chunk: number[];
-  if (kind === "vp8x") chunk = [...ascii("VP8X"), ...le32(10), 0x00, 0x00, 0x00, 0x00, ...le24(width - 1), ...le24(height - 1)];
-  else if (kind === "vp8l") chunk = [...ascii("VP8L"), ...le32(size + 5), 0x2f, ...le32(((width - 1) & 0x3fff) | (((height - 1) & 0x3fff) << 14))];
-  else chunk = [...ascii("VP8 "), ...le32(size + 10), 0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, ...le16(width & 0x3fff), ...le16(height & 0x3fff)];
-  return Uint8Array.from([...riff, ...chunk, ...randomBytes(size)]);
+  if (kind === "vp8l" || kind === "vp8") return Uint8Array.from([...riff, ...webpImageChunk(kind, width, height, size), ...randomBytes(size)]);
+  const canvas = options.canvas ?? { width, height };
+  const flags = options.animation === true ? 0x02 : 0x00;
+  const header = [...ascii("VP8X"), ...le32(options.vp8xSize ?? 10), flags, 0x00, 0x00, 0x00, ...le24(canvas.width - 1), ...le24(canvas.height - 1)];
+  const before = (options.before ?? []).flatMap(({ fourcc, size: length }) => [...ascii(fourcc), ...le32(length), ...new Array<number>(length).fill(0), ...(length % 2 === 1 ? [0] : [])]);
+  const inner = options.inner ?? "vp8l";
+  const image = inner === "none" ? [] : inner === "anim" || inner === "anmf" ? [...ascii(inner === "anim" ? "ANIM" : "ANMF"), ...le32(16), ...new Array<number>(16).fill(0)] : webpImageChunk(inner, width, height, size);
+  return Uint8Array.from([...riff, ...header, ...before, ...image, ...randomBytes(size)]);
 }

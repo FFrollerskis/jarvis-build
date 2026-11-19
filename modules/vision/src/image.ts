@@ -10,7 +10,8 @@ import { createHash } from "node:crypto";
  *   - størrelsen har en hard øvre grense (standard 5 MiB; aldri over 20 MiB, som også er DB-CHECK i 134) - ett øyeblikksbilde, ikke video,
  *   - sha256 beregnes av de samme bytene (integritet, revisjon og signaturbinding for enhetsopplasting).
  *   - mål (bredde/høyde) leses fra BILDEHODET (PNG IHDR, JPEG SOF, WebP VP8/VP8L/VP8X) og har en grense (review A-L6): et lite PNG/JPEG kan deklarere enorme mål og velte den LOKALE modellserveren
- *     når den dekoder det (en «pikselbombe»). Mål som ikke kan leses = avvist (fail-closed).
+ *     når den dekoder det (en «pikselbombe»). Mål som ikke kan leses = avvist (fail-closed). For WebP VP8X leses også den første bildechunken (VP8/VP8L) og målene MÅ være like lerretets (review delta A LOW-D3);
+ *     animert WebP avvises (kun stillbilder).
  * Funksjonen leser aldri pikseldata og dekoder ingenting (ingen bildebibliotek = ingen dekoder-angrepsflate i denne prosessen; kun et par bytes i hodet leses, med grensesjekk);
  * selve visjonsmodellen sitter bak lokal modell-adapter. Et bilde som ikke består gir en typet feil med en kort, stabil kode.
  */
@@ -81,19 +82,47 @@ function jpegDimensions(bytes: Uint8Array): ImageDimensions | null {
   return null;
 }
 
-function webpDimensions(bytes: Uint8Array): ImageDimensions | null {
-  if (bytes.length < 30) return null;
-  const chunk = String.fromCharCode(bytes[12] as number, bytes[13] as number, bytes[14] as number, bytes[15] as number);
-  if (chunk === "VP8 ") {
-    if (!startsWith(bytes, [0x9d, 0x01, 0x2a], 23)) return null; // startkode etter rammehodet
-    return { width: u16le(bytes, 26) & 0x3fff, height: u16le(bytes, 28) & 0x3fff };
+const fourcc = (b: Uint8Array, o: number): string => String.fromCharCode(b[o] as number, b[o + 1] as number, b[o + 2] as number, b[o + 3] as number);
+
+/** Målene i selve BILDECHUNKEN (`VP8 ` lossy / `VP8L` lossless); `payload` er første byte etter chunk-hodet. `null` når chunken ikke er en bildechunk eller er avkortet/ugyldig. */
+function webpFrameDimensions(bytes: Uint8Array, kind: string, payload: number): ImageDimensions | null {
+  if (kind === "VP8 ") {
+    if (payload + 10 > bytes.length || !startsWith(bytes, [0x9d, 0x01, 0x2a], payload + 3)) return null; // startkode etter rammehodet
+    return { width: u16le(bytes, payload + 6) & 0x3fff, height: u16le(bytes, payload + 8) & 0x3fff };
   }
-  if (chunk === "VP8L") {
-    if (bytes[20] !== 0x2f) return null; // signaturbyte
-    const bits = u32le(bytes, 21);
+  if (kind === "VP8L") {
+    if (payload + 5 > bytes.length || bytes[payload] !== 0x2f) return null; // signaturbyte
+    const bits = u32le(bytes, payload + 1);
     return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
   }
-  if (chunk === "VP8X") return { width: 1 + u24le(bytes, 24), height: 1 + u24le(bytes, 27) };
+  return null;
+}
+
+/** Høyst så mange chunker leses etter VP8X før vi gir opp (en fil med tusenvis av småchunker skal ikke holde parseren opptatt). */
+const MAX_WEBP_CHUNKS_BEFORE_IMAGE = 32;
+
+function webpDimensions(bytes: Uint8Array): ImageDimensions | null {
+  if (bytes.length < 30) return null;
+  const first = fourcc(bytes, 12);
+  if (first === "VP8 " || first === "VP8L") return webpFrameDimensions(bytes, first, 20);
+  if (first !== "VP8X") return null;
+  // VP8X (utvidet format): lerretet står i VP8X-chunken, men det er den FØRSTE bildechunken etter den en dekoder faktisk allokerer for. Review delta A LOW-D3: å lese kun lerretet lot et lerret på
+  // 100x100 med en indre VP8L på 16384x16384 passere (pikselbombe forbi grensene). Derfor leses også bildechunken (hoppende over ALPH/ICCP/EXIF/XMP ...) og målene MÅ være like (en stillbildefil har lerret = ramme; libwebp krever det
+  // samme). Animasjon (flagg 0x02, ANIM/ANMF) støttes ikke: Jarvis lagrer kun stillbilder, og rammene har egne mål som ikke kan bekreftes av hodet.
+  if (u32le(bytes, 16) !== 10) return null; // VP8X-chunken har alltid 10 byte nyttelast
+  if (((bytes[20] as number) & 0x02) !== 0) return null; // animasjonsflagget
+  const canvas = { width: 1 + u24le(bytes, 24), height: 1 + u24le(bytes, 27) };
+  let offset = 30; // RIFF-hode (12) + VP8X-chunk-hode (8) + nyttelast (10)
+  for (let chunks = 0; chunks < MAX_WEBP_CHUNKS_BEFORE_IMAGE && offset + 8 <= bytes.length; chunks += 1) {
+    const kind = fourcc(bytes, offset);
+    if (kind === "VP8 " || kind === "VP8L") {
+      const frame = webpFrameDimensions(bytes, kind, offset + 8);
+      return frame !== null && frame.width === canvas.width && frame.height === canvas.height ? canvas : null;
+    }
+    if (kind === "ANIM" || kind === "ANMF") return null;
+    const size = u32le(bytes, offset + 4);
+    offset += 8 + size + (size & 1); // chunker er polstret til partall lengde
+  }
   return null;
 }
 
