@@ -433,6 +433,41 @@ export class SituationAutonomyUnauthorizedError extends Error {
 }
 
 /**
+ * WP-G4 fiks-runde (A-LOW-5, TOCTOU): bindingen auto-ACT valgte er endret, tilbakekalt, utløpt eller deaktivert da claimen skulle tas. Sjekket INNE i claim-transaksjonen under domenelåsen (den samme låsen
+ * `setAutonomyPolicy`/`clearAutonomyPolicy` tar), så en `clear_autonomy_policy` mellom utvalget og claimen aldri gir ACT. Ingen claim, ingen gateway-kall.
+ */
+export class SituationAutonomyBindingChangedError extends Error {
+  constructor(public readonly domain: string) {
+    super(`situation_autonomy_binding_changed:${domain}`);
+    this.name = "SituationAutonomyBindingChangedError";
+  }
+}
+
+/** WP-G4 fiks-runde (A-MEDIUM-4): auto-ACT på en situasjon som ikke lenger er åpen/`suggest` eller ikke er observert innen ferskhetsvinduet. Ingen claim, ingen gateway-kall. */
+export class SituationActStaleError extends Error {
+  constructor(public readonly situationId: string, public readonly reason: "not_open_suggest" | "not_fresh") {
+    super(`situation_act_stale:${reason}:${situationId}`);
+    this.name = "SituationActStaleError";
+  }
+}
+
+/** Valgfrie, strengere vilkår for `actOn()`. Kun auto-ACT bruker dem; en direkte `actOn()` (eier/transport) er uendret. */
+export interface ActOnOptions {
+  /**
+   * Auto-ACT-vakt, sjekket i claim-transaksjonen (under domenelåsen, før claimen): situasjonen er fortsatt åpen og i stadiet `suggest`, den er observert innen `max_age_seconds` (DB-klokke), og eierens binding for domenet
+   * finnes fortsatt, er aktivert og ikke utløpt, og gir EKSAKT samme operasjon (verktøy, handling, rendrede parametre) som `request`.
+   */
+  autoActGuard?: { max_age_seconds: number };
+}
+
+/** Tak for `getQueue` (B-MEDIUM-3): standard og maks antall rader. */
+export const DEFAULT_QUEUE_LIMIT = 500;
+export const MAX_QUEUE_LIMIT = 2000;
+
+/** Standard ferskhetsvindu for auto-ACT: en situasjon som ikke er observert/evaluert siste time utføres ikke (A-MEDIUM-4). Signalløperen bruker `max(1 time, 3 x tikkintervall)`. */
+export const DEFAULT_AUTO_ACT_MAX_AGE_MS = 60 * 60_000;
+
+/**
  * Funn 1 (arkitekt-review runde 2, PR #85): SHA-256 over HELE den immutable
  * operasjonen `actOn()` faktisk claimer - `situation_id` (ALDRI kun i selve
  * nøkkelen, se `actOn()` sin `finalIdempotencyKey`) + `tool_id` + `action` +
@@ -784,11 +819,11 @@ export class SituationEngine {
   async getQueue(
     tenantId: string,
     memorySpace: MemorySpace,
-    filter: { domain?: string; stage?: SituationStage; statusOpenOnly?: boolean } = {}
+    filter: { domain?: string; stage?: SituationStage; statusOpenOnly?: boolean; limit?: number } = {}
   ): Promise<Situation[]> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const conditions = ["tenant_id = $1"];
-      const params: Array<string> = [tenantId];
+      const params: Array<string | number> = [tenantId];
       if (filter.statusOpenOnly !== false) conditions.push("status = 'open'");
       if (filter.domain) {
         params.push(filter.domain);
@@ -798,9 +833,12 @@ export class SituationEngine {
         params.push(filter.stage);
         conditions.push(`stage = $${params.length}`);
       }
+      // WP-G4 fiks-runde (B-MEDIUM-3): en kø uten tak vokste ubegrenset (24 t kamerabevegelse = 144 åpne situasjoner per kamera). Standard 500, aldri mer enn 2000 (eksplisitt `limit` klemmes).
+      params.push(Math.min(MAX_QUEUE_LIMIT, Math.max(1, Math.floor(filter.limit ?? DEFAULT_QUEUE_LIMIT))));
       const { rows } = await client.query(
         `SELECT * FROM situations WHERE ${conditions.join(" AND ")}
-         ORDER BY (priority = 'high') DESC, (priority = 'normal') DESC, opened_at ASC`,
+         ORDER BY (priority = 'high') DESC, (priority = 'normal') DESC, opened_at ASC
+         LIMIT $${params.length}`,
         params
       );
       return rows as Situation[];
@@ -861,7 +899,8 @@ export class SituationEngine {
     situationId: string,
     request: ActOnRequest,
     gateway: ToolGateway,
-    identity: IdentityContext
+    identity: IdentityContext,
+    options: ActOnOptions = {}
   ): Promise<ActOnResult> {
     // Funn 4 (arkitekt-review runde 2, PR #85): identitetens EGET scope MÅ
     // matche situasjonens eksplisitte tenant/space FØRST, FØR noe som helst
@@ -953,6 +992,26 @@ export class SituationEngine {
         const locked = lockedRows[0] as Situation | undefined;
         if (!locked) throw new SituationNotFoundError(situationId);
         if (locked.act_idempotency_key === null) {
+          // WP-G4 fiks-runde (A-LOW-5, A-MEDIUM-4): auto-ACT-vakten sjekkes HER - i claim-transaksjonen, under domenelåsen som `setAutonomyPolicy`/`clearAutonomyPolicy` også tar - rett før claimen.
+          // Utvalget (`autoActPending`) er bare et forslag; en binding som er tilbakekalt/utløpt/endret eller en situasjon som er løst/gammel mellom utvalg og claim gir INGEN claim og INGET kall.
+          if (options.autoActGuard !== undefined) {
+            if (locked.status !== "open" || locked.stage !== "suggest") throw new SituationActStaleError(situationId, "not_open_suggest");
+            const { rows: liveRows } = await client.query(
+              `SELECT tool_id, action, parameters FROM situation_autonomy_policies
+               WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND enabled = true AND (expires_at IS NULL OR expires_at > now())`,
+              [tenantId, memorySpace, locked.domain]
+            );
+            const live = liveRows[0] as { tool_id: string; action: string; parameters: Record<string, JsonValue> } | undefined;
+            const rendered = live === undefined ? null : renderAutonomyParameters(live.parameters, locked);
+            if (live === undefined || rendered === null || computeActOperationFingerprint(situationId, live.tool_id, live.action, rendered) !== operationFingerprint) {
+              throw new SituationAutonomyBindingChangedError(locked.domain);
+            }
+            const { rows: freshRows } = await client.query(
+              `SELECT (updated_at >= now() - make_interval(secs => $3::double precision)) AS fresh FROM situations WHERE tenant_id = $1 AND situation_id = $2`,
+              [tenantId, situationId, options.autoActGuard.max_age_seconds]
+            );
+            if ((freshRows[0] as { fresh: boolean } | undefined)?.fresh !== true) throw new SituationActStaleError(situationId, "not_fresh");
+          }
           const notifyMessage = buildNotifyMessage(locked.reason, request.tool_id, request.action);
           const { rowCount } = await client.query(
             `UPDATE situations
@@ -1346,8 +1405,10 @@ export class SituationEngine {
    */
   async markInformDelivered(tenantId: string, memorySpace: MemorySpace, situationId: string, anchorIso: string): Promise<boolean> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      // WP-G4 fiks-runde (A-MEDIUM-4): leveringen bumper IKKE lenger `updated_at`. `updated_at` betyr «sist evaluert/observert» (auto-ACT krever en fersk verdi): en forsinket levering (kø under pause, opphevet pause) skal ikke få
+      // et gammelt forslag til å se ferskt ut. Ingen annen kode leser `updated_at` som leveringstidspunkt (`inform_delivered_at` er det).
       const { rowCount } = await client.query(
-        `UPDATE situations SET inform_delivered_at = $3, updated_at = now()
+        `UPDATE situations SET inform_delivered_at = $3
          WHERE tenant_id = $1 AND situation_id = $2 AND last_notified_at = $3::timestamptz`,
         [tenantId, situationId, anchorIso]
       );
@@ -1558,11 +1619,13 @@ export class SituationEngine {
     console.error(JSON.stringify({ msg: "situation_auto_act_blocked", tenant_id: tenantId, memory_space_id: memorySpace, domain, tool_id: toolId, action, code: "physical_action_not_bindable" }));
   }
 
-  async autoActPending(tenantId: string, memorySpace: MemorySpace, gateway: ToolGateway, identity: IdentityContext): Promise<AutoActResult> {
+  async autoActPending(tenantId: string, memorySpace: MemorySpace, gateway: ToolGateway, identity: IdentityContext, options: { maxAgeMs?: number } = {}): Promise<AutoActResult> {
     if (identity.tenant_id !== tenantId || identity.memory_space_id !== memorySpace) {
       throw new SituationActScopeMismatchError(tenantId, memorySpace, identity.tenant_id, identity.memory_space_id);
     }
     const result: AutoActResult = { attempted: 0, succeeded: 0, denied: 0, skipped: 0 };
+    // WP-G4 fiks-runde (A-MEDIUM-4): FERSKHETSVINDU - kun situasjoner som er evaluert/observert innen vinduet er kandidater (standard 1 time; en gammel `suggest` utføres aldri når eieren senere binder domenet).
+    const maxAgeSeconds = Math.max(1, (options.maxAgeMs ?? DEFAULT_AUTO_ACT_MAX_AGE_MS) / 1000);
     const candidates = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
         `SELECT s.*, p.tool_id AS policy_tool_id, p.action AS policy_action, p.parameters AS policy_parameters
@@ -1573,8 +1636,9 @@ export class SituationEngine {
          WHERE s.tenant_id = $1 AND s.memory_space_id = $2 AND s.status = 'open'
            AND s.stage = 'suggest' AND s.act_idempotency_key IS NULL
            AND NOT (s.domain = ANY($3::text[]))
+           AND s.updated_at >= now() - make_interval(secs => $4::double precision)
          ORDER BY s.opened_at ASC`,
-        [tenantId, memorySpace, [...NEVER_ACT_DOMAINS]]
+        [tenantId, memorySpace, [...NEVER_ACT_DOMAINS], maxAgeSeconds]
       );
       return rows as Array<Situation & { policy_tool_id: string; policy_action: string; policy_parameters: Record<string, JsonValue> }>;
     });
@@ -1615,7 +1679,8 @@ export class SituationEngine {
           candidate.situation_id,
           { tool_id: candidate.policy_tool_id, action: candidate.policy_action, parameters, idempotency_key: "auto-act" },
           gateway,
-          identity
+          identity,
+          { autoActGuard: { max_age_seconds: maxAgeSeconds } }
         );
         result.attempted += 1;
         if (outcome.tool_result.ok) result.succeeded += 1;
@@ -1627,7 +1692,9 @@ export class SituationEngine {
           err instanceof SituationActInFlightError ||
           err instanceof SituationActOperationMismatchError ||
           err instanceof SituationActDomainForbiddenError ||
-          err instanceof SituationActActionForbiddenError
+          err instanceof SituationActActionForbiddenError ||
+          err instanceof SituationAutonomyBindingChangedError ||
+          err instanceof SituationActStaleError
         ) {
           result.skipped += 1;
           continue;

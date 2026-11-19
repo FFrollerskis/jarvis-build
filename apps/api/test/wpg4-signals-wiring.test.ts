@@ -137,11 +137,15 @@ describe("B: hjem-leseren - kun abonnerte entiteter via ToolGateway, effekt-tell
     expect(t1[0]).toMatchObject({ over_limit_ticks: 1, over_limit_since: new Date(NOW).toISOString(), limit_w: 2000 });
     expect(t2[0]).toMatchObject({ over_limit_ticks: 2, over_limit_since: new Date(NOW).toISOString() });
     watts = "800";
-    expect(await read(ctx(NOW + 120_000), entities)).toEqual([]);
+    // fiks-runde (A-MEDIUM-4): under grensen leveres som en NORMAL observasjon (`over_limit_ticks: 0`), så bussen kan løse en åpen effektsituasjon; broen gir fortsatt ingen signal for den
+    expect(await read(ctx(NOW + 120_000), entities)).toEqual([
+      { source: "home_assistant", entity_id: "sensor.ovn", role: "power", state: "800", last_changed: "2026-11-19T11:59:00.000Z", limit_w: 2000, over_limit_ticks: 0, over_limit_since: new Date(NOW + 120_000).toISOString() }
+    ]);
     watts = "2600";
     expect((await read(ctx(NOW + 180_000), entities))[0]).toMatchObject({ over_limit_ticks: 1, over_limit_since: new Date(NOW + 180_000).toISOString() });
     watts = "ikke-et-tall";
-    expect(await read(ctx(NOW + 240_000), entities)).toEqual([]);
+    // en ukjent verdi er IKKE normal (ingen `over_limit_ticks`): ingen løsing på gjetning, og telleren er nullstilt
+    expect(await read(ctx(NOW + 240_000), entities)).toEqual([{ source: "home_assistant", entity_id: "sensor.ovn", role: "power", state: "ikke-et-tall", last_changed: "2026-11-19T11:59:00.000Z" }]);
   });
 });
 

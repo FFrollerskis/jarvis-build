@@ -43,11 +43,16 @@ export class TelegramSpy implements ToolTransport {
 
 export class ActuatorSpy implements ToolTransport {
   calls: Array<{ action: string; parameters: Record<string, JsonValue> }> = [];
+  /** Kjøres midt i utførelsen av første `close` (simulerer at eieren endrer/utløper bindingen mens sveipet pågår). */
+  onClose: (() => Promise<void>) | undefined;
   private done = false;
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
     this.calls.push({ action, parameters });
     if (action === "read_state") return { data: { done: this.done } };
     this.done = true;
+    const hook = this.onClose;
+    this.onClose = undefined;
+    if (hook) await hook();
     return { external_id: "close-1", data: { done: true } };
   }
 }

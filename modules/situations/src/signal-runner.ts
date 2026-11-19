@@ -7,8 +7,9 @@ import { ALL_DOMAINS } from "./domain-pause.ts";
 import { emptyBatchResult, mergeBatchResults, type PendingAssistEntry, type SituationSignalBus, type SignalBatchResult } from "./signal-bus.ts";
 import type { IncidentObservation, SignalObservation } from "./signal-bridges.ts";
 import { SignalLogService } from "./signal-log.ts";
+import { retireSignalSituations } from "./signal-retention.ts";
 import { HEALTH_SIGNAL_METRICS, type HealthSignalMetric, type HomeFilter, type SignalSource } from "./signal-types.ts";
-import type { SituationEngine } from "./service.ts";
+import { DEFAULT_AUTO_ACT_MAX_AGE_MS, type SituationEngine } from "./service.ts";
 import type { SituationSubscription } from "./subscriptions.ts";
 import type { VisionObservation } from "./vision-bridge.ts";
 import { parseFilter } from "./signal-bridges.ts";
@@ -78,6 +79,15 @@ export interface SignalRunnerDeps {
   cadence?: Readonly<Partial<Record<SignalSource, number>>>;
   /** Samlet tidsbudsjett (ms, vegg-tid) for modellvurderinger per tikk (se `DEFAULT_ASSIST_TICK_BUDGET_MS`). */
   assistBudgetMs?: number;
+  /** Ferskhetsvindu for auto-ACT (ms). Standard `max(1 time, 3 x tikkintervall)` - et gammelt forslag utføres aldri (A-MEDIUM-4). */
+  autoActMaxAgeMs?: number;
+  /** Åpne, uclaimede signalsituasjoner som ikke er sett så lenge løses av den daglige oppryddingen (standard 48 t). */
+  resolveAfterHours?: number;
+  /** Kildenes EGEN oppbevaring (G2 helse, G3 kamera): en signalsituasjon overlever aldri kildedataene. Injiseres fra `apps/api` (modulene importerer ikke hverandre); en feil eller `null` = standard. */
+  sourceRetention?: {
+    healthDays?: (tenantId: string) => Promise<number | null>;
+    visionDays?: (tenantId: string, memorySpace: MemorySpace) => Promise<number | null>;
+  };
   now?: () => number;
 }
 
@@ -192,7 +202,11 @@ export class SituationSignalRunner {
         const { tenant_id: tenantId, memory_space: space } = target;
         try {
           const subs = await this.deps.subscriptions(tenantId, space);
-          if (subs.length === 0) continue;
+          if (subs.length === 0) {
+            // Ingen påslåtte abonnementer: ingen lesing og ingen levering (eieren har slått alt av), men oppryddingen kjøres uavhengig (en 90 dager gammel loggrad skal ikke bli stående).
+            await this.maybePurge(tenantId, space);
+            continue;
+          }
           result.spaces += 1;
           const ctx: SourceReadContext = { tenant_id: tenantId, memory_space: space, now: this.now() };
           const bySource = new Map<SignalSource, SituationSubscription[]>();
@@ -231,7 +245,7 @@ export class SituationSignalRunner {
             if (result.errors.length < 20) result.errors.push(`deliver:${codeOf(err)}`);
           }
           try {
-            const act = await this.deps.engine.autoActPending(tenantId, space, this.deps.gateway, identity);
+            const act = await this.deps.engine.autoActPending(tenantId, space, this.deps.gateway, identity, { maxAgeMs: this.deps.autoActMaxAgeMs ?? Math.max(DEFAULT_AUTO_ACT_MAX_AGE_MS, 3 * this.deps.intervalMs) });
             result.auto_act_attempted += act.attempted;
           } catch (err) {
             if (result.errors.length < 20) result.errors.push(`auto_act:${codeOf(err)}`);
@@ -288,6 +302,27 @@ export class SituationSignalRunner {
       await new SignalLogService(this.deps.pool).purge(tenantId, space, this.deps.logRetentionDays, nowMs);
     } catch (err) {
       console.error(JSON.stringify({ msg: "situation_signal_purge_failed", tenant_id: tenantId, memory_space_id: space, code: codeOf(err) }));
+    }
+    // A-MEDIUM-4/B-MEDIUM-3: signalsituasjonene (kamera/helse/hjem) får samme oppryddingsrytme: gamle åpne løses, og alt eldre enn kildedataenes oppbevaring slettes (kaskade til logg, vurderinger og tilbakemeldinger).
+    try {
+      const source = this.deps.sourceRetention;
+      const safe = async (fn: (() => Promise<number | null>) | undefined): Promise<number | null> => {
+        if (fn === undefined) return null;
+        try {
+          return await fn();
+        } catch {
+          return null;
+        }
+      };
+      const healthDays = await safe(source?.healthDays ? () => source.healthDays!(tenantId) : undefined);
+      const visionDays = await safe(source?.visionDays ? () => source.visionDays!(tenantId, space) : undefined);
+      await retireSignalSituations(this.deps.pool, tenantId, space, {
+        nowMs, healthDays, visionDays,
+        ...(this.deps.logRetentionDays !== undefined ? { retentionDays: this.deps.logRetentionDays } : {}),
+        ...(this.deps.resolveAfterHours !== undefined ? { resolveAfterHours: this.deps.resolveAfterHours } : {})
+      });
+    } catch (err) {
+      console.error(JSON.stringify({ msg: "situation_signal_retention_failed", tenant_id: tenantId, memory_space_id: space, code: codeOf(err) }));
     }
   }
 

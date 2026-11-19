@@ -24,3 +24,5 @@ export * from "./simulation.ts";
 export * from "./anomaly-detectors.ts";
 // WP-G4 fiks-runde (A-HIGH-1): delt, fail-closed regel for fysiske/kritiske handlinger (bind-tid, kjøring og simulering).
 export * from "./autonomy-guard.ts";
+// WP-G4 fiks-runde (A-MEDIUM-4, B-MEDIUM-3): livssyklus for signalsituasjoner (sist sett, normalisering, daglig opprydding).
+export * from "./signal-retention.ts";

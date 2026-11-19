@@ -37,6 +37,52 @@ export function openingDetectionKey(entityId: string, lastChangedMs: number): st
   return `home:opening:${entityId}@${new Date(lastChangedMs).toISOString()}`;
 }
 
+const CLOSED_STATES: ReadonlySet<string> = new Set(["off", "closed"]);
+const ALARM_NOT_TRIGGERED: ReadonlySet<string> = new Set(["disarmed", "armed_home", "armed_away", "armed_night", "armed_vacation", "armed_custom_bypass"]);
+
+/**
+ * A-MEDIUM-4/B-MEDIUM-3: er tilstanden NORMAL (lukket/tørr/avarmert/under grensen)? Kun da er en åpen situasjon for entiteten løst - ukjent (`unavailable`, `unknown`), overgang (`closing`, `pending`) og en tilstand under terskelen
+ * er IKKE normal (null løsing på gjetning). Ren funksjon over HAs egne tilstandsverdier.
+ */
+export function homeStateIsNormal(obs: HomeObservation): boolean {
+  switch (obs.role) {
+    case "door":
+    case "window":
+    case "garage_door":
+    case "gate":
+    case "opening":
+      return CLOSED_STATES.has(obs.state);
+    case "leak":
+      return obs.state === "off";
+    case "alarm":
+      return ALARM_NOT_TRIGGERED.has(obs.state);
+    case "power":
+      return obs.limit_w !== undefined && obs.over_limit_ticks === 0;
+    default:
+      return false;
+  }
+}
+
+/** Nøkkelprefikset (`home:<art>:<entitet>@`) for ALLE episoder av denne entiteten og rollen - brukes til å løse åpne situasjoner når tilstanden er normal. Samme form som nøklene broen lager. */
+export function homeKeyPrefix(obs: Pick<HomeObservation, "role" | "entity_id">): string | null {
+  switch (obs.role) {
+    case "door":
+    case "window":
+    case "garage_door":
+    case "gate":
+    case "opening":
+      return `home:opening:${obs.entity_id}@`;
+    case "leak":
+      return `home:leak:${obs.entity_id}@`;
+    case "alarm":
+      return `home:alarm:${obs.entity_id}@`;
+    case "power":
+      return `home:power:${obs.entity_id}@`;
+    default:
+      return null;
+  }
+}
+
 function factsOf(entries: Record<string, string | number | boolean>): Record<string, string | number | boolean> {
   assertMinimalFacts(entries);
   return entries;

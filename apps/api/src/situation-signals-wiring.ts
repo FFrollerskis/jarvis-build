@@ -29,10 +29,18 @@ export interface SituationSignalsWiringDeps {
   ownerTenant: string;
   ownerPersonId: string;
   incidents: { listIncidents(tenantId: string, memorySpace: MemorySpace, status: "all"): Promise<Array<{ incident_id: string; title: string; status: string; severity: string; opened_at: string | Date }>> };
-  vision: { getRecentEvents(tenantId: string, memorySpace: MemorySpace, personId: string, filter: { sinceMs?: number }): Promise<Array<{
-    observation_id: string; event_type: string; source_instance_id: string; source_event_id: string; observed_at: string | Date; object_label: string | null; classification_status: string }>> };
+  vision: {
+    getRecentEvents(tenantId: string, memorySpace: MemorySpace, personId: string, filter: { sinceMs?: number }): Promise<Array<{
+      observation_id: string; event_type: string; source_instance_id: string; source_event_id: string; observed_at: string | Date; object_label: string | null; classification_status: string }>>;
+    /** Kildens EGEN oppbevaring (G3): en signalsituasjon overlever aldri kameradataene. Valgfri (uten den brukes standard). */
+    getRetentionPolicy?(tenantId: string, memorySpace: MemorySpace): Promise<{ retention_days: number } | null>;
+  };
   /** `value` er `unknown`: `health_metric_observations.value` er `numeric`, og node-postgres leverer det som STRENG (se `num()`). */
-  health: { getRecentMetrics(tenantId: string, personId: string, metricType: HealthSignalMetric, sinceMs?: number): Promise<Array<{ value: unknown; observed_at: string | Date }>> };
+  health: {
+    getRecentMetrics(tenantId: string, personId: string, metricType: HealthSignalMetric, sinceMs?: number): Promise<Array<{ value: unknown; observed_at: string | Date }>>;
+    /** Kildens EGEN oppbevaring (G2): en signalsituasjon overlever aldri helsedataene. Valgfri (uten den brukes standard). */
+    getRetentionPolicy?(tenantId: string): Promise<{ retention_days: number } | null>;
+  };
   /** HA-transporten (den samme som `home-assistant`-verktøyene bruker) for den nye lese-handlingen. */
   haTransport: ToolTransport;
   killSwitch: { isActiveDurable(): Promise<boolean> };
@@ -115,6 +123,8 @@ export function createHomeReader(deps: { gateway: Pick<ToolGateway, "execute">; 
           out.push({ ...base, limit_w: entity.limit_w, over_limit_ticks: cur.ticks, over_limit_since: cur.since });
         } else {
           powerTracker.delete(key);
+          // A-MEDIUM-4: under grensen er NORMAL (bussen løser åpne effektsituasjoner for entiteten); en ukjent verdi (`unavailable`) er det ikke (ingen løsing på gjetning).
+          out.push(Number.isFinite(watts) ? { ...base, limit_w: entity.limit_w, over_limit_ticks: 0, over_limit_since: new Date(ctx.now).toISOString() } : base);
         }
         continue;
       }
@@ -201,7 +211,12 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
   const runner = new SituationSignalRunner({
     pool: deps.pool, bus, engine: deps.engine, gateway: deps.gateway, readers, subscriptions: (t, s) => registry.listEnabled(t, s), targets, identityFor,
     guard: { blocked: async () => ((await deps.killSwitch.isActiveDurable()) ? "kill_switch_active" : null) },
-    intervalMs: intervalSeconds * 1000, logRetentionDays: retentionDays, now
+    intervalMs: intervalSeconds * 1000, logRetentionDays: retentionDays, now,
+    // Signalsituasjonene (kamera/helse/hjem) rydder etter kildedataenes egen oppbevaring (G3/G2) når den finnes; ellers etter `logRetentionDays`.
+    sourceRetention: {
+      ...(deps.health.getRetentionPolicy ? { healthDays: async (tenantId: string) => (await deps.health.getRetentionPolicy!(tenantId))?.retention_days ?? null } : {}),
+      ...(deps.vision.getRetentionPolicy ? { visionDays: async (tenantId: string, space: MemorySpace) => (await deps.vision.getRetentionPolicy!(tenantId, space))?.retention_days ?? null } : {})
+    }
   });
 
   // `set_autonomy_policy` får et valgfritt `expires_at` KUN med hovedbryteren på. Definisjonen (samme tool_id/action) ERSTATTER den eksisterende ved registrering (`ToolGateway.register` er en `Map.set`, siste vinner);

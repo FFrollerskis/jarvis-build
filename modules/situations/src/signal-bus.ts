@@ -4,6 +4,8 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import { applyAssistToCandidate, assistInputDigest, type AssistInput, type AssistOutcome, type SignalAssist } from "./assist.ts";
 import { ALL_DOMAINS, type DomainPauseRegistry } from "./domain-pause.ts";
+import { homeKeyPrefix, homeStateIsNormal } from "./home-bridge.ts";
+import { resolveNormalizedHome, touchSituation } from "./signal-retention.ts";
 import { bridgeObservation, deriveEventType, type SignalObservation } from "./signal-bridges.ts";
 import { assertMinimalFacts, resolveRuleThreshold, ruleByKey, type BridgeContext, type BridgeResult, type SignalFacts } from "./signal-types.ts";
 import { SituationDetectionKeyConflictError, type SituationEngine } from "./service.ts";
@@ -268,7 +270,11 @@ export class SituationSignalBus {
 
       // Pause FØR alt som skriver (også før logg-oppslaget): et pauset domene leses ikke inn, og signalet regnes ikke som sett (det gjenoppdages etter at pausen er opphevet).
       if (await this.isPaused(tenantId, memorySpace, bridge.candidate.domain)) return { status: "ignored", reason: "paused" };
-      if (await this.alreadyLogged(tenantId, memorySpace, bridge.source, bridge.source_ref)) return { status: "ignored", reason: "duplicate" };
+      if (await this.alreadyLogged(tenantId, memorySpace, bridge.source, bridge.source_ref)) {
+        // A-MEDIUM-4: tilstanden gjelder FORTSATT (observert nå) -> «sist sett» (høyst hvert 5. minutt). Auto-ACT krever en fersk observasjon, så et gammelt forslag utføres aldri.
+        await touchSituation(this.deps.pool, tenantId, memorySpace, bridge.candidate.detection_key);
+        return { status: "ignored", reason: "duplicate" };
+      }
 
       // Modellassistert vurdering (valgfri): kun regler som er berettiget, og kun som et løft low -> normal (assist.ts). Hvert kall bundet til et tak per batch, et tidsbudsjett og en digest (samme input = ett kall).
       // A-MEDIUM-2: i løperens fase 1 (`deterministic`) kalles INGEN modell - signalet evalueres (og leveres) deterministisk først, og modellvurderingen kjøres etterpå i fase 2.
@@ -361,6 +367,20 @@ export class SituationSignalBus {
         if (out.newly_actionable) result.newly_actionable += 1;
         if (out.held) result.held += 1;
       }
+    }
+    // A-MEDIUM-4/B-MEDIUM-3: tilstanden er NORMAL for en abonnert entitet (døra lukket, sensoren tørr, alarmen avarmert, effekten under grensen) -> åpne situasjoner for entiteten løses (ÉN spørring per batch; ikke mens domenet er pauset).
+    try {
+      const prefixes = new Set<string>();
+      for (const observation of observations) {
+        if (observation.source !== "home_assistant" || !homeStateIsNormal(observation)) continue;
+        const eventType = deriveEventType(observation);
+        if (eventType === null || !subs.some((s) => s.enabled && s.source === "home_assistant" && s.event_type === eventType)) continue;
+        const prefix = homeKeyPrefix(observation);
+        if (prefix !== null) prefixes.add(prefix);
+      }
+      if (prefixes.size > 0 && !(await this.isPaused(tenantId, memorySpace, "home"))) await resolveNormalizedHome(this.deps.pool, tenantId, memorySpace, [...prefixes]);
+    } catch (err) {
+      if (result.errors.length < 20) result.errors.push(`resolve:${codeOf(err)}`);
     }
     return result;
   }
