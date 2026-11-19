@@ -120,6 +120,57 @@ describe("A: autonom klasse D-handling går gjennom klasse D-kjeden (umiddelbart
   });
 });
 
+describe("A2: bindingen re-verifiseres med LEVENDE parametre rett før hvert kall", () => {
+  class ParamSpy implements ToolTransport {
+    calls: Array<Record<string, JsonValue>> = [];
+    /** Kjøres midt i det første kallet (simulerer at eieren endrer bindingen mens sveipet pågår; direkte mot databasen, siden en pågående ACT holder domenets advisory-lås). */
+    onFirst: (() => Promise<void>) | undefined;
+    async invoke(_action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
+      this.calls.push(parameters);
+      const hook = this.onFirst;
+      this.onFirst = undefined;
+      if (hook) await hook();
+      return { external_id: `p-${this.calls.length}` };
+    }
+  }
+
+  it("endrer eieren målet (parametrene) midt i løpet, får neste situasjon det SISTE valget - aldri øyeblikksbildet fra utvalget", async () => {
+    const { gateway } = buildGateway(new FakeNotifier(true));
+    const spy = new ParamSpy();
+    gateway.register({
+      tool_id: "test_param", action: "apply", description: "test", input_schema: record({ situation_id: z.string(), target: z.string() }), capability_class: "B", scopes: [], reversible: true,
+      rollback_procedure: "angre via test_param", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_PARAM_TOKEN", output_trust: "internal", transport: spy
+    });
+    await seedGateSuggest("cover.garasje");
+    await seedGateSuggest("cover.port");
+    await bind("test_param", "apply", { situation_id: "{{situation_id}}", target: "A" });
+    spy.onFirst = async () => {
+      await db.adminPool.query(`UPDATE situation_autonomy_policies SET parameters = $2::jsonb WHERE tenant_id = $1`, [TENANT_A, JSON.stringify({ situation_id: "{{situation_id}}", target: "B" })]);
+    };
+    const result = await db.engine.autoActPending(TENANT_A, "home", gateway, identity(TENANT_A, "home"));
+    expect(result).toMatchObject({ attempted: 2, succeeded: 2, denied: 0 });
+    expect(spy.calls.map((c) => c["target"])).toEqual(["A", "B"]);
+  });
+
+  it("bytter eieren verktøy/handling midt i løpet, hoppes neste situasjon over (ingen ACT med et annet verktøy enn det som var valgt ved utvalget)", async () => {
+    const { gateway } = buildGateway(new FakeNotifier(true));
+    const spy = new ParamSpy();
+    gateway.register({
+      tool_id: "test_param", action: "apply", description: "test", input_schema: record({ situation_id: z.string(), target: z.string() }), capability_class: "B", scopes: [], reversible: true,
+      rollback_procedure: "angre via test_param", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_PARAM_TOKEN", output_trust: "internal", transport: spy
+    });
+    await seedGateSuggest("cover.garasje");
+    await seedGateSuggest("cover.port");
+    await bind("test_param", "apply", { situation_id: "{{situation_id}}", target: "A" });
+    spy.onFirst = async () => {
+      await db.adminPool.query(`UPDATE situation_autonomy_policies SET tool_id = 'test_gate', action = 'close', parameters = $2::jsonb WHERE tenant_id = $1`, [TENANT_A, JSON.stringify({ situation_id: "{{situation_id}}" })]);
+    };
+    const result = await db.engine.autoActPending(TENANT_A, "home", gateway, identity(TENANT_A, "home"));
+    expect(result).toMatchObject({ attempted: 1, succeeded: 1, skipped: 1 });
+    expect(spy.calls).toHaveLength(1);
+  });
+});
+
 describe("B: de ekte G2-hjemmehandlingene nektes for den autonome sveipe-identiteten (step-up, Q-55) - fail-closed", () => {
   it("critical_cover med eierens binding: nektet av step-up FØR noe kall til Home Assistant; situasjonen eskalerer; ingen varsel om utført handling", async () => {
     const notifier = new FakeNotifier(true);

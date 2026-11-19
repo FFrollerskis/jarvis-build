@@ -1551,11 +1551,11 @@ export class SituationEngine {
       // WP-G4: bindingen re-verifiseres RETT FØR hvert kall (ikke bare ved utvalget): en binding som er tilbakekalt, deaktivert, utløpt eller endret i mellomtiden gir INGEN ACT for denne situasjonen.
       const live = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
         const { rows } = await client.query(
-          `SELECT tool_id, action FROM situation_autonomy_policies
+          `SELECT tool_id, action, parameters FROM situation_autonomy_policies
            WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND enabled = true AND (expires_at IS NULL OR expires_at > now())`,
           [tenantId, memorySpace, candidate.domain]
         );
-        return rows[0] as { tool_id: string; action: string } | undefined;
+        return rows[0] as { tool_id: string; action: string; parameters: Record<string, JsonValue> } | undefined;
       });
       if (live === undefined || live.tool_id !== candidate.policy_tool_id || live.action !== candidate.policy_action) {
         result.skipped += 1;
@@ -1564,7 +1564,8 @@ export class SituationEngine {
       // Policyens parametre rendres med situasjonens IMMUTABLE identifikatorer
       // (aldri injisert som ekstra nøkler - verktøyenes strenge input-skjemaer
       // avgjør selv hvilke felt som finnes). Manglende verdi => hopp over.
-      const parameters = renderAutonomyParameters(candidate.policy_parameters, candidate);
+      // WP-G4: parametrene er de LEVENDE (re-verifiserte) fra bindingen, ikke øyeblikksbildet fra utvalget: endrer eieren målet/parametrene midt i løpet, gjelder det siste valget.
+      const parameters = renderAutonomyParameters(live.parameters, candidate);
       if (parameters === null) {
         result.skipped += 1;
         continue;
