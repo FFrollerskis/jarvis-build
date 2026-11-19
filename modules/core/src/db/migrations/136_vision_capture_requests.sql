@@ -48,7 +48,9 @@ ALTER TABLE vision_capture_requests ADD CONSTRAINT vision_capture_requests_snaps
 ALTER TABLE vision_capture_requests ADD CONSTRAINT vision_capture_requests_idempotency_key
   UNIQUE (tenant_id, memory_space_id, person_id, idempotency_key);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON vision_capture_requests TO jarvis_app;
+-- Minste privilegium (review B-L9): kun livssyklus-kolonnene (forbruk/utløp/avvisning og peker til bildet) kan oppdateres - aldri enhet, kamera, person, levetid eller idempotensnøkkel.
+GRANT SELECT, INSERT, DELETE ON vision_capture_requests TO jarvis_app;
+GRANT UPDATE (state, resolved_at, snapshot_id, upload_sha256, reject_reason) ON vision_capture_requests TO jarvis_app;
 ALTER TABLE vision_capture_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vision_capture_requests FORCE ROW LEVEL SECURITY;
 CREATE POLICY vision_capture_requests_tenant ON vision_capture_requests

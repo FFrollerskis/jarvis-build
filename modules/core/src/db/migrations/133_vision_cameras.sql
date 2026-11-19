@@ -56,7 +56,9 @@ ALTER TABLE vision_cameras ADD CONSTRAINT vision_cameras_scope_key UNIQUE (tenan
 ALTER TABLE vision_cameras ADD CONSTRAINT vision_cameras_room_fkey
   FOREIGN KEY (tenant_id, memory_space_id, person_id, room_id) REFERENCES vision_rooms (tenant_id, memory_space_id, person_id, room_id);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON vision_cameras TO jarvis_app;
+-- Minste privilegium (review B-L9): kun kolonnene `VisionCameraService.updateCamera` faktisk endrer kan oppdateres. Identitet, kilde, person, tenant, space og spor kan aldri omskrives av runtime-rollen.
+GRANT SELECT, INSERT, DELETE ON vision_cameras TO jarvis_app;
+GRANT UPDATE (label, zone_kind, route_policy, cooldown_seconds, enabled, trigger_entities, updated_at) ON vision_cameras TO jarvis_app;
 ALTER TABLE vision_cameras ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vision_cameras FORCE ROW LEVEL SECURITY;
 CREATE POLICY vision_cameras_tenant ON vision_cameras

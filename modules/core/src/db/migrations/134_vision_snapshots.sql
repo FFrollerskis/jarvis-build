@@ -60,7 +60,9 @@ ALTER TABLE vision_snapshots ADD CONSTRAINT vision_snapshots_source_event_key
   UNIQUE (tenant_id, memory_space_id, person_id, source_type, source_instance_id, source_event_id);
 ALTER TABLE vision_snapshots ADD CONSTRAINT vision_snapshots_storage_key_key UNIQUE (tenant_id, storage_backend, storage_key);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON vision_snapshots TO jarvis_app;
+-- Minste privilegium (review B-L9): kun tilstandsovergangen pending -> stored (`markStoredInTransaction`) kan oppdateres; lagringsnøkkel, hash, lengde, person og kilde kan aldri omskrives av runtime-rollen.
+GRANT SELECT, INSERT, DELETE ON vision_snapshots TO jarvis_app;
+GRANT UPDATE (state, stored_at) ON vision_snapshots TO jarvis_app;
 ALTER TABLE vision_snapshots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vision_snapshots FORCE ROW LEVEL SECURITY;
 CREATE POLICY vision_snapshots_tenant ON vision_snapshots
@@ -87,7 +89,9 @@ CREATE TABLE vision_snapshot_tombstones (
   UNIQUE (tenant_id, storage_backend, storage_key)
 );
 CREATE INDEX vision_snapshot_tombstones_work_idx ON vision_snapshot_tombstones (tenant_id, memory_space_id, created_at);
-GRANT SELECT, INSERT, UPDATE, DELETE ON vision_snapshot_tombstones TO jarvis_app;
+-- Minste privilegium (review B-L9): reaperen oppdaterer kun forsøkstelling og feilkode; lagringsnøkkelen kan aldri omskrives.
+GRANT SELECT, INSERT, DELETE ON vision_snapshot_tombstones TO jarvis_app;
+GRANT UPDATE (attempts, last_attempt_at, last_error) ON vision_snapshot_tombstones TO jarvis_app;
 ALTER TABLE vision_snapshot_tombstones ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vision_snapshot_tombstones FORCE ROW LEVEL SECURITY;
 CREATE POLICY vision_snapshot_tombstones_tenant ON vision_snapshot_tombstones

@@ -81,7 +81,9 @@ ALTER TABLE vision_inventory_items ADD CONSTRAINT vision_inventory_room_fkey
 ALTER TABLE vision_inventory_items ADD CONSTRAINT vision_inventory_item_key
   UNIQUE (tenant_id, memory_space_id, person_id, room_id, object_label);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON vision_inventory_items TO jarvis_app;
+-- Minste privilegium (review B-L9): kun kolonnene UPSERTEN i inventory.ts oppdaterer (ikke rom, navn, person eller tenant).
+GRANT SELECT, INSERT, DELETE ON vision_inventory_items TO jarvis_app;
+GRANT UPDATE (confidence, seen_count, first_seen_at, last_seen_at, last_observation_id, source_type, source_instance_id, expires_at, task_id, session_id, updated_at) ON vision_inventory_items TO jarvis_app;
 ALTER TABLE vision_inventory_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vision_inventory_items FORCE ROW LEVEL SECURITY;
 CREATE POLICY vision_inventory_items_tenant ON vision_inventory_items

@@ -337,6 +337,55 @@ describe("136: opptaksforespørsler", () => {
   });
 });
 
+/**
+ * Review B-L9: minste privilegium. Runtime-rollen (jarvis_app) hadde tabell-UPDATE på de fem muterbare vision-tabellene, så en kodefeil eller et injisert uttrykk kunne omskrive identitet, kilde,
+ * lagringsnøkkel, person eller tidsfrister. Nå har den KUN kolonne-UPDATE på kolonnene tjenestene faktisk endrer. Listene under er sannheten om hva koden gjør (hver UPDATE i modules/vision/src);
+ * en ny kolonne som må kunne endres krever en bevisst endring både her og i migrasjonen.
+ */
+const UPDATABLE_COLUMNS: Record<string, string[]> = {
+  vision_cameras: ["label", "zone_kind", "route_policy", "cooldown_seconds", "enabled", "trigger_entities", "updated_at"],
+  vision_snapshots: ["state", "stored_at"],
+  vision_snapshot_tombstones: ["attempts", "last_attempt_at", "last_error"],
+  vision_inventory_items: ["confidence", "seen_count", "first_seen_at", "last_seen_at", "last_observation_id", "source_type", "source_instance_id", "expires_at", "task_id", "session_id", "updated_at"],
+  vision_capture_requests: ["state", "resolved_at", "snapshot_id", "upload_sha256", "reject_reason"]
+};
+/** En identitets-/kilde-/frist-kolonne per tabell som runtime-rollen ALDRI skal kunne omskrive. */
+const IMMUTABLE_COLUMN: Record<string, string> = {
+  vision_cameras: "source_ref", vision_snapshots: "storage_key", vision_snapshot_tombstones: "storage_key", vision_inventory_items: "object_label", vision_capture_requests: "expires_at"
+};
+
+describe("review B-L9: kun kolonner tjenestene faktisk endrer kan oppdateres av runtime-rollen", () => {
+  for (const [table, allowed] of Object.entries(UPDATABLE_COLUMNS)) {
+    it(`${table}: UPDATE-rettigheten er nøyaktig [${allowed.join(", ")}] - ingen tabellrettighet og ingen ekstra kolonner`, async () => {
+      const rows = (
+        await db.app.query(
+          `SELECT a.attname AS column_name, has_column_privilege(current_user, c.oid, a.attnum, 'UPDATE') AS can_update
+             FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+            WHERE c.relname = $1 AND c.relnamespace = 'public'::regnamespace AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`,
+          [table]
+        )
+      ).rows as Array<{ column_name: string; can_update: boolean }>;
+      expect(rows.length).toBeGreaterThan(allowed.length); // tabellen har flere kolonner enn de som kan endres
+      expect(rows.filter((r) => r.can_update).map((r) => r.column_name).sort()).toEqual([...allowed].sort());
+      expect((await db.app.query(`SELECT has_table_privilege(current_user, $1, 'UPDATE') AS t`, [table])).rows[0].t).toBe(false);
+      // Selve setningen, ikke bare katalogen: en omskriving av identitet/kilde feiler mot databasen, en tillatt kolonne gjør det ikke (WHERE false: ingen rader berøres, rettigheten sjekkes likevel).
+      const immutable = IMMUTABLE_COLUMN[table] as string;
+      await expect(asApp(T1.tenant, ["home"], (c) => c.query(`UPDATE ${table} SET ${immutable} = ${immutable} WHERE false`))).rejects.toThrow(/permission denied/i);
+      const first = allowed[0] as string;
+      await expect(asApp(T1.tenant, ["home"], (c) => c.query(`UPDATE ${table} SET ${first} = ${first} WHERE false`))).resolves.toBeDefined();
+    });
+  }
+
+  it("SELECT, INSERT og DELETE er uendret (livssyklusen - også erasure og kaskader - trenger dem), og alle fem tabellene har fortsatt FORCE RLS", async () => {
+    for (const table of Object.keys(UPDATABLE_COLUMNS)) {
+      const priv = (await db.app.query(`SELECT has_table_privilege(current_user, $1, 'SELECT') AS s, has_table_privilege(current_user, $1, 'INSERT') AS i, has_table_privilege(current_user, $1, 'DELETE') AS d`, [table])).rows[0];
+      expect(priv, table).toEqual({ s: true, i: true, d: true });
+      const rls = (await db.admin.query(`SELECT relrowsecurity AS enabled, relforcerowsecurity AS forced FROM pg_class WHERE relname = $1 AND relnamespace = 'public'::regnamespace`, [table])).rows[0];
+      expect(rls, table).toEqual({ enabled: true, forced: true });
+    }
+  });
+});
+
 describe("ingen biometri i skjemaet (første linje av P3f - selve vakten ligger i g3-guards.test.ts)", () => {
   it("ingen vision_*-kolonne eller -tabell har et biometrisk/identitetsnavn", async () => {
     const cols = await db.admin.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name LIKE 'vision\\_%'`);

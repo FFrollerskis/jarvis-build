@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { MemorySpace } from "@jarvis/contracts";
 import { VisionCameraService, type VisionCamera } from "../src/cameras.ts";
 import { VisionIngestPipeline } from "../src/pipeline.ts";
-import { VisionPoller, startVisionPoller, type VisionPollerGuard } from "../src/poller.ts";
+import { VisionPoller, startVisionPoller, type VisionPollTickResult, type VisionPollerGuard } from "../src/poller.ts";
 import { VisionService } from "../src/service.ts";
 import type { CapturedImage, VisionSource, VisionSourceCamera, VisionSourceEvent } from "../src/source.ts";
 import { makeJpeg, seedTenant, startVisionDb, type VisionDb } from "./support/harness.ts";
@@ -217,6 +217,101 @@ describe("periodisk start", () => {
       handle.stop();
       await vi.advanceTimersByTimeAsync(20_000);
       expect(ticks).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("review B-L8: feilserie gir eksponentiell backoff, ikke en fast rytme mot en kilde som er nede", () => {
+  const summary = { events_seen: 0, recorded: 0, duplicates: 0, discarded: 0, cooldown: 0, failed: 0 };
+  const sourceDown: VisionPollTickResult = { status: "ok", spaces_polled: 1, cameras_polled: 1, failed_spaces: 0, summary: { ...summary, source_error: "home_assistant_error_503" } };
+  const failedSpace: VisionPollTickResult = { status: "ok", spaces_polled: 1, cameras_polled: 1, failed_spaces: 1, summary };
+  const healthy: VisionPollTickResult = { status: "ok", spaces_polled: 1, cameras_polled: 1, failed_spaces: 0, summary };
+  const ownerStop: VisionPollTickResult = { status: "blocked", reason: "kill_switch_active" };
+  const scripted = (script: VisionPollTickResult[]): { stub: VisionPoller; calls: () => number } => {
+    let calls = 0;
+    const stub = { tick: async () => { calls += 1; return script.shift() ?? healthy; } } as unknown as VisionPoller;
+    return { stub, calls: () => calls };
+  };
+
+  it("kildefeil: ventetiden dobles per feil på rad (10 s -> 20 -> 40 -> 60 = taket, blir der), og første vellykkede runde går tilbake til grunnintervallet", async () => {
+    vi.useFakeTimers();
+    try {
+      const { stub, calls } = scripted([sourceDown, sourceDown, sourceDown, sourceDown, healthy]);
+      const handle = startVisionPoller(stub, 10_000, () => new Date("2026-11-18T12:00:00.000Z"), { maxBackoffMs: 60_000 });
+      expect(handle.health()).toEqual({ consecutive_failures: 0, next_delay_ms: 10_000, base_interval_ms: 10_000, max_delay_ms: 60_000 });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(calls()).toBe(1);
+      expect(handle.health()).toMatchObject({ consecutive_failures: 1, next_delay_ms: 20_000 });
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(calls(), "ingen ny runde før den doblede ventetiden er gått").toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(calls()).toBe(2);
+      expect(handle.health()).toMatchObject({ consecutive_failures: 2, next_delay_ms: 40_000 });
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(calls()).toBe(3);
+      expect(handle.health()).toMatchObject({ consecutive_failures: 3, next_delay_ms: 60_000 }); // 80 000 klemmes til taket
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(calls()).toBe(4);
+      expect(handle.health()).toMatchObject({ consecutive_failures: 4, next_delay_ms: 60_000 }); // blir på taket
+      expect(handle.status()).toMatchObject({ last_status: "ok", last_source_error: "home_assistant_error_503" });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(calls()).toBe(5); // den vellykkede runden
+      expect(handle.health()).toMatchObject({ consecutive_failures: 0, next_delay_ms: 10_000 });
+      expect(handle.status().last_source_error).toBeNull();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(calls()).toBe(6); // tilbake på grunnrytmen
+      handle.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("feilede spaces teller som feil; en eier-stans (kill switch) er ingen feil og nullstiller serien; en overlappende manuell runde (tick_in_progress) rører verken status eller serie", async () => {
+    vi.useFakeTimers();
+    try {
+      const overlapping: VisionPollTickResult = { status: "blocked", reason: "tick_in_progress" };
+      const { stub, calls } = scripted([failedSpace, failedSpace, ownerStop, failedSpace, overlapping]);
+      let clock = new Date("2026-11-18T12:00:00.000Z");
+      const handle = startVisionPoller(stub, 5_000, () => clock);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(handle.health()).toMatchObject({ consecutive_failures: 1, next_delay_ms: 10_000 });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(handle.health()).toMatchObject({ consecutive_failures: 2, next_delay_ms: 20_000 });
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(calls()).toBe(3);
+      expect(handle.status()).toMatchObject({ last_status: "blocked", last_reason: "kill_switch_active" });
+      expect(handle.health()).toMatchObject({ consecutive_failures: 0, next_delay_ms: 5_000 }); // stanset av eier = ingen feil
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(handle.health()).toMatchObject({ consecutive_failures: 1, next_delay_ms: 10_000 });
+      const statusBefore = handle.status();
+      const healthBefore = handle.health();
+      clock = new Date("2026-11-18T13:00:00.000Z");
+      expect(await handle.tick()).toEqual(overlapping); // en manuell runde mens en annen pågår
+      expect(handle.status()).toEqual(statusBefore); // ingen ny måling: hverken tidspunkt, status eller serie endres
+      expect(handle.health()).toEqual(healthBefore);
+      handle.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stop() under en backoff avslutter alt (ingen etterlatt timer), og en runde som kaster teller som feil uten å stoppe løkken", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const throwing = { tick: async () => { calls += 1; throw new Error("boom"); } } as unknown as VisionPoller;
+      const handle = startVisionPoller(throwing, 5_000, () => new Date("2026-11-18T12:00:00.000Z"));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(calls).toBe(1);
+      expect(handle.health()).toMatchObject({ consecutive_failures: 1, next_delay_ms: 10_000 });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(calls).toBe(2); // løkken lever videre etter et kast
+      handle.stop();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(calls).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }

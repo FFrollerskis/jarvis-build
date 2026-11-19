@@ -13,6 +13,7 @@ import { detectionsJson, makeJpeg, NOT_AN_IMAGE, ScriptedGateway, seedTenant, st
 import { jpegBytes } from "../../../modules/vision/test/support/images.ts";
 import { RateLimiter } from "../src/http-guard.ts";
 import { createApiServer, type ApiDeps } from "../src/server.ts";
+import type { VisionStatusReport } from "../src/vision-routes.ts";
 
 /**
  * WP-G3 (D-465): `/vision/*` over HTTP mot en ekte Postgres (app-rolle, RLS): dormant (404), grant/eier/step-up-rekkefølgen, typet bekreftelse for sletting, enhets-id kun fra grantet og den enhetssignerte
@@ -37,7 +38,7 @@ const grants = new Map<string, Grant>();
 
 const OWNER_ID = (identity: IdentityContext): boolean => identity.person_id === T.owner && identity.tenant_id === T.tenant && identity.delegation_id === undefined;
 
-function makeDeps(withFeature: boolean, extra: { uploadLimiter?: RateLimiter; verified?: string[] } = {}): ApiDeps {
+function makeDeps(withFeature: boolean, extra: { uploadLimiter?: RateLimiter; verified?: string[]; status?: () => VisionStatusReport } = {}): ApiDeps {
   return {
     grants: {
       verify: async (token: string) => {
@@ -56,7 +57,8 @@ function makeDeps(withFeature: boolean, extra: { uploadLimiter?: RateLimiter; ve
             lastSeen: new VisionLastSeenService(db.app, { embeddings, inventory }),
             inventory,
             maxUploadBytes: MAX_UPLOAD,
-            ...(extra.uploadLimiter !== undefined ? { uploadLimiter: extra.uploadLimiter } : {})
+            ...(extra.uploadLimiter !== undefined ? { uploadLimiter: extra.uploadLimiter } : {}),
+            ...(extra.status !== undefined ? { status: extra.status } : {})
           }
         }
       : {})
@@ -135,7 +137,7 @@ const upload = (request: { request_id: string }, bytes: Uint8Array, over: Record
 
 describe("dormant: uten deps.vision finnes ingen rute", () => {
   it("alle ruter gir 404 selv med gyldig eier-grant; med deps.vision gir feil metode/ukjent sti også 404", async () => {
-    for (const path of ["/vision/cameras/list", "/vision/cameras/register", "/vision/capture/request", "/vision/capture/upload", "/vision/last-seen", "/vision/inventory"]) {
+    for (const path of ["/vision/cameras/list", "/vision/cameras/register", "/vision/capture/request", "/vision/capture/upload", "/vision/last-seen", "/vision/inventory", "/vision/status"]) {
       expect((await post(urlDormant, path, { grant_token: "owner-signed" })).status, path).toBe(404);
     }
     expect((await fetch(`${url}/vision/cameras/list`)).status).toBe(404); // GET
@@ -159,7 +161,7 @@ describe("kropp, grant, eier og step-up - alt avvises FØR noe skrives", () => {
 
   it("en annen person i samme tenant får 403 owner_required på alle eier-ruter; enhets-rutene er personbundne", async () => {
     const bodies: Array<[string, Record<string, unknown>]> = [
-      ["/vision/cameras/list", {}], ["/vision/last-seen", { query: "x" }], ["/vision/inventory", {}],
+      ["/vision/cameras/list", {}], ["/vision/status", {}], ["/vision/last-seen", { query: "x" }], ["/vision/inventory", {}],
       ["/vision/cameras/register", { label: "x", source_type: "iphone", source_ref: "d", zone_kind: "home", route_policy: "local_only" }],
       ["/vision/cameras/update", { camera_id: "c", label: "x" }], ["/vision/cameras/remove", { camera_id: "c", confirm: true, confirm_camera_id: "c" }], ["/vision/capture/request", { camera_id: "c" }]
     ];
@@ -447,5 +449,42 @@ describe("opplastingsruten (review B-L4 og B-L6)", () => {
     const tooBig = await call("/vision/capture/upload", "phone", upload(await request(), over));
     expect(tooBig.status).toBe(400);
     expect(tooBig.body).toMatchObject({ error: "malformed_request", reason: "byte_length" });
+  });
+});
+
+describe("/vision/status (review B-L8): eierens helsebilde - kun lesing, kun eier, kun koder og tall", () => {
+  const REPORT: VisionStatusReport = {
+    poller: { enabled: true, last_tick_at: "2026-11-18T12:00:00.000Z", last_status: "ok", last_reason: null, last_source_error: "home_assistant_error_503", consecutive_failures: 3, next_delay_ms: 160_000 },
+    maintenance: { light: { at: "2026-11-18T12:05:00.000Z", failed: 1, tombstones_deleted: 4, tombstones_failed: 1, tombstones_stuck: 1 }, full: null },
+    storage: { maintenance_enabled: true, writing_enabled: false },
+    classifier: true,
+    embeddings: false
+  };
+
+  it("eieren får helsebildet (lesing: ingen step-up kreves), og svaret er nøyaktig det kjøretiden rapporterer", async () => {
+    const base = await listen(makeDeps(true, { status: () => REPORT }));
+    for (const token of ["owner-signed", "owner-active"]) {
+      const res = await post(base, "/vision/status", { grant_token: token });
+      expect(res.status, token).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, data: REPORT });
+    }
+  });
+
+  it("uten grant 401, ugyldig grant 403, annen person i samme tenant 403 owner_required, og kroppen kan ikke bære identitetsfelt eller ukjente felt (400)", async () => {
+    const base = await listen(makeDeps(true, { status: () => REPORT }));
+    expect((await post(base, "/vision/status", {})).status).toBe(401);
+    expect((await post(base, "/vision/status", { grant_token: "bogus" })).status).toBe(403);
+    const other = await post(base, "/vision/status", { grant_token: "other-signed" });
+    expect(other.status).toBe(403);
+    expect(await other.json()).toMatchObject({ error: "owner_required" });
+    expect((await post(base, "/vision/status", { grant_token: "owner-signed", person_id: "x" })).status).toBe(400);
+    expect((await post(base, "/vision/status", { grant_token: "owner-signed", surprise: 1 })).status).toBe(400);
+  });
+
+  it("uten en status-kilde (kjøretiden satte ingen) er ruten 503 status_unavailable - aldri en tom, villedende «alt ok»", async () => {
+    const res = await call("/vision/status", "owner-signed");
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ error: "status_unavailable" });
+    expect(res.body["data"]).toBeUndefined();
   });
 });

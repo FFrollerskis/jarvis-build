@@ -1,7 +1,9 @@
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type pg from "pg";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import type { MemorySpace } from "@jarvis/contracts";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import { VisionCameraService, VisionCameraValidationError, type VisionCamera } from "../src/cameras.ts";
 import { VisionClassifier } from "../src/classifier.ts";
@@ -9,7 +11,7 @@ import { VisionEmbeddingService } from "../src/embeddings.ts";
 import { VisionInventoryService } from "../src/inventory.ts";
 import { VisionIngestPipeline, type IngestContext } from "../src/pipeline.ts";
 import { VisionService } from "../src/service.ts";
-import { VisionSnapshotService } from "../src/snapshots.ts";
+import { SnapshotQuotaError, VisionSnapshotService } from "../src/snapshots.ts";
 import { LocalFsStorageAdapter, type StorageAdapter } from "../src/storage.ts";
 import { runVisionMaintenanceSweepForAllTenants } from "../src/sweep.ts";
 import { detectionsJson, makeJpeg, ScriptedGateway, seedTenant, startVisionDb, type VisionDb } from "./support/harness.ts";
@@ -21,7 +23,8 @@ import { detectionsJson, makeJpeg, ScriptedGateway, seedTenant, startVisionDb, t
  *  - hendelser som utløper tar vektor, bilde og (via utløp) inventar med seg,
  *  - reaper-feil står igjen som gravstein med forsøkstall og kort feilkode, og kan prøves på nytt (ingenting stille tapt),
  *  - pending-bilder fra et krasj ryddes, kamera-fjerning er destruktiv og krever bekreftelse, og tenant-isolasjon gjelder reaperen,
- *  - integritet: et ødelagt bildeobjekt serveres aldri.
+ *  - integritet: et ødelagt bildeobjekt serveres aldri,
+ *  - review B-L7/B-L8/B-L11: kvoten holder under samtidighet (advisory-lås, deterministisk barriere), reaperen tømmer køen i batcher (hver gravstein forsøkes høyst én gang per kall) og en «stuck» gravstein er en sveipefeil.
  */
 let db: VisionDb;
 let T: Awaited<ReturnType<typeof seedTenant>>;
@@ -276,5 +279,114 @@ describe("lagringskvote: en støyende sensor kan ikke fylle disken", () => {
   it("ugyldig kvote avvises ved konstruksjon", () => {
     expect(() => new VisionSnapshotService(db.app, storage, vision, { maxStoredBytes: 0 })).toThrow("vision_snapshot_quota_invalid");
     expect(() => new VisionSnapshotService(db.app, storage, vision, { maxStoredBytes: Number.NaN })).toThrow("vision_snapshot_quota_invalid");
+  });
+});
+
+/**
+ * Review B-L7: holder ALLE `parties` begin()-transaksjoner åpne (retensjonsoppslaget er gjort, ingenting er satt inn ennå) til alle har kommet. Det gjør kappløpet mellom innsetting og kvotesjekk
+ * deterministisk uten sleep: uten en lås ser hver transaksjon bare sin egen uforpliktede rad (READ COMMITTED) og slipper gjennom.
+ */
+class LatchedVision extends VisionService {
+  arrived = 0;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(pool: pg.Pool, private readonly parties: number) {
+    super(pool);
+  }
+
+  override async snapshotRetentionDaysInTransaction(client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace): Promise<number> {
+    const days = await super.snapshotRetentionDaysInTransaction(client, tenantId, memorySpace);
+    this.arrived += 1;
+    if (this.arrived >= this.parties) for (const release of this.waiting) release();
+    else await new Promise<void>((resolve) => { this.waiting.push(resolve); setTimeout(resolve, 10_000).unref(); });
+    return days;
+  }
+}
+
+describe("review B-L7: kvoten holder også under samtidighet", () => {
+  it("åtte samtidige begin() med plass til nøyaktig ÉN ekstra bilderad: nøyaktig én slipper gjennom, resten får SnapshotQuotaError (uten advisory-lås slipper alle gjennom)", async () => {
+    const parties = 8;
+    const racing = new LatchedVision(db.app, parties);
+    const used = await scalar(`SELECT COALESCE(SUM(byte_length), 0)::int AS n FROM vision_snapshots WHERE tenant_id = $1 AND memory_space_id = 'home'`, [T.tenant]);
+    const limited = new VisionSnapshotService(db.app, storage, racing, { maxStoredBytes: used + 150 }); // ett bilde à 100 byte får plass, to får det ikke
+    const results = await Promise.allSettled(
+      Array.from({ length: parties }, (_, i) =>
+        limited.begin(T.tenant, "home", T.owner, { camera_id: camera.camera_id, source_type: "home_assistant", source_instance_id: camera.camera_id, source_event_id: `binary_sensor.x@race-${i}`, media_type: "image/jpeg", byte_length: 100, sha256: String(i).repeat(64), task_id: "task-race" })
+      )
+    );
+    expect(racing.arrived).toBe(parties); // alle åtte hadde åpnet transaksjonen før noen satte inn
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    for (const failed of results.filter((r) => r.status === "rejected")) expect((failed as PromiseRejectedResult).reason).toBeInstanceOf(SnapshotQuotaError);
+    expect(await scalar(`SELECT count(*)::int AS n FROM vision_snapshots WHERE source_event_id LIKE '%@race-%'`)).toBe(1); // ingen pending-rester fra de avviste
+    expect(await scalar(`SELECT COALESCE(SUM(byte_length), 0)::int AS n FROM vision_snapshots WHERE tenant_id = $1 AND memory_space_id = 'home'`, [T.tenant])).toBeLessThanOrEqual(used + 150);
+    await snapshots.reapPending(T.tenant, "home", 0); // rydd: den ene pending-raden hører ikke til resten av filen
+    await snapshots.reapTombstones(T.tenant, "home");
+  });
+});
+
+describe("review B-L11 + B-L8: reaperen tømmer køen, og en gravstein som ikke lar seg slette synes", () => {
+  const stuckDir = async (name: string, attempts = 0): Promise<string> => {
+    // En KATALOG på nøkkelens sti kan ikke slettes med unlink (EISDIR, også som root): en deterministisk «ulesbar gravstein» uten å late som om vi kan endre filrettigheter.
+    const key = `snapshots/stuck/${name}`;
+    await mkdir(join(root, key), { recursive: true });
+    await db.admin.query(`INSERT INTO vision_snapshot_tombstones (tenant_id, memory_space_id, storage_backend, storage_key, attempts) VALUES ($1, 'home', 'local_fs', $2, $3)`, [T.tenant, key, attempts]);
+    return key;
+  };
+  const bulk = async (prefix: string, count: number): Promise<void> => {
+    const keys = Array.from({ length: count }, (_, i) => `snapshots/bulk/${prefix}-${i}`);
+    await db.admin.query(`INSERT INTO vision_snapshot_tombstones (tenant_id, memory_space_id, storage_backend, storage_key) SELECT $1, 'home', 'local_fs', k FROM unnest($2::text[]) AS k`, [T.tenant, keys]);
+  };
+  const remaining = (like: string): Promise<number> => scalar(`SELECT count(*)::int AS n FROM vision_snapshot_tombstones WHERE storage_key LIKE $1`, [like]);
+
+  it("B-L11: 250 gravsteiner med batch-størrelse 100 tømmes i ÉN kjøring (en enkelt batch ville latt 150 ligge til neste kjøring)", async () => {
+    await bulk("b11", 250);
+    const result = await snapshots.reapTombstones(T.tenant, "home", { limit: 100 });
+    expect(result.deleted).toBeGreaterThanOrEqual(250);
+    expect(result.failed).toBe(0);
+    expect(await remaining("snapshots/bulk/b11-%")).toBe(0);
+  });
+
+  it("B-L11: en gravstein som feiler forsøkes høyst ÉN gang per kall (markøren går forbi den), resten av køen tømmes likevel; maxBatches er en sikkerhetsgrense", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const key = await stuckDir("b11-once");
+      await bulk("b11-rest", 5);
+      const result = await snapshots.reapTombstones(T.tenant, "home", { limit: 2 });
+      expect(result.failed).toBe(1); // ikke ett nytt forsøk per batch
+      expect(result.deleted).toBeGreaterThanOrEqual(5);
+      expect(await remaining("snapshots/bulk/b11-rest-%")).toBe(0);
+      const row = (await db.admin.query(`SELECT attempts, last_error FROM vision_snapshot_tombstones WHERE storage_key = $1`, [key])).rows[0] as { attempts: number; last_error: string };
+      expect(row).toEqual({ attempts: 1, last_error: "eisdir" }); // kun en kort kode, aldri sti eller tekst
+
+      await bulk("b11-cap", 3);
+      const bounded = await snapshots.reapTombstones(T.tenant, "home", { limit: 1, maxBatches: 2 });
+      expect(bounded.deleted + bounded.failed).toBeLessThanOrEqual(2); // to batcher à ÉN gravstein: aldri mer
+      expect((await remaining("snapshots/bulk/b11-cap-%")) + (await remaining(key))).toBeGreaterThanOrEqual(2);
+      await rm(join(root, key), { recursive: true }); // rydd: volumet repareres, så tømmes resten
+      await snapshots.reapTombstones(T.tenant, "home");
+      expect(await remaining("snapshots/bulk/%")).toBe(0);
+      expect(await remaining(key)).toBe(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("B-L8: en gravstein som har nådd «stuck» (5 mislykkede forsøk) er en SVEIPEFEIL (failed-listen), ikke bare en teller - og feilen forsvinner når lagringen er reparert", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const key = await stuckDir("b8-stuck", 4);
+      const first = await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots }, { light: true });
+      expect(first.tombstones_stuck).toBe(1);
+      expect(first.tombstones_failed).toBe(1);
+      expect(first.failed).toEqual([{ tenant_id: T.tenant, memory_space_id: "home", error: "tombstones_stuck:1" }]);
+      expect(await remaining(key)).toBe(1); // graven står (ingenting stille tapt)
+      await rm(join(root, key), { recursive: true }); // volumet er reparert
+      const second = await runVisionMaintenanceSweepForAllTenants(db.app, { snapshots }, { light: true });
+      expect(second.failed).toEqual([]);
+      expect(second.tombstones_stuck).toBe(0);
+      expect(await remaining(key)).toBe(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });

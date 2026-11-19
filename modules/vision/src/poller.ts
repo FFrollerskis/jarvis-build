@@ -121,21 +121,64 @@ export interface VisionPollerHandle {
   tick(): Promise<VisionPollTickResult>;
   /** Siste rundes utfall (kort kode/tall, aldri innhold). */
   status(): { last_tick_at: string | null; last_status: string | null; last_reason: string | null; last_source_error: string | null };
+  /**
+   * Review B-L8: feilserie og neste ventetid. `consecutive_failures` teller runder på rad med kildefeil (HA nede/feil token) eller feilede spaces; en stanset runde (kill switch, frosset connector) og en vellykket runde
+   * nullstiller den. `next_delay_ms` er ventetiden før neste runde: grunnintervallet, doblet per feil på rad opp til taket (`max_delay_ms`).
+   */
+  health(): { consecutive_failures: number; next_delay_ms: number; base_interval_ms: number; max_delay_ms: number };
   stop(): void;
 }
 
-/** Starter en periodisk runde (aldri overlappende; `unref` så den ikke holder prosessen i live). `intervalMs` klemmes til minst 5 s. Første runde etter ett intervall (aldri i oppstartsstien). */
-export function startVisionPoller(poller: VisionPoller, intervalMs: number, now: () => Date = () => new Date()): VisionPollerHandle {
+/** Øvre grense for ventetiden mellom runder under en feilserie (review B-L8). */
+export const POLLER_MAX_BACKOFF_MS = 5 * 60_000;
+
+/**
+ * Starter periodiske runder (aldri overlappende; `unref` så den ikke holder prosessen i live). `intervalMs` klemmes til minst 5 s. Første runde etter ett intervall (aldri i oppstartsstien).
+ * Review B-L8: en feilserie (kildefeil/feilede spaces) gir EKSPONENTIELL backoff (intervall x 2^feil, tak 5 min) i stedet for en fast rytme mot en kilde som er nede (med HA «black-holet» kan en runde ta 8 s per sensor);
+ * første vellykkede runde (eller en eier-stans) tilbake til grunnintervallet. Runder planlegges ETTER at forrige er ferdig (setTimeout-kjede), så de overlapper aldri.
+ */
+export function startVisionPoller(poller: VisionPoller, intervalMs: number, now: () => Date = () => new Date(), options: { maxBackoffMs?: number } = {}): VisionPollerHandle {
+  const base = Math.max(5_000, intervalMs);
+  const cap = Math.max(base, options.maxBackoffMs ?? POLLER_MAX_BACKOFF_MS);
   const state = { last_tick_at: null as string | null, last_status: null as string | null, last_reason: null as string | null, last_source_error: null as string | null };
+  let failures = 0;
+  let nextDelay = base;
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
+  const delayAfter = (n: number): number => Math.min(cap, base * 2 ** Math.min(n, 12));
+  const record = (failed: boolean): void => {
+    failures = failed ? failures + 1 : 0;
+    nextDelay = delayAfter(failures);
+  };
   const run = async (): Promise<VisionPollTickResult> => {
     const result = await poller.tick();
+    // En overlappende runde (manuelt `tick()` mens en runde pågår) er ingen ny måling: status og feilserie står som de var.
+    if (result.status === "blocked" && result.reason === "tick_in_progress") return result;
     state.last_tick_at = now().toISOString();
     state.last_status = result.status;
     state.last_reason = result.status === "blocked" ? result.reason : null;
     state.last_source_error = result.status === "ok" ? (result.summary.source_error ?? null) : null;
+    // En eier-stans (kill switch, frosset connector) er ingen feil og nullstiller serien; kildefeil og feilede spaces teller.
+    record(result.status === "ok" && (result.summary.source_error !== undefined || result.failed_spaces > 0));
     return result;
   };
-  const timer = setInterval(() => void run().catch(() => undefined), Math.max(5_000, intervalMs));
-  timer.unref();
-  return { tick: run, status: () => ({ ...state }), stop: () => clearInterval(timer) };
+  const schedule = (): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      void run()
+        .catch(() => record(true))
+        .finally(schedule);
+    }, nextDelay);
+    timer.unref();
+  };
+  schedule();
+  return {
+    tick: run,
+    status: () => ({ ...state }),
+    health: () => ({ consecutive_failures: failures, next_delay_ms: nextDelay, base_interval_ms: base, max_delay_ms: cap }),
+    stop: () => {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
 }

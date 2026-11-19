@@ -101,6 +101,9 @@ export class VisionSnapshotService {
   async begin(tenantId: string, memorySpace: MemorySpace, personId: string, input: BeginSnapshotInput): Promise<{ row: VisionSnapshotRow; existing: boolean }> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const days = await this.vision.snapshotRetentionDaysInTransaction(client, tenantId, memorySpace);
+      // Review B-L7: kvoten (SUM etter INSERT, READ COMMITTED) var «mykt»: samtidige begin() så ikke hverandres uforpliktede rader og slapp alle gjennom. En advisory-lås per (tenant, space) serialiserer innsetting + kvotesjekk
+      // (frigjøres ved commit/rollback), slik at hver begin() ser alle tidligere bilder. Låsen tas FØR innsettingen og ETTER oppslaget over (ingen låsholder venter på noe annet enn databasen).
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`vision-quota:${tenantId}:${memorySpace}`]);
       const snapshotId = `vis-snap-${randomUUID()}`;
       const { rows } = await client.query(
         `INSERT INTO vision_snapshots
@@ -115,7 +118,7 @@ export class VisionSnapshotService {
         ]
       );
       if (rows[0]) {
-        // Kvote (mykt tak, i samme transaksjon): summen av ALLE bilderader i (tenant, space) inkludert denne. Over taket rulles raden tilbake - ingen pending-rest, ingen fil.
+        // Kvote (i samme transaksjon, serialisert av låsen over): summen av ALLE bilderader i (tenant, space) inkludert denne. Over taket rulles raden tilbake - ingen pending-rest, ingen fil.
         const used = await client.query(`SELECT COALESCE(SUM(byte_length), 0)::bigint AS used FROM vision_snapshots WHERE tenant_id = $1 AND memory_space_id = $2`, [tenantId, memorySpace]);
         if (Number((used.rows[0] as { used: string }).used) > this.maxStoredBytes) throw new SnapshotQuotaError();
         return { row: rows[0] as VisionSnapshotRow, existing: false };
@@ -211,39 +214,48 @@ export class VisionSnapshotService {
 
   /**
    * Sletter bildeobjektene bak gravsteinene (for denne adapterens backend). Graven fjernes KUN når `StorageAdapter.delete` lyktes (et objekt som allerede er borte er en
-   * vellykket sletting). En feil øker `attempts` og lagrer en kort kode; resten av batchen fortsetter. `stuck` = gravsteiner med mange mislykkede forsøk (synlig i status).
+   * vellykket sletting). En feil øker `attempts` og lagrer en kort kode; resten av batchen fortsetter. `stuck` = gravsteiner med mange mislykkede forsøk (telles som sveipefeil, se sweep.ts).
+   * Review B-L11: kjøringen går i batcher (`limit` per batch, standard 100) til køen er TOM - en erasure av 10 000 bilder tok ellers ca. ett døgn (100 per kjøring). Hver gravstein forsøkes høyst
+   * ÉN gang per kall (en markør på `tombstone_id` flytter seg alltid forover, også forbi en feilet gravstein), og `maxBatches` (standard 1000) er en sikkerhetsgrense.
    */
-  async reapTombstones(tenantId: string, memorySpace: MemorySpace, options: { limit?: number; stuckAttempts?: number } = {}): Promise<{ deleted: number; failed: number; stuck: number }> {
+  async reapTombstones(tenantId: string, memorySpace: MemorySpace, options: { limit?: number; stuckAttempts?: number; maxBatches?: number } = {}): Promise<{ deleted: number; failed: number; stuck: number }> {
     const limit = Math.min(Math.max(options.limit ?? 100, 1), 1000);
+    const maxBatches = Math.max(1, Math.floor(options.maxBatches ?? 1000));
     const stuckAttempts = options.stuckAttempts ?? 5;
-    const batch = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const { rows } = await client.query(
-        `SELECT tombstone_id, storage_key FROM vision_snapshot_tombstones
-          WHERE tenant_id = $1 AND memory_space_id = $2 AND storage_backend = $3 ORDER BY created_at ASC, tombstone_id ASC LIMIT $4`,
-        [tenantId, memorySpace, this.storage.backend, limit]
-      );
-      return rows as Array<{ tombstone_id: string; storage_key: string }>;
-    });
     let deleted = 0;
     let failed = 0;
-    for (const tombstone of batch) {
-      try {
-        await this.storage.delete(tombstone.storage_key);
-        await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-          await client.query(`DELETE FROM vision_snapshot_tombstones WHERE tenant_id = $1 AND tombstone_id = $2`, [tenantId, tombstone.tombstone_id]);
-        });
-        deleted += 1;
-      } catch (err) {
-        failed += 1;
-        const code = storageErrorCode(err);
-        console.error(JSON.stringify({ msg: "vision_tombstone_delete_failed", code }));
-        await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-          await client.query(
-            `UPDATE vision_snapshot_tombstones SET attempts = attempts + 1, last_attempt_at = now(), last_error = $3 WHERE tenant_id = $1 AND tombstone_id = $2`,
-            [tenantId, tombstone.tombstone_id, code]
-          );
-        }).catch(() => undefined);
+    let cursor = "0";
+    for (let round = 0; round < maxBatches; round += 1) {
+      const batch = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+        const { rows } = await client.query(
+          `SELECT tombstone_id::text AS tombstone_id, storage_key FROM vision_snapshot_tombstones
+            WHERE tenant_id = $1 AND memory_space_id = $2 AND storage_backend = $3 AND tombstone_id > $5::bigint ORDER BY tombstone_id ASC LIMIT $4`,
+          [tenantId, memorySpace, this.storage.backend, limit, cursor]
+        );
+        return rows as Array<{ tombstone_id: string; storage_key: string }>;
+      });
+      if (batch.length === 0) break;
+      for (const tombstone of batch) {
+        try {
+          await this.storage.delete(tombstone.storage_key);
+          await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+            await client.query(`DELETE FROM vision_snapshot_tombstones WHERE tenant_id = $1 AND tombstone_id = $2`, [tenantId, tombstone.tombstone_id]);
+          });
+          deleted += 1;
+        } catch (err) {
+          failed += 1;
+          const code = storageErrorCode(err);
+          console.error(JSON.stringify({ msg: "vision_tombstone_delete_failed", code }));
+          await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+            await client.query(
+              `UPDATE vision_snapshot_tombstones SET attempts = attempts + 1, last_attempt_at = now(), last_error = $3 WHERE tenant_id = $1 AND tombstone_id = $2`,
+              [tenantId, tombstone.tombstone_id, code]
+            );
+          }).catch(() => undefined);
+        }
       }
+      cursor = (batch[batch.length - 1] as { tombstone_id: string }).tombstone_id;
+      if (batch.length < limit) break;
     }
     const stuck = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(

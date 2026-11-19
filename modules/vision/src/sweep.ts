@@ -146,6 +146,12 @@ export async function runVisionMaintenanceSweepForAllTenants(pool: pg.Pool, deps
           summary.tombstones_deleted += reaped.deleted;
           summary.tombstones_failed += reaped.failed;
           summary.tombstones_stuck += reaped.stuck;
+          // Review B-L8: «stuck» (gravsteiner som gjentatte ganger ikke lar seg slette - ofte et volum uten skrivetilgang) er en sveipefeil: den når `assertNoSweepFailures`/loggen i stedet for å ligge stille i en teller.
+          if (reaped.stuck > 0) {
+            const failure: VisionRetentionSweepFailure = { tenant_id: tenantId, memory_space_id: spaceName, error: `tombstones_stuck:${reaped.stuck}` };
+            summary.failed.push(failure);
+            console.error(JSON.stringify({ msg: "vision_maintenance_failed", ...failure }));
+          }
         }
       } catch (err) {
         const failure: VisionRetentionSweepFailure = { tenant_id: tenantId, memory_space_id: spaceName, error: (err as Error).message.slice(0, 200) };

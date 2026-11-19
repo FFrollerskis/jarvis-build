@@ -1,7 +1,7 @@
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import {
   LocalFsStorageAdapter, VisionCameraService, VisionClassifier, VisionEmbeddingService, VisionIngestPipeline, VisionInventoryService, VisionService, VisionSnapshotService, type VisionCamera, type VisionHttpFetch
@@ -13,6 +13,7 @@ import { buildVisionRuntime } from "../src/vision-runtime.ts";
  * WP-G3 (D-465), review B-M1 og B-M2: kjøretidskoblingen (apps/api/src/vision-runtime.ts) mot en EKTE Postgres og ekte lokal lagring.
  *  B-M1: bildefiler slettes (retensjon, kamera-fjerning, gravsteiner) også når JARVIS_VISION_STORE_SNAPSHOTS er AV så lenge JARVIS_VISION_STORAGE_DIR er satt - flagget styrer kun SKRIVING.
  *  B-M2: HA-polleren i kjøretiden leser KUN eierens tenant (`tenantIds: [ownerTenantId]`): en annen tenants kamera polles aldri med eierens HA-credential.
+ *  B-L8: en gravstein som ikke lar seg slette (stuck) og et sveip med feil KASTES av lett vedlikehold i stedet for å ligge stille i en teller; `status()` (= `/vision/status`) samler siste vedlikeholdsutfall og pollerens feilserie.
  */
 let db: VisionDb;
 let T1: Awaited<ReturnType<typeof seedTenant>>;
@@ -56,6 +57,10 @@ afterAll(async () => {
   for (const r of runtimes) r.stop();
   await db?.stop();
 }, 120_000);
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("B-M2: HA-polleren i kjøretiden leser kun eierens tenant", () => {
   const register = (tenant: string, person: string, entity: string, ref: string): Promise<VisionCamera> =>
@@ -146,6 +151,72 @@ describe("B-M1: bildefiler slettes også når JARVIS_VISION_STORE_SNAPSHOTS er a
     const runtime = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on" })));
     expect(await runtime.fullMaintenance()).toMatchObject({ failed: [] });
     await runtime.lightMaintenance();
+    runtime.stop();
+  });
+});
+
+describe("B-L8: vedlikeholdsfeil og stuck gravsteiner synes (kastes, full-kjøringens failed-liste, /vision/status)", () => {
+  it("en gravstein som ikke lar seg slette: lett kjøring kaster FØRST når den er «stuck» (5 forsøk), full kjøring returnerer feilen, status() har tallene - alt er grønt igjen når lagringen er reparert", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const root = await mkdtemp(join(tmpdir(), "jarvis-vision-g3rt-b8-"));
+    const key = "snapshots/stuck/b8-dir";
+    // En katalog på nøkkelens sti kan ikke slettes med unlink (EISDIR): en deterministisk «ulesbar gravstein». Tre forsøk er allerede gjort.
+    await mkdir(join(root, key), { recursive: true });
+    await db.admin.query(`INSERT INTO vision_snapshot_tombstones (tenant_id, memory_space_id, storage_backend, storage_key, attempts) VALUES ($1, 'home', 'local_fs', $2, 3)`, [T1.tenant, key]);
+    const runtime = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORAGE_DIR: root })));
+    expect(runtime.status().maintenance).toEqual({ light: null, full: null });
+
+    await runtime.lightMaintenance(); // forsøk 4: feilet, men ennå ikke «stuck» (grensen er 5)
+    expect(runtime.status().maintenance.light).toMatchObject({ failed: 0, tombstones_failed: 1, tombstones_stuck: 0 });
+    await expect(runtime.lightMaintenance()).rejects.toThrow("vision_maintenance_failed:1"); // forsøk 5: stuck = sveipefeil
+    const light = runtime.status().maintenance.light as { at: string; failed: number };
+    expect(light).toMatchObject({ failed: 1, tombstones_failed: 1, tombstones_stuck: 1, tombstones_deleted: 0 });
+    expect(new Date(light.at).toISOString()).toBe(light.at);
+
+    const full = await runtime.fullMaintenance();
+    expect(full.failed).toEqual([{ tenant_id: T1.tenant, memory_space_id: "home", error: "tombstones_stuck:1" }]); // DailyScheduler.assertNoSweepFailures kaster på dette
+    expect(runtime.status().maintenance.full).toMatchObject({ failed: 1, tombstones_stuck: 1 });
+    expect(await scalar(`SELECT count(*)::int AS n FROM vision_snapshot_tombstones WHERE storage_key = $1`, [key])).toBe(1); // ingenting stille tapt
+
+    await rm(join(root, key), { recursive: true }); // volumet repareres
+    await runtime.lightMaintenance();
+    expect(runtime.status().maintenance.light).toMatchObject({ failed: 0, tombstones_deleted: 1, tombstones_stuck: 0 });
+    expect((await runtime.fullMaintenance()).failed).toEqual([]);
+    runtime.stop();
+  });
+
+  it("status(): uten poller/lagring er alt av; med STORAGE_DIR (uten STORE_SNAPSHOTS) er KUN vedlikeholdet på, og med STORE_SNAPSHOTS også skrivingen - ingen stier, URL-er eller hemmeligheter i svaret", async () => {
+    const off = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on" })));
+    expect(off.status()).toEqual({ poller: { enabled: false }, maintenance: { light: null, full: null }, storage: { maintenance_enabled: false, writing_enabled: false }, classifier: false, embeddings: true });
+    off.stop();
+    const root = await mkdtemp(join(tmpdir(), "jarvis-vision-g3rt-st-"));
+    const maintenanceOnly = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORAGE_DIR: root })));
+    expect(maintenanceOnly.status().storage).toEqual({ maintenance_enabled: true, writing_enabled: false });
+    maintenanceOnly.stop();
+    const writing = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORAGE_DIR: root, JARVIS_VISION_STORE_SNAPSHOTS: "on" })));
+    expect(writing.status().storage).toEqual({ maintenance_enabled: true, writing_enabled: true });
+    expect(JSON.stringify(writing.status())).not.toContain(root);
+    writing.stop();
+  });
+
+  it("status().poller viser siste runde og feilserien: HA nede -> consecutive_failures og doblet ventetid (20 s -> 40 s), neste vellykkede runde nullstiller - uten vertsnavn, adresser eller token", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await cameras.registerCamera(T1.tenant, "home", { person_id: T1.owner, label: "Helse-kamera", source_type: "home_assistant", source_ref: "camera.l8_front", trigger_entities: ["binary_sensor.l8_front"], zone_kind: "home", route_policy: "local_only" });
+    let down = true;
+    const fetchImpl: VisionHttpFetch = async () => {
+      if (down) throw new Error("connect ECONNREFUSED 10.0.0.5:8123");
+      return new Response(JSON.stringify({ state: "off", attributes: { device_class: "motion" }, last_changed: new Date().toISOString() }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const runtime = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_HA_POLL: "on" }, { fetchImpl })));
+    expect(runtime.status().poller).toEqual({ enabled: true, last_tick_at: null, last_status: null, last_reason: null, last_source_error: null, consecutive_failures: 0, next_delay_ms: 20_000 });
+    await runtime.pollerHandle?.tick();
+    const failing = runtime.status().poller;
+    expect(failing).toMatchObject({ enabled: true, last_status: "ok", consecutive_failures: 1, next_delay_ms: 40_000 });
+    expect((failing as { last_source_error: string }).last_source_error).toMatch(/^[a-z0-9_]{3,60}$/);
+    expect(JSON.stringify(failing)).not.toMatch(/ECONNREFUSED|10\.0\.0\.5|tok-test|ha\.test/);
+    down = false;
+    await runtime.pollerHandle?.tick();
+    expect(runtime.status().poller).toMatchObject({ enabled: true, last_status: "ok", last_source_error: null, consecutive_failures: 0, next_delay_ms: 20_000 });
     runtime.stop();
   });
 });

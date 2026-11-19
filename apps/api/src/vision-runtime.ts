@@ -13,7 +13,7 @@ import {
   type VisionModelGateway, type VisionPollerGuard, type VisionPollerHandle, type VisionService
 } from "@jarvis/vision";
 import { RateLimiter } from "./http-guard.ts";
-import type { VisionApiDeps } from "./vision-routes.ts";
+import type { VisionApiDeps, VisionMaintenanceStatus, VisionStatusReport } from "./vision-routes.ts";
 
 /**
  * WP-G3 (D-465): kobling av UA-9 (kamerabilder, lokal klassifisering, bilde-lagring, «sist sett», iPhone-opptak) til api-prosessen. ALT er AV som standard: uten `JARVIS_VISION_ENABLED=on` bygges ingenting,
@@ -270,8 +270,10 @@ export interface VisionRuntime {
   classifier: VisionClassifier | undefined;
   poller: VisionPoller | null;
   pollerHandle: VisionPollerHandle | null;
-  /** Hyppig vedlikehold (gravsteiner, pending-bilder, utløp av opptaksforespørsler) - kalles av en intervalltimer i main.ts. */
+  /** Hyppig vedlikehold (gravsteiner, pending-bilder, utløp av opptaksforespørsler) - kalles av en intervalltimer i main.ts. Kaster (`vision_maintenance_failed:<n>`) når noen space feilet eller en gravstein er «stuck» (review B-L8). */
   lightMaintenance(): Promise<void>;
+  /** Eierens helsebilde (samme som `/vision/status`). */
+  status(): VisionStatusReport;
   /** Daglig full vedlikeholdskjøring (bilde-retensjon, inventar, vektorer, gravsteiner) - kalles av en `DailyScheduler` i main.ts. */
   fullMaintenance(): Promise<{ failed: Array<{ tenant_id: string; memory_space_id: string; error: string }> }>;
   stop(): void;
@@ -343,19 +345,37 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   }
 
   const maintenanceDeps = { snapshots, inventory, captures: capture, embeddings };
+  // Review B-L8: siste vedlikeholdsutfall og pollerens helse samles til eierens helsebilde (`/vision/status`).
+  const last: { light: VisionMaintenanceStatus | null; full: VisionMaintenanceStatus | null } = { light: null, full: null };
+  const toStatus = (summary: Awaited<ReturnType<typeof runVisionMaintenanceSweepForAllTenants>>): VisionMaintenanceStatus => ({
+    at: new Date().toISOString(), failed: summary.failed.length, tombstones_deleted: summary.tombstones_deleted, tombstones_failed: summary.tombstones_failed, tombstones_stuck: summary.tombstones_stuck
+  });
+  const status = (): VisionStatusReport => ({
+    poller: pollerHandle === null ? { enabled: false } : { enabled: true, ...pollerHandle.status(), consecutive_failures: pollerHandle.health().consecutive_failures, next_delay_ms: pollerHandle.health().next_delay_ms },
+    maintenance: { light: last.light, full: last.full },
+    storage: { maintenance_enabled: snapshots !== undefined, writing_enabled: flags.storeSnapshots && snapshots !== undefined },
+    classifier: classifier !== undefined,
+    embeddings: embeddings !== undefined
+  });
   return {
     flags,
     // Review B-L4: egen strenge per-IP-grense for opplastingsruten (kroppen er opptil ca. 7 MB og leses FØR grantet verifiseres): 20 opplastinger per minutt per IP er rause rom for én iPhone (ETT opptak per forespørsel).
-    api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024, uploadLimiter: new RateLimiter(VISION_UPLOADS_PER_IP_PER_MINUTE, 60_000) },
+    api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024, uploadLimiter: new RateLimiter(VISION_UPLOADS_PER_IP_PER_MINUTE, 60_000), status },
     pipeline,
     classifier,
     poller,
     pollerHandle,
+    status,
     async lightMaintenance(): Promise<void> {
-      await runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps, { light: true });
+      const summary = await runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps, { light: true });
+      last.light = toStatus(summary);
+      // Review B-L8: en feil (inkl. «stuck» gravsteiner) skal ikke forsvinne i en teller: den kastes, og main.ts-timeren logger den (`vision_light_maintenance_failed`) i stedet for å late som alt gikk bra.
+      if (summary.failed.length > 0) throw new Error(`vision_maintenance_failed:${summary.failed.length}`);
     },
     async fullMaintenance() {
-      return runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps);
+      const summary = await runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps);
+      last.full = toStatus(summary);
+      return summary;
     },
     stop(): void {
       pollerHandle?.stop();

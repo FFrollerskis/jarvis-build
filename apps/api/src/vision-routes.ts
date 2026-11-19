@@ -10,13 +10,31 @@ import { VisionCameraValidationError, VisionCaptureError, type CaptureRequest, t
  *
  * Alle ruter er `POST` med JSON-kropp og `grant_token` (som resten av kontrollrutene): identitet, tenant, person, space og enhet kommer UTELUKKENDE fra det verifiserte grantet - kroppen kan aldri
  * bære dem (`authed` avviser identitetsfelt og ukjente felt FØR grantet løses). Tre klasser:
- *   - eier-LES (`cameras/list`, `last-seen`, `inventory`): grant + eier-port (`deps.ownerGate`).
+ *   - eier-LES (`cameras/list`, `status`, `last-seen`, `inventory`): grant + eier-port (`deps.ownerGate`).
  *   - eier-SKRIV (`cameras/register|update|remove`, `capture/request`): grant + eier-port + STEP-UP (enhetssignert økt fra en eier-kanal, samme regel som øvrige kontrollhandlinger).
  *     `remove` krever i tillegg TYPET bekreftelse (`confirm: true` + `confirm_camera_id` = kameraets id; ingen destruktiv handling uten eksplisitt bekreftelse, CLAUDE.md regel 8).
  *   - ENHET (`capture/pending`, `capture/upload`): grant der `device_id` KOMMER FRA GRANTET (aldri fra kroppen). Opplastingen er i tillegg enhetssignert (Ed25519 over request_id/tenant/person/enhet/hash/
  *     lengde/type/tid, se `captureSigningBytes`) og engangs - se modules/vision/src/capture.ts. Enhetens økt må ha SAMME memory space som kameraet (grantets scope).
  * Svar inneholder aldri bildebytes, modellens rå tekst eller hemmeligheter; opplastingssvaret har kun utfallskoder og antall.
  */
+/** Utfall av siste vedlikeholdskjøring (kun tall og tidspunkt, aldri innhold). */
+export interface VisionMaintenanceStatus {
+  at: string;
+  failed: number;
+  tombstones_deleted: number;
+  tombstones_failed: number;
+  tombstones_stuck: number;
+}
+
+/** Eierens helsebilde (review B-L8): poller, vedlikehold og hva som er koblet inn. Ingen vertsnavn, URL-er, tokens eller innhold - kun koder, tall og tidspunkt. */
+export interface VisionStatusReport {
+  poller: { enabled: false } | { enabled: true; last_tick_at: string | null; last_status: string | null; last_reason: string | null; last_source_error: string | null; consecutive_failures: number; next_delay_ms: number };
+  maintenance: { light: VisionMaintenanceStatus | null; full: VisionMaintenanceStatus | null };
+  storage: { maintenance_enabled: boolean; writing_enabled: boolean };
+  classifier: boolean;
+  embeddings: boolean;
+}
+
 export interface VisionApiDeps {
   cameras: VisionCameraService;
   capture: VisionCaptureService;
@@ -29,6 +47,8 @@ export interface VisionApiDeps {
    * grense kunne en uautentisert klient strømme mange MB per forespørsel opp til den generelle IP-grensen (600/min). Utelatt = ingen ekstra grense (kun den generelle).
    */
   uploadLimiter?: RateLimiter;
+  /** Helsebilde for `/vision/status` (satt av kjøretiden). Utelatt = ruten gir `status_unavailable`. */
+  status?: () => VisionStatusReport;
 }
 
 export interface VisionRouteHelpers {
@@ -52,6 +72,7 @@ interface RouteSpec {
 
 const ROUTES: Readonly<Record<string, RouteSpec>> = {
   "/vision/cameras/list": { access: "owner_read", action: "cameras_list", keys: [] },
+  "/vision/status": { access: "owner_read", action: "status", keys: [] },
   "/vision/last-seen": { access: "owner_read", action: "last_seen", keys: ["query"] },
   "/vision/inventory": { access: "owner_read", action: "inventory", keys: ["room_id"] },
   "/vision/cameras/register": { access: "owner_write", action: "camera_register", keys: ["label", "source_type", "source_ref", "trigger_entities", "room_id", "zone_kind", "route_policy", "cooldown_seconds", "enabled"] },
@@ -138,6 +159,14 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
     switch (pathname) {
       case "/vision/cameras/list": {
         h.json(200, { ok: true, data: { cameras: await deps.cameras.listCameras(tenant, space, person) } });
+        return true;
+      }
+      case "/vision/status": {
+        if (deps.status === undefined) {
+          h.json(503, { error: "status_unavailable", request_id: requestId });
+          return true;
+        }
+        h.json(200, { ok: true, data: deps.status() });
         return true;
       }
       case "/vision/cameras/register": {

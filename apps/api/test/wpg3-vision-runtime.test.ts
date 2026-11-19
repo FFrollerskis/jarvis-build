@@ -358,6 +358,13 @@ describe("buildVisionRuntime", () => {
     runtime?.stop();
   });
 
+  it("review B-L8: /vision/status får kjøretidens helsebilde (samme funksjon som runtime.status) - og et helt ferskt bilde har ingen vedlikeholdsutfall ennå", () => {
+    const runtime = buildVisionRuntime(stubs({ JARVIS_VISION_ENABLED: "on" }));
+    expect(runtime?.api.status).toBe(runtime?.status);
+    expect(runtime?.api.status?.()).toMatchObject({ poller: { enabled: false }, maintenance: { light: null, full: null }, storage: { maintenance_enabled: false, writing_enabled: false }, classifier: false });
+    runtime?.stop();
+  });
+
   it("kun hovedbryter: rutene kan bygges, men ingen poller, ingen klassifisering og ingen bildelagring (hver del må slås på for seg)", () => {
     const runtime = buildVisionRuntime(stubs({ JARVIS_VISION_ENABLED: "on" }));
     expect(runtime).not.toBeNull();
