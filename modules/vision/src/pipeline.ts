@@ -120,7 +120,9 @@ function isInventoryLabelViolation(err: unknown): boolean {
 
 function errorCode(err: unknown): string {
   const pgCode = (err as { code?: unknown } | null)?.code;
-  if (typeof pgCode === "string" && /^[0-9A-Z]{5}$/.test(pgCode)) return `db_${pgCode.toLowerCase()}`;
+  // SQLSTATE har alltid 5 tegn og minst ett siffer (`23505`, `42P01`, `XX000`). Et 5-tegns Node-feilnummer (`EPERM`, `EPIPE`, `EBUSY`) har ikke siffer og er et filsystem-/nettverksavvik, ikke en databasefeil (ble tidligere `db_eperm`).
+  if (typeof pgCode === "string" && /^(?=[0-9A-Z]*[0-9])[0-9A-Z]{5}$/.test(pgCode)) return `db_${pgCode.toLowerCase()}`;
+  if (typeof pgCode === "string" && /^E[A-Z0-9]{2,15}$/.test(pgCode)) return `os_${pgCode.toLowerCase()}`;
   const message = (err as Error | null)?.message;
   if (typeof message === "string") {
     const m = /^([a-z0-9_]{3,60})(?::|$)/.exec(message);

@@ -302,6 +302,25 @@ describe("ubetrodd modellutdata og bilder", () => {
     expect(out.status).toBe("recorded");
     expect(out.notes).toContain("image_home_assistant_error_500");
   });
+
+  it("feilkoder i notatene er stabile og riktig klassifisert (review delta B, kosmetikk): SQLSTATE (alltid et siffer) -> db_<kode>, Node-feilnummer (EPERM, EPIPE ...) -> os_<kode> (ikke db_eperm), ellers pipeline_error - aldri meldingstekst", async () => {
+    const cases: Array<[Error, string]> = [
+      [Object.assign(new Error("sti /x/y"), { code: "EPERM" }), "image_os_eperm"],
+      [Object.assign(new Error("x"), { code: "EPIPE" }), "image_os_epipe"],
+      [Object.assign(new Error("x"), { code: "ECONNRESET" }), "image_os_econnreset"],
+      [Object.assign(new Error("x"), { code: "23505" }), "image_db_23505"],
+      [Object.assign(new Error("x"), { code: "42P01" }), "image_db_42p01"],
+      [Object.assign(new Error("x"), { code: "XX000" }), "image_db_xx000"],
+      [new Error("Sti /hemmelig/fil feilet"), "image_pipeline_error"]
+    ];
+    for (const [err, note] of cases) {
+      const out = await pipeline.processCaptured(ctx, camStore, spec({ image: () => { throw err; } }));
+      expect(out.status, note).toBe("recorded");
+      expect(out.notes, note).toContain(note);
+      expect(JSON.stringify(out.notes), note).not.toMatch(/hemmelig|\/x\/y/);
+      clock = new Date(clock.getTime() + 3_600_000); // flomvernet (30 s per kamera og hendelsestype) skal ikke avvise neste kall
+    }
+  });
 });
 
 describe("lagringsfeil og kompenserende sletting", () => {
