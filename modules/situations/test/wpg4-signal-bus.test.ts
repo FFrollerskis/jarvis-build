@@ -183,6 +183,8 @@ describe("A: abonnementsregisteret - eier-autorisert, lukket validering, tenant-
     await bad("home", { source: "home_assistant", event_type: "reboot", filter: { entities: [] } }, /event_type_unknown/);
     await bad("business", { source: "home_assistant", event_type: "water_leak", filter: { entities: [{ entity_id: "binary_sensor.a", role: "leak" }] } }, /space_not_allowed_for_source/);
     await bad("personal", { source: "health", event_type: "activity_deviation", filter: { person_id: OWNER } }, /space_not_allowed_for_source/);
+    // kamera kan kun abonneres i rommet løperen faktisk leser (`home`): et abonnement i et annet rom ville stått stille uvirksomt
+    await bad("personal", { source: "vision", event_type: "motion_detected", filter: {} }, /space_not_allowed_for_source/);
     await bad("home", { source: "home_assistant", event_type: "water_leak", filter: { entities: [{ entity_id: "binary_sensor.a", role: "door" }] } }, /role_event_mismatch/);
     await bad("home", { source: "home_assistant", event_type: "door_open_too_long", filter: { entities: [{ entity_id: "*", role: "door" }] } }, /filter_invalid/);
     await bad("home", { source: "home_assistant", event_type: "door_open_too_long", filter: { entities: [{ entity_id: "binary_sensor.a", role: "door" }], extra: 1 } }, /filter_invalid/);

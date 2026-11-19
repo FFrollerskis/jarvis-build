@@ -53,10 +53,10 @@ export class SubscriptionNotFoundError extends Error {
   }
 }
 
-/** Hvilke memory spaces en kilde kan registreres i. Begrensede kilder er låst til sine egne rom (helse -> `health`; kamerahendelser -> `home`/`personal`). */
+/** Hvilke memory spaces en kilde kan registreres i. Begrensede kilder er låst til sine egne rom (helse -> `health`; kamerahendelser -> `home`). Samme rom som løperen leser (`situation-signals-wiring.ts`): et abonnement i et rom ingen leser ville vært stille uvirksomt. */
 export const SOURCE_SPACES: Readonly<Record<SignalSource, readonly MemorySpace[]>> = {
   home_assistant: ["home"],
-  vision: ["home", "personal"],
+  vision: ["home"],
   health: ["health"],
   incident: ["business"],
   communications: [],

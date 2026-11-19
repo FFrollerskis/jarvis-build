@@ -62,7 +62,7 @@ Navnene står i `SERVICE_ENV.api` (`infra/local/service-env.mjs`), i den regener
 | `health` | `resting_heart_rate_deviation`, `sleep_duration_deviation`, `activity_deviation` | health | De 3 siste fullførte UTC-døgn ligger alle \|z\| >= terskel på SAMME side av eierens egen baseline (median/MAD, inntil 28 døgn, minst 14). Ingen verdi, baseline eller z i tekst/logg; kun lukket kategori + «ikke medisinsk rådgivning» | `z_score` 2 [1,5..4], 0,25 | `inform` | aldri |
 | `incident` | `incident_active` | infra | Aktiv incident (alt unntatt `resolved`/`wont_fix`); alvorlighet -> prioritet; ingen konfidens | ikke tunbar | `inform` | nei |
 
-Abonnementsfiltre er lukkede (`strict`): HA krever eksakt entitets-id (ingen jokertegn) og eierens egen ROLLE per entitet (`door`, `window`, `garage_door`, `gate`, `opening`, `leak`, `alarm`, `power`; `limit_w` kun og alltid for `power`); kamera kan begrenses til kilde-id-er og nattvindu; helse kun eierens egen person. Kilde -> tillatte rom: HA `home`, kamera `home`/`personal`, helse `health`, hendelser `business`.
+Abonnementsfiltre er lukkede (`strict`): HA krever eksakt entitets-id (ingen jokertegn) og eierens egen ROLLE per entitet (`door`, `window`, `garage_door`, `gate`, `opening`, `leak`, `alarm`, `power`; `limit_w` kun og alltid for `power`); kamera kan begrenses til kilde-id-er og nattvindu; helse kun eierens egen person. Kilde -> tillatt rom (samme rom som løperen leser, så ingen abonnement står stille uvirksomt): HA `home`, kamera `home`, helse `health`, hendelser `business`.
 
 ## 4. Tabeller (migrasjon 139, kun denne er brukt av G4)
 
