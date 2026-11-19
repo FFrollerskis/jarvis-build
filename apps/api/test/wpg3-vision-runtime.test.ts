@@ -17,7 +17,7 @@ import { FakeHaServer, haTimestamp } from "../../../modules/vision/test/support/
 import { freezeTargetError, knownModelProviders } from "../src/provider-pause.ts";
 import {
   assertLocalVisionEndpoint, assertStorageDirWritable, buildVisionRuntime, createVisionPollerGuard, isLocalAddress, verifyVisionEndpoints, visionAdapterFromEnv, visionAllowTailscale, visionFlagsFromEnv, visionModelTimeoutMs,
-  VISION_MODEL_TIMEOUT_BOUNDS, VisionConfigError
+  VISION_MODEL_TIMEOUT_BOUNDS, VISION_UPLOADS_PER_IP_PER_MINUTE, VisionConfigError
 } from "../src/vision-runtime.ts";
 
 /**
@@ -345,6 +345,17 @@ describe("buildVisionRuntime", () => {
     const ok = join(dir, "vision", "images");
     expect(buildVisionRuntime(stubs({ ...on, JARVIS_VISION_STORAGE_DIR: ok }))).not.toBeNull();
     expect(await readdir(ok)).toEqual([]);
+  });
+
+  it("review B-L4: kjøretiden gir opplastingsruten en egen per-IP-grense (20 per minutt) som er per klient-IP", () => {
+    const runtime = buildVisionRuntime(stubs({ JARVIS_VISION_ENABLED: "on" }));
+    const limiter = runtime?.api.uploadLimiter;
+    expect(limiter).toBeDefined();
+    expect(VISION_UPLOADS_PER_IP_PER_MINUTE).toBe(20);
+    for (let i = 0; i < VISION_UPLOADS_PER_IP_PER_MINUTE; i += 1) expect(limiter?.take("203.0.113.9"), `kall ${i + 1}`).toBe(true);
+    expect(limiter?.take("203.0.113.9")).toBe(false);
+    expect(limiter?.take("203.0.113.10")).toBe(true);
+    runtime?.stop();
   });
 
   it("kun hovedbryter: rutene kan bygges, men ingen poller, ingen klassifisering og ingen bildelagring (hver del må slås på for seg)", () => {

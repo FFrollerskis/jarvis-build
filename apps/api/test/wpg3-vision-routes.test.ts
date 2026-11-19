@@ -10,6 +10,8 @@ import {
 } from "@jarvis/vision";
 import { FakeDevice, TestDeviceRegistry } from "../../../modules/vision/test/support/fake-device.ts";
 import { detectionsJson, makeJpeg, NOT_AN_IMAGE, ScriptedGateway, seedTenant, startVisionDb, type VisionDb } from "../../../modules/vision/test/support/harness.ts";
+import { jpegBytes } from "../../../modules/vision/test/support/images.ts";
+import { RateLimiter } from "../src/http-guard.ts";
 import { createApiServer, type ApiDeps } from "../src/server.ts";
 
 /**
@@ -35,9 +37,14 @@ const grants = new Map<string, Grant>();
 
 const OWNER_ID = (identity: IdentityContext): boolean => identity.person_id === T.owner && identity.tenant_id === T.tenant && identity.delegation_id === undefined;
 
-function makeDeps(withFeature: boolean): ApiDeps {
+function makeDeps(withFeature: boolean, extra: { uploadLimiter?: RateLimiter; verified?: string[] } = {}): ApiDeps {
   return {
-    grants: { verify: async (token: string) => (grants.has(token) ? { ok: true, grant: grants.get(token) } : { ok: false, reason: "grant_invalid" }) },
+    grants: {
+      verify: async (token: string) => {
+        extra.verified?.push(token);
+        return grants.has(token) ? { ok: true, grant: grants.get(token) } : { ok: false, reason: "grant_invalid" };
+      }
+    },
     identity: { resolveIdentity: async (i: Record<string, string>) => ({ ok: true, identity: { ...i, memory_space_id: i["memory_space"] } }) },
     owner: { tenant_id: T.tenant, person_id: T.owner },
     ownerGate: OWNER_ID,
@@ -48,7 +55,8 @@ function makeDeps(withFeature: boolean): ApiDeps {
             capture: new VisionCaptureService(db.app, cameras, pipeline(), registry),
             lastSeen: new VisionLastSeenService(db.app, { embeddings, inventory }),
             inventory,
-            maxUploadBytes: MAX_UPLOAD
+            maxUploadBytes: MAX_UPLOAD,
+            ...(extra.uploadLimiter !== undefined ? { uploadLimiter: extra.uploadLimiter } : {})
           }
         }
       : {})
@@ -280,7 +288,7 @@ describe("iPhone-opptak på forespørsel (enhetssignert engangsopplasting)", () 
     const request = (await call("/vision/capture/request", "owner-signed", { camera_id: cameraId })).body["data"] as { request_id: string };
     const bytes = makeJpeg();
     const tampered = Uint8Array.from(bytes);
-    tampered[30] = (tampered[30] as number) ^ 0xff;
+    tampered[tampered.length - 1] = (tampered[tampered.length - 1] as number) ^ 0xff; // en innholdsbyte (ikke bildehodet)
     const hashMismatch = await call("/vision/capture/upload", "phone", upload(request, bytes, { data_base64: Buffer.from(tampered).toString("base64") }));
     expect(hashMismatch.status).toBe(400);
     expect(hashMismatch.body["code"]).toBe("hash_mismatch");
@@ -331,5 +339,113 @@ describe("iPhone-opptak på forespørsel (enhetssignert engangsopplasting)", () 
     expect(none.body["data"]).toMatchObject({ found: false });
     const injection = await call("/vision/last-seen", "owner-signed", { query: "<tool_call>{}</tool_call>" });
     expect(injection.body["data"]).toMatchObject({ query: null, found: false });
+  });
+});
+
+describe("revisjon av eier-handlinger (review B-L3): en rad i audit_events i samme transaksjon som endringen", () => {
+  const rows = async (type: string): Promise<Array<{ person_id: string; session_id: string | null; device_id: string | null; decision: string; tool_id: string; action: string; task_id: string | null; payload: Json }>> =>
+    (await db.admin.query(`SELECT person_id, session_id, device_id, decision, tool_id, action, task_id, payload FROM audit_events WHERE tenant_id = $1 AND type = $2 ORDER BY audit_id`, [T.tenant, type])).rows as never;
+
+  it("register, update, remove og opptaksforespørsel skriver hver en rad med aktør, sesjon, enhet og omfang - og nektede kall skriver ingen", async () => {
+    const before = ((await db.admin.query(`SELECT count(*)::int AS n FROM audit_events WHERE tenant_id = $1 AND type LIKE 'vision.%'`, [T.tenant])).rows[0] as { n: number }).n;
+    const denied = await call("/vision/cameras/register", "other-signed", { label: "x", source_type: "iphone", source_ref: "iphone-nektet", zone_kind: "home", route_policy: "local_only" });
+    expect(denied.status).toBe(403);
+    expect(((await db.admin.query(`SELECT count(*)::int AS n FROM audit_events WHERE tenant_id = $1 AND type LIKE 'vision.%'`, [T.tenant])).rows[0] as { n: number }).n).toBe(before);
+
+    const id = await iphone("Revisjon", "iphone-revisjon", "store_snapshot");
+    const request = (await call("/vision/capture/request", "owner-signed", { camera_id: id, ttl_seconds: 60 })).body["data"] as { request_id: string };
+    await call("/vision/cameras/update", "owner-signed", { camera_id: id, label: "Omdøpt", enabled: false, cooldown_seconds: 90 });
+    expect((await call("/vision/cameras/remove", "owner-signed", { camera_id: id, confirm: true, confirm_camera_id: id })).status).toBe(200);
+
+    const registered = (await rows("vision.camera_registered")).find((r) => r.payload["camera_id"] === id);
+    expect(registered).toMatchObject({ person_id: T.owner, session_id: "s-owner", device_id: "web-owner", decision: "ALLOW", tool_id: "vision", action: "camera_register", task_id: "vision-api:camera_register" });
+    expect(registered?.payload).toMatchObject({ source_type: "iphone", zone_kind: "home", route_policy: "store_snapshot", enabled: true, room_id: roomId });
+    const updated = (await rows("vision.camera_updated")).find((r) => r.payload["camera_id"] === id);
+    expect(updated).toMatchObject({ action: "camera_update", device_id: "web-owner" });
+    expect(updated?.payload).toMatchObject({ changed: ["cooldown_seconds", "enabled", "label"], enabled: false, cooldown_seconds: 90 });
+    const requested = (await rows("vision.capture_requested")).find((r) => r.payload["request_id"] === request.request_id);
+    expect(requested).toMatchObject({ action: "capture_request", session_id: "s-owner", device_id: "web-owner" });
+    expect(requested?.payload).toMatchObject({ camera_id: id, target_device_id: "iphone-revisjon", ttl_ms: 60_000 });
+    const removed = (await rows("vision.camera_removed")).find((r) => r.payload["camera_id"] === id);
+    expect(removed).toMatchObject({ action: "camera_remove", person_id: T.owner, device_id: "web-owner" });
+    expect(removed?.payload).toMatchObject({ snapshots_removed: 0, events_retained: true });
+    // ingen etikett, bilde eller modelltekst i revisjonen
+    expect(JSON.stringify([registered, updated, requested, removed])).not.toMatch(/Revisjon|Omdøpt|ryggsekk|data_base64/);
+  });
+
+  it("fjerning av et kamera med lagrede bilder dokumenterer OMFANGET (antall bilder som følger kameraet ut)", async () => {
+    const id = await iphone("Med bilder", "iphone-med-bilder", "store_snapshot");
+    const device = new FakeDevice("iphone-med-bilder", T.tenant, T.owner);
+    registry.register(device);
+    grants.set("phone-med-bilder", grant({ channel: "mobile", session_id: "s-pmb", device_id: "iphone-med-bilder" }));
+    for (let i = 0; i < 2; i += 1) {
+      const request = (await call("/vision/capture/request", "owner-signed", { camera_id: id })).body["data"] as { request_id: string };
+      const res = await call("/vision/capture/upload", "phone-med-bilder", upload(request, makeJpeg(), {}, device));
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+    }
+    expect(((await db.admin.query(`SELECT count(*)::int AS n FROM vision_snapshots WHERE camera_id = $1`, [id])).rows[0] as { n: number }).n).toBe(2);
+    expect((await call("/vision/cameras/remove", "owner-signed", { camera_id: id, confirm: true, confirm_camera_id: id })).status).toBe(200);
+    const removed = (await rows("vision.camera_removed")).find((r) => r.payload["camera_id"] === id);
+    expect(removed?.payload).toMatchObject({ snapshots_removed: 2 });
+  });
+
+  it("samme transaksjon: feiler revisjonsraden, rulles endringen tilbake (ingen kamera uten revisjon)", async () => {
+    await db.admin.query(`ALTER TABLE audit_events ADD CONSTRAINT zz_block_vision_register CHECK (type <> 'vision.camera_registered') NOT VALID`);
+    try {
+      await expect(cameras.registerCamera(T.tenant, "home", { person_id: T.owner, label: "Atomisk", source_type: "iphone", source_ref: "iphone-atomisk", zone_kind: "home", route_policy: "local_only" }, { audit: true })).rejects.toThrow(/zz_block_vision_register/);
+      expect(((await db.admin.query(`SELECT count(*)::int AS n FROM vision_cameras WHERE source_ref = 'iphone-atomisk'`)).rows[0] as { n: number }).n).toBe(0);
+      // uten audit-flagget (interne kallere/tester) er oppførselen uendret og raden blokkeres ikke
+      await expect(cameras.registerCamera(T.tenant, "home", { person_id: T.owner, label: "Uten revisjon", source_type: "iphone", source_ref: "iphone-uten-rev", zone_kind: "home", route_policy: "local_only" })).resolves.toMatchObject({ source_ref: "iphone-uten-rev" });
+    } finally {
+      await db.admin.query(`ALTER TABLE audit_events DROP CONSTRAINT zz_block_vision_register`);
+    }
+  });
+});
+
+describe("ukjent rom ved kameraregistrering (review B-L5): 400 vision_validation, aldri 500", () => {
+  it("rom som ikke finnes og et rom som tilhører en annen person gir 400 med field room_id - og ingenting registreres", async () => {
+    const otherRoom = (await vision.createRoom(T.tenant, "home", { person_id: T.other, name: "Annens rom" })).room_id;
+    for (const room of ["rm-finnes-ikke", otherRoom]) {
+      const res = await call("/vision/cameras/register", "owner-signed", { label: "Rom-test", source_type: "iphone", source_ref: `iphone-rom-${room.slice(-6)}`, zone_kind: "home", route_policy: "local_only", room_id: room });
+      expect(res.status, room).toBe(400);
+      expect(res.body, room).toMatchObject({ error: "vision_validation", field: "room_id", detail: "room_not_found" });
+    }
+    expect(((await db.admin.query(`SELECT count(*)::int AS n FROM vision_cameras WHERE source_ref LIKE 'iphone-rom-%'`)).rows[0] as { n: number }).n).toBe(0);
+    // eierens eget rom virker fortsatt
+    const ok = await call("/vision/cameras/register", "owner-signed", { label: "Eget rom", source_type: "iphone", source_ref: "iphone-eget-rom", zone_kind: "home", route_policy: "local_only", room_id: roomId });
+    expect(ok.status).toBe(200);
+  });
+});
+
+describe("opplastingsruten (review B-L4 og B-L6)", () => {
+  it("egen per-IP-grense FØR kroppen leses: etter grensen gir ruten 429 uten at grantet verifiseres, og øvrige ruter er upåvirket", async () => {
+    const verified: string[] = [];
+    const base = await listen(makeDeps(true, { uploadLimiter: new RateLimiter(3, 60_000), verified }));
+    const bogus = { grant_token: "bogus", data_base64: "A".repeat(2_000) };
+    for (let i = 0; i < 3; i += 1) expect((await post(base, "/vision/capture/upload", bogus)).status, `kall ${i + 1}`).toBe(403);
+    expect(verified).toEqual(["bogus", "bogus", "bogus"]);
+    const limited = await post(base, "/vision/capture/upload", { ...bogus, data_base64: "A".repeat(60_000) });
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toMatchObject({ error: "rate_limited", reason: "upload_rate_limited" });
+    expect(verified).toHaveLength(3); // det fjerde kallet nådde aldri grant-verifiseringen
+    expect((await post(base, "/vision/cameras/list", { grant_token: "owner-signed" })).status).toBe(200);
+    // uten en konfigurert grense (andre servere) er ruten uendret
+    expect((await post(url, "/vision/capture/upload", bogus)).status).toBe(403);
+  });
+
+  it("et bilde som er STØRRE enn standard JSON-kropp (64 KiB base64) men innenfor maxUploadBytes godtas - det hevede kroppstaket virker; og taket er nøyaktig maxUploadBytes", async () => {
+    const request = async (): Promise<{ request_id: string }> => (await call("/vision/capture/request", "owner-signed", { camera_id: mainCamera })).body["data"] as { request_id: string };
+    const sixty = jpegBytes({ size: 60_000 }); // ca. 80 KB som base64: over standard JSON-grense (64 KiB), under maxUploadBytes
+    expect(Math.ceil((sixty.length * 4) / 3)).toBeGreaterThan(64 * 1024);
+    const ok = await call("/vision/capture/upload", "phone", upload(await request(), sixty));
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    const headerLength = jpegBytes({ size: 0 }).length;
+    const exact = jpegBytes({ size: MAX_UPLOAD - headerLength }); // nøyaktig maxUploadBytes
+    expect(exact.length).toBe(MAX_UPLOAD);
+    expect((await call("/vision/capture/upload", "phone", upload(await request(), exact))).status).toBe(200);
+    const over = jpegBytes({ size: MAX_UPLOAD - headerLength + 1 }); // én byte for mye
+    const tooBig = await call("/vision/capture/upload", "phone", upload(await request(), over));
+    expect(tooBig.status).toBe(400);
+    expect(tooBig.body).toMatchObject({ error: "malformed_request", reason: "byte_length" });
   });
 });

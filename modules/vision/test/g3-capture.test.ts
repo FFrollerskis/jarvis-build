@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import { VisionCameraService, type VisionCamera } from "../src/cameras.ts";
-import { captureSigningBytes, CAPTURE_MAX_PENDING_PER_CAMERA, VisionCaptureError, VisionCaptureService, type CaptureContext, type CaptureRequest } from "../src/capture.ts";
+import { captureSigningBytes, CAPTURE_MAX_PENDING_PER_CAMERA, VisionCaptureError, VisionCaptureService, type CaptureContext, type CaptureDeviceRegistry, type CaptureRequest } from "../src/capture.ts";
 import { VisionClassifier } from "../src/classifier.ts";
 import { VisionEmbeddingService } from "../src/embeddings.ts";
 import { VisionInventoryService } from "../src/inventory.ts";
@@ -42,12 +42,12 @@ const expectCode = async (promise: Promise<unknown>, code: string): Promise<void
   await expect(promise).rejects.toMatchObject({ name: "VisionCaptureError", code });
 };
 
-function makeService(over: { pipelineVision?: VisionService } = {}): VisionCaptureService {
+function makeService(over: { pipelineVision?: VisionService; devices?: CaptureDeviceRegistry } = {}): VisionCaptureService {
   const pipeline = new VisionIngestPipeline({
     pool: db.app, vision: over.pipelineVision ?? vision, classifier: new VisionClassifier({ gateway }), snapshots, embeddings: new VisionEmbeddingService(db.app, new LocalHashEmbedding()),
     inventory: new VisionInventoryService(db.app), enabled: true, storeSnapshots: true
   });
-  return new VisionCaptureService(db.app, cameras, pipeline, registry, { now: () => new Date(clock) });
+  return new VisionCaptureService(db.app, cameras, pipeline, over.devices ?? registry, { now: () => new Date(clock) });
 }
 
 beforeAll(async () => {
@@ -134,6 +134,30 @@ describe("engangsbruk og binding", () => {
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     for (const failed of results.filter((r) => r.status === "rejected")) expect((failed as PromiseRejectedResult).reason).toMatchObject({ code: "request_not_pending" });
     expect(gateway.calls).toHaveLength(1);
+  });
+
+  it("DETERMINISTISK barriere (review B-L6): alle tre opplastinger har passert state-sjekken FØR noen forbruker - nøyaktig én vinner, én modellkjøring (en claim uten state = 'pending' gir tre)", async () => {
+    const requested = await request();
+    const bytes = makeJpeg();
+    const upload = phone.upload(requested, bytes);
+    // Enhetsoppslaget skjer ETTER at forespørselen er lest som `pending` og FØR den forbrukes: en lås som slipper dem først når alle tre har kommet hit, gjør kappløpet deterministisk (ingen sleep).
+    let arrived = 0;
+    const release: Array<() => void> = [];
+    const latch: CaptureDeviceRegistry = {
+      async approverFor(deviceId, tenantId) {
+        arrived += 1;
+        if (arrived >= 3) for (const r of release) r();
+        else await new Promise<void>((resolve) => { release.push(resolve); setTimeout(resolve, 10_000).unref(); });
+        return registry.approverFor(deviceId, tenantId);
+      }
+    };
+    const racing = makeService({ devices: latch });
+    const results = await Promise.allSettled([1, 2, 3].map(() => racing.submitUpload({ tenant_id: T.tenant, memory_space: "home", task_id: "t" }, upload, bytes)));
+    expect(arrived).toBe(3); // alle tre nådde låsen (altså: alle leste `pending`)
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    for (const failed of results.filter((r) => r.status === "rejected")) expect((failed as PromiseRejectedResult).reason).toMatchObject({ code: "request_not_pending" });
+    expect(gateway.calls).toHaveLength(1);
+    expect(await count(`SELECT count(*)::int AS n FROM vision_event_observations WHERE source_event_id LIKE $1`, [`${requested.request_id}%`])).toBe(1);
   });
 
   it("signaturen er bundet til forespørselen: en signatur for forespørsel A kan ikke brukes mot forespørsel B", async () => {

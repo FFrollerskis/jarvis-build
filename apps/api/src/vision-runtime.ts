@@ -12,6 +12,7 @@ import {
   VisionLastSeenService, VisionPoller, VisionSnapshotService, runVisionMaintenanceSweepForAllTenants, startVisionPoller, type CaptureDeviceRegistry, type VisionHttpFetch,
   type VisionModelGateway, type VisionPollerGuard, type VisionPollerHandle, type VisionService
 } from "@jarvis/vision";
+import { RateLimiter } from "./http-guard.ts";
 import type { VisionApiDeps } from "./vision-routes.ts";
 
 /**
@@ -64,6 +65,9 @@ export function visionFlagsFromEnv(env: NodeJS.ProcessEnv): VisionFlags {
     storageDir: env["JARVIS_VISION_STORAGE_DIR"]?.trim() || undefined
   };
 }
+
+/** Opplastinger per klient-IP per minutt (review B-L4). */
+export const VISION_UPLOADS_PER_IP_PER_MINUTE = 20;
 
 const LOCAL_SUFFIXES = [".local", ".lan", ".internal", ".home.arpa", ".localdomain"];
 
@@ -341,7 +345,8 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   const maintenanceDeps = { snapshots, inventory, captures: capture, embeddings };
   return {
     flags,
-    api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024 },
+    // Review B-L4: egen strenge per-IP-grense for opplastingsruten (kroppen er opptil ca. 7 MB og leses FØR grantet verifiseres): 20 opplastinger per minutt per IP er rause rom for én iPhone (ETT opptak per forespørsel).
+    api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024, uploadLimiter: new RateLimiter(VISION_UPLOADS_PER_IP_PER_MINUTE, 60_000) },
     pipeline,
     classifier,
     poller,

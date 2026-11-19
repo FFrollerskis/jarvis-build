@@ -145,7 +145,10 @@ describe("poll -> pipeline", () => {
       res.end();
     });
     const summary = await makePipeline().pollSource(ctx, source, [camera]);
-    expect(summary.failed + summary.recorded).toBe(1);
+    // review B-L12: «hendelsen skrives uten objekter» - selve raden FINNES (recorded = 1, ingenting feilet), men har ingen objekter og intet bilde
+    expect(summary).toEqual({ events_seen: 1, recorded: 1, duplicates: 0, discarded: 0, cooldown: 0, failed: 0 });
+    const base = (await db.admin.query(`SELECT event_type, snapshot_ref, classification_status FROM vision_event_observations WHERE source_instance_id = $1`, [camera.camera_id])).rows as Array<{ event_type: string; snapshot_ref: string | null; classification_status: string }>;
+    expect(base).toEqual([{ event_type: "motion_detected", snapshot_ref: null, classification_status: "not_applicable" }]);
     expect(await count(`SELECT count(*)::int AS n FROM vision_event_observations WHERE source_instance_id = $1 AND event_type = 'object_detected'`, [camera.camera_id])).toBe(0);
     expect(await count(`SELECT count(*)::int AS n FROM vision_snapshots WHERE camera_id = $1 AND state = 'stored'`, [camera.camera_id])).toBe(0);
     expect(gateway.calls).toHaveLength(0);

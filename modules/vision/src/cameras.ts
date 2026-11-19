@@ -3,6 +3,7 @@ import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import { z } from "zod";
+import { writeVisionAudit, type VisionChangeProvenance } from "./audit.ts";
 import type { VisionRoutePolicy, VisionZoneKind } from "./policy.ts";
 
 /**
@@ -105,6 +106,12 @@ function assertZonePolicy(zone: VisionZoneKind, policy: VisionRoutePolicy): void
   if (policy === "store_snapshot" && zone !== "home") fail("route_policy", "zone_forbids_storage");
 }
 
+/** Review B-L5: FK-brudd mot rommet (`vision_cameras_room_fkey`) er en ugyldig forespørsel (ukjent rom, eller rom som tilhører en annen person/space/tenant), ikke en serverfeil. */
+function isRoomForeignKeyViolation(err: unknown): boolean {
+  const e = err as { code?: unknown; constraint?: unknown } | null;
+  return e?.code === "23503" && typeof e.constraint === "string" && e.constraint === "vision_cameras_room_fkey";
+}
+
 function parse<T>(schema: z.ZodType<T>, input: unknown): T {
   const parsed = schema.safeParse(input);
   if (!parsed.success) {
@@ -117,24 +124,34 @@ function parse<T>(schema: z.ZodType<T>, input: unknown): T {
 export class VisionCameraService {
   constructor(private readonly pool: pg.Pool) {}
 
-  async registerCamera(tenantId: string, memorySpace: MemorySpace, input: RegisterCameraInput, provenance: { task_id?: string; session_id?: string } = {}): Promise<VisionCamera> {
+  async registerCamera(tenantId: string, memorySpace: MemorySpace, input: RegisterCameraInput, provenance: VisionChangeProvenance = {}): Promise<VisionCamera> {
     const value = parse(RegisterCameraInputSchema, input);
     const label = validateLabel(value.label);
     if (value.source_type === "home_assistant" && !HA_CAMERA_ENTITY.test(value.source_ref)) fail("source_ref", "invalid_ha_camera_entity");
     if (value.source_type === "iphone" && !DEVICE_ID.test(value.source_ref)) fail("source_ref", "invalid_device_id");
     const triggers = validateTriggers(value.source_type, value.trigger_entities);
     assertZonePolicy(value.zone_kind, value.route_policy);
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const { rows } = await client.query(
-        `INSERT INTO vision_cameras (camera_id, tenant_id, memory_space_id, person_id, label, source_type, source_ref, trigger_entities, room_id, zone_kind, route_policy, cooldown_seconds, enabled, task_id, session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
-        [
-          `vis-cam-${randomUUID()}`, tenantId, memorySpace, value.person_id, label, value.source_type, value.source_ref, triggers, value.room_id ?? null,
-          value.zone_kind, value.route_policy, value.cooldown_seconds ?? 30, value.enabled ?? true, provenance.task_id ?? null, provenance.session_id ?? null
-        ]
-      );
-      return rows[0] as VisionCamera;
-    });
+    try {
+      return await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO vision_cameras (camera_id, tenant_id, memory_space_id, person_id, label, source_type, source_ref, trigger_entities, room_id, zone_kind, route_policy, cooldown_seconds, enabled, task_id, session_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
+          [
+            `vis-cam-${randomUUID()}`, tenantId, memorySpace, value.person_id, label, value.source_type, value.source_ref, triggers, value.room_id ?? null,
+            value.zone_kind, value.route_policy, value.cooldown_seconds ?? 30, value.enabled ?? true, provenance.task_id ?? null, provenance.session_id ?? null
+          ]
+        );
+        const camera = rows[0] as VisionCamera;
+        await writeVisionAudit(client, tenantId, value.person_id, provenance, {
+          type: "vision.camera_registered", action: "camera_register",
+          payload: { camera_id: camera.camera_id, source_type: camera.source_type, zone_kind: camera.zone_kind, route_policy: camera.route_policy, enabled: camera.enabled, room_id: camera.room_id, trigger_count: camera.trigger_entities.length }
+        });
+        return camera;
+      });
+    } catch (err) {
+      if (isRoomForeignKeyViolation(err)) fail("room_id", "room_not_found");
+      throw err;
+    }
   }
 
   async getCamera(tenantId: string, memorySpace: MemorySpace, personId: string, cameraId: string): Promise<VisionCamera | null> {
@@ -171,7 +188,7 @@ export class VisionCameraService {
   }
 
   /** Endrer label/sone/policy/cooldown/på-av/triggere. Sone-/policyregelen sjekkes mot den RESULTERENDE kombinasjonen (ikke bare det som endres). */
-  async updateCamera(tenantId: string, memorySpace: MemorySpace, personId: string, cameraId: string, input: UpdateCameraInput): Promise<VisionCamera | null> {
+  async updateCamera(tenantId: string, memorySpace: MemorySpace, personId: string, cameraId: string, input: UpdateCameraInput, provenance: VisionChangeProvenance = {}): Promise<VisionCamera | null> {
     const value = parse(UpdateCameraInputSchema, input);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await client.query(`SELECT * FROM vision_cameras WHERE tenant_id = $1 AND person_id = $2 AND camera_id = $3 FOR UPDATE`, [tenantId, personId, cameraId]);
@@ -187,7 +204,12 @@ export class VisionCameraService {
           WHERE tenant_id = $1 AND person_id = $2 AND camera_id = $3 RETURNING *`,
         [tenantId, personId, cameraId, label, zone, policy, value.cooldown_seconds ?? row.cooldown_seconds, value.enabled ?? row.enabled, triggers]
       );
-      return rows[0] as VisionCamera;
+      const camera = rows[0] as VisionCamera;
+      await writeVisionAudit(client, tenantId, personId, provenance, {
+        type: "vision.camera_updated", action: "camera_update",
+        payload: { camera_id: camera.camera_id, changed: Object.keys(value).sort(), zone_kind: camera.zone_kind, route_policy: camera.route_policy, enabled: camera.enabled, cooldown_seconds: camera.cooldown_seconds }
+      });
+      return camera;
     });
   }
 
@@ -195,11 +217,20 @@ export class VisionCameraService {
    * Fjerner kameraet OG alle bildene det har tatt (FK `ON DELETE CASCADE` + gravsteiner sørger for at bildeobjektene også slettes). Hendelsene beholdes (de følger sin egen
    * retensjon). DESTRUKTIV (regel 8): krever `confirm: true` - eier-ruten krever i tillegg en typet bekreftelse og signert enhetsøkt.
    */
-  async removeCamera(tenantId: string, memorySpace: MemorySpace, personId: string, cameraId: string, options: { confirm: boolean }): Promise<boolean> {
+  async removeCamera(tenantId: string, memorySpace: MemorySpace, personId: string, cameraId: string, options: { confirm: boolean } & VisionChangeProvenance): Promise<boolean> {
     if (options.confirm !== true) fail("confirm", "explicit_confirmation_required");
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      // Review B-L3: antall bilder som følger kameraet ut (kaskade) telles FØR sletting og settes i revisjonsraden - en destruktiv handling skal etterlate et spor med omfang.
+      const images = await client.query(`SELECT count(*)::int AS n FROM vision_snapshots WHERE tenant_id = $1 AND person_id = $2 AND camera_id = $3`, [tenantId, personId, cameraId]);
       const { rowCount } = await client.query(`DELETE FROM vision_cameras WHERE tenant_id = $1 AND person_id = $2 AND camera_id = $3`, [tenantId, personId, cameraId]);
-      return (rowCount ?? 0) > 0;
+      const removed = (rowCount ?? 0) > 0;
+      if (removed) {
+        await writeVisionAudit(client, tenantId, personId, options, {
+          type: "vision.camera_removed", action: "camera_remove",
+          payload: { camera_id: cameraId, snapshots_removed: (images.rows[0] as { n: number }).n, events_retained: true }
+        });
+      }
+      return removed;
     });
   }
 }

@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import type { IdentityContext } from "@jarvis/contracts";
 import { ownerStepUpDenial } from "@jarvis/tool-gateway";
+import { clientKey, type RateLimiter } from "./http-guard.ts";
 import { VisionCameraValidationError, VisionCaptureError, type CaptureRequest, type SignedCaptureUpload, type VisionCameraService, type VisionCaptureService, type VisionInventoryService, type VisionLastSeenService } from "@jarvis/vision";
 
 /**
@@ -23,6 +24,11 @@ export interface VisionApiDeps {
   inventory: VisionInventoryService;
   /** Maks bildestørrelse i opplastingen (bytes). */
   maxUploadBytes: number;
+  /**
+   * Streng per-IP-grense for opplastingsruten, sjekket FØR kroppen leses (review B-L4): opplastingen har et hevet kroppstak (ca. 7 MB mot 64 KiB ellers) og serveren leser kroppen FØR grantet verifiseres, så uten egen
+   * grense kunne en uautentisert klient strømme mange MB per forespørsel opp til den generelle IP-grensen (600/min). Utelatt = ingen ekstra grense (kun den generelle).
+   */
+  uploadLimiter?: RateLimiter;
 }
 
 export interface VisionRouteHelpers {
@@ -96,6 +102,14 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
   const spec = ROUTES[pathname];
   if (spec === undefined || req.method !== "POST") return false;
   const maxBytes = spec.upload === true ? Math.ceil((deps.maxUploadBytes * 4) / 3) + 8_192 : undefined;
+  if (spec.upload === true && deps.uploadLimiter !== undefined) {
+    const peer = clientKey(req);
+    if (!deps.uploadLimiter.take(peer)) {
+      req.resume(); // kroppen leses/bufres aldri: en avvist forespørsel koster ingen minne
+      h.json(429, { error: "rate_limited", reason: "upload_rate_limited", retry_after_seconds: deps.uploadLimiter.retryAfterSeconds(peer), request_id: h.requestId() });
+      return true;
+    }
+  }
   const authed = await h.authed(spec.keys, maxBytes);
   if (authed === null) return true;
   const { identity, body } = authed;
@@ -127,7 +141,8 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
         return true;
       }
       case "/vision/cameras/register": {
-        const camera = await deps.cameras.registerCamera(tenant, space, { person_id: person, ...pick(body, spec.keys) } as never, { task_id: "vision-api:camera_register", session_id: identity.session_id });
+        // Review B-L3: revisjonsrad i samme transaksjon (audit: true); ukjent rom gir 400 `vision_validation` (field room_id, review B-L5) via tjenesten.
+        const camera = await deps.cameras.registerCamera(tenant, space, { person_id: person, ...pick(body, spec.keys) } as never, { task_id: "vision-api:camera_register", session_id: identity.session_id, device_id: identity.device_id, audit: true });
         h.json(200, { ok: true, data: camera });
         return true;
       }
@@ -136,7 +151,7 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
         if (cameraId === null) return bad("camera_id");
         const { camera_id: _omit, ...patch } = pick(body, spec.keys);
         void _omit;
-        const camera = await deps.cameras.updateCamera(tenant, space, person, cameraId, patch as never);
+        const camera = await deps.cameras.updateCamera(tenant, space, person, cameraId, patch as never, { task_id: "vision-api:camera_update", session_id: identity.session_id, device_id: identity.device_id, audit: true });
         if (camera === null) {
           h.json(404, { error: "camera_not_found", request_id: requestId });
           return true;
@@ -152,7 +167,7 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
           h.json(409, { error: "confirmation_required", reason: "confirm_true_and_confirm_camera_id_required", confirm_camera_id_required: cameraId, request_id: requestId });
           return true;
         }
-        const removed = await deps.cameras.removeCamera(tenant, space, person, cameraId, { confirm: true });
+        const removed = await deps.cameras.removeCamera(tenant, space, person, cameraId, { confirm: true, task_id: "vision-api:camera_remove", session_id: identity.session_id, device_id: identity.device_id, audit: true });
         if (!removed) {
           h.json(404, { error: "camera_not_found", request_id: requestId });
           return true;
@@ -168,7 +183,7 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
         const key = body["idempotency_key"];
         if (key !== undefined && typeof key !== "string") return bad("idempotency_key");
         const request = await deps.capture.requestCapture(
-          { tenant_id: tenant, memory_space: space, person_id: person, task_id: "vision-api:capture_request", session_id: identity.session_id },
+          { tenant_id: tenant, memory_space: space, person_id: person, task_id: "vision-api:capture_request", session_id: identity.session_id, device_id: identity.device_id, audit: true },
           { camera_id: cameraId, idempotency_key: key as string | undefined, ttl_ms: ttl === undefined ? undefined : Math.round((ttl as number) * 1000) }
         );
         h.json(200, { ok: true, data: publicRequest(request) });
