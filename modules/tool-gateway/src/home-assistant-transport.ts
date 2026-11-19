@@ -126,6 +126,16 @@ export class HomeAssistantTransport implements ToolTransport {
         const filtered = domain ? all.filter((e) => e.entity_id.startsWith(domain + ".")) : all;
         return { data: filtered.slice(0, 200).map((e) => ({ entity_id: e.entity_id, state: e.state, name: (e.attributes?.["friendly_name"] as JsonValue) ?? null })) };
       }
+      case "read_state_detail": {
+        // WP-G4 (D-466): MINIMERT tilstandsdetalj for situasjonsmotorens hjem-bro: kun `state`, `last_changed` og `device_class` (lukkede nøkler, kuttet lengde) - aldri attributter, navn eller historikk.
+        // `last_changed` er når tilstanden sist endret seg (HA-dokumentasjonen), som gir «hvor lenge har døren stått åpen» uten at Jarvis lagrer en egen tilstandshistorikk. Ukjent entitet gir `data: null`.
+        const entityId = assertEntityId(parameters["entity"], "entity");
+        const { status, json } = await this.call("GET", `/api/states/${encodeURIComponent(entityId)}`, credential);
+        if (status === 404 || !json || typeof json !== "object") return { data: null };
+        const raw = json as { state?: unknown; last_changed?: unknown; attributes?: { device_class?: unknown } };
+        const text = (v: unknown, max: number): string | null => (typeof v === "string" && v.length > 0 && v.length <= max ? v : null);
+        return { data: { entity_id: entityId, state: text(raw.state, 100), last_changed: text(raw.last_changed, 40), device_class: text(raw.attributes?.device_class, 40) } };
+      }
       case "read_state": {
         // Q-34: et ukjent mål gir `data: null` → `preflight_requires_target` avviser lock/alarm lukket.
         if (typeof parameters["entity"] === "string") {

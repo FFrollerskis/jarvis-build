@@ -145,12 +145,12 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 
 ### Situasjonsmotor og kontroll
 
-- **Formål:** Prioriterte situasjoner og pauser
-- **Memory space/tenant:** personal/business (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
-- **Datakategori:** Avledede situasjoner fra eierens egne data
-- **Retensjon:** Løste situasjoner beholdes for forklarbarhet.
-- **Eksterne mottakere:** Ingen
-- **Tabeller:** `situation_autonomy_policies`, `situation_domain_pauses`, `situation_notification_policies`, `situations`
+- **Formål:** Prioriterte situasjoner og pauser. WP-G4 (D-466, UA-10): bak `JARVIS_SITUATION_SIGNALS` (AV) et samlet hendelsesabonnement - abonnementsregister (eierens eksplisitte valg av kilde, hendelsestype og filter), inntaksbuss, signallogg, modellassistert vurdering, tilbakemelding og regeltuning. Kilder: Home Assistant-tilstander (dør/port åpen for lenge, lekkasje, alarm, strøm), kamerahendelser, avvik fra eierens egen helse-baseline og hendelsesregisteret. Se `docs/UA10_SITUATION_ENGINE_DESIGN.md` §11 og `docs/runbooks/WPG4_SITUATION_BRIDGES.md`
+- **Memory space/tenant:** personal/business/home/health (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`). Begrensede kilder lagres i sitt eget rom (helse -> `health`, kamera -> `home`)
+- **Datakategori:** Avledede situasjoner fra eierens egne data. WP-G4: signalloggen og vurderingene er AVLEDET og MINIMERT fra begrensede data (helse, kamera): kun lukkede kategorier og grove tall (retning, alvorlighet, antall dager, hendelsestype), aldri måleverdier, baselineverdier, bilder, objektetiketter, kamera-id-er i tekst eller fritekst fra kilden - låst av `assertMinimalFacts` (kode), en DB-CHECK på størrelse og vakttester. Varselteksten for helse- og bildeutledede hendelser er innholdsfri (kun kategori + «åpne Jarvis for detaljer»). Modellens forklaring (ubetrodd) lagres kun i vurderingstabellen, aldri i situasjonens tekst eller varselet
+- **Retensjon:** Løste situasjoner beholdes for forklarbarhet. Signalloggen: daglig opprydding (standard 30 dager, `JARVIS_SITUATION_LOG_RETENTION_DAYS` 7-365). Tilbakemelding, regeltuning og vurderinger følger situasjonen/rommet (Q-20-erasure dekker alle fem nye tabeller). Abonnementer består til eieren fjerner dem
+- **Eksterne mottakere:** Ingen for selve tilstanden. Varsler går til eierens egen Telegram-kanal (eksisterende `telegram.notify`; innholdsfri tekst for begrensede domener). Modellassistert vurdering (AV som standard) går kun via `ModelGateway`: begrensede domener (helse, kamera, hjem) sendes med `SECRET_RESTRICTED` til en LOKAL modell, svar fra en ikke-lokal leverandør forkastes, og inngangen er kun den lukkede fakta-mengden. Ingen ny leverandør
+- **Tabeller:** `situation_assessments`, `situation_autonomy_policies`, `situation_domain_pauses`, `situation_feedback`, `situation_notification_policies`, `situation_rule_tuning`, `situation_signal_log`, `situation_subscriptions`, `situations`
 
 ### Sted, helse, kontekst og rom
 

@@ -527,6 +527,14 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "risks", await run(client, mode, "risks", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "scenarios", await run(client, mode, "scenarios", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "decision_log", await run(client, mode, "decision_log", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-G4 (D-466, migrasjon 139): signallogg, tilbakemelding og modellvurderinger peker (sammensatt FK, ON DELETE CASCADE) på `situations` og er avledet av eierens egne data; abonnementer og regeltuning er eierens
+  // konfigurasjon for rommet (et helseabonnement bærer personens id, et hjemabonnement eierens entitets-id-er). Alle fem er tenant+space-skopet og slettes sammen med rommet. Registrert FØR `situations` (barna eksplisitt, selv om kaskaden
+  // uansett ville tatt dem) så tellingene i erasure-resultatet er ærlige.
+  add(result, "situation_signal_log", await run(client, mode, "situation_signal_log", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "situation_feedback", await run(client, mode, "situation_feedback", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "situation_assessments", await run(client, mode, "situation_assessments", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "situation_subscriptions", await run(client, mode, "situation_subscriptions", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "situation_rule_tuning", await run(client, mode, "situation_rule_tuning", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "situations", await run(client, mode, "situations", "tenant_id = $1 AND memory_space_id = $2", tv));
   // WP-D2 (UA-3 «churn/product usage», 090): produktbruk + churn-vurderinger. Churn-loopen er REN DERIVERT state av bruksdataene (detection_key bærer konto-pseudonymet,
   // reason bærer tall utledet av dem) og slettes sammen med dem - snevert avgrenset til loop_type = 'customer_churn_risk' (rører aldri andre loops). Plassert ETTER

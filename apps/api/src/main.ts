@@ -110,6 +110,7 @@ import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
 } from "@jarvis/situations";
+import { createSituationSignalsWiring } from "./situation-signals-wiring.ts";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, parseFollowUpPushPolicy, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
@@ -835,6 +836,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const personal = createPersonalWiring({ env: process.env, pool, gateway: toolGateway, readSecret: (ref) => readSecretProvider.get(ref), ownerPersonId: owner.owner_person_id });
   const personalLog = personal.describe();
   if (personalLog) console.log(JSON.stringify(personalLog));
+  // WP-G4 (D-466, UA-10): samlet hendelsesabonnement (abonnementsregister, inntaksbuss, hendelsesløper, kildeporter). ALT er AV som standard: uten `JARVIS_SITUATION_SIGNALS=on` er `tools` tom, `runner` null og ingenting logges
+  // (verktøylister, utvalg, intents, rate-grenser, ruter og det daglige sveipet er identiske med main). Helse-/visjonsporten tas strukturelt inn fra de ALLEREDE konstruerte tjenestene (denne filen er en godkjent helse-importør).
+  const situationSignals = createSituationSignalsWiring({
+    env: process.env, pool, engine: situationEngine, domainPauses: situationDomainPauses, gateway: toolGateway, modelGateway: gateway, ownerIdentity, ownerTenantId: owner.tenant_id,
+    ownerPersonId: owner.owner_person_id, incidents: incidentService, vision: visionService, health: healthService, killSwitch,
+    haTransport: new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))
+  });
+  const situationSignalsLog = situationSignals.describe();
+  if (situationSignalsLog) console.log(JSON.stringify(situationSignalsLog));
   for (const tool of personal.filterTools(firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -1121,7 +1131,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // D-388 (JARVIS-061): Home Assistant-verktøyene (definert siden fase 9, aldri registrert) registreres nå med den
       // ekte transporten fra `transports`-recorden over - samme ene register-løkke som resten.
       ...homeAssistantTools(new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))),
-      ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
+      // WP-G4: `autonomyExpiry` gir `set_autonomy_policy` et valgfritt `expires_at` KUN med hovedbryteren på (ellers er skjemaet identisk med main).
+      ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses), { autonomyExpiry: situationSignals.flags.signals }),
       // WP-H2: tjenesten legger seg i `executiveRef` (`holder`) så Drift-/Verdi-sentrene kan lese rapportene dens (late funksjoner over); `run_golden_suite` og `revoke_autonomy_binding` registreres KUN med sine flagg.
       ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER],
         selfModel: {
@@ -1232,7 +1243,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // (ingen verktøy, ingen utvalgstreff, ingen rate-endring). Samme ene register-løkke som resten - ingen parallell registreringsvei.
       ...commsRuntime.tools,
       // WP-G2 (D-464): personlig-domenet (tom liste uten flagg). Eier-/step-up-krevende, aldri på en modellflate.
-      ...personal.tools
+      ...personal.tools,
+      // WP-G4 (D-466): kontrollhandlinger for hendelsesabonnementet på `situations` (eier-eksklusivt navnerom) og HA-lesehandlingen `read_state_detail`. Tom liste uten `JARVIS_SITUATION_SIGNALS=on`.
+      ...situationSignals.tools
     ]
   }))) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
@@ -1847,6 +1860,8 @@ porter: se docs/RUNTIME_GATES.md`;
       ...ownerIdentity, tenant_id: tenantId, memory_space_id: memorySpace, session_id: `${ownerIdentity.session_id}-situation-sweep`
     })
   }).then(assertSituationSweepHealthy));
+  // WP-G4 (D-466): hendelsesløperen starter KUN med hovedbryteren på (ingen effekt ellers). Første tikk etter ett intervall; eier-kontrollene (kill switch, pause) gjelder per tikk.
+  situationSignals.start();
   // UA-3 business-event-linkage (D-57) §19/§20/§21: periodisk Gmail/Calendar->
   // Business-OS-synkronisering - SAMME reboot-durable DailyScheduler-mekanisme
   // (eget job_name, egen klokkeslett-env), uavhengig av Telegram-konfig.

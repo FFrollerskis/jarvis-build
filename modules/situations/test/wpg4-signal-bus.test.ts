@@ -18,7 +18,7 @@ import { SituationActDomainForbiddenError, SituationAutonomyUnauthorizedError, S
 import { SignalLogService } from "../src/signal-log.ts";
 import { SituationSignalBus } from "../src/signal-bus.ts";
 import { runSituationSweep } from "../src/sweep.ts";
-import { SubscriptionRegistry, SubscriptionUnauthorizedError, SubscriptionValidationError } from "../src/subscriptions.ts";
+import { SubscriptionRegistry, SubscriptionUnauthorizedError } from "../src/subscriptions.ts";
 import { SituationsTransport, situationsToolDefinitions } from "../src/transport.ts";
 import type { VisionObservation } from "../src/vision-bridge.ts";
 import type { HealthObservation, DailyPoint } from "../src/health-bridge.ts";
