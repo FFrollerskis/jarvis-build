@@ -11,6 +11,7 @@ import { VisionSnapshotService } from "../src/snapshots.ts";
 import { LocalFsStorageAdapter } from "../src/storage.ts";
 import { FakeDevice, TestDeviceRegistry } from "./support/fake-device.ts";
 import { detectionsJson, makeJpeg, NOT_AN_IMAGE, ScriptedGateway, seedTenant, startVisionDb, type VisionDb } from "./support/harness.ts";
+import { jpegBytes } from "./support/images.ts";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -149,7 +150,9 @@ describe("engangsbruk og binding", () => {
     const bytes = makeJpeg();
     const upload = phone.upload(requested, bytes);
     const tampered = Uint8Array.from(bytes);
-    tampered[20] = (tampered[20] as number) ^ 0xff;
+    // en byte i innholdet (ikke i bildehodet: et ødelagt hode avvises av bildekontrollen først, se A-L6-testene)
+    const last = tampered.length - 1;
+    tampered[last] = (tampered[last] as number) ^ 0xff;
     await expectCode(service.submitUpload({ tenant_id: T.tenant, memory_space: "home", task_id: "t" }, upload, tampered), "hash_mismatch");
     const recomputed = phone.upload(requested, tampered);
     await expect(service.submitUpload({ tenant_id: T.tenant, memory_space: "home", task_id: "t" }, { ...recomputed, sha256: upload.sha256 }, tampered)).rejects.toMatchObject({ code: "invalid_signature" });
@@ -209,6 +212,11 @@ describe("engangsbruk og binding", () => {
     const big = new Uint8Array(6 * 1024 * 1024);
     await expectCode(service.submitUpload(ctxUpload, phone.upload(requested, big), big), "upload_size_mismatch");
     await expectCode(service.submitUpload(ctxUpload, phone.upload(requested, NOT_AN_IMAGE), NOT_AN_IMAGE), "image_unsupported_format");
+    // review A-L6: pikselbombe (liten fil, enorme mål) og et hode uten lesbare mål avvises FØR forbruk og før modellen
+    const bomb = jpegBytes({ width: 60_000, height: 60_000 });
+    await expectCode(service.submitUpload(ctxUpload, phone.upload(requested, bomb), bomb), "image_dimensions_too_large");
+    const headerOnly = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 2, 3, 4]);
+    await expectCode(service.submitUpload(ctxUpload, phone.upload(requested, headerOnly), headerOnly), "image_dimensions_unreadable");
     await expectCode(service.submitUpload(ctxUpload, phone.upload(requested, bytes, { media_type: "image/png" }), bytes), "image_content_type_mismatch");
     await expectCode(service.submitUpload(ctxUpload, { ...phone.upload(requested, bytes), media_type: "video/mp4" }, bytes), "upload_malformed");
     expect((await db.admin.query(`SELECT state FROM vision_capture_requests WHERE request_id = $1`, [requested.request_id])).rows[0].state).toBe("pending");

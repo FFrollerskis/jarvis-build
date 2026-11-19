@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { decayedConfidence, describeEventForEmbedding, isStorableObjectLabel, MAX_OBJECT_LABEL_CHARS, normalizeObjectLabel } from "../src/labels.ts";
 import { VisionObservationInputSchema } from "../src/types.ts";
-import { DEFAULT_MAX_IMAGE_BYTES, inspectImage, readBodyLimited, sniffMediaType, VisionImageError } from "../src/image.ts";
+import { DEFAULT_MAX_IMAGE_BYTES, inspectImage, MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE, readBodyLimited, sniffMediaType, VisionImageError } from "../src/image.ts";
+import { jpegBytes, pngBytes, webpBytes } from "./support/images.ts";
 import { assertSafeStorageKey, LocalFsStorageAdapter, StorageKeyError } from "../src/storage.ts";
 
 /**
@@ -130,17 +131,18 @@ describe("describeEventForEmbedding og decayedConfidence", () => {
   });
 });
 
-const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1]);
-const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
-const WEBP = Uint8Array.from([0x52, 0x49, 0x46, 0x46, 1, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20]);
+// Strukturelt gyldige hoder (review A-L6: inspectImage leser målene fra hodet) - se support/images.ts
+const JPEG = jpegBytes({ size: 8 });
+const PNG = pngBytes({ size: 8 });
+const WEBP = webpBytes("vp8x", { size: 8 });
 
 describe("inspectImage: media type fra BYTENE, hard størrelsesgrense, ingen SVG/HTML/GIF", () => {
-  it("gjenkjenner JPEG, PNG og WebP og beregner sha256 + lengde", () => {
+  it("gjenkjenner JPEG, PNG og WebP og beregner sha256 + lengde + mål", () => {
     expect(sniffMediaType(JPEG)).toBe("image/jpeg");
     expect(sniffMediaType(PNG)).toBe("image/png");
     expect(sniffMediaType(WEBP)).toBe("image/webp");
     const inspected = inspectImage(JPEG, { declaredType: "image/jpeg; charset=binary" });
-    expect(inspected).toMatchObject({ media_type: "image/jpeg", byte_length: JPEG.length });
+    expect(inspected).toMatchObject({ media_type: "image/jpeg", byte_length: JPEG.length, width: 64, height: 48 });
     expect(inspected.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(inspectImage(JPEG, { declaredType: "image/jpg" }).media_type).toBe("image/jpeg");
   });
@@ -176,6 +178,97 @@ describe("inspectImage: media type fra BYTENE, hard størrelsesgrense, ingen SVG
     const declared = new Response(new Uint8Array(10), { headers: { "content-length": "999999999" } });
     await expect(readBodyLimited(declared, 1024)).rejects.toThrowError(/too_large/);
     expect(await readBodyLimited(new Response(JPEG), 1024)).toEqual(JPEG);
+  });
+});
+
+describe("inspectImage: mål fra bildehodet (review A-L6) - en liten fil kan deklarere enorme mål og velte den lokale modellserveren", () => {
+  const dims = (bytes: Uint8Array): [number, number] => {
+    const i = inspectImage(bytes);
+    return [i.width, i.height];
+  };
+
+  it("leser bredde/høyde fra PNG IHDR, JPEG SOF (baseline og progressive, også etter et langt APP1-segment) og WebP VP8/VP8L/VP8X - uten dekoder", () => {
+    expect(dims(pngBytes({ width: 1920, height: 1080 }))).toEqual([1920, 1080]);
+    expect(dims(jpegBytes({ width: 4032, height: 3024 }))).toEqual([4032, 3024]);
+    expect(dims(jpegBytes({ width: 800, height: 600, sof: 0xc2 }))).toEqual([800, 600]);
+    expect(dims(jpegBytes({ width: 321, height: 123, appPadding: 3000 }))).toEqual([321, 123]);
+    expect(dims(webpBytes("vp8", { width: 640, height: 480 }))).toEqual([640, 480]);
+    expect(dims(webpBytes("vp8l", { width: 1000, height: 500 }))).toEqual([1000, 500]);
+    expect(dims(webpBytes("vp8x", { width: 3000, height: 2000 }))).toEqual([3000, 2000]);
+  });
+
+  it("avviser enorme mål selv om filen er liten (pikselbombe): side over 8192, areal over 50 MP, PNG/JPEG/WebP - men 48 MP (8064 x 6048) og 8192 x 6000 består", () => {
+    const bombs: Array<[string, Uint8Array]> = [
+      ["PNG 30000x30000", pngBytes({ width: 30_000, height: 30_000 })],
+      ["PNG 8193x10", pngBytes({ width: 8193, height: 10 })],
+      ["PNG 4294967295x1", pngBytes({ width: 0xffff_ffff, height: 1 })],
+      ["JPEG 65535x65535", jpegBytes({ width: 65_535, height: 65_535 })],
+      ["JPEG 8193x1", jpegBytes({ width: 8193, height: 1 })],
+      ["JPEG 8192x8192 (67 MP)", jpegBytes({ width: 8192, height: 8192 })],
+      ["WebP VP8X 16777216x16777216", webpBytes("vp8x", { width: 16_777_216, height: 16_777_216 })],
+      ["WebP VP8L 16384x16384", webpBytes("vp8l", { width: 16_384, height: 16_384 })],
+      ["WebP VP8 16383x16383", webpBytes("vp8", { width: 16_383, height: 16_383 })]
+    ];
+    for (const [name, bytes] of bombs) {
+      expect(bytes.length, name).toBeLessThan(2_000);
+      expect(() => inspectImage(bytes), name).toThrowError(/dimensions_too_large/);
+    }
+    expect(dims(jpegBytes({ width: 8064, height: 6048 }))).toEqual([8064, 6048]);
+    expect(dims(pngBytes({ width: 8192, height: 6000 }))).toEqual([8192, 6000]);
+    expect(MAX_IMAGE_SIDE).toBe(8192);
+    expect(MAX_IMAGE_PIXELS).toBe(50_000_000);
+  });
+
+  it("grensene kan senkes av kalleren, aldri heves", () => {
+    const hd = jpegBytes({ width: 1920, height: 1080 });
+    expect(() => inspectImage(hd, { maxSide: 1000 })).toThrowError(/dimensions_too_large/);
+    expect(() => inspectImage(hd, { maxPixels: 1_000_000 })).toThrowError(/dimensions_too_large/);
+    expect(() => inspectImage(jpegBytes({ width: 9000, height: 100 }), { maxSide: 100_000, maxPixels: 1e12 })).toThrowError(/dimensions_too_large/);
+    expect(inspectImage(hd, { maxSide: 1920, maxPixels: 1920 * 1080 }).width).toBe(1920);
+  });
+
+  it("ulesbare mål avvises fail-closed: avkortet hode, SOS før SOF, ugyldig markørstruktur, PNG uten IHDR, WebP med ukjent chunk/startkode, null-mål", () => {
+    const bad: Array<[string, Uint8Array]> = [
+      ["JPEG kun SOI + APP0", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1])],
+      ["JPEG SOS før SOF", Uint8Array.from([0xff, 0xd8, 0xff, 0xda, 0, 12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 1, 2, 3, 4])],
+      ["JPEG uten markør (ikke FF)", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 4, 1, 2, 0x12, 0x34, 0x56, 0x78, 0x9a])],
+      ["JPEG segmentlengde 0", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 1, 2, 3, 4, 5, 6])],
+      ["JPEG stuffet FF00 i markørlaget", Uint8Array.from([0xff, 0xd8, 0xff, 0x00, 0, 4, 1, 2, 3, 4, 5, 6])],
+      ["JPEG for kort SOF", Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0, 6, 8, 0, 1, 2, 3, 4, 5, 6])],
+      ["PNG uten IHDR", Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x74, 0x45, 0x58, 0x74, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2])],
+      ["PNG avkortet", Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0])],
+      ["PNG null-mål", pngBytes({ width: 0, height: 10 })],
+      ["JPEG null-mål", jpegBytes({ width: 0, height: 10 })],
+      ["WebP ukjent chunk", Uint8Array.from([...webpBytes("vp8x").slice(0, 12), ...new TextEncoder().encode("ALPH"), ...new Array<number>(40).fill(1)])],
+      ["WebP VP8 uten startkode", Uint8Array.from([...webpBytes("vp8").slice(0, 23), 0, 0, 0, ...new Array<number>(20).fill(1)])],
+      ["WebP VP8L uten signatur", Uint8Array.from([...webpBytes("vp8l").slice(0, 20), 0x00, ...new Array<number>(20).fill(1)])],
+      ["WebP avkortet", webpBytes("vp8x").slice(0, 28)]
+    ];
+    for (const [name, bytes] of bad) expect(() => inspectImage(bytes), name).toThrowError(/dimensions_unreadable/);
+  });
+
+  it("parseren kaster aldri annet enn VisionImageError og leser aldri utenfor bufferen: hver avkorting av gyldige filer (og tilfeldig søppel etter signaturen) er enten godtatt eller avvist med en typet feil", () => {
+    const valid = [jpegBytes({ size: 0, appPadding: 40 }), pngBytes({ size: 0 }), webpBytes("vp8", { size: 0 }), webpBytes("vp8l", { size: 0 }), webpBytes("vp8x", { size: 0 })];
+    for (const file of valid) {
+      for (let length = 0; length <= file.length; length += 1) {
+        try {
+          inspectImage(file.slice(0, length));
+        } catch (err) {
+          expect(err, `lengde ${length}`).toBeInstanceOf(VisionImageError);
+        }
+      }
+    }
+    for (let round = 0; round < 300; round += 1) {
+      const junk = Uint8Array.from({ length: 64 }, () => Math.floor(Math.random() * 256));
+      for (const signature of [[0xff, 0xd8, 0xff], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], [0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]]) {
+        const bytes = Uint8Array.from([...signature, ...junk]);
+        try {
+          inspectImage(bytes);
+        } catch (err) {
+          expect(err).toBeInstanceOf(VisionImageError);
+        }
+      }
+    }
   });
 });
 

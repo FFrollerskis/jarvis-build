@@ -16,6 +16,7 @@ import { LocalFsStorageAdapter, type StorageAdapter } from "../src/storage.ts";
 import type { VisionEventType } from "../src/types.ts";
 import { decayedConfidence } from "../src/labels.ts";
 import { detectionsJson, makeJpeg, NOT_AN_IMAGE, ScriptedGateway, ScriptedSource, seedTenant, startVisionDb, type VisionDb } from "./support/harness.ts";
+import { jpegBytes } from "./support/images.ts";
 
 /**
  * WP-G3 (D-465), P1a/P1b/P1c/P2e: hele kildepipelinen mot ekte Postgres (RLS som runtime-rolle), ekte lokal lagring (temp-mappe) og en scriptet LOKAL modellgateway.
@@ -280,7 +281,10 @@ describe("ubetrodd modellutdata og bilder", () => {
     const cases: Array<[() => { bytes: Uint8Array; declared_type?: string }, RegExp]> = [
       [() => ({ bytes: NOT_AN_IMAGE, declared_type: "image/jpeg" }), /^image_vision_image_invalid$/],
       [() => ({ bytes: makeJpeg(), declared_type: "image/png" }), /^image_vision_image_invalid$/],
-      [() => ({ bytes: makeJpeg(5_000), declared_type: "image/jpeg" }), /^image_vision_image_invalid$/]
+      [() => ({ bytes: makeJpeg(5_000), declared_type: "image/jpeg" }), /^image_vision_image_invalid$/],
+      // review A-L6: en LITEN fil som deklarerer enorme mål (pikselbombe) når aldri modellen; samme for et hode uten lesbare mål
+      [() => ({ bytes: jpegBytes({ width: 65_535, height: 65_535 }), declared_type: "image/jpeg" }), /^image_vision_image_invalid$/],
+      [() => ({ bytes: Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 2, 3, 4]), declared_type: "image/jpeg" }), /^image_vision_image_invalid$/]
     ];
     for (const [image, note] of cases) {
       const p = makePipeline({ maxImageBytes: 1_000 });

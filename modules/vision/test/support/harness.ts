@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +7,7 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import type { CapturedImage, VisionSource, VisionSourceCamera, VisionSourceEvent } from "../../src/source.ts";
 import type { VisionModelCall, VisionModelGateway, VisionModelResultLike } from "../../src/classifier.ts";
+import { jpegBytes } from "./images.ts";
 
 /**
  * WP-G3 (D-465): felles testoppsett for UA-9-integrasjonstestene (ekte embedded Postgres, NOSUPERUSER/NOBYPASSRLS-rolle som runtime). Testdoblene ligger BEVISST her
@@ -61,9 +61,9 @@ export async function seedTenant(db: VisionDb, tenant: string): Promise<Omit<See
   return { tenant, owner, other };
 }
 
-/** Unike, gyldige JPEG-bytes (magic bytes + tilfeldig innhold) - hver kall gir en ny sha256. */
+/** Unike JPEG-bytes med et strukturelt gyldig hode (SOI/JFIF/SOF 64x48/SOS, se images.ts) + tilfeldig innhold - hver kall gir en ny sha256. */
 export function makeJpeg(size = 512): Uint8Array {
-  return Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, ...randomBytes(size)]);
+  return jpegBytes({ size });
 }
 
 export const NOT_AN_IMAGE = new TextEncoder().encode("<html><script>alert(1)</script></html>");

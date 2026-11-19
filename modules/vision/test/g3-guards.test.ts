@@ -7,6 +7,7 @@ import { VISION_SYSTEM_PROMPT, parseModelClassification } from "../src/classifie
 import { HomeAssistantVisionSource } from "../src/ha-source.ts";
 import { inspectImage, sniffMediaType } from "../src/image.ts";
 import { VisionEventTypeSchema } from "../src/types.ts";
+import { jpegBytes, pngBytes, webpBytes } from "./support/images.ts";
 
 /**
  * WP-G3 (D-465), P3f: BYGGEVAKTER (ikke atferdstester av en funksjon, men låser som feller bygget hvis noen senere går utenfor UA-9-rammen):
@@ -434,9 +435,9 @@ describe("ingen kontinuerlig rå video: kun hendelses-øyeblikksbilder", () => {
   });
 
   it("de tre tillatte stillbildeformatene (jpeg/png/webp) godtas - og ingen annen media type finnes", () => {
-    expect(inspectImage(header(0xff, 0xd8, 0xff, 0xe0)).media_type).toBe("image/jpeg");
-    expect(inspectImage(header(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)).media_type).toBe("image/png");
-    expect(inspectImage(header(...ascii("RIFF"), 0, 0, 0, 0, ...ascii("WEBP"))).media_type).toBe("image/webp");
+    expect(inspectImage(jpegBytes()).media_type).toBe("image/jpeg");
+    expect(inspectImage(pngBytes()).media_type).toBe("image/png");
+    expect(inspectImage(webpBytes()).media_type).toBe("image/webp");
   });
 
   it("databasen tillater kun stillbilder og én liten rad per hendelse: media_type = 3 bildeformater, byte_length <= 20 MiB, route_policy har ingen strøm-/sky-verdi", () => {
