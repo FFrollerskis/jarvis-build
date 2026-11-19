@@ -5,7 +5,8 @@ import type { VisionCamera } from "./cameras.ts";
 import type { VisionClassifier, VisionDetection } from "./classifier.ts";
 import type { VisionEmbeddingService } from "./embeddings.ts";
 import { DEFAULT_MAX_IMAGE_BYTES, inspectImage, type InspectedImage } from "./image.ts";
-import type { VisionInventoryService } from "./inventory.ts";
+import type { SightingInput, VisionInventoryService } from "./inventory.ts";
+import { isInventoryLabel } from "./labels.ts";
 import { routeVisionEvent, type VisionRouteReason } from "./policy.ts";
 import { SnapshotInProgressError, type VisionSnapshotRow, type VisionSnapshotService } from "./snapshots.ts";
 import type { CapturedImage, VisionSource, VisionSourceCamera } from "./source.ts";
@@ -26,7 +27,8 @@ import type { VisionClassificationStatus, VisionEventType, VisionObservationInpu
  *      utløseren, ingen objekter) med `classification_status`.
  *   6. LAGRING (kun `store_snapshot` i hjemmesonen): pending-rad -> bytes -> committet SAMMEN med hendelsene (snapshots.ts). Feiler skrivingen, skrives hendelsene uten bilde.
  *   7. ATOMISK SKRIVING: hendelsen, objekthendelsene, bildepekeren, vektorene og inventaret committes i ÉN transaksjon (alt eller ingenting). Embedding beregnes FØR transaksjonen (en tregere
- *      modellserver holder aldri en databasetransaksjon åpen) og er ikke fatal hvis den feiler (`backfillMissing` fyller etter).
+ *      modellserver holder aldri en databasetransaksjon åpen) og er ikke fatal hvis den feiler (`backfillMissing` fyller etter). Unntak fra «alt eller ingenting» (review delta D1): en etikett
+ *      som ikke kan bli INVENTAR hoppes over for den raden (note `inventory_label_invalid`/`inventory_label_rejected`, se `recordInventory`) - inventaret er avledet, hendelsen er sannheten.
  *   8. MERKING (regel 4): alle rader bærer person/tenant/space, kilde og `task_id` (+ `session_id`); proveniens for klassifiseringen (`classifier`) og status lagres.
  * Per-hendelse-feil kaster aldri ut av pipelinen (en sensor som feiler skal ikke stoppe de andre): de gir `status: "failed"` med en stabil feilkode - aldri innhold.
  */
@@ -102,6 +104,19 @@ class DuplicateRaceError extends Error {
 }
 
 const MAX_OBJECTS_PER_EVENT = 8;
+const INVENTORY_SAVEPOINT = "vision_inventory";
+const INVENTORY_LABEL_CHECK = "vision_inventory_items_object_label_check";
+
+/** Stabil kode, ingen duplikater (to objekter i samme hendelse kan gi samme avvik). */
+function addNote(notes: string[], code: string): void {
+  if (!notes.includes(code)) notes.push(code);
+}
+
+/** Kun etikett-CHECK-en i inventartabellen (SQLSTATE 23514 + constraintnavn) - ikke en annen CHECK, og aldri FK/RLS/tilkoblingsfeil. */
+function isInventoryLabelViolation(err: unknown): boolean {
+  const e = err as { code?: unknown; constraint?: unknown } | null;
+  return e !== null && typeof e === "object" && e.code === "23514" && e.constraint === INVENTORY_LABEL_CHECK;
+}
 
 function errorCode(err: unknown): string {
   const pgCode = (err as { code?: unknown } | null)?.code;
@@ -299,7 +314,7 @@ export class VisionIngestPipeline {
             await this.options.embeddings.storeInTransaction(client, { observationId: result.observation.observation_id, tenantId: ctx.tenant_id, memorySpace: ctx.memory_space }, vector);
           }
           if (camera.room_id !== null && this.options.inventory !== undefined) {
-            await this.options.inventory.recordSightingInTransaction(client, {
+            await this.recordInventory(client, notes, this.options.inventory, {
               tenantId: ctx.tenant_id, memorySpace: ctx.memory_space, personId: ctx.person_id, roomId: camera.room_id, objectLabel: label, confidence: detection.confidence,
               observedAt: spec.observed_at, observationId: result.observation.observation_id, sourceType: spec.source_type, sourceInstanceId: camera.camera_id,
               taskId: ctx.task_id, sessionId: ctx.session_id, retentionDays
@@ -323,6 +338,32 @@ export class VisionIngestPipeline {
       detection_count: detections.length,
       notes
     });
+  }
+
+  /**
+   * Inventar for ÉN observasjon - aldri på bekostning av hendelsen (review delta D1). Inventaret er en AVLEDET tilstand, hendelsene er sannheten; at en etikett ikke kan bli inventar skal derfor
+   * aldri rulle tilbake basishendelsen (HA ville ellers forsøkt den samme hendelsen på hver poll til den ble for gammel for bilde, og et iPhone-opptak ble avvist). To lag:
+   *   1. FORHÅNDSSJEKK (`isInventoryLabel`, speiler CHECK-en i 135): en etikett uten inventarform hoppes over uten å røre databasen (note `inventory_label_invalid`).
+   *   2. SAVEPOINT rundt selve skrivingen: avviser databasen etiketten likevel (CHECK-en er strammet inn i en senere migrasjon, eller JS-regelen har drevet fra SQL), rulles KUN inventarskrivingen
+   *      tilbake (note `inventory_label_rejected`), og hendelsene, vektoren og bildepekeren i samme transaksjon består. Enhver ANNEN feil (FK, RLS, tilkobling ...) kastes videre og ruller hele
+   *      hendelsen tilbake som før - savepointet er ikke et «svelg alt».
+   */
+  private async recordInventory(client: pg.PoolClient, notes: string[], inventory: VisionInventoryService, input: SightingInput): Promise<void> {
+    if (!isInventoryLabel(input.objectLabel)) {
+      addNote(notes, "inventory_label_invalid");
+      return;
+    }
+    await client.query(`SAVEPOINT ${INVENTORY_SAVEPOINT}`);
+    try {
+      await inventory.recordSightingInTransaction(client, input);
+    } catch (err) {
+      if (!isInventoryLabelViolation(err)) throw err;
+      await client.query(`ROLLBACK TO SAVEPOINT ${INVENTORY_SAVEPOINT}`);
+      await client.query(`RELEASE SAVEPOINT ${INVENTORY_SAVEPOINT}`);
+      addNote(notes, "inventory_label_rejected");
+      return;
+    }
+    await client.query(`RELEASE SAVEPOINT ${INVENTORY_SAVEPOINT}`);
   }
 
   private async roomName(ctx: IngestContext, roomId: string): Promise<string | null> {
