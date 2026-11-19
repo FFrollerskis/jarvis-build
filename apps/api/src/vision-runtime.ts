@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
 import type pg from "pg";
 import { envInt } from "@jarvis/contracts";
+import { MAX_MODEL_TIMEOUT_MS } from "@jarvis/model-gateway";
 import { LocalOpenAiCompatibleAdapter } from "@jarvis/provider-adapters";
 import { guardedFetch } from "@jarvis/tool-gateway";
 import type { EmbeddingProvider } from "@jarvis/memory";
@@ -19,6 +20,7 @@ import type { VisionApiDeps } from "./vision-routes.ts";
  *   JARVIS_VISION_ENABLED         hovedbryter: ruter (`/vision/*`), pipeline, vedlikeholdssveip.
  *   JARVIS_VISION_CLASSIFIER      lokal visjonsmodell (krever JARVIS_VISION_LOCAL_URL, som MÅ peke til en lokal/privat adresse - se `assertLocalVisionEndpoint`).
  *   JARVIS_VISION_LOCAL_URL / _MODEL   OpenAI-kompatibelt lokalt endepunkt (Ollama, llama.cpp ...) og modellnavn (standard `local-vision`).
+ *   JARVIS_VISION_MODEL_TIMEOUT_MS tidsavbrudd per modellkall (standard 90000; 5000-180000 = gatewayens harde tak, ellers kastes ved oppstart). Virker nå på selve kallet (review A-M2).
  *   JARVIS_VISION_STORE_SNAPSHOTS lagring av hendelsesbilder (krever JARVIS_VISION_STORAGE_DIR; kun kameraer med policy `store_snapshot` i hjemmesonen lagres).
  *   JARVIS_VISION_HA_POLL         poll Home Assistant (bruker den EKSISTERENDE HA-connectorens JARVIS_HA_BASE_URL/JARVIS_HA_TOKEN fra secret-kjeden - ingen ny credential).
  *   JARVIS_VISION_MAX_STORED_MB   lagringstak for bilder per (tenant, space) (standard 2048, 16-10000000; over taket lagres bildet ikke, hendelsen skrives uten bilde).
@@ -85,13 +87,23 @@ export function assertLocalVisionEndpoint(raw: string): string {
   return raw;
 }
 
+/**
+ * Tidsavbrudd (ms) for ETT modellkall (`JARVIS_VISION_MODEL_TIMEOUT_MS`, standard 90 s). Review A-M2: knappen var DØD - klassifisereren sendte alltid `timeoutMs: 90000` per kall, og gatewayen skriver den verdien til
+ * `request.timeoutMs` som slår adapterens konstruktørverdi (`request.timeoutMs ?? this.timeoutMs`). Den SAMME verdien går nå til både adapteren og klassifisereren. Øvre grense er gatewayens harde tak
+ * (`MAX_MODEL_TIMEOUT_MS`, 180 s): en verdi over det kan aldri etterkommes, så den KASTER ved oppstart (aldri en stille klemming - samme regel som gatewayen selv). Den gamle øvre grensen (600 s) kunne aldri virke.
+ */
+export const VISION_MODEL_TIMEOUT_BOUNDS = { min: 5_000, max: MAX_MODEL_TIMEOUT_MS } as const;
+export function visionModelTimeoutMs(env: NodeJS.ProcessEnv): number {
+  return envInt("JARVIS_VISION_MODEL_TIMEOUT_MS", 90_000, VISION_MODEL_TIMEOUT_BOUNDS, env);
+}
+
 /** `local_vision`-adapteren, kun når hovedbryter + CLASSIFIER er på. `null` ellers (da registreres ingenting). Kaster ved manglende/ikke-lokal URL. */
 export function visionAdapterFromEnv(env: NodeJS.ProcessEnv): LocalOpenAiCompatibleAdapter | null {
   const flags = visionFlagsFromEnv(env);
   if (!flags.classifier) return null;
   if (flags.localUrl === undefined) throw new VisionConfigError("local_url_missing");
   const url = assertLocalVisionEndpoint(flags.localUrl);
-  return new LocalOpenAiCompatibleAdapter(url, flags.localModel, envInt("JARVIS_VISION_MODEL_TIMEOUT_MS", 90_000, { min: 5_000, max: 600_000 }), "local_vision", undefined, { vision: true });
+  return new LocalOpenAiCompatibleAdapter(url, flags.localModel, visionModelTimeoutMs(env), "local_vision", undefined, { vision: true });
 }
 
 /** Eier-kontrollene som stanser polleren: kill switch, frosset `home-assistant`-connector, tilbakekalt `JARVIS_HA_TOKEN` (samme live, delte sjekker som gatewayen bruker). */
@@ -131,6 +143,8 @@ export interface VisionRuntime {
   flags: VisionFlags;
   api: VisionApiDeps;
   pipeline: VisionIngestPipeline;
+  /** Den lokale klassifisereren (kun med JARVIS_VISION_CLASSIFIER=on). Eksponert slik at koblingen (tidsavbrudd, gateway) kan bevises i tester. */
+  classifier: VisionClassifier | undefined;
   poller: VisionPoller | null;
   pollerHandle: VisionPollerHandle | null;
   /** Hyppig vedlikehold (gravsteiner, pending-bilder, utløp av opptaksforespørsler) - kalles av en intervalltimer i main.ts. */
@@ -152,7 +166,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   const cameras = new VisionCameraService(deps.pool);
   const inventory = new VisionInventoryService(deps.pool);
   const snapshots = flags.storeSnapshots && flags.storageDir !== undefined
-    ? new VisionSnapshotService(deps.pool, new LocalFsStorageAdapter(flags.storageDir), deps.vision, { maxStoredBytes: envInt("JARVIS_VISION_MAX_STORED_MB", 2048, { min: 16, max: 10_000_000 }) * 1024 * 1024 })
+    ? new VisionSnapshotService(deps.pool, new LocalFsStorageAdapter(flags.storageDir), deps.vision, { maxStoredBytes: envInt("JARVIS_VISION_MAX_STORED_MB", 2048, { min: 16, max: 10_000_000 }, deps.env) * 1024 * 1024 })
     : undefined;
   let embeddings: VisionEmbeddingService | undefined;
   try {
@@ -161,7 +175,8 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
     // Kun lokal embedding (fail-closed): en sky-provider gir ingen objektvektorer - «sist sett» faller til eksakte treff.
     console.error(JSON.stringify({ msg: "vision_embeddings_disabled", code: (err as Error).name }));
   }
-  const classifier = flags.classifier ? new VisionClassifier({ gateway: deps.gateway }) : undefined;
+  // Review A-M2: tidsavbruddet fra JARVIS_VISION_MODEL_TIMEOUT_MS går inn i klassifisereren (per kall via gatewayen), ikke bare i adapterens konstruktør.
+  const classifier = flags.classifier ? new VisionClassifier({ gateway: deps.gateway, timeoutMs: visionModelTimeoutMs(deps.env) }) : undefined;
   const pipeline = new VisionIngestPipeline({ pool: deps.pool, vision: deps.vision, classifier, snapshots, embeddings, inventory, enabled: true, storeSnapshots: snapshots !== undefined });
   const capture = new VisionCaptureService(deps.pool, cameras, pipeline, deps.devices);
   const lastSeen = new VisionLastSeenService(deps.pool, { ...(embeddings !== undefined ? { embeddings } : {}), inventory });
@@ -176,7 +191,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
       token: async () => (await deps.secrets.get("JARVIS_HA_TOKEN")) ?? null
     });
     poller = new VisionPoller({ pool: deps.pool, cameras, pipeline, source, guard: createVisionPollerGuard(deps.ownerControls), tenantIds: [deps.ownerTenantId] });
-    pollerHandle = startVisionPoller(poller, envInt("JARVIS_VISION_POLL_INTERVAL_SECONDS", 20, { min: 5, max: 3600 }) * 1000);
+    pollerHandle = startVisionPoller(poller, envInt("JARVIS_VISION_POLL_INTERVAL_SECONDS", 20, { min: 5, max: 3600 }, deps.env) * 1000);
   }
 
   const maintenanceDeps = { snapshots, inventory, captures: capture, embeddings };
@@ -184,6 +199,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
     flags,
     api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024 },
     pipeline,
+    classifier,
     poller,
     pollerHandle,
     async lightMaintenance(): Promise<void> {

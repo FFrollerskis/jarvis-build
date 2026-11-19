@@ -5,12 +5,12 @@ import { fileURLToPath } from "node:url";
 import type pg from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalHashEmbedding } from "@jarvis/memory";
-import { LocalModelUnavailableError, MemoryTraceSink, ModelGateway, assertProvidersHaveExplicitPricing, pricingFromEnv } from "@jarvis/model-gateway";
+import { LocalModelUnavailableError, MAX_MODEL_TIMEOUT_MS, MemoryTraceSink, ModelGateway, assertProvidersHaveExplicitPricing, pricingFromEnv } from "@jarvis/model-gateway";
 import { ProviderError, type ModelProviderAdapter, type ModelRequest, type ModelResult } from "@jarvis/provider-adapters";
 import { guardedFetch } from "@jarvis/tool-gateway";
 import { HomeAssistantVisionSource, VisionClassifier, type VisionService } from "@jarvis/vision";
 import { FakeHaServer, haTimestamp } from "../../../modules/vision/test/support/fake-ha-server.ts";
-import { assertLocalVisionEndpoint, buildVisionRuntime, createVisionPollerGuard, visionAdapterFromEnv, visionFlagsFromEnv, VisionConfigError } from "../src/vision-runtime.ts";
+import { assertLocalVisionEndpoint, buildVisionRuntime, createVisionPollerGuard, visionAdapterFromEnv, visionFlagsFromEnv, visionModelTimeoutMs, VISION_MODEL_TIMEOUT_BOUNDS, VisionConfigError } from "../src/vision-runtime.ts";
 
 /**
  * WP-G3 (D-465): api-koblingen av UA-9 - flagg (alt AV som standard), URL-vakten for den lokale visjonsmodellen, `local_vision`-adapteren, eier-kontroll-porten for polleren, HA-kilden med den ENDELIGE `guardedFetch`
@@ -113,13 +113,13 @@ describe("main.ts: flagg-av-identitet i selve koblingen", () => {
   });
 });
 
-describe("buildVisionRuntime", () => {
-  const stubs = (envVars: Record<string, string>, over: Record<string, unknown> = {}) => ({
-    pool: {} as pg.Pool, env: envVars as NodeJS.ProcessEnv, vision: {} as VisionService, gateway: { complete: async () => ({ text: "{}", provider: "local_vision", model: "m" }) },
-    memoryEmbedding: new LocalHashEmbedding(), devices: { approverFor: async () => undefined }, ownerTenantId: "tenant-owner", secrets: { get: async () => null },
-    ownerControls: { killSwitch: { isActiveDurable: async () => false }, controls: { isFrozenDurable: async () => false, isRevokedDurable: async () => false } }, ...over
-  });
+const stubs = (envVars: Record<string, string>, over: Record<string, unknown> = {}) => ({
+  pool: {} as pg.Pool, env: envVars as NodeJS.ProcessEnv, vision: {} as VisionService, gateway: { complete: async () => ({ text: "{}", provider: "local_vision", model: "m" }) },
+  memoryEmbedding: new LocalHashEmbedding(), devices: { approverFor: async () => undefined }, ownerTenantId: "tenant-owner", secrets: { get: async () => null },
+  ownerControls: { killSwitch: { isActiveDurable: async () => false }, controls: { isFrozenDurable: async () => false, isRevokedDurable: async () => false } }, ...over
+});
 
+describe("buildVisionRuntime", () => {
   it("hovedbryter av (også «true», også med alle underflagg på) = null: ingenting bygges", () => {
     expect(buildVisionRuntime(stubs({}))).toBeNull();
     expect(buildVisionRuntime(stubs({ JARVIS_VISION_ENABLED: "true", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_STORE_SNAPSHOTS: "on", JARVIS_VISION_HA_POLL: "on" }))).toBeNull();
@@ -150,6 +150,42 @@ describe("buildVisionRuntime", () => {
     runtime?.stop();
     expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).toContain("vision_embeddings_disabled");
     errors.mockRestore();
+  });
+});
+
+describe("JARVIS_VISION_MODEL_TIMEOUT_MS (review A-M2): knappen virker på selve modellkallet", () => {
+  const withEnv = (e: Record<string, string> = {}): Record<string, string> => ({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: "http://127.0.0.1:11434", ...e });
+  const classifyInput = { tenant_id: "t", task_id: "task-1", image: { bytes: JPEG, media_type: "image/jpeg" }, trigger: "motion_detected" } as const;
+
+  it("standard 90 s, gyldig verdi leses, og grensene er 5 s til gatewayens harde tak - alt utenfor KASTER ved oppstart (aldri en stille klemming)", () => {
+    expect(visionModelTimeoutMs(withEnv() as NodeJS.ProcessEnv)).toBe(90_000);
+    expect(visionModelTimeoutMs(withEnv({ JARVIS_VISION_MODEL_TIMEOUT_MS: "45000" }) as NodeJS.ProcessEnv)).toBe(45_000);
+    expect(VISION_MODEL_TIMEOUT_BOUNDS).toEqual({ min: 5_000, max: MAX_MODEL_TIMEOUT_MS });
+    expect(visionModelTimeoutMs(withEnv({ JARVIS_VISION_MODEL_TIMEOUT_MS: String(MAX_MODEL_TIMEOUT_MS) }) as NodeJS.ProcessEnv)).toBe(MAX_MODEL_TIMEOUT_MS);
+    for (const bad of ["4999", String(MAX_MODEL_TIMEOUT_MS + 1), "600000", "abc", "-1", "9.5"]) {
+      const env = withEnv({ JARVIS_VISION_MODEL_TIMEOUT_MS: bad });
+      expect(() => visionAdapterFromEnv(env as NodeJS.ProcessEnv), bad).toThrow(/JARVIS_VISION_MODEL_TIMEOUT_MS/);
+      expect(() => buildVisionRuntime(stubs(env)), bad).toThrow(/JARVIS_VISION_MODEL_TIMEOUT_MS/);
+    }
+  });
+
+  it("klassifisereren sender env-verdien som timeoutMs på HVERT modellkall (ikke en fast 90000)", async () => {
+    for (const [value, expected] of [[undefined, 90_000], ["45000", 45_000], ["180000", 180_000], ["5000", 5_000]] as const) {
+      const sent: number[] = [];
+      const gateway = {
+        complete: async (call: { timeoutMs: number }) => {
+          sent.push(call.timeoutMs);
+          return { text: "{\"detections\":[]}", provider: "local_vision", model: "m" };
+        }
+      };
+      const runtime = buildVisionRuntime(stubs(withEnv(value === undefined ? {} : { JARVIS_VISION_MODEL_TIMEOUT_MS: value }), { gateway }));
+      expect(runtime?.classifier, String(value)).toBeDefined();
+      await runtime?.classifier?.classify(classifyInput);
+      expect(sent, String(value)).toEqual([expected]);
+      runtime?.stop();
+    }
+    // uten CLASSIFIER bygges ingen klassifiserer (og en ugyldig verdi spiller da ingen rolle)
+    expect(buildVisionRuntime(stubs({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_MODEL_TIMEOUT_MS: "600000" }))?.classifier).toBeUndefined();
   });
 });
 
@@ -234,7 +270,8 @@ describe("kamerabilder når ALDRI en skymodell (ekte ModelGateway + ekte local_v
     return { connect: async () => client } as unknown as pg.Pool;
   };
 
-  async function localServer(behaviour: "ok" | "down"): Promise<string> {
+  const timers: NodeJS.Timeout[] = [];
+  async function localServer(behaviour: "ok" | "down" | "slow"): Promise<string> {
     server = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
@@ -244,9 +281,14 @@ describe("kamerabilder når ALDRI en skymodell (ekte ModelGateway + ekte local_v
           res.end();
           return;
         }
-        received.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ choices: [{ message: { content: "{\"detections\":[{\"event_type\":\"object_detected\",\"object_label\":\"nøkler\",\"confidence\":0.88}]}" }, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 5 } }));
+        const respond = (): void => {
+          received.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ choices: [{ message: { content: "{\"detections\":[{\"event_type\":\"object_detected\",\"object_label\":\"nøkler\",\"confidence\":0.88}]}" }, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 5 } }));
+        };
+        // «slow»: svarer først etter 5,6 s - rett etter den minste tillatte grensen (5 s) for JARVIS_VISION_MODEL_TIMEOUT_MS.
+        if (behaviour === "slow") timers.push(setTimeout(respond, 5_600));
+        else respond();
       });
     });
     await new Promise<void>((resolve) => server?.listen(0, "127.0.0.1", resolve));
@@ -257,6 +299,7 @@ describe("kamerabilder når ALDRI en skymodell (ekte ModelGateway + ekte local_v
     received.length = 0;
   });
   afterEach(async () => {
+    for (const t of timers.splice(0)) clearTimeout(t);
     server?.closeAllConnections();
     await new Promise<void>((resolve) => (server === null ? resolve() : server.close(() => resolve())));
     server = null;
@@ -289,6 +332,20 @@ describe("kamerabilder når ALDRI en skymodell (ekte ModelGateway + ekte local_v
     expect(await classify(gateway)).toMatchObject({ status: "model_unavailable" });
     expect(calls).toHaveLength(0);
   });
+
+  it("JARVIS_VISION_MODEL_TIMEOUT_MS=5000 (review A-M2): en modell som svarer etter 5,6 s gir model_unavailable - med den gamle konstanten (90 s per kall) ville svaret blitt klassifisert", async () => {
+    const url = await localServer("slow");
+    const env = { JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: url, JARVIS_VISION_MODEL_TIMEOUT_MS: "5000" };
+    const adapter = visionAdapterFromEnv(env as NodeJS.ProcessEnv);
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: adapter ? [adapter] : [] });
+    const runtime = buildVisionRuntime(stubs(env, { gateway }));
+    const started = Date.now();
+    const outcome = await runtime?.classifier?.classify({ tenant_id: "t", task_id: "task-1", image: { bytes: JPEG, media_type: "image/jpeg" }, trigger: "motion_detected" });
+    expect(outcome).toMatchObject({ status: "model_unavailable" });
+    // gatewayen prøver et tidsavbrudd én gang til (2 x 5 s); langt under de 90 s den gamle konstanten ville ventet
+    expect(Date.now() - started).toBeLessThan(20_000);
+    runtime?.stop();
+  }, 40_000);
 
   it("flagg AV (ingen local_vision registrert): kun skyleverandører finnes - klassifiseringen feiler lukket og skyen kalles ALDRI (identisk fail-closed-oppførsel)", async () => {
     const calls: ModelRequest[] = [];

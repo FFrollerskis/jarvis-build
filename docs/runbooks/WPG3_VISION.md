@@ -35,7 +35,7 @@ Alle flagg er AV som standard og slås på KUN med eksakt verdi `on` (`true`/`1`
 | `JARVIS_VISION_CLASSIFIER` | tom | Registrerer `local_vision`-adapteren (krever `JARVIS_VISION_LOCAL_URL`). |
 | `JARVIS_VISION_LOCAL_URL` | tom | OpenAI-kompatibelt LOKALT endepunkt (f.eks. `http://host.docker.internal:11434`). MÅ være loopback/privat IP/`.local`/`.lan`/`.internal`/`.home.arpa`/enkelt-label (docker-tjeneste); en offentlig adresse eller brukerinfo i URL-en STOPPER oppstarten (`vision_config_invalid:local_url_not_local`). Redirects følges aldri. |
 | `JARVIS_VISION_LOCAL_MODEL` | `local-vision` | Modellnavn på det lokale endepunktet (en visjonsmodell - eierens valg). |
-| `JARVIS_VISION_MODEL_TIMEOUT_MS` | `90000` | 5000-600000. |
+| `JARVIS_VISION_MODEL_TIMEOUT_MS` | `90000` | Tidsavbrudd per modellkall, 5000-180000 (180000 = ModelGateways harde tak; en verdi utenfor stopper oppstarten, aldri en stille klemming). Virker på hvert kall (review A-M2: knappen var tidligere død og tallet alltid 90 s). Treg CPU-modell: øk, ellers gir hvert kall `model_unavailable`. |
 | `JARVIS_VISION_STORE_SNAPSHOTS` | tom | Lagre hendelsesbilder (kun kameraer med policy `store_snapshot` i sone `home`). Krever `JARVIS_VISION_STORAGE_DIR`. |
 | `JARVIS_VISION_STORAGE_DIR` | tom | ABSOLUTT mappe i api-containeren. Eieren må montere et skrivbart volum selv (rootfs er read-only) - se §5, steg 5. |
 | `JARVIS_VISION_MAX_STORED_MB` | `2048` | Lagringstak for bilder per (tenant, space), 16-10000000 MB. Over taket lagres bildet ikke (hendelsen skrives uten bilde, notat `snapshot_quota_exceeded`); mykt tak (samtidige skrivinger kan overskride det marginalt). |
