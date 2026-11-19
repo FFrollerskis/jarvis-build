@@ -5,3 +5,12 @@ export * from "./open-loop-bridge.ts";
 export * from "./infra-incident-bridge.ts";
 export * from "./sweep.ts";
 export * from "./transport.ts";
+// WP-G4 (D-466): samlet hendelsesabonnement (abonnementsregister + inntaksbuss), kilde-broer, modellassistert vurdering.
+export * from "./signal-types.ts";
+export * from "./home-bridge.ts";
+export * from "./vision-bridge.ts";
+export * from "./health-bridge.ts";
+export * from "./signal-bridges.ts";
+export * from "./subscriptions.ts";
+export * from "./assist.ts";
+export * from "./signal-bus.ts";

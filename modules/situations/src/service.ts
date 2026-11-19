@@ -23,6 +23,7 @@ import {
 } from "./types.ts";
 import { withDomainAdvisoryLocks } from "./advisory-lock.ts";
 import { ALL_DOMAINS, type DomainPauseRegistry } from "./domain-pause.ts";
+import { NEVER_ACT_DOMAINS } from "./signal-types.ts";
 
 /**
  * UA-10 Proactive Situation Engine: JARVIS_CANONICAL hendelses-/situasjons-
@@ -223,6 +224,17 @@ export class SituationActNotificationPayloadMissingError extends Error {
   constructor(public readonly situationId: string) {
     super(`situation_act_notification_payload_missing:${situationId}`);
     this.name = "SituationActNotificationPayloadMissingError";
+  }
+}
+
+/**
+ * WP-G4 (D-466): ACT er kategorisk forbudt i domener der motoren kun skal INFORMERE/FORESLÅ til eier (`NEVER_ACT_DOMAINS`: helse og kamera). Håndheves i kode på TRE steder (binding, auto-ACT-utvalg og `actOn()`),
+ * uavhengig av hva en autonomi-rad eller en modell måtte si - aldri en promptregel.
+ */
+export class SituationActDomainForbiddenError extends Error {
+  constructor(public readonly domain: string) {
+    super(`situation_act_domain_forbidden:${domain}`);
+    this.name = "SituationActDomainForbiddenError";
   }
 }
 
@@ -575,16 +587,18 @@ export class SituationEngine {
     client: pg.PoolClient,
     tenantId: string,
     memorySpace: MemorySpace
-  ): Promise<{ quietStart: number | null; quietEnd: number | null; resuppressHours: number }> {
+  ): Promise<{ quietStart: number | null; quietEnd: number | null; resuppressHours: number; criticalBypassQuiet: boolean }> {
     const { rows } = await client.query(
-      `SELECT quiet_hours_start_utc, quiet_hours_end_utc, resuppress_hours FROM situation_notification_policies WHERE tenant_id = $1 AND memory_space_id = $2`,
+      `SELECT quiet_hours_start_utc, quiet_hours_end_utc, resuppress_hours, critical_bypass_quiet FROM situation_notification_policies WHERE tenant_id = $1 AND memory_space_id = $2`,
       [tenantId, memorySpace]
     );
-    const row = rows[0] as { quiet_hours_start_utc: number | null; quiet_hours_end_utc: number | null; resuppress_hours: number } | undefined;
+    const row = rows[0] as { quiet_hours_start_utc: number | null; quiet_hours_end_utc: number | null; resuppress_hours: number; critical_bypass_quiet: boolean } | undefined;
     return {
       quietStart: row?.quiet_hours_start_utc ?? null,
       quietEnd: row?.quiet_hours_end_utc ?? null,
-      resuppressHours: row?.resuppress_hours ?? DEFAULT_RESUPPRESS_HOURS
+      resuppressHours: row?.resuppress_hours ?? DEFAULT_RESUPPRESS_HOURS,
+      // WP-G4 (139): eierens eksplisitte valg om at et sikkerhetssignal (`urgent`) får bryte stille timer. Standard false = uendret oppførsel.
+      criticalBypassQuiet: row?.critical_bypass_quiet === true
     };
   }
 
@@ -627,7 +641,8 @@ export class SituationEngine {
 
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const policy = await this.policyInTransaction(client, tenantId, memorySpace);
-      const withinQuiet = isWithinQuietHours(now, policy.quietStart, policy.quietEnd);
+      // WP-G4: stille timer gjelder ikke for et `urgent` sikkerhetssignal NÅR eieren eksplisitt har valgt det (`critical_bypass_quiet`). Uten valget (standard) er oppførselen identisk med før.
+      const withinQuiet = isWithinQuietHours(now, policy.quietStart, policy.quietEnd) && !(value.urgent === true && policy.criticalBypassQuiet);
       const computedStage = computeTargetStage(value.priority, value.confidence, withinQuiet);
       const ownerPersonId = value.owner_person_id ?? null;
       const sourceOpenLoopId = value.source_open_loop_id ?? null;
@@ -731,6 +746,36 @@ export class SituationEngine {
         ]
       );
       return { situation: rows[0] as Situation, newly_actionable: newlyActionable };
+    });
+  }
+
+  /** WP-G4: les én situasjon på hendelsesnøkkel (tenant+space-scoped, RLS). Brukes av inntaksbussen for å se hva som finnes FØR en evaluering (opprettet vs. oppdatert) - ren lesing. */
+  async findByDetectionKey(tenantId: string, memorySpace: MemorySpace, detectionKey: string): Promise<Situation | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM situations WHERE tenant_id = $1 AND memory_space_id = $2 AND detection_key = $3`,
+        [tenantId, memorySpace, detectionKey]
+      );
+      return (rows[0] as Situation | undefined) ?? null;
+    });
+  }
+
+  /**
+   * WP-G4: eierens valg om at sikkerhetssignaler (`urgent`) får bryte stille timer. SAMME sovereign-eier som for autonomi-bindinger og gjenoppretting (fail-closed uten konfigurert autoritet).
+   * Selve verdien flyttes aldri av tilbakemelding eller modell. Standard (ingen rad / false) = stille timer virker som før.
+   */
+  async setCriticalQuietBypass(tenantId: string, memorySpace: MemorySpace, enabled: boolean, actorPersonId: string | undefined): Promise<SituationNotificationPolicy> {
+    this.assertAutonomyAuthority(actorPersonId);
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO situation_notification_policies (tenant_id, memory_space_id, critical_bypass_quiet, actor_person_id, updated_at)
+         VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (tenant_id, memory_space_id)
+         DO UPDATE SET critical_bypass_quiet = EXCLUDED.critical_bypass_quiet, actor_person_id = EXCLUDED.actor_person_id, updated_at = now()
+         RETURNING *`,
+        [tenantId, memorySpace, enabled, actorPersonId]
+      );
+      return rows[0] as SituationNotificationPolicy;
     });
   }
 
@@ -844,6 +889,11 @@ export class SituationEngine {
       if (!rows[0]) throw new SituationNotFoundError(situationId);
       return rows[0] as Situation;
     });
+
+    // WP-G4: ACT er forbudt i domener som kun skal informere (helse, kamera) - FØR pause, claim og ethvert gateway-kall (ingen skriving, ingen effekt).
+    if (NEVER_ACT_DOMAINS.has(situation.domain)) {
+      throw new SituationActDomainForbiddenError(situation.domain);
+    }
 
     // Billig, IKKE-autoritativ "fail fast" FØR vi i det hele tatt tar en
     // advisory-lås - se domain-pause.ts sitt filhode Funn 5. Den EKTE gaten
@@ -1423,6 +1473,16 @@ export class SituationEngine {
       throw new SituationEngineValidationError(firstIssue?.path.join(".") || "input", firstIssue?.message ?? "schema_validation_failed");
     }
     const value = parsed.data;
+    // WP-G4: en autonomi-binding for et informer-kun-domene (helse, kamera) avvises ved BINDING (og auto-ACT/`actOn()` nekter det uansett).
+    if (NEVER_ACT_DOMAINS.has(value.domain)) throw new SituationActDomainForbiddenError(value.domain);
+    // WP-G4: valgfri utløpstid. Må være en gyldig tid i fremtiden, høyst 365 dager frem (aldri en bakdatert eller «evig» verdi gjennom feltet).
+    let expiresAtIso: string | null = null;
+    if (value.expires_at !== undefined) {
+      const ms = Date.parse(value.expires_at);
+      const nowMs = Date.now();
+      if (!Number.isFinite(ms) || ms <= nowMs || ms > nowMs + 365 * 86_400_000) throw new SituationEngineValidationError("expires_at", "must_be_future_within_365_days");
+      expiresAtIso = new Date(ms).toISOString();
+    }
     // Fail-closed ved BINDING: en ukjent plassholder avvises nå, ikke først ved kjøring.
     const used = new Set<string>();
     collectPlaceholders(value.parameters ?? {}, used);
@@ -1432,13 +1492,13 @@ export class SituationEngine {
     return withDomainAdvisoryLocks(this.pool, [value.domain], () =>
       withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
         const { rows } = await client.query(
-          `INSERT INTO situation_autonomy_policies (tenant_id, memory_space_id, domain, tool_id, action, parameters, enabled, actor_person_id)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+          `INSERT INTO situation_autonomy_policies (tenant_id, memory_space_id, domain, tool_id, action, parameters, enabled, actor_person_id, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
            ON CONFLICT (tenant_id, memory_space_id, domain) DO UPDATE
              SET tool_id = EXCLUDED.tool_id, action = EXCLUDED.action, parameters = EXCLUDED.parameters,
-                 enabled = EXCLUDED.enabled, actor_person_id = EXCLUDED.actor_person_id, updated_at = now()
+                 enabled = EXCLUDED.enabled, actor_person_id = EXCLUDED.actor_person_id, expires_at = EXCLUDED.expires_at, updated_at = now()
            RETURNING *`,
-          [tenantId, memorySpace, value.domain, value.tool_id, value.action, JSON.stringify(value.parameters ?? {}), value.enabled ?? true, actorPersonId]
+          [tenantId, memorySpace, value.domain, value.tool_id, value.action, JSON.stringify(value.parameters ?? {}), value.enabled ?? true, actorPersonId, expiresAtIso]
         );
         return rows[0] as SituationAutonomyPolicy;
       })
@@ -1478,14 +1538,29 @@ export class SituationEngine {
          FROM situations s
          JOIN situation_autonomy_policies p
            ON p.tenant_id = s.tenant_id AND p.memory_space_id = s.memory_space_id AND p.domain = s.domain AND p.enabled = true
+              AND (p.expires_at IS NULL OR p.expires_at > now())
          WHERE s.tenant_id = $1 AND s.memory_space_id = $2 AND s.status = 'open'
            AND s.stage = 'suggest' AND s.act_idempotency_key IS NULL
+           AND NOT (s.domain = ANY($3::text[]))
          ORDER BY s.opened_at ASC`,
-        [tenantId, memorySpace]
+        [tenantId, memorySpace, [...NEVER_ACT_DOMAINS]]
       );
       return rows as Array<Situation & { policy_tool_id: string; policy_action: string; policy_parameters: Record<string, JsonValue> }>;
     });
     for (const candidate of candidates) {
+      // WP-G4: bindingen re-verifiseres RETT FØR hvert kall (ikke bare ved utvalget): en binding som er tilbakekalt, deaktivert, utløpt eller endret i mellomtiden gir INGEN ACT for denne situasjonen.
+      const live = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+        const { rows } = await client.query(
+          `SELECT tool_id, action FROM situation_autonomy_policies
+           WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND enabled = true AND (expires_at IS NULL OR expires_at > now())`,
+          [tenantId, memorySpace, candidate.domain]
+        );
+        return rows[0] as { tool_id: string; action: string } | undefined;
+      });
+      if (live === undefined || live.tool_id !== candidate.policy_tool_id || live.action !== candidate.policy_action) {
+        result.skipped += 1;
+        continue;
+      }
       // Policyens parametre rendres med situasjonens IMMUTABLE identifikatorer
       // (aldri injisert som ekstra nøkler - verktøyenes strenge input-skjemaer
       // avgjør selv hvilke felt som finnes). Manglende verdi => hopp over.
@@ -1511,7 +1586,8 @@ export class SituationEngine {
           err instanceof SituationDomainPausedError ||
           err instanceof SituationActAlreadyClaimedError ||
           err instanceof SituationActInFlightError ||
-          err instanceof SituationActOperationMismatchError
+          err instanceof SituationActOperationMismatchError ||
+          err instanceof SituationActDomainForbiddenError
         ) {
           result.skipped += 1;
           continue;
