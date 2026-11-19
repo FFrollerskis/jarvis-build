@@ -303,12 +303,47 @@ class LatchedVision extends VisionService {
   }
 }
 
+/**
+ * Review B-L7 (del 2): holder hver transaksjon rett ETTER innsettingen av bilderaden (før kvotesjekken) i inntil `windowMs`, eller til alle har satt inn. Uten en lås har alle satt inn før noen teller summen
+ * og ser dermed bare sin egen uforpliktede rad (alle slipper gjennom, uavhengig av timing); med låsen kommer bare én om gangen hit, og ventetiden er en kort pause per transaksjon.
+ */
+function pausingAfterInsert(pool: pg.Pool, parties: number, windowMs: number): pg.Pool {
+  let inserted = 0;
+  const waiting: Array<() => void> = [];
+  const pause = async (): Promise<void> => {
+    inserted += 1;
+    if (inserted >= parties) for (const release of waiting) release();
+    else await new Promise<void>((resolve) => { waiting.push(resolve); setTimeout(resolve, windowMs).unref(); });
+  };
+  const bindIfFunction = (target: object, prop: string | symbol): unknown => {
+    const value: unknown = Reflect.get(target, prop, target);
+    return typeof value === "function" ? value.bind(target) : value;
+  };
+  const wrap = (client: pg.PoolClient): pg.PoolClient =>
+    new Proxy(client, {
+      get(target, prop) {
+        if (prop !== "query") return bindIfFunction(target, prop);
+        return async (...args: unknown[]): Promise<unknown> => {
+          const result: unknown = await Reflect.apply(target.query, target, args);
+          if (typeof args[0] === "string" && args[0].includes("INSERT INTO vision_snapshots")) await pause();
+          return result;
+        };
+      }
+    });
+  return new Proxy(pool, {
+    get(target, prop) {
+      if (prop === "connect") return async (): Promise<pg.PoolClient> => wrap(await target.connect());
+      return bindIfFunction(target, prop);
+    }
+  });
+}
+
 describe("review B-L7: kvoten holder også under samtidighet", () => {
-  it("åtte samtidige begin() med plass til nøyaktig ÉN ekstra bilderad: nøyaktig én slipper gjennom, resten får SnapshotQuotaError (uten advisory-lås slipper alle gjennom)", async () => {
+  it("åtte samtidige begin() med plass til nøyaktig ÉN ekstra bilderad: nøyaktig én slipper gjennom, resten får SnapshotQuotaError (uten advisory-lås slipper alle gjennom, deterministisk)", async () => {
     const parties = 8;
     const racing = new LatchedVision(db.app, parties);
     const used = await scalar(`SELECT COALESCE(SUM(byte_length), 0)::int AS n FROM vision_snapshots WHERE tenant_id = $1 AND memory_space_id = 'home'`, [T.tenant]);
-    const limited = new VisionSnapshotService(db.app, storage, racing, { maxStoredBytes: used + 150 }); // ett bilde à 100 byte får plass, to får det ikke
+    const limited = new VisionSnapshotService(pausingAfterInsert(db.app, parties, 100), storage, racing, { maxStoredBytes: used + 150 }); // ett bilde à 100 byte får plass, to får det ikke
     const results = await Promise.allSettled(
       Array.from({ length: parties }, (_, i) =>
         limited.begin(T.tenant, "home", T.owner, { camera_id: camera.camera_id, source_type: "home_assistant", source_instance_id: camera.camera_id, source_event_id: `binary_sensor.x@race-${i}`, media_type: "image/jpeg", byte_length: 100, sha256: String(i).repeat(64), task_id: "task-race" })
@@ -337,6 +372,19 @@ describe("review B-L11 + B-L8: reaperen tømmer køen, og en gravstein som ikke 
     await db.admin.query(`INSERT INTO vision_snapshot_tombstones (tenant_id, memory_space_id, storage_backend, storage_key) SELECT $1, 'home', 'local_fs', k FROM unnest($2::text[]) AS k`, [T.tenant, keys]);
   };
   const remaining = (like: string): Promise<number> => scalar(`SELECT count(*)::int AS n FROM vision_snapshot_tombstones WHERE storage_key LIKE $1`, [like]);
+
+  it("B-L11: køen leses i NUMERISK id-rekkefølge også når id-ene krysser en sifferbredde (99 -> 100) midt i en batch - ingen gravstein hoppes over (ORDER BY mot et tekst-alias sorterte leksikalsk)", async () => {
+    // Eksplisitte id-er 90..119 (OVERRIDING SYSTEM VALUE) gjør testen uavhengig av hvor identitetssekvensen står: «100» < «90» som tekst, men 90 < 100 som tall.
+    await db.admin.query(
+      `INSERT INTO vision_snapshot_tombstones (tombstone_id, tenant_id, memory_space_id, storage_backend, storage_key)
+       OVERRIDING SYSTEM VALUE SELECT 90 + i, $1, 'home', 'local_fs', 'snapshots/bulk/width-' || i FROM generate_series(0, 29) AS i`,
+      [T.tenant]
+    );
+    const result = await snapshots.reapTombstones(T.tenant, "home", { limit: 7 });
+    expect(result.deleted).toBeGreaterThanOrEqual(30);
+    expect(result.failed).toBe(0);
+    expect(await remaining("snapshots/bulk/width-%")).toBe(0);
+  });
 
   it("B-L11: 250 gravsteiner med batch-størrelse 100 tømmes i ÉN kjøring (en enkelt batch ville latt 150 ligge til neste kjøring)", async () => {
     await bulk("b11", 250);

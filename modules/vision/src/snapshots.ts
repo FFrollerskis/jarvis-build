@@ -226,20 +226,22 @@ export class VisionSnapshotService {
     let failed = 0;
     let cursor = "0";
     for (let round = 0; round < maxBatches; round += 1) {
+      // NB: kolonnen gis et ANNET navn enn `tombstone_id`. `ORDER BY tombstone_id` mot et utdata-alias med samme navn sorterer på TEKSTEN (leksikalsk: "100" før "99"), mens markøren under sammenligner numerisk -
+      // da hoppes gravsteiner over når id-ene krysser en sifferbredde midt i en batch. `ORDER BY` skal alltid gå mot den numeriske kolonnen.
       const batch = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
         const { rows } = await client.query(
-          `SELECT tombstone_id::text AS tombstone_id, storage_key FROM vision_snapshot_tombstones
+          `SELECT tombstone_id::text AS tombstone_ref, storage_key FROM vision_snapshot_tombstones
             WHERE tenant_id = $1 AND memory_space_id = $2 AND storage_backend = $3 AND tombstone_id > $5::bigint ORDER BY tombstone_id ASC LIMIT $4`,
           [tenantId, memorySpace, this.storage.backend, limit, cursor]
         );
-        return rows as Array<{ tombstone_id: string; storage_key: string }>;
+        return rows as Array<{ tombstone_ref: string; storage_key: string }>;
       });
       if (batch.length === 0) break;
       for (const tombstone of batch) {
         try {
           await this.storage.delete(tombstone.storage_key);
           await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-            await client.query(`DELETE FROM vision_snapshot_tombstones WHERE tenant_id = $1 AND tombstone_id = $2`, [tenantId, tombstone.tombstone_id]);
+            await client.query(`DELETE FROM vision_snapshot_tombstones WHERE tenant_id = $1 AND tombstone_id = $2`, [tenantId, tombstone.tombstone_ref]);
           });
           deleted += 1;
         } catch (err) {
@@ -249,12 +251,12 @@ export class VisionSnapshotService {
           await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
             await client.query(
               `UPDATE vision_snapshot_tombstones SET attempts = attempts + 1, last_attempt_at = now(), last_error = $3 WHERE tenant_id = $1 AND tombstone_id = $2`,
-              [tenantId, tombstone.tombstone_id, code]
+              [tenantId, tombstone.tombstone_ref, code]
             );
           }).catch(() => undefined);
         }
       }
-      cursor = (batch[batch.length - 1] as { tombstone_id: string }).tombstone_id;
+      cursor = (batch[batch.length - 1] as { tombstone_ref: string }).tombstone_ref;
       if (batch.length < limit) break;
     }
     const stuck = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
