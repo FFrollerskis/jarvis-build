@@ -10,18 +10,32 @@ import type { PersonalRouteContext } from "./personal-routes.ts";
  *  - sletting krever en typet bekreftelse (`confirm_uid` = uid, regel 8: ingen destruktive handlinger uten eksplisitt bekreftelse).
  *  - en hendelse/oppgave MED deltakere kan sende e-post til andre ved endring/sletting (iTIP, uverifisert mot iCloud): `allow_attendee_notification: true` kreves, ellers 409 `attendees_confirmation_required` og ingenting sendes.
  *  - REVISJON FØR mutasjon: en `requested`-rad skrives FØR noe sendes (feiler revisjonen, gjøres ingenting), og utfallet revideres etterpå (best effort). Revisjonen har samling, slag, UID og utfall - aldri innhold.
+ *  - STOPP: et forsøk som stoppkontrollene stopper (kill switch, tilbakekalt credential, vakt utilgjengelig) gir NØYAKTIG ÉN DENY-rad (`tool.denied`: handling, samling og årsak - aldri innhold), også for lesing og uansett om stoppen oppdages før klienten
+ *    eller midt i en operasjon (da kommer DENY-raden i stedet for `rejected:`-raden). Samme sporbarhet som Policy Gateway gir et avslått verktøykall, så eieren ser forsøket i sikkerhetssenteret. Raden er best effort: stoppen står uansett.
  *  - utfallet er alltid `SUCCESS` | `REPLAYED` | `MISMATCH` | `UNKNOWN` fra readback (aldri «ok» uten bevis); `UNKNOWN` skal føre til en lesing (`get`), aldri en ny blind kommando.
  */
-export interface DavAuditEntry { action: string; collection: string; uid?: string; outcome: string }
+export interface DavAuditEntry {
+  action: string; collection: string; uid?: string; outcome: string;
+  /** `DENY` = forsøket ble STOPPET av stoppkontrollene (se `StopReason`); utelatt = `ALLOW` (mutasjonssporet). */
+  decision?: "ALLOW" | "DENY";
+  /** Kun med `DENY`: hvorfor det ble stoppet. */
+  reason?: StopReason;
+}
 export interface PersonalDavDeps {
   client: Pick<AppleDavClient, "listCollections" | "list" | "get" | "create" | "update" | "remove">;
   audit(identity: IdentityContext, entry: DavAuditEntry): Promise<void>;
   /**
-   * Stoppvakten (kill switch + tilbakekalte credentials; fiks-runde review B MEDIUM-1): sjekkes her FØR revisjon og klient (ingen forsøk, ingen revisjonsrad mens eieren har stanset systemet), OG av transporten FØR hver utsendelse
-   * (en operasjon sender flere forespørsler). DAV-rutene går utenom ToolGateway, som ellers er det som hører kill switch og revokering.
+   * Stoppvakten (kill switch + tilbakekalte credentials; fiks-runde review B MEDIUM-1): sjekkes her FØR klienten (ingen forsøk mens eieren har stanset systemet), OG av transporten FØR hver utsendelse (en operasjon sender flere forespørsler).
+   * DAV-rutene går utenom ToolGateway, som ellers er det som hører kill switch og revokering. PÅKREVD (fiks-runde 2, delta-review B NY-4): en wiring som glemte den ville latt eieren miste stoppen uten at noe feilet; en kaller uten typesjekk
+   * (cast/JS) uten vakt får `dav_guard_unavailable` (fail closed).
    */
-  guard?: DavSendGuard;
+  guard: DavSendGuard;
 }
+
+/** Hvorfor stoppkontrollene stopper et forsøk. `dav_guard_unavailable` = vakten selv feilet (fail closed). */
+export type StopReason = "kill_switch_active" | "credential_revoked" | "dav_guard_unavailable";
+/** Transportens stoppkoder (midt i en operasjon, mellom to forespørsler) -> samme årsaker som ruten sjekker før klienten. */
+const STOP_CODE_REASON: Readonly<Partial<Record<DavErrorCode, StopReason>>> = { dav_kill_switch_active: "kill_switch_active", dav_credential_revoked: "credential_revoked", dav_guard_unavailable: "dav_guard_unavailable" };
 
 export const DAV_ERROR_STATUS: Readonly<Record<DavErrorCode, number>> = {
   invalid_input: 400, invalid_text: 400, invalid_uid: 400, invalid_etag: 400,
@@ -78,6 +92,16 @@ export const DAV_ROUTES: Readonly<Record<string, DavRoute>> = {
 
 const uidOf = (b: Body): string | undefined => (typeof b["uid"] === "string" ? (b["uid"] as string).slice(0, 120) : undefined);
 
+/** Hvorfor stoppkontrollene stopper (`null` = fortsett). En vakt som kaster (eller mangler, for en kaller uten typesjekk) er fail-closed `dav_guard_unavailable` - aldri «fortsett». */
+async function stopReason(guard: DavSendGuard): Promise<StopReason | null> {
+  try { return await guard(); } catch { return "dav_guard_unavailable"; }
+}
+
+/** ÉN DENY-rad uten innhold (handling, samling og årsak). Best effort: stoppen står uansett om raden ikke lar seg skrive (verken en avvist eller en synkront kastet revisjon slipper ut). */
+async function auditDenied(deps: PersonalDavDeps, identity: IdentityContext, action: string, collection: string, reason: StopReason): Promise<void> {
+  try { await deps.audit(identity, { action, collection, outcome: "blocked", decision: "DENY", reason }); } catch { return; }
+}
+
 /** `true` = ruten er håndtert. Rekkefølge: grant -> EIER -> (mutasjon: step-up) -> revisjon `requested` -> utførelse -> revisjon av utfallet. */
 export async function handleDavRoute(ctx: PersonalRouteContext, deps: PersonalDavDeps): Promise<boolean> {
   const route = DAV_ROUTES[ctx.url.pathname];
@@ -92,11 +116,13 @@ export async function handleDavRoute(ctx: PersonalRouteContext, deps: PersonalDa
   }
   const action = ctx.url.pathname.slice("/personal/dav/".length);
   const collection = typeof body["collection"] === "string" ? (body["collection"] as string).slice(0, 40) : "";
-  // Stoppvakten: kill switch / tilbakekalt credential = ingen forsøk, ingen revisjonsrad, ingen klient (samme avgrensning som gatewayen ville gitt). `collections` er lokal og sender ingenting.
-  if (deps.guard !== undefined && action !== "collections") {
-    let denial: Awaited<ReturnType<DavSendGuard>>;
-    try { denial = await deps.guard(); } catch { return ctx.json(503, { error: "dav_blocked", reason: "dav_guard_unavailable", request_id: ctx.requestId() }), true; }
-    if (denial !== null) return ctx.json(503, { error: "dav_blocked", reason: denial, request_id: ctx.requestId() }), true;
+  // Stoppvakten: kill switch / tilbakekalt credential = ingen klient og ingen `requested`-rad, men ÉN DENY-rad (samme sporbarhet som gatewayen gir et avslag). `collections` er lokal og sender ingenting.
+  if (action !== "collections") {
+    const blocked = await stopReason(deps.guard);
+    if (blocked !== null) {
+      await auditDenied(deps, identity, action, collection, blocked);
+      return ctx.json(503, { error: "dav_blocked", reason: blocked, request_id: ctx.requestId() }), true;
+    }
   }
   try {
     const helpers = {
@@ -115,7 +141,10 @@ export async function handleDavRoute(ctx: PersonalRouteContext, deps: PersonalDa
     ctx.json(200, out);
   } catch (err) {
     if (err instanceof DavError) {
-      if (route.mutation) await deps.audit(identity, { action, collection, ...optional("uid", uidOf(body)), outcome: `rejected:${err.code}` }).catch(() => undefined);
+      const stopped = STOP_CODE_REASON[err.code];
+      // Stoppet midt i operasjonen av transportens vakt: ÉN DENY-rad (også for lesing) i stedet for `rejected:`; alle andre avvisninger revideres kun for mutasjoner, som før.
+      if (stopped !== undefined) await auditDenied(deps, identity, action, collection, stopped);
+      else if (route.mutation) await deps.audit(identity, { action, collection, ...optional("uid", uidOf(body)), outcome: `rejected:${err.code}` }).catch(() => undefined);
       ctx.json(DAV_ERROR_STATUS[err.code], { error: "dav_rejected", reason: err.code, request_id: ctx.requestId() });
     } else ctx.domainFailure(500, "dav_failed", new Error(err instanceof Error ? err.name : "unknown")); // aldri feilteksten: den kan inneholde URL-er/hodeverdier
   }

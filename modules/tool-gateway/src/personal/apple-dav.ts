@@ -679,8 +679,11 @@ export type DavSendGuard = () => Promise<"kill_switch_active" | "credential_revo
 
 export interface FetchDavTransportOptions {
   collections: readonly DavCollection[];
-  /** Stoppvakten (kill switch + tilbakekalte credentials) FØR hver utsendelse. Uten den sendes alt som før (kun tester/frakoblet bruk). */
-  guard?: DavSendGuard;
+  /**
+   * Stoppvakten (kill switch + tilbakekalte credentials) FØR hver utsendelse. PÅKREVD (fiks-runde 2, delta-review B NY-4): en ny wiring som glemte den ville sendt alt uten at eieren kunne stoppet det, og et valgfritt felt kompilerer
+   * stille. Tester og frakoblet bruk sier det eksplisitt med `async () => null` («ingen stopp»). En kaller uten typesjekk (cast/JS) uten vakt får en kastet feil allerede ved konstruksjon.
+   */
+  guard: DavSendGuard;
   /** Hentes per forespørsel fra vaulten; `null` = ikke konfigurert (fail closed). Verdiene logges aldri. */
   credentials: () => Promise<{ user: string; password: string } | null>;
   /** Standard `guardedFetch`; tester injiserer en fake (ingen nettkall). */
@@ -719,6 +722,8 @@ async function readCapped(response: Response, maxBytes: number): Promise<string>
 export class FetchDavTransport implements DavTransport {
   private readonly fetchFn: DavFetch;
   constructor(private readonly options: FetchDavTransportOptions) {
+    // Påkrevd i typen; her også i kjøretid for en kaller som omgår typene: en transport uten stoppvakt skal ikke kunne bygges (fail closed).
+    if (typeof options.guard !== "function") throw new Error("dav_guard_required");
     this.fetchFn = options.fetchFn ?? guardedFetch;
   }
 
@@ -727,11 +732,9 @@ export class FetchDavTransport implements DavTransport {
     const allowed = url !== null && url.protocol === "https:" && url.port === "" && this.options.collections.some((c) => `https://${url.hostname.toLowerCase()}${url.pathname}`.startsWith(c.url));
     if (!allowed) throw new DavError("url_not_allowed");
     // Stoppvakten FØR credentials leses og FØR noe sendes (kill switch / tilbakekalt credential = ingenting forlater huset).
-    if (this.options.guard !== undefined) {
-      let denial: Awaited<ReturnType<DavSendGuard>>;
-      try { denial = await this.options.guard(); } catch { throw new DavError("dav_guard_unavailable"); }
-      if (denial !== null) throw new DavError(denial === "credential_revoked" ? "dav_credential_revoked" : "dav_kill_switch_active");
-    }
+    let denial: Awaited<ReturnType<DavSendGuard>>;
+    try { denial = await this.options.guard(); } catch { throw new DavError("dav_guard_unavailable"); }
+    if (denial !== null) throw new DavError(denial === "credential_revoked" ? "dav_credential_revoked" : "dav_kill_switch_active");
     const credentials = await this.options.credentials();
     if (!credentials || credentials.user.length === 0 || credentials.password.length === 0) throw new DavError("dav_credentials_unavailable");
     // Eget tak (standard 20 s) SAMMENSATT med et evt. forespørsels-/kallsignal (aldri bare eget signal, D-471); et allerede avbrutt kall sender ingenting.

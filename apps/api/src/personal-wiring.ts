@@ -147,9 +147,13 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
     dav = {
       guard,
       client: new AppleDavClient({ transport, collections }),
+      // Et forsøk stoppkontrollene stoppet (`decision: "DENY"`) skrives som `tool.denied` med årsaken - samme type som et avslått verktøykall, så sikkerhetssenteret teller den; alt annet er mutasjonssporet (`dav.mutation`). Aldri innhold.
       audit: (identity, entry) =>
         withTenantTransaction(pool, identity.tenant_id, (client) =>
-          writeAudit(client, identity, { type: "dav.mutation", decision: "ALLOW", tool_id: "apple_dav", action: entry.action, payload: { collection: entry.collection, ...(entry.uid !== undefined ? { uid: entry.uid } : {}), outcome: entry.outcome, channel: identity.channel } })
+          writeAudit(client, identity, {
+            type: entry.decision === "DENY" ? "tool.denied" : "dav.mutation", decision: entry.decision ?? "ALLOW", ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+            tool_id: "apple_dav", action: entry.action, payload: { collection: entry.collection, ...(entry.uid !== undefined ? { uid: entry.uid } : {}), outcome: entry.outcome, channel: identity.channel }
+          })
         )
     };
     log["apple_dav"] = { registered: true, collections: collections.length, rejected_entries: rejected, live: "BLOCKED_EXTERNAL" };

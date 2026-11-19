@@ -261,7 +261,9 @@ describe("C: klienten mot en falsk server - les, opprett, endre, slett med readb
 describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
   const collections: DavCollection[] = [{ name: "privat", kind: "calendar", url: CAL }];
   const creds = async () => ({ user: "eier@example.com", password: "app-passord-fake-123" });
-  const make = (fetchFn: unknown, extra: Partial<ConstructorParameters<typeof FetchDavTransport>[0]> = {}) => new FetchDavTransport({ collections, credentials: creds, fetchFn: fetchFn as unknown as DavFetch, ...extra });
+  /** Stoppvakten er påkrevd (fiks-runde 2, NY-4): testene som ikke handler om stopp sier det eksplisitt («ingen stopp»). */
+  const noStop = async (): Promise<null> => null;
+  const make = (fetchFn: unknown, extra: Partial<ConstructorParameters<typeof FetchDavTransport>[0]> = {}) => new FetchDavTransport({ collections, credentials: creds, guard: noStop, fetchFn: fetchFn as unknown as DavFetch, ...extra });
   const ok = () => vi.fn(async () => new Response("<ok/>", { status: 207, headers: { ETag: '"e1"' } }));
 
   it("sender Basic-autentisering fra vault-verdier, aldri redirect, og gir status/hoder/innhold; kun URL-er under en samling", async () => {
@@ -282,7 +284,7 @@ describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
 
   it("uten credentials sendes ingenting (fail closed); redirect, for stort svar og nettfeil gir kode uten å lekke passord/feiltekst", async () => {
     const f = ok();
-    expect(await code(new FetchDavTransport({ collections, credentials: async () => null, fetchFn: f as unknown as DavFetch }).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_credentials_unavailable");
+    expect(await code(new FetchDavTransport({ collections, credentials: async () => null, guard: noStop, fetchFn: f as unknown as DavFetch }).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_credentials_unavailable");
     expect(f).not.toHaveBeenCalled();
     expect(await code(make(vi.fn(async () => new Response("", { status: 302, headers: { Location: "https://evil.example.net/" } }))).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_redirect_refused");
     expect(await code(make(ok(), { maxBytes: 3 }).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_response_too_large");
@@ -299,7 +301,7 @@ describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
     const spy = vi.spyOn(globalThis, "fetch");
     try {
       spy.mockResolvedValue(new Response("<ok/>", { status: 207, headers: { ETag: '"e1"' } }));
-      const transport = new FetchDavTransport({ collections, credentials: creds }); // ingen fetchFn: standarden er guardedFetch
+      const transport = new FetchDavTransport({ collections, credentials: creds, guard: noStop }); // ingen fetchFn: standarden er guardedFetch
       expect((await transport.request({ method: "GET", url: `${CAL}a.ics`, headers: {} })).status).toBe(207);
       const [url, init] = spy.mock.calls[0] as unknown as [string, RequestInit & { headers: Record<string, string> }];
       expect(url).toBe(`${CAL}a.ics`);
@@ -385,5 +387,12 @@ describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
       expect(f).not.toHaveBeenCalled();
       expect(credentials).not.toHaveBeenCalled();
     }
+  });
+
+  it("fiks-runde 2 (delta-review B NY-4): vakten er PÅKREVD - typen krever den (`@ts-expect-error` feiler typesjekken hvis den blir valgfri igjen), og en kaller som omgår typene får en kastet feil ved konstruksjon i stedet for en transport uten stopp", () => {
+    // @ts-expect-error `guard` er påkrevd i FetchDavTransportOptions: en ny wiring som glemmer den kompilerer ikke
+    expect(() => new FetchDavTransport({ collections, credentials: creds })).toThrow("dav_guard_required");
+    for (const guard of [undefined, null, "på", {}]) expect(() => new FetchDavTransport({ collections, credentials: creds, guard } as never), String(guard)).toThrow("dav_guard_required");
+    expect(() => new FetchDavTransport({ collections, credentials: creds, guard: noStop })).not.toThrow();
   });
 });
