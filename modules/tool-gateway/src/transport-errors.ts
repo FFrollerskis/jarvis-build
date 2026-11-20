@@ -90,6 +90,28 @@ export function isIndeterminateTransportError(err: unknown): boolean {
   return typeof rootMessage === "string" && INDETERMINATE_MESSAGE.test(rootMessage);
 }
 
+/**
+ * WP-D3 review H1 (D-459): det MOTSATTE standardvalget av `isIndeterminateTransportError`. Den er bevisst smal (kun KJENTE former = ukjent utfall) og passer for gatewayens generelle regel. En transport som VET at
+ * forespørselen er en mutasjon (growth-skriving) må derimot regne ENHVER feil som ikke er BEVIST «aldri sendt» som ukjent utfall: en feilform vi ikke kjenner kan like godt ha oppstått ETTER at leverandøren behandlet
+ * forespørselen (en nullstilt socket, en avbrutt lesing, et svar vi ikke tolker). `true` KUN når feilen beviser at INGEN byte av forespørselen nådde leverandøren: utrygg/ugyldig URL avvist før fetch, DNS, tilkobling
+ * nektet/nådde ikke frem, TLS-oppsett (samme kodelister som over). En 3xx fra leverandøren er motsatt (svaret kom) og er aldri «før sending», og en feil som OGSÅ bærer en etter-sending-kode er aldri «bevist».
+ */
+export function isProvenPreSendTransportError(err: unknown): boolean {
+  const nodes = nodesOf(err);
+  if (nodes.some(isUnexpectedRedirect)) return false;
+  if (err instanceof UnsafeVendorUrlError) return true; // ugyldig/utrygg URL avvist FØR fetch
+  if (nodes.length === 0) return false;
+  for (const node of nodes) {
+    const name = nameOf(node);
+    const code = codeOf(node);
+    if (name === "TimeoutError" || name === "AbortError" || (code !== undefined && INDETERMINATE_CODES.has(code)) || isAnsweredSuccessStatus(node) || isJsonSyntaxError(node)) return false;
+  }
+  return nodes.some((node) => {
+    const code = codeOf(node);
+    return code !== undefined && (PRE_SEND_CODES.has(code) || PRE_SEND_CODE_PREFIXES.some((prefix) => code.startsWith(prefix)));
+  });
+}
+
 /** Kort, fast etikett for hvilken type transportfeil det var (aldri feilteksten): brukes i årsakskoden `outcome_unknown:transport_<kind>`. `redirect`/`response` = leverandøren SVARTE (3xx / uforståelig 2xx). */
 export function transportErrorKind(err: unknown): "timeout" | "aborted" | "reset" | "redirect" | "response" | "network" {
   const nodes = nodesOf(err);
