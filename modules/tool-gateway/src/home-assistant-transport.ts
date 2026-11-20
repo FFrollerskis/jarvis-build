@@ -190,6 +190,15 @@ export class HomeAssistantTransport implements ToolTransport {
     return normalizeHomeState(json as { entity_id: string; state: string; attributes?: Record<string, unknown> });
   }
 
+  /** Minimert tilstandsdetalj (`state`, `last_changed`, `unit`) for ÉN entitet; ukjent entitet = `null`. `unit` (måleenhet, f.eks. W/kW) tas kun med for å kunne sjekke enheten på en effektsensor. */
+  private async readDetail(entityId: string, credential: string): Promise<Record<string, JsonValue> | null> {
+    const { status, json } = await this.call("GET", `/api/states/${encodeURIComponent(entityId)}`, credential);
+    if (status === 404 || !json || typeof json !== "object") return null;
+    const raw = json as { state?: unknown; last_changed?: unknown; attributes?: { unit_of_measurement?: unknown } };
+    const text = (v: unknown, max: number): string | null => (typeof v === "string" && v.length > 0 && v.length <= max ? v : null);
+    return { entity_id: entityId, state: text(raw.state, 100), last_changed: text(raw.last_changed, 40), unit: text(raw.attributes?.unit_of_measurement, 16) };
+  }
+
   private async service(domain: string, service: string, data: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
     const { json } = await this.call("POST", `/api/services/${encodeURIComponent(domain)}/${encodeURIComponent(service)}`, credential, data);
     return (json as JsonValue) ?? null;
@@ -205,6 +214,32 @@ export class HomeAssistantTransport implements ToolTransport {
         const domain = typeof parameters["domain"] === "string" ? parameters["domain"] : null;
         const filtered = domain ? all.filter((e) => e.entity_id.startsWith(domain + ".")) : all;
         return { data: filtered.slice(0, 200).map((e) => ({ entity_id: e.entity_id, state: e.state, name: (e.attributes?.["friendly_name"] as JsonValue) ?? null })) };
+      }
+      case "read_state_detail": {
+        // WP-G4 (D-466): MINIMERT tilstandsdetalj for situasjonsmotorens hjem-bro: kun `state`, `last_changed` og `unit` (måleenheten, kun for effekt: W/kW; lukkede nøkler, kuttet lengde) - aldri andre attributter, navn eller historikk.
+        // `last_changed` er når tilstanden sist endret seg (HA-dokumentasjonen), som gir «hvor lenge har døren stått åpen» uten at Jarvis lagrer en egen tilstandshistorikk. Ukjent entitet gir `data: null`.
+        return { data: await this.readDetail(assertEntityId(parameters["entity"], "entity"), credential) };
+      }
+      case "read_states_detail": {
+        // WP-G4 fiks-runde (B-MEDIUM-4): samme minimerte lesing for opptil 50 entiteter i ETT kall (én revisjonsrad i gatewayen). Rekkefølgen er bevart; ukjent entitet = `null`; en enkeltfeil = `{ entity_id, error }`.
+        // Feiler ALLE (HA nede, tilbakekalt credential) kastes den første feilen, så det er en synlig kildefeil og ikke en tom liste.
+        const list = parameters["entities"];
+        if (!Array.isArray(list) || list.length === 0 || list.length > 50) throw new Error("home_invalid_entity_id:entities");
+        const ids = list.map((value) => assertEntityId(value, "entities"));
+        const states: JsonValue[] = [];
+        let failures = 0;
+        let firstError: unknown;
+        for (const id of ids) {
+          try {
+            states.push(await this.readDetail(id, credential));
+          } catch (err) {
+            failures += 1;
+            firstError ??= err;
+            states.push({ entity_id: id, error: err instanceof Error && /^[a-z0-9_]{3,60}$/.test(err.message) ? err.message : "home_read_failed" });
+          }
+        }
+        if (failures === ids.length) throw firstError;
+        return { data: { states } };
       }
       case "read_state": {
         // Q-34: et ukjent mål gir `data: null` → `preflight_requires_target` avviser lock/alarm lukket.

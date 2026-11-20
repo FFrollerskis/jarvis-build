@@ -430,12 +430,15 @@ export class VisionService {
     });
   }
 
-  /** Lese-API, vision-space-scoped (RLS + eksplisitt `memorySpace`-argument, samme "aldri et blankt gi-meg-alt-kall"-disiplin som `@jarvis/location`). */
+  /**
+   * Lese-API, vision-space-scoped (RLS + eksplisitt `memorySpace`-argument, samme "aldri et blankt gi-meg-alt-kall"-disiplin som `@jarvis/location`).
+   * WP-G4 (B-LOW-6): valgfri `limit` (de NYESTE `limit` radene) - uten den er oppførselen uendret (ingen LIMIT) for alle eksisterende kallere; situasjonsløperen setter alltid et tak.
+   */
   async getRecentEvents(
     tenantId: string,
     memorySpace: MemorySpace,
     personId: string,
-    filter: { eventType?: string; roomId?: string; sinceMs?: number } = {}
+    filter: { eventType?: string; roomId?: string; sinceMs?: number; limit?: number } = {}
   ): Promise<VisionEventObservation[]> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const conditions = ["tenant_id = $1", "person_id = $2"];
@@ -452,8 +455,13 @@ export class VisionService {
         params.push(new Date(filter.sinceMs).toISOString());
         conditions.push(`observed_at >= $${params.length}`);
       }
+      let limitClause = "";
+      if (filter.limit !== undefined && Number.isFinite(filter.limit)) {
+        params.push(Math.max(1, Math.floor(filter.limit)));
+        limitClause = ` LIMIT $${params.length}`;
+      }
       const { rows } = await client.query(
-        `SELECT * FROM vision_event_observations WHERE ${conditions.join(" AND ")} ORDER BY observed_at DESC`,
+        `SELECT * FROM vision_event_observations WHERE ${conditions.join(" AND ")} ORDER BY observed_at DESC${limitClause}`,
         params
       );
       return rows as VisionEventObservation[];

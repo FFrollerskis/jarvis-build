@@ -116,7 +116,9 @@ export class SituationsTransport implements ToolTransport {
             tool_id: requireString(parameters, "tool_id"),
             action: requireString(parameters, "action"),
             ...(parameters["parameters"] !== undefined ? { parameters: parameters["parameters"] as Record<string, JsonValue> } : {}),
-            ...(parameters["enabled"] !== undefined ? { enabled: parameters["enabled"] === true } : {})
+            ...(parameters["enabled"] !== undefined ? { enabled: parameters["enabled"] === true } : {}),
+            // WP-G4: valgfri utløpstid. Feltet finnes KUN i skjemaet når `JARVIS_SITUATION_SIGNALS=on` (se `situationsToolDefinitions`); uten flagget avvises det som `invalid_parameters` før denne koden nås.
+            ...(typeof parameters["expires_at"] === "string" ? { expires_at: parameters["expires_at"] } : {})
           },
           actor
         );
@@ -163,7 +165,12 @@ const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as 
  * variabel. Regresjonsvakt: `ua10-p1-situation-sweep-host-run-wiring.test.ts`
  * beviser løsning mot den EKTE kjeden uten noen env satt.
  */
-export function situationsToolDefinitions(transport: SituationsTransport): ToolDefinition[] {
+export interface SituationsToolOptions {
+  /** WP-G4: gi `set_autonomy_policy` et valgfritt `expires_at` (utløpstid på eierens binding). Standard (utelatt) = skjemaet er identisk med main. */
+  autonomyExpiry?: boolean;
+}
+
+export function situationsToolDefinitions(transport: SituationsTransport, options: SituationsToolOptions = {}): ToolDefinition[] {
   const common = {
     credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF,
     output_trust: "internal" as const,
@@ -200,7 +207,7 @@ export function situationsToolDefinitions(transport: SituationsTransport): ToolD
       { quiet_hours_start_utc: z.number().nullable().optional(), quiet_hours_end_utc: z.number().nullable().optional(), resuppress_hours: z.number().optional() },
       "sett forrige verdier tilbake"),
     control("set_autonomy_policy", "Bind (eller erstatt) eierens auto-ACT-handling for ett domene",
-      { domain: z.string(), tool_id: z.string(), action: z.string(), parameters: z.record(z.unknown()).optional(), enabled: z.boolean().optional() },
+      { domain: z.string(), tool_id: z.string(), action: z.string(), parameters: z.record(z.unknown()).optional(), enabled: z.boolean().optional(), ...(options.autonomyExpiry === true ? { expires_at: z.string().optional() } : {}) },
       "clear_autonomy_policy"),
     control("clear_autonomy_policy", "Fjern eierens auto-ACT-binding for ett domene", { domain: z.string() }, "set_autonomy_policy med forrige verdier"),
     control("release_stuck_act_claim", "Frigjør en fastlåst ACT-claim (kun sovereign eier, kun uten bevis)",

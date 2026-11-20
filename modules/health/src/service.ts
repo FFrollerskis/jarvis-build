@@ -177,12 +177,14 @@ export class HealthService {
    * Lese-API, health-space-scoped (RLS + strukturell CHECK, se
    * `049_health.sql`). `metricType`/`sinceMs` er valgfrie filtre - `sinceMs`
    * filtrerer på `observed_at` (hendelsestidspunktet, IKKE `recorded_at`).
+   * WP-G4 (B-LOW-6): valgfri `limit` (de NYESTE `limit` radene) - uten den er oppførselen uendret (ingen LIMIT) for alle eksisterende kallere; situasjonsløperen setter alltid et tak.
    */
   async getRecentMetrics(
     tenantId: string,
     personId: string,
     metricType?: MetricType,
-    sinceMs?: number
+    sinceMs?: number,
+    limit?: number
   ): Promise<HealthMetricObservation[]> {
     return withMemoryTransaction(this.pool, tenantId, ["health"], async (client) => {
       const conditions = ["tenant_id = $1", "person_id = $2"];
@@ -195,8 +197,13 @@ export class HealthService {
         params.push(new Date(sinceMs).toISOString());
         conditions.push(`observed_at >= $${params.length}`);
       }
+      let limitClause = "";
+      if (limit !== undefined && Number.isFinite(limit)) {
+        params.push(Math.max(1, Math.floor(limit)));
+        limitClause = ` LIMIT $${params.length}`;
+      }
       const { rows } = await client.query(
-        `SELECT * FROM health_metric_observations WHERE ${conditions.join(" AND ")} ORDER BY observed_at DESC, seq DESC`,
+        `SELECT * FROM health_metric_observations WHERE ${conditions.join(" AND ")} ORDER BY observed_at DESC, seq DESC${limitClause}`,
         params
       );
       return rows as HealthMetricObservation[];
