@@ -212,13 +212,14 @@ Flaggene AV og restart (`JARVIS_SITUATION_SIGNALS` av stopper alt, også den dag
 
 ## 17. Testbevis (kommandoer og tall; alt mot lokale fakes og ekte embedded Postgres)
 
-Kommando (DB-testene kjøres som OS-bruker `postgres`, maks 2 workers): `pnpm exec vitest run modules/situations/test apps/api/test/wpg4- modules/tool-gateway/test/wpg4-ha-state-detail.test.ts modules/health/test modules/vision/test/service-rls.test.ts modules/vision/test/wpg4-fix-limit.test.ts --maxWorkers=2`: 44 filer, 612 tester grønne (inkl. de eksisterende situasjons-, helse- og kamerasettene). G4-egne filer og tall (340):
+Kommando (DB-testene kjøres som OS-bruker `postgres`, maks 2 workers): `pnpm exec vitest run modules/situations/test apps/api/test/wpg4- modules/tool-gateway/test/wpg4-ha-state-detail.test.ts modules/health/test modules/vision/test/service-rls.test.ts modules/vision/test/wpg4-fix-limit.test.ts --maxWorkers=2` (delta-runden la til `modules/erasure/test`): 65 filer, 724 tester grønne (inkl. de eksisterende situasjons-, helse-, kamera- og erasure-settene; før delta-runden 44 filer/612 uten erasure-pakken). G4-egne filer og tall (367; 340 før delta-runden):
 
-* `modules/situations/test`: `wpg4-bridges` (36), `wpg4-signal-bus` (27), `wpg4-signal-runner` (15), `wpg4-signals-transport` (8), `wpg4-flags-wiring` (5), `wpg4-tuning-simulation` (46), `wpg4-anomaly-detectors` (14), `wpg4-act-dchain` (13); fiks-rundens: `wpg4-fix-signals` (9), `wpg4-fix-assist-pause` (13), `wpg4-fix-lifecycle` (16), `wpg4-fix-locks` (6), `wpg4-fix-db` (21), `wpg4-fix-low` (26), `wpg4-fix-pure` (15).
+* `modules/situations/test`: `wpg4-bridges` (36), `wpg4-signal-bus` (27), `wpg4-signal-runner` (15), `wpg4-signals-transport` (8), `wpg4-flags-wiring` (5), `wpg4-tuning-simulation` (46), `wpg4-anomaly-detectors` (14), `wpg4-act-dchain` (13); fiks-rundens: `wpg4-fix-signals` (9), `wpg4-fix-assist-pause` (13), `wpg4-fix-lifecycle` (29; 16 før delta-runden), `wpg4-fix-locks` (6), `wpg4-fix-db` (21), `wpg4-fix-low` (26), `wpg4-fix-pure` (15).
 * `modules/tool-gateway/test/wpg4-ha-state-detail.test.ts` (10); `modules/health/test/wpg4-fix-limit.test.ts` (3); `modules/vision/test/wpg4-fix-limit.test.ts` (3).
-* `apps/api/test`: `wpg4-signals-wiring` (16), `wpg4-signals-limits` (6), `wpg4-signals-damping-wiring` (2), `wpg4-signals-health-db` (4), `wpg4-signals-home-db` (2), `wpg4-signal-routes` (13), `wpg4-assist-runtime` (11).
+* `apps/api/test`: `wpg4-signals-wiring` (16), `wpg4-signals-limits` (6), `wpg4-signals-damping-wiring` (2), `wpg4-signals-health-db` (4), `wpg4-signals-home-db` (2), `wpg4-signal-routes` (16; 13 før delta-runden), `wpg4-assist-runtime` (11); delta-runden: `wpg4-signals-retention-wiring` (7).
+* `modules/erasure/test/wpg4-signals-erasure.test.ts` (4, delta-runden: rom- og person-scope mot ekte `ErasureService`).
 
-Vaktbatch (alt som leser `main.ts`/ruter/manifest, wph1/wph2, env-drift, compose-isolasjon, schema-invariants, D-395-erasure, D-420, flagg-wiring, migrasjonsrekkefølge og -koding) og full suite: se sluttrapporten.
+Vaktbatch (alt som leser `main.ts`/ruter/manifest, wph1/wph2, env-drift, compose-isolasjon, schema-invariants, D-395-erasure, D-420, flagg-wiring, migrasjonsrekkefølge og -koding): 67 filer, 1 113 tester grønne (også etter delta-runden). Full suite: se sluttrapporten (ikke kjørt på nytt i delta-runden).
 
 ## 18. Fiks-runde etter to uavhengige reviews (verdikt MERGE ETTER FIKSER, 3 HIGH)
 
@@ -254,3 +255,20 @@ Status per funn. `LUKKET` = rettet i koden og bevist med en test som er RØD ute
 | M10b, M23, M34 | ingen handling | Ekvivalente/iboende (reviewerens egen vurdering) | - | - |
 
 Nye eierspørsmål i fiks-runden: Q-G4-6 (nøytral helsetekst), Q-G4-7 (regel-skopet binding), Q-G4-8 (morgenoppsummering), Q-G4-9 (flapp-demping), Q-G4-10 (delt alarm-nøkkel, glidende kameravindu); se §16.
+
+### Delta-runde etter to delta-reviews mot f2c70362 (A = MERGE, B = MERGE ETTER FIKSER med ett nytt MEDIUM)
+
+Samme statusbegreper som over. Mutasjonsbevis: 60 egne mutanter, ALLE drept (0 overlevde); ekvivalente og analysert uten å kjøres: `NOT EXISTS` uten tenant-/rom-vilkår (`situation_id` er unik), `firstCause ??=` mot `=` (begge årsakene er den samme feilen i testene), retensjonsløkkens `status === "ok"`-vakt (dekket av den indre kill switch-sjekken) og tenant-filteret i person-scope-planen (RLS gir det samme).
+
+| Punkt | Status | Hva (kort) | Test | Mutasjonsbevis |
+|---|---|---|---|---|
+| (1) B D-MEDIUM-1: en beslutning som refererer en gammel signalsituasjon velter hele retensjonssveipet | `LUKKET` | `retireSignalSituations` sletter ikke en situasjon en beslutning refererer (`NOT EXISTS` mot `decision_log`; den løses likevel, og unntaket varer kun så lenge beslutningen finnes); sletting og løsing i hver sin transaksjon, begge forsøkes alltid, feilen kastes etterpå (`SignalRetentionFailedError`). Løperen teller (`retention_failures`), viser `errors` (`purge:<kode>`/`retention:<kode>`) og logger kode + SQLSTATE uten innhold, stopper ikke andre rom og prøver igjen etter én time | `wpg4-fix-lifecycle` (8 nye: referert/ureferert, helse og kamera, skjemavakt for FK-er mot `situations`, SQL-feil i sletting, begge steg, begge feiler, loggoppryddingen, 1 t-fristen) + reviewerens egen akseptansetest (rød på f2c70362, grønn nå) | 20/20 |
+| (2) A D-LOW-1 = B D-LOW-2: `simulate` med ukjent situasjon ga 500 | `LUKKET` | 404 `not_found` (`reason: situation_not_found`), også for en annen tenants situasjon; skjemavakt: hver feilklasse tjenestene kaster er mappet i ruten, og hver feilsti gir 4xx med stabil kode | `wpg4-signal-routes` (2 nye) | 6/6 |
+| (3) A D-LOW-2 + B INFO-8 (regel 4): `critical_bypass_set` uten økt; rute-rader uten `task_id` | `LUKKET` | `setCriticalQuietBypass(..., context)`: revisjonsraden bærer økt (og oppgave); verktøyet sender `identity.session_id`, ruten sender økt og `task_id` = `situation-signals-api:<handling>`; alle rader fra ruten (abonnement, tilbakemelding, regeltuning, revisjon) har person, økt og oppgave | `wpg4-signal-routes` (1 ny + 2 utvidede), `wpg4-signals-transport` (utvidet) | 8/8 |
+| (4) B D-LOW-3: retensjon kun for rom med påslått kilde | `LUKKET` | `retentionTargets` (kun opprydding, ingen lesing/levering, kill switch gjelder) = eierens tenant x `SOURCE_SPACES`; hovedbryteren AV = ingenting kjører (dokumentert i §1/§14; erasure er veien) | `wpg4-fix-lifecycle` (4 nye), `wpg4-signals-retention-wiring` (hovedbryter alene, avslått kilde, kill switch, hovedbryter av) | 8/8 |
+| (5) B D-LOW-4: N22/N56/N57/N58 overlevde hele suiten | `LUKKET` | G2/G3-oppbevaring og `JARVIS_SITUATION_LOG_RETENTION_DAYS` gjennom ekte wiring -> løper -> sveip (også en feilende helsepolicy = standard 30 d) | `wpg4-signals-retention-wiring` (3 + 4) | 6/6 (reviewerens N22/N56/N57/N58 er drept; reviewerens DW1/DW2 kjørt og grønne) |
+| (6) A D-INFO-1: `SituationActStaleError` i hopp-over-listen | `LUKKET` | `autoActPending` hopper over en situasjon som er løst mens `actOn` står i kø, og fortsetter med neste | `wpg4-fix-lifecycle` (1 ny) | 1/1 |
+| (7) B INFO-9: erasure per person | `LUKKET` | `planPerson` tar signallogg, vurderinger, tilbakemeldinger og abonnementer i alle rom (også `health`); `situation_rule_tuning` og `situations` er BEVISST ikke med (begrunnet i `plan.ts` og §4) | `modules/erasure/test/wpg4-signals-erasure` (4, ekte `ErasureService`); d395-vakten grønn | 11/11 |
+| (8) Docs: §1, §5 punkt 4, A D-LOW-3/D-LOW-4/D-INFO-2, B INFO-5/INFO-7 | dokumentert | §1 og §5 punkt 4 rettet mot koden; §5 punkt 11 (vakten stenger kun `home-assistant`/`car`; `make.run_scenario`, `n8n.activate_workflow`, `mcp_zapier.call_tool`; Q-G4-11), punkt 12 (haste dempes aldri), punkt 13 (`domain_lock_busy`), §15 (nattlige kamerahendelser, decision_log-lås), `home-bridge.ts`-filhodet | - | - |
+
+Nytt eierspørsmål: Q-G4-11 (bindbarhet per verktøydefinisjon), se §16.
