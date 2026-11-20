@@ -157,6 +157,7 @@ import { servedByCloudModel } from "./cloud-tool-screen.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { claudeBudgetBriefSource } from "./claude-budget-surfaces.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
+import { createPersonalWiring } from "./personal-wiring.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
@@ -820,7 +821,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     env: process.env, pool, graph: conversationGraphService, business: businessService, secrets: readSecretProvider,
     warn: (event) => console.error(JSON.stringify({ msg: "comms_warn", ...event }))
   });
-  for (const tool of firstWaveTools({
+  // WP-G2 (D-464, UA-8 Personal Twin): kritiske hjem-/bilhandlinger, familie, helse-inntak, Apple CalDAV/CardDAV, personlig økonomi-lesing og kontekstmotor. ALT er AV som standard: uten `JARVIS_PERSONAL_*`-flagg er
+  // `personal.tools` tom, `filterTools` identiteten og `personal.deps` `undefined` (verktøylister, utvalg, rate-grenser og ruter er identiske med main, ingen ekstra loggline). Kun API-prosessen kobler det inn.
+  const personal = createPersonalWiring({ env: process.env, pool, gateway: toolGateway, readSecret: (ref) => readSecretProvider.get(ref), ownerPersonId: owner.owner_person_id, controls: { killSwitch, ownerControls } });
+  const personalLog = personal.describe();
+  if (personalLog) console.log(JSON.stringify(personalLog));
+  for (const tool of personal.filterTools(firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
     // D-247: `chatId` som en resolver mot `readSecretProvider` (samme
@@ -1214,9 +1220,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       ...(growthExperimentRegistry ? growthExperimentToolDefinitions(new GrowthExperimentTransport(growthExperimentRegistry)) : []),
       // WP-G1 (D-463, UA-7): `comms.*` (felles utgående kommunikasjon - klasse D `outbound_message`, eier-kun, aldri en modellflate) registreres KUN med JARVIS_COMMS_OUTBOUND=on. Flagg AV = tom liste = identisk med main
       // (ingen verktøy, ingen utvalgstreff, ingen rate-endring). Samme ene register-løkke som resten - ingen parallell registreringsvei.
-      ...commsRuntime.tools
+      ...commsRuntime.tools,
+      // WP-G2 (D-464): personlig-domenet (tom liste uten flagg). Eier-/step-up-krevende, aldri på en modellflate.
+      ...personal.tools
     ]
-  })) toolGateway.register(tool);
+  }))) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
   // lenger koblet til noen aktiv flate. Chat, tale, Telegram og executive-jobber
   // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
@@ -1528,6 +1536,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           }
         }
       : {}),
+    // WP-G2 (D-464): `/personal/*` finnes KUN når minst ett JARVIS_PERSONAL_*-flagg er på; ellers 404 (identisk med main).
+    ...(personal.deps ? { personal: personal.deps } : {}),
     ...(process.env["JARVIS_PRODUCT_USAGE_TENANT_ID"]
       ? {
           productUsage: {

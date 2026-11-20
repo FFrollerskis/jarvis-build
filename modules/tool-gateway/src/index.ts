@@ -52,3 +52,5 @@ export * from "./owner-stated-memory.ts";
 export * from "./tool-manifest.ts";
 export * from "./turn-context.ts";
 export * from "./url-safety.ts";
+// WP-G2 (D-464): personlig-domenet (dormant bak JARVIS_PERSONAL_*-flagg).
+export * from "./personal/index.ts";
