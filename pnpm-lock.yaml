@@ -238,6 +238,21 @@ importers:
         specifier: 16.14.0-beta.17
         version: 16.14.0-beta.17
 
+  modules/connector-sdk:
+    dependencies:
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/tool-gateway':
+        specifier: workspace:*
+        version: link:../tool-gateway
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
   modules/consent:
     dependencies:
       '@jarvis/contracts':

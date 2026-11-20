@@ -1,0 +1,20 @@
+{
+  "name": "@jarvis/connector-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WP-I (D-472): Connector SDK - ConnectorManifest (masterplan kap. 10), skeleton-derivasjon fra connector-registeret, CI-vakt og connector-gjeld (hovedinngang); kontraktstest-kit, fake-harness og Appendiks B-scoring bak subpath-en ./testing. Ingen leverandør-SDK-er, ingen kjøretidseffekt.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
+    "zod": "^3.25.76"
+  }
+}
