@@ -7,7 +7,7 @@ import { createWatchdogIncidentBridge, parseIncidentProducerConfig } from "./inc
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPolicyAuditSinkFromEnv, createPool, installPolicyAuditDrain, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
-import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
+import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ClaudeBudgetEnforcer, claudeBudgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv, type ClaudeBudgetConfig } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubTransport, createGitHubAuth, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
@@ -34,6 +34,7 @@ import {
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import { GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
+import { ClaudeBudgetAlerter, startClaudeBudgetAlerts } from "./claude-budget-surfaces.ts";
 import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute } from "./tool-turn-route.ts";
 import {
   AnthropicAdapter,
@@ -93,9 +94,18 @@ const worker = new InProcessWorker(queue);
 
 // BO-09 (§22): worker bruker AI Mesh gjennom ModelGateway med purpose -
 // aldri provider-API direkte, aldri låst til én provider.
+// WP-B4 (D-476): Claude-kreditten - samme miljøvariabler og samme enforcer som api (workeren kaller også modellen: minneuttrekk, sammendrag, delegerte jobber). AV som standard; ugyldig verdi stopper oppstarten.
+let claudeBudgetConfig: ClaudeBudgetConfig | null = null;
+try {
+  claudeBudgetConfig = claudeBudgetConfigFromEnv(process.env);
+} catch (err) {
+  failStartup(err);
+}
+const workerTrace = traceSinkFromEnv("var/worker-traces.jsonl");
+const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace: workerTrace, actor_person_id: owner.owner_person_id, owner_tenant_id: owner.tenant_id });
 const gateway = new ModelGateway({
   pool,
-  trace: traceSinkFromEnv("var/worker-traces.jsonl"),
+  trace: workerTrace,
   pricing: pricingFromEnv(), // D-399: se apps/api/src/main.ts
   providers: [
     new OpenAiAdapter(),
@@ -119,7 +129,9 @@ const gateway = new ModelGateway({
   // i api gjaldt ikke her. Samme kilde som api: `budgetConfigFromEnv()`.
   budget: budgetConfigFromEnv(),
   // WP-H0 (JARVIS-087): eierens pause/tilbakekall av en modellleverandør, lest LIVE fra `owner_control_state` ved hvert kall - en pause satt via api stanser også workerens modellkall (se provider-pause.ts).
-  providerPause: createProviderPauseSourceFromPool(pool)
+  providerPause: createProviderPauseSourceFromPool(pool),
+  // WP-B4: Claude-kreditten (kun når JARVIS_CLAUDE_BUDGET_USD er satt).
+  ...(claudeBudget !== undefined ? { claudeBudget } : {})
 });
 // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
 try {
@@ -622,6 +634,11 @@ setInterval(
       .catch((err) => console.error(JSON.stringify({ msg: "watchdog_tick_error", error: (err as Error).message }))),
   WATCHDOG_INTERVAL_MS
 );
+// WP-B4 (D-476): Telegram-varsel om Claude-kreditten (50/75/90/100 % og tempo over 1,3 × kurven) - ÉN gang per terskel per kredittperiode, via vakthundens eksisterende varslingsvei (samme sink som `costWarningCheck`,
+// D-395). Kun eierens tenant. AV uten JARVIS_CLAUDE_BUDGET_USD. Ingen modellkall og ingen verktøykall: kun lesing av `cost_events` og skriving av revisjonsmarkører.
+if (claudeBudgetConfig !== null) {
+  startClaudeBudgetAlerts(new ClaudeBudgetAlerter({ pool, config: claudeBudgetConfig, tenantId: owner.tenant_id, ownerPersonId: owner.owner_person_id, sink: watchdogAlertSink }));
+}
 
 // REMEDIERING DEL 2 (JARVIS-010): kodejobber kjører KUN i en per-jobb-container med eksplisitt policy
 // (ikke-root, read-only rootfs, ressursgrenser, egress via allowlistet proxy, ingen arvede secrets) -

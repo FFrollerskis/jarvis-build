@@ -21,3 +21,5 @@ export * from "./tool-honesty.ts";
 export * from "./bakeoff.ts";
 export * from "./mesh-smoke.ts";
 export * from "./mesh-verification.ts";
+export * from "./claude-budget.ts";
+export * from "./claude-budget-enforcer.ts";

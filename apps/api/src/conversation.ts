@@ -2,6 +2,7 @@ import { envInt, type DataSensitivity, type IdentityContext } from "@jarvis/cont
 import { ContextBuilder, MessageStore, delegationRequestVariants, describeSecretFindings, fastRoute, scanForSecrets } from "@jarvis/core";
 import {
   BudgetExceededError,
+  ClaudeBudgetBlockedError,
   CouncilAutoTriggerLimiter,
   classifyContentSensitivity,
   partitionHistoryBySensitivity,
@@ -29,7 +30,7 @@ import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type CouncilSubmitResult, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
 import { chatKnowledgeWithheldNote, chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
-import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, reserveModelNote, stripSourceMarkerIds, stripSystemNotes } from "./tool-turn-route.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, claudeBudgetRouteNote, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, reserveModelNote, stripSourceMarkerIds, stripSystemNotes } from "./tool-turn-route.ts";
 import { DEFAULT_CHAT_CANDIDATES, type ChatCandidates } from "./chat-candidates.ts";
 
 export interface ConversationDeps {
@@ -811,7 +812,10 @@ export class ConversationEngine {
       const reserveUsed = reserveFailedBeforeAnswer.length > 0 || (reserveFailed.size > 0 && earlierCloud.length > 0);
       const reserveNote = reserveUsed && surface !== "voice" ? reserveModelNote([...reserveFailed], result.provider, servedByCloudModel(result), earlierCloud) : "";
       if (reserveUsed) console.log(JSON.stringify({ msg: "wpd4_chat_reserve_used", failed: reserveFailedBeforeAnswer.length > 0 ? reserveFailedBeforeAnswer : [...reserveFailed], served: result.provider, cloud: servedByCloudModel(result), ...(earlierCloud.length > 0 ? { earlier_cloud: earlierCloud } : {}) }));
-      const notes = `${routeNote}${variantNote}${withheldNote}${reserveNote}`;
+      // WP-B4 (D-476): svaret kom fra lokal modell fordi Claude-kreditten stengte Anthropic - sagt rett ut (aldri en usynlig nedgradering). Da droppes den generelle «Reservemodell brukt: anthropic var ikke tilgjengelig»-merknaden,
+      // som ville vært misvisende (Anthropic var tilgjengelig, men stengt av kreditten). Uten Claude-kreditten er `budgetNote` alltid tom og strengen under er identisk med før.
+      const budgetNote = surface !== "voice" ? claudeBudgetRouteNote(result.metadata, "svaret", result) : "";
+      const notes = `${routeNote}${variantNote}${withheldNote}${budgetNote !== "" && [...reserveFailed].every((name) => name === "anthropic") ? "" : reserveNote}${budgetNote}`;
       const replyText = notes ? `${result.text}${notes}` : result.text;
       if (notes) onToken?.(notes);
       await this.deps.messages.save(identity, "assistant", replyText);
@@ -822,6 +826,12 @@ export class ConversationEngine {
         await this.deps.messages.save(identity, "assistant", reply);
         onToken?.(reply);
         return { reply, routed: "blocked" };
+      }
+      if (err instanceof ClaudeBudgetBlockedError) {
+        // WP-B4 (D-476): Claude-kreditten stengte Anthropic og ingen lokal modell kunne svare. Teksten er ferdig norsk, uten beløp og uten ord sensitivitetsklassifiseringen reagerer på (den lagres i samtalen).
+        await this.deps.messages.save(identity, "assistant", err.message);
+        onToken?.(err.message);
+        return { reply: err.message, routed: "blocked" };
       }
       if (err instanceof ProviderError && err.kind === "cancelled") {
         // §6: rent avbrudd - delvis tekst persisteres med eksplisitt markør,

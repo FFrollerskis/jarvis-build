@@ -390,6 +390,15 @@ export class AiCouncil {
   ) {}
 
   /**
+   * WP-B4 (D-476): opphavet til rådets modellkall for Claude-kreditten. En eksplisitt bestilling («bruk AI-rådet») er en oppgave eieren bestilte (VIKTIG); den automatiske triggeren (høy-innvirkning-klassifisering) er
+   * bakgrunnsarbeid. Settes KUN når Claude-kreditten er på (`claudeBudgetActive`) - ellers er innputtet byte-identisk med main. En fake gateway uten egenskapen gir `{}`.
+   */
+  private budgetHint(input: CouncilInput): { budget_origin?: "owner_task" | "background" } {
+    if (this.gateway.claudeBudgetActive !== true) return {};
+    return { budget_origin: input.trigger?.trigger_source === "explicit_user" ? "owner_task" : "background" };
+  }
+
+  /**
    * D-106 HOST-FIX 2 (§"Council Gemma family mismatch"): Gemma-familien har TO
    * mulige konkrete backends (`gemma_local` på Tobias sin RTX 4070-vert /
    * `gemma_hosted` via Googles Gemini API) - NØYAKTIG én av dem representerer
@@ -462,6 +471,7 @@ export class AiCouncil {
     }
 
     const baseInput = (provider: string): CompleteInput => ({
+      ...this.budgetHint(input),
       tenant_id: input.tenant_id,
       ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
       ...(input.task_id !== undefined ? { task_id: input.task_id } : {}),
@@ -606,6 +616,7 @@ export class AiCouncil {
       .map((r) => `[${r.provider}] konklusjon: ${r.conclusion}\nbegrunnelse: ${r.reasoning_summary}\nconfidence: ${r.confidence}\nrisiko: ${r.risks.join("; ")}`)
       .join("\n\n");
     const synthesisInput: CompleteInput = {
+      ...this.budgetHint(input),
       tenant_id: input.tenant_id,
       ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
       ...(input.task_id !== undefined ? { task_id: input.task_id } : {}),

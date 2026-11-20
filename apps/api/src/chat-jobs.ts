@@ -32,8 +32,10 @@ const RESULT_PREVIEW_CHARS = 1500;
 /**
  * D-449 (Q-50): `input.data`-nøkler som BARE trusted kode (`TasksDelegateTransport`) kan sette. `POST /tasks/submit` avviser en innsendt kontrakt som bærer dem, så et rutingsflagg aldri kan
  * forfalskes via API-et (revisjonsfunn: flagget var tidligere bare «trusted» etter konvensjon). Workeren klassifiserer i tillegg oppgaveteksten selv, uavhengig av flagget.
+ * WP-B4 (D-476, review M2): `delegated_from_chat` er nå også reservert. Markøren styrer hva som leveres tilbake i eierens chat (`DELEGATED`-filteret) og, sammen med `cloud_tool_turns_allowed`, hvilken prioritet
+ * jobben får på Claude-kreditten (en bestilt oppgave = VIKTIG, se `executive.ts`) - en grant-innehaver kunne ellers satt den selv og hoppet foran bakgrunnsarbeid ved stramt tempo.
  */
-export const RESERVED_SUBMIT_DATA_KEYS: readonly string[] = ["cloud_tool_turns_allowed"];
+export const RESERVED_SUBMIT_DATA_KEYS: readonly string[] = ["cloud_tool_turns_allowed", "delegated_from_chat"];
 
 export function submittedContractHasReservedKey(contract: unknown): string | null {
   if (typeof contract !== "object" || contract === null) return null;
