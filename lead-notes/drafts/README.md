@@ -68,3 +68,18 @@ Nye kommits får trailerne `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic
 
 ## 7. Øvelse av rekkefølgen (gjort 2026-11-20, lokalt)
 Hele PR-rekkefølgen er øvd som lokale to-forelder-merger fra `origin/main` (`ec3e684e`) i en temporær worktree. Sluttreet er IDENTISK med treet til `integration/post-merge-test-2` (`95380285`, full-suite-verifisert). Konfliktkart, løsninger og `git rerere`-cache: `rehearsal/CONFLICTS.md`, `rehearsal/resolve_lib.py`, `rehearsal/rr-cache.tgz`. Mellomtilstandene ligger som lokale `refs/rehearsal/*` (pushes ALDRI); de er ikke testet, så GitHub CI per PR avgjør dem.
+
+## 8. Mellomtilstandene er testet (2026-11-20, lokalt; full suite per tilstand, `/tmp/lead/run-rehearsal-chain.sh`)
+Hver tilstand = `origin/main` + alle forgjengerne merget (to-forelder) + den aktuelle delen. Typecheck, lint og `check:containment` exit 0 i alle. Full suite: kun de fem kjente sandkasse-feilene (wpc3-review1-hardening F10a/b/c, break-glass-guard, nas-ua0-gate «friskt system»); ingen nye røde.
+| Tilstand | Filer / tester | Resultat |
+|---|---|---|
+| K+H1+I+H2 (`04-h2`) | 838 / 14 232 | 5 kjente røde, ellers grønn |
+| +B3 | (== B3-grenens tre; testet av byggeren: 14 511 av 14 516) | grønn |
+| +D3 (`06`) | 862 / 14 746 | 5 kjente røde |
+| +B4 (`07`) | 871 / 15 036 | 5 kjente røde |
+| +G1 (`08`) | 900 / 15 395 | 5 kjente røde |
+| +G2 og `ca13dace` (`09b`) | 928 / 15 812 | 5 kjente røde |
+| +G3 (`10`) | 948 / 16 286 | 5 kjente røde |
+| +G4 og `87b49a65` (`11b`) | 975 / 16 654 | 5 kjente røde |
+| +docs (`12`) | == `integration/post-merge-test-2` (full suite 16 649 av 16 654) | grønn |
+**Test-tilpasningene er nødvendige (målt):** uten `ca13dace` feiler `apps/api/test/wpg1-comms-routes.test.ts` (1 test) i G2-tilstanden; med den består 29/29. Uten `87b49a65` feiler `modules/situations/test/wpg2-autonomy-step-up.test.ts` (2 av 5) i G4-tilstanden; med den består 5/5. De MÅ derfor med i henholdsvis G2-PR-en og G4-PR-en. Forventet CI per PR i den rekkefølgen: grønn bortsett fra de fem kjente sandkasse-feilene (som skal være grønne/ikke relevante på GitHub-runnere; ikke verifisert der).
