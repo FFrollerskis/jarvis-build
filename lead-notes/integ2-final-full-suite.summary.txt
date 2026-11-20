@@ -1,0 +1,9 @@
+ FAIL  ops/acceptance/test/nas-ua0-gate.test.mjs > nas-ua0-gate.sh > friskt system: alt PASS (backup ukjent uten JARVIS_BACKUP_DIR), exit 0, evidensfil uten hemmeligheter skrevet
+ FAIL  modules/self-modification/test/break-glass-guard.test.ts > break-glass: Jarvis holder aldri eierens nøkkel > .gitignore ignorerer privatnøkler (*.key, *private*.pem og - WP-C3 review F10 - al
+ FAIL  modules/tool-gateway/test/wpc3-review1-hardening.test.ts > F10: .gitignore fanger GitHub App-privatnøkkelen uansett filnavn (*.pem), men aldri den OFFENTLIGE konstitusjonsnøkkelen > F10a: nø
+ FAIL  modules/tool-gateway/test/wpc3-review1-hardening.test.ts > F10: .gitignore fanger GitHub App-privatnøkkelen uansett filnavn (*.pem), men aldri den OFFENTLIGE konstitusjonsnøkkelen > F10b: den
+ FAIL  modules/tool-gateway/test/wpc3-review1-hardening.test.ts > F10: .gitignore fanger GitHub App-privatnøkkelen uansett filnavn (*.pem), men aldri den OFFENTLIGE konstitusjonsnøkkelen > F10c: run
+ Test Files  3 failed | 972 passed (975)
+      Tests  5 failed | 16649 passed (16654)
+   Duration  2839.52s (transform 17.67s, setup 0ms, collect 292.74s, tests 2313.47s, environment 173ms, prepare 58.35s)
+FINAL SUITE exit=1 00:58:57
