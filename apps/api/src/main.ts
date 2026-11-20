@@ -135,7 +135,8 @@ import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { parseIncidentProducerConfig, startApiIncidentProducers } from "./incident-producers.ts";
 import { createInfraStatusSource } from "./infra-status-source.ts";
 import { createRadarState, radarSweepFailures } from "./evolution-radar.ts";
-import { createEvolutionReportProvider } from "./evolution-source.ts";
+import { createEvolutionReadinessProvider, createEvolutionReportProvider, type EvolutionSourceDeps } from "./evolution-source.ts";
+import { createEvolutionDecisionRecorder } from "./evolution-decisions.ts";
 import { createAiMeshReportProvider } from "./ai-mesh-source.ts";
 import { parseKnowledgeClaimWrites } from "./knowledge-flags.ts";
 import { createPushSendGuard, startFollowUpPush } from "./follow-up-push.ts";
@@ -223,7 +224,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     lastResensitize = summary;
     return summary;
   };
-  const evolutionReports = createEvolutionReportProvider({
+  // WP-B3 (D-475): kildene er trukket ut til ÉN verdi (uendret innhold) så Evolusjon-senteret kan lese den samme rapporten og de samme beredskapsfaktaene (`createEvolutionReadinessProvider`) uten en parallell kobling.
+  const evolutionSourceDeps: EvolutionSourceDeps = {
     radar: evolutionRadar,
     resensitize: () => lastResensitize,
     pool,
@@ -234,7 +236,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
     mesh: () => gateway.meshStatus(),
     toolSurface: () => modelToolSurface
-  });
+  };
+  const evolutionReports = createEvolutionReportProvider(evolutionSourceDeps);
+  const evolutionReadiness = createEvolutionReadinessProvider(evolutionSourceDeps);
   // WP-D4 (JARVIS-033/036/078): AI Mesh-status (`executive.get_ai_mesh_status`) - leverandørhelse i prosessen + cost_events siste 7 døgn. Kun lesing; gjør aldri et modellkall.
   const aiMeshReports = createAiMeshReportProvider({
     pool,
@@ -772,10 +776,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     authority: ownerAuthority, killSwitch, infraGate,
     ...(policyAuditSink ? { policyAudit: () => ({ gateway: policy.auditStats(), sink: policyAuditSink.stats() }) } : {}),
     modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS,
+    // WP-B3 (D-475, EV-22): Evolusjon-senteret (kun med JARVIS_CONTROL_CENTER_EVOLUTION=on) leser samme rapport + beredskap + oppstartssjekk, bundet til eierens tenant.
+    evolutionReadiness, ev0Status: () => getLastEv0BootStatus(), evolutionTenantId: owner.tenant_id,
     valueReport: (tenantId) => lateExecutive().getValueReport(tenantId), infraStatus: (tenantId) => lateExecutive().getInfraStatus(tenantId),
     ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
     ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
   });
+  // WP-B3 (D-475, EV-23): eierens avgjørelse om et endringsforslag (`executive.record_evolution_decision`, kun en registrering i revisjonssporet - ingen virkning) finnes KUN med JARVIS_CONTROL_EVOLUTION_APPROVAL=on OG når
+  // Evolusjon-senteret faktisk er koblet inn (knappene bor der). Uten flagget finnes hverken verktøyet, skriveren eller ruten-navnet (flagg AV er identisk med main).
+  const evolutionApprovalOn = flagOn(process.env, CONTROL_FEATURE_FLAGS.evolutionApproval) && controlCenters.has("evolution");
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -1102,6 +1111,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {}),
         // WP-H2 (gjennomgang L1): før-bildet av en autonomi-binding skrives og committes i revisjonssporet FØR `revoke_autonomy_binding` sletter den (kun brukt når verktøyet er registrert, JARVIS_CONTROL_AUTONOMY_REVOKE=on).
         autonomyAudit: createAutonomyAudit(pool),
+        // WP-B3 (D-475, EV-23): skriveren (kun revisjonssporet; aldri endringsregisteret) finnes KUN når avgjørelsesverktøyet er registrert.
+        ...(evolutionApprovalOn ? { evolutionDecisions: createEvolutionDecisionRecorder(pool) } : {}),
         holder: executiveRef
       })), {
         // WP-H1/H2 (gjennomgang M1): per-senter lese-verktøyene (`get_<senter>_center`) registreres KUN for sentrene hvis flagg er på - flagg AV er identisk med main (ingen verktøy, ingen utvalgstreff, ingen rate-endring).
@@ -1109,7 +1120,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         controlCenters: controlCentersWithTools(process.env, controlCenters),
         // WP-H2 (M1): `run_golden_suite` og `revoke_autonomy_binding` registreres KUN med sine egne flagg (uten flagg finnes verktøyene ikke - og `/executive/mutate` godtar ikke navnene, se `server.ts`).
         goldenSuite: goldenSuiteRunner !== undefined,
-        autonomyRevoke: flagOn(process.env, CONTROL_FEATURE_FLAGS.autonomyRevoke)
+        autonomyRevoke: flagOn(process.env, CONTROL_FEATURE_FLAGS.autonomyRevoke),
+        // WP-B3 (D-475, EV-23): `record_evolution_decision` registreres kun med eget flagg + Evolusjon-senteret (se `evolutionApprovalOn`).
+        evolutionApproval: evolutionApprovalOn
       }),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten

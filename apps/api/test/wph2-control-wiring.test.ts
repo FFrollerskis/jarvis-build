@@ -68,7 +68,8 @@ describe("kildevakt: de to flaggstyrte funksjonene finnes kun med sine flagg", (
   });
 
   it("executiveToolDefinitions får flaggene som valg: `run_golden_suite` bare med en kjører, `revoke_autonomy_binding` bare med JARVIS_CONTROL_AUTONOMY_REVOKE=on", () => {
-    expect(MAIN_CODE).toMatch(/goldenSuite: goldenSuiteRunner !== undefined,\s*autonomyRevoke: flagOn\(process\.env, CONTROL_FEATURE_FLAGS\.autonomyRevoke\)\s*\}\)/);
+    // WP-B3 (D-475, EV-23) la til `evolutionApproval: evolutionApprovalOn` sist i samme valgobjekt (de to H2-valgene er uendret og står først).
+    expect(MAIN_CODE).toMatch(/goldenSuite: goldenSuiteRunner !== undefined,\s*autonomyRevoke: flagOn\(process\.env, CONTROL_FEATURE_FLAGS\.autonomyRevoke\),\s*evolutionApproval: evolutionApprovalOn\s*\}\)/);
     // M1: per-senter-verktøyene registreres kun for sentre med flagg på OG et registrert senter
     expect(MAIN_CODE).toMatch(/controlCenters: controlCentersWithTools\(process\.env, controlCenters\)/);
     // L1: før-bildet skrives via den injiserte revisjonsskriveren (ikke en ny ExecutiveService)

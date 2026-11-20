@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import {
-  CLOUD_WITHHELD_CENTERS, CONTROL_CENTER_IDS, CONTROL_CENTER_READ_ACTIONS, CONTROL_CENTER_READ_TOOLS, ControlCenterRegistry, EXECUTION_GUARDED_RESTRICTED_KEYS, ExecutiveService, ExecutiveTransport, controlItem, controlSection,
+  ALL_CONTROL_CENTER_IDS, CLOUD_WITHHELD_CENTERS, CONTROL_CENTER_IDS, CONTROL_CENTER_READ_ACTIONS, CONTROL_CENTER_READ_TOOLS, ControlCenterRegistry, EXECUTION_GUARDED_RESTRICTED_KEYS, ExecutiveService, ExecutiveTransport, controlItem, controlSection,
   controlCenterForReadAction, executiveToolDefinitions, isCloudWithheldCenter, withheldCenterData, type ControlCenterDefinition, type ControlCenterReport
 } from "@jarvis/executive";
 import { GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
@@ -57,7 +57,8 @@ describe("tabellen er den eneste kilden", () => {
     expect(TOOLS.map((t) => t.action).slice(0, 3)).toEqual(["get_finance_center", "get_memory_center", "get_agent_center"]);
     expect(new Set(TOOLS.map((t) => t.action)).size).toBe(TOOLS.length);
     for (const t of TOOLS) {
-      expect(CONTROL_CENTER_IDS as readonly string[]).toContain(t.center);
+      // WP-B3 (D-475): tilleggssentre (Evolusjon) er kjente sentre utenfor masterplanens ti.
+      expect(ALL_CONTROL_CENTER_IDS as readonly string[]).toContain(t.center);
       expect(t.action).toBe(`get_${t.center}_center`);
       expect(controlCenterForReadAction(t.action)).toBe(t.center);
     }
@@ -403,9 +404,11 @@ describe("responsen", () => {
     const t = transportWith([money("ai")]);
     const keys = factKeys((await call(t, "get_control_center", { center: "ai" }, CLOUD)).report);
     expect(keys).toEqual(expect.arrayContaining(["amount_ore", "daily_cap_ore"]));
-    expect(CLOUD_WITHHELD_CENTERS).toEqual(["finance", "value"]);
+    expect(CLOUD_WITHHELD_CENTERS).toEqual(["finance", "value", "evolution"]);
     expect(isCloudWithheldCenter("finance")).toBe(true);
     expect(isCloudWithheldCenter("value")).toBe(true);
+    // WP-B3 (D-475): Evolusjon (kostmodellen, EV-16) holdes tilbake HELT fra sky, som Verdi.
+    expect(isCloudWithheldCenter("evolution")).toBe(true);
     for (const id of CONTROL_CENTER_IDS.filter((c) => c !== "finance" && c !== "value")) expect(isCloudWithheldCenter(id), id).toBe(false);
   });
 
@@ -413,7 +416,7 @@ describe("responsen", () => {
     const d = withheldCenterData("finance", "Finans");
     expect(Object.keys(d).sort()).toEqual(["center", "explanation_no", "found", "summary_no", "withheld"]);
     expect(String(d["summary_no"])).toContain("finansdata er SECRET_RESTRICTED (D-378)");
-    expect([...EXECUTION_GUARDED_RESTRICTED_KEYS].sort()).toEqual(["executive.get_finance_center", "executive.get_value_center"]);
+    expect([...EXECUTION_GUARDED_RESTRICTED_KEYS].sort()).toEqual(["executive.get_evolution_center", "executive.get_finance_center", "executive.get_value_center"]);
     // hvert senter som holdes tilbake har sitt lese-verktøy i den guardede mengden
     for (const center of CLOUD_WITHHELD_CENTERS) {
       const tool = TOOLS.find((x) => x.center === center);
