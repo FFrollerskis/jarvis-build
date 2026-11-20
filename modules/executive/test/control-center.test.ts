@@ -436,6 +436,63 @@ describe("ControlCenterRegistry: oversikt", () => {
   });
 });
 
+describe("gjennomgang M2: oversikt uten tilbakeholdte sentre (en skymodell får ikke finans)", () => {
+  it("uten `withhold` (og med tom liste) er oversikten IDENTISK med før - ingen `withheld`-nøkkel, samme tekst", async () => {
+    const r = registry();
+    r.register(center("ai", async () => ({ sections: [okSection()], actions: [] })));
+    r.register(center("finance", async () => ({ sections: [okSection("f")], actions: [] })));
+    const plain = await r.overview(owner);
+    const empty = await r.overview(owner, { withhold: [] });
+    expect(empty).toEqual(plain);
+    expect("withheld" in plain).toBe(false);
+    expect(composeControlCenterOverview(plain.centers, NOW)).toEqual(composeControlCenterOverview(plain.centers, NOW, []));
+    expect(plain.summary_no).toContain("2 av 10 er koblet inn. Samlet: ");
+    expect(plain.summary_no).not.toContain("Holdt tilbake");
+  });
+
+  it("et tilbakeholdt senter bygges IKKE, står i `withheld` (ikke i `centers`, ikke i `unregistered`), teller ikke i samlet status og nevnes i teksten uten innhold", async () => {
+    const r = registry();
+    let financeBuilds = 0;
+    r.register(center("ai", async () => ({ sections: [okSection()], actions: [] })));
+    r.register(center("finance", async () => {
+      financeBuilds += 1;
+      return { sections: [controlSection({ id: "f", title_no: "F", source: "x", summary_no: "Hemmelig tall: 150000", status: "FAIL" })], actions: [] };
+    }));
+    const o = await r.overview(owner, { withhold: ["finance"] });
+    expect(financeBuilds).toBe(0);
+    expect(o.withheld).toEqual(["finance"]);
+    expect(o.centers.map((c) => c.center)).toEqual(["ai"]);
+    expect(o.unregistered).not.toContain("finance");
+    expect(o.status).toBe("OK"); // FAIL i det tilbakeholdte senteret lekker ikke inn i samlet status
+    expect(o.summary_no).toContain("2 av 10 er koblet inn. Samlet (uten de tilbakeholdte): ");
+    expect(o.summary_no).toContain("Holdt tilbake fra denne modellen (SECRET_RESTRICTED, D-378): Finans.");
+    expect(JSON.stringify(o)).not.toContain("150000");
+    // uten withhold bygges det som før
+    const full = await r.overview(owner);
+    expect(financeBuilds).toBe(1);
+    expect(full.status).toBe("FAIL");
+  });
+
+  it("`withhold` for et senter som IKKE er registrert gjør ingenting (ingen `withheld`, fortsatt «ikke koblet inn») - og eier-porten gjelder like fullt", async () => {
+    const r = registry();
+    r.register(center("ai", async () => ({ sections: [okSection()], actions: [] })));
+    const o = await r.overview(owner, { withhold: ["finance"] });
+    expect(o.withheld).toBeUndefined();
+    expect(o.unregistered).toContain("finance");
+    await expect(r.overview(stranger, { withhold: ["finance"] })).rejects.toBeInstanceOf(ControlCenterAccessError);
+  });
+
+  it("alle sentre tilbakeholdt: «koblet inn» teller dem, status er UNKNOWN (ingenting vurdert), og teksten sier hvorfor", async () => {
+    const r = registry();
+    r.register(center("finance", async () => ({ sections: [okSection("f")], actions: [] })));
+    const o = await r.overview(owner, { withhold: ["finance"] });
+    expect(o.status).toBe("UNKNOWN");
+    expect(o.centers).toEqual([]);
+    expect(o.withheld).toEqual(["finance"]);
+    expect(o.summary_no).toContain("1 av 10 er koblet inn. Samlet (uten de tilbakeholdte): ");
+  });
+});
+
 describe("hemmelighetsvern: siste forsvarslinje i registeret", () => {
   const redact = (t: string) => t.replace(/sk-ant-[A-Za-z0-9_-]+/g, "[REDACTED]").replace(/hunter22/g, "[REDACTED]");
 

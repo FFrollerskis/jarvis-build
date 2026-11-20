@@ -144,6 +144,8 @@ import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
+import { controlCentersWithTools } from "./control-center/shared.ts";
+import { servedByCloudModel } from "./cloud-tool-screen.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -1069,6 +1071,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           producer_names: INCIDENT_PRODUCER_NAMES, mode: async () => (await infraGate.statusDurable()).state.mode
         },
         controlCenters,
+        // Gjennomgang M2: finansdata er SECRET_RESTRICTED (D-378) - en SKYmodell får aldri finans-senteret (holdes tilbake ved utførelse i executive-transporten, uansett hvilke verktøy turens utvalg valgte); en lokal modell
+        // og siden får det. Lokalitet kommer fra leverandørregisteret (SAMME `servedByCloudModel` som chattens verktøyskjerm); ukjent leverandør regnes som sky (fail-closed).
+        servedLocally: (model) => !servedByCloudModel({ provider: model.provider }),
         // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling bruker den EKSISTERENDE kanselleringsveien (samme `taskService` som chatens «avbryt jobb <id>»).
         tasks: { cancel: (identity, taskId) => taskService.cancel(identity, taskId) },
         // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.
@@ -1079,7 +1084,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active
           })
         }
-      }))),
+      })), {
+        // WP-H1/H2 (gjennomgang M1): per-senter lese-verktøyene (`get_<senter>_center`) registreres KUN for sentrene hvis flagg er på - flagg AV er identisk med main (ingen verktøy, ingen utvalgstreff, ingen rate-endring).
+        // Gjennomgang L5: OG som faktisk er registrert i registeret (en slått-på flagg uten sine avhengigheter gir et uregistrert senter) - et verktøy for et senter som ikke finnes skal aldri listes som tilgjengelig (`get_capability_status`).
+        controlCenters: controlCentersWithTools(process.env, controlCenters)
+      }),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
       // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,
@@ -1099,7 +1108,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // resten av denne filen (`withMemoryTransaction`, se `GovernanceService`
       // sitt filhode) - IKKE en parallell tilkobling. Registrert i SAMME
       // liste/løkke som `situations`/`executive`/`owner_controls`.
-      ...governanceToolDefinitions(new GovernanceTransport(new GovernanceService(pool))),
+      // WP-H1 (JARVIS-087 del 2): proveniens (kanal/sesjon/jobb/opphav) på nye journalrader - AV som standard, kun den eksakte verdien «on» slår det på.
+      ...governanceToolDefinitions(new GovernanceTransport(new GovernanceService(pool), { recordProvenance: process.env["JARVIS_GOVERNANCE_PROVENANCE"] === "on" })),
       // Task #118 ("Charlie"-minne-verifisering): `memory.search` over DEN
       // SAMME `memoryRetriever`-instansen `conversationEngine` under gjenbruker
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar

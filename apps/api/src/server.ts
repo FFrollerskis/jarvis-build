@@ -16,7 +16,7 @@ import {
 } from "@jarvis/incidents";
 import { OwnerControlUnauthorizedError, type InfraExecutionGate, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
-import { CLOUD_CONTROL_TOOL_IDS, type DockerMutationAction, type ToolGateway } from "@jarvis/tool-gateway";
+import { CLOUD_CONTROL_TOOL_IDS, ownerStepUpDenial, type DockerMutationAction, type ToolGateway } from "@jarvis/tool-gateway";
 import {
   InvalidWebhookSignatureError, StripeCredentialsUnavailableError, StripeTenantNotConfiguredError,
   VippsCredentialsUnavailableError, VippsTenantNotConfiguredError,
@@ -1540,8 +1540,14 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
+    // WP-H1 (JARVIS-087 del 2): dashbord-ruten attesterer at parameterne er eierens EGNE ord (skjemaet i dashbordet, grant fra en innrullert enhet - ingen modell har formulert dem) - men KUN når kalleren er
+    // den suverene eieren (`deps.ownerGate`, samme predikat som kontrollsentrene) OG grantet er en enhetssignert økt fra en eier-kanal (`ownerStepUpDenial(identity) === undefined`, samme regel som gatewayens
+    // `step_up_required` og kontrollrutenes step-up; gjennomgang L3): en annen innrullert person i tenanten, en passiv/aktiv økt uten enhetssignatur, en tale-/Telegram-kanal eller en rute uten konfigurert eier-port
+    // får ingen attest, og journalraden står da som `unspecified` (fail-closed - aldri «eierens ord» på noe annet enn eierens egen inntasting fra en signert enhet). Kun journal-transporten leser verdien (og kun
+    // når JARVIS_GOVERNANCE_PROVENANCE=on); den åpner ingen rute.
     const result = await deps.executive.gateway.execute({
-      identity: resolved.identity, tool_id: "governance", action, parameters
+      identity: resolved.identity, tool_id: "governance", action, parameters,
+      ...(deps.ownerGate?.(resolved.identity) === true && ownerStepUpDenial(resolved.identity) === undefined ? { contentOrigin: "owner_direct" as const } : {})
     });
     if (!result.ok) {
       return json(res, 403, { error: "tool_denied", reason: result.reason });
