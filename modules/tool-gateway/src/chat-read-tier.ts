@@ -68,11 +68,16 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "executive", action: "get_connector_status" },
   // WP-H0 (UA-11 Admin Control Center): eierens kontrollsentre (kun lesing; eier-kun port i verktøydefinisjonen, rapportene er merket private). Handlingene eieren kan ta peker på eksisterende ruter og står ikke på modellflaten.
   { tool_id: "executive", action: "get_control_center" },
-  // WP-H1 (UA-11): per-senter lese-verktøy for Finans, Minne og Agenter - SAMME register og samme eier + signert-økt-port (fail-closed), ikke på tale (VOICE_EXCLUDED_KEYS). Registreres KUN med senterets flagg på
+  // WP-H1/H2 (UA-11): per-senter lese-verktøy for Finans, Minne, Agenter, Drift, Verdi, Personvern og Sikkerhet - SAMME register og samme eier + signert-økt-port (fail-closed), ikke på tale (VOICE_EXCLUDED_KEYS). Registreres KUN med senterets flagg på
   // (`OPTIONAL_TIER_KEYS`, gjennomgang M1): står flagget av, finnes verktøyet ikke - og da er flaten, utvalget og kapabilitetslisten identisk med main.
   { tool_id: "executive", action: "get_finance_center" },
   { tool_id: "executive", action: "get_memory_center" },
   { tool_id: "executive", action: "get_agent_center" },
+  // WP-H2 (UA-11): Drift, Verdi, Personvern og Sikkerhet - samme mønster, og de er OGSÅ valgfrie (`OPTIONAL_TIER_KEYS`: registreres kun med senterets flagg på). `run_golden_suite` og `revoke_autonomy_binding` står bevisst IKKE her (kontrollsenter-knapper).
+  { tool_id: "executive", action: "get_operations_center" },
+  { tool_id: "executive", action: "get_value_center" },
+  { tool_id: "executive", action: "get_privacy_center" },
+  { tool_id: "executive", action: "get_security_center" },
   { tool_id: "executive", action: "get_control_surface_status" },
   { tool_id: "executive", action: "get_delegation_board" },
   { tool_id: "executive", action: "get_self_diagnosis" },
@@ -222,7 +227,10 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
  * `assertManifestInvariants`) godtar derfor at AKKURAT disse er uregistrert; er et av dem registrert, kontrolleres det som alle andre (klasse A, effekt read, flater, forbudte navn). Utvidelsen er en eksplisitt,
  * endelig liste - aldri et unntak per kall.
  */
-export const OPTIONAL_TIER_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center", "executive.get_memory_center", "executive.get_agent_center"]);
+export const OPTIONAL_TIER_KEYS: ReadonlySet<string> = new Set([
+  "executive.get_finance_center", "executive.get_memory_center", "executive.get_agent_center",
+  "executive.get_operations_center", "executive.get_value_center", "executive.get_privacy_center", "executive.get_security_center"
+]);
 
 /** `tool_id.action`-nøkler for rask oppslag. */
 export const CHAT_READ_TIER_KEYS: ReadonlySet<string> = new Set(CHAT_READ_TIER.map((g) => `${g.tool_id}.${g.action}`));

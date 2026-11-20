@@ -151,6 +151,15 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Eksterne mottakere:** Ingen
 - **Tabeller:** `erasure_fingerprints`, `erasure_requests`
 
+### Migrasjonsregister (systemmetadata, WP-H2)
+
+- **Formål:** Hvilke databasemigrasjoner som er anvendt (filnavn, sjekksum, tidspunkt). Migratoren (`modules/core/src/db/migrator.ts`) oppretter tabellen selv - den står ikke i en migrasjonsfil, så D-420-vakten (som leser `CREATE TABLE` i migrasjonene) fanger den ikke. Personvern-senteret (WP-H2) sammenligner derfor mot de LEVENDE tabellene og fant dette hullet.
+- **Memory space/tenant:** system (global; ingen tenant-skopet innhold)
+- **Datakategori:** Tekniske systemdata (migrasjonsnavn, sjekksum, tidspunkt) - ingen personopplysninger
+- **Retensjon:** Beholdes så lenge databasen finnes (migrasjonshistorikken er beviset på hvilket skjema som kjører)
+- **Eksterne mottakere:** Ingen
+- **Tabeller:** `schema_migrations`
+
 ## 2. Eksterne behandlere av innhold
 
 ### 2a. Modellleverandører (LLM) - erstatter `TBD`-raden i `PROCESSOR_REGION_MATRIX.md`

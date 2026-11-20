@@ -6,7 +6,7 @@ import {
   type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { createControlCenterRegistry } from "../src/control-center/register.ts";
-import { EXECUTIVE_MUTATE_ACTIONS } from "../src/server.ts";
+import { EXECUTIVE_MUTATE_ACTIONS, EXECUTIVE_MUTATE_FLAGGED_ACTIONS } from "../src/server.ts";
 import { STEP_UP_EXEMPT_ACTIONS, actionRequiresStepUp, stepUpDenial } from "../src/step-up.ts";
 
 /**
@@ -44,7 +44,7 @@ describe("registrering", () => {
     }
   });
 
-  it("står i den lukkede mutasjonslisten (13 handlinger), og er en stopp-handling uten step-up (resten av listen uendret)", () => {
+  it("står i den lukkede mutasjonslisten (13 handlinger - main sin; WP-H2 sine to flaggstyrte står i EXECUTIVE_MUTATE_FLAGGED_ACTIONS), og er en stopp-handling uten step-up (resten av listen uendret)", () => {
     expect(EXECUTIVE_MUTATE_ACTIONS).toHaveLength(13);
     expect(EXECUTIVE_MUTATE_ACTIONS).toContain("cancel_task");
     expect(STEP_UP_EXEMPT_ACTIONS.has("cancel_task")).toBe(true);
@@ -52,6 +52,8 @@ describe("registrering", () => {
     expect(stepUpDenial({ auth_strength: "passive", channel: "telegram" }, "cancel_task")).toBeUndefined();
     // å GJENOPPTA/gjenopprette krever fortsatt step-up (uendret)
     for (const a of ["unfreeze_connector", "resume_domain", "restore_credential", "revoke_device", "deactivate_kill_switch"]) expect(actionRequiresStepUp(a), a).toBe(true);
+    // WP-H2: de to nye handlingene krever BEGGE step-up (signert enhet) - ingen av dem er en stopp-handling i unntaksmengden
+    for (const a of EXECUTIVE_MUTATE_FLAGGED_ACTIONS) { expect(actionRequiresStepUp(a), a).toBe(true); expect(STEP_UP_EXEMPT_ACTIONS.has(a), a).toBe(false); }
   });
 });
 

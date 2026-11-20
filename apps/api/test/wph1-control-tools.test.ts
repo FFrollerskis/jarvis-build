@@ -53,7 +53,8 @@ const defOf = (action: string, list: ToolDefinition[] = defs): ToolDefinition =>
 
 describe("tabellen er den eneste kilden", () => {
   it("hvert senter i tabellen er et kjent senter (H0-sentrene har ikke et eget verktøy), og handlingsnavnene er stabile og unike", () => {
-    expect(TOOLS.map((t) => t.action)).toEqual(["get_finance_center", "get_memory_center", "get_agent_center"]);
+    // H1-verktøyene står først og er uendret (WP-H2 la til fire til bakerst - se wph2-control-tools.test.ts for hele tabellen).
+    expect(TOOLS.map((t) => t.action).slice(0, 3)).toEqual(["get_finance_center", "get_memory_center", "get_agent_center"]);
     expect(new Set(TOOLS.map((t) => t.action)).size).toBe(TOOLS.length);
     for (const t of TOOLS) {
       expect(CONTROL_CENTER_IDS as readonly string[]).toContain(t.center);
@@ -398,20 +399,21 @@ describe("responsen", () => {
     expect(((await call(t, "get_control_center", {}, CLOUD)) as unknown as { withheld?: string[] }).withheld).toBeUndefined();
   });
 
-  it("H0-sentrene er uendret: AI-senterets `*_ore`-fakta (grenser og kost) når fortsatt en skymodell - kun senteret i CLOUD_WITHHELD_CENTERS holdes tilbake", async () => {
+  it("H0-sentrene er uendret: AI-senterets `*_ore`-fakta (grenser og kost) når fortsatt en skymodell - kun sentrene i CLOUD_WITHHELD_CENTERS (Finans, og fra WP-H2 Verdi) holdes tilbake", async () => {
     const t = transportWith([money("ai")]);
     const keys = factKeys((await call(t, "get_control_center", { center: "ai" }, CLOUD)).report);
     expect(keys).toEqual(expect.arrayContaining(["amount_ore", "daily_cap_ore"]));
-    expect(CLOUD_WITHHELD_CENTERS).toEqual(["finance"]);
+    expect(CLOUD_WITHHELD_CENTERS).toEqual(["finance", "value"]);
     expect(isCloudWithheldCenter("finance")).toBe(true);
-    for (const id of CONTROL_CENTER_IDS.filter((c) => c !== "finance")) expect(isCloudWithheldCenter(id), id).toBe(false);
+    expect(isCloudWithheldCenter("value")).toBe(true);
+    for (const id of CONTROL_CENTER_IDS.filter((c) => c !== "finance" && c !== "value")) expect(isCloudWithheldCenter(id), id).toBe(false);
   });
 
   it("`withheldCenterData` har ingen tall og ingen innhold - kun hvorfor og hva eieren kan gjøre; verktøynøkkelen står i EXECUTION_GUARDED_RESTRICTED_KEYS", () => {
     const d = withheldCenterData("finance", "Finans");
     expect(Object.keys(d).sort()).toEqual(["center", "explanation_no", "found", "summary_no", "withheld"]);
     expect(String(d["summary_no"])).toContain("finansdata er SECRET_RESTRICTED (D-378)");
-    expect([...EXECUTION_GUARDED_RESTRICTED_KEYS]).toEqual(["executive.get_finance_center"]);
+    expect([...EXECUTION_GUARDED_RESTRICTED_KEYS].sort()).toEqual(["executive.get_finance_center", "executive.get_value_center"]);
     // hvert senter som holdes tilbake har sitt lese-verktøy i den guardede mengden
     for (const center of CLOUD_WITHHELD_CENTERS) {
       const tool = TOOLS.find((x) => x.center === center);

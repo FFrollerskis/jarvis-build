@@ -193,13 +193,27 @@ export function flagOn(env: Readonly<Record<string, string | undefined>>, name: 
 /**
  * WP-H1/H2: flaggene som slår på kontrollsentrene som ble bygget etter H0. ALLE er AV som standard og krever den EKSAKTE verdien «on» (`flagOn`): uten flagg registreres senteret ikke, og står i oversiktens
  * `unregistered`-liste («ikke koblet inn») akkurat som før H1 - H0-oppførselen er uendret. Integrasjoner, Autoritet og AI (H0) har ingen flagg og er alltid på når deres avhengigheter finnes.
- * Objektet bor her (ikke i `register.ts`) slik at `main.ts` kan lese det uten å røre importlinjen fra fabrikken `register.ts` - den er låst av kildevakten i `e1-review-m3-owner-gate.test.ts`. `register.ts` re-eksporterer det.
+ * Objektene bor her (ikke i `register.ts`) slik at `main.ts` kan lese dem uten å røre importlinjen fra fabrikken `register.ts` - den er låst av kildevakten i `e1-review-m3-owner-gate.test.ts`. `register.ts` re-eksporterer dem.
  * Hvert navn MÅ stå i `SERVICE_ENV.api` (`infra/local/service-env.mjs`), ellers når en verdi i `.env` aldri containeren - låst av `wph1-control-env.test.ts`.
  */
 export const CONTROL_CENTER_FLAGS = {
   finance: "JARVIS_CONTROL_CENTER_FINANCE",
   memory: "JARVIS_CONTROL_CENTER_MEMORY",
-  agent: "JARVIS_CONTROL_CENTER_AGENT"
+  agent: "JARVIS_CONTROL_CENTER_AGENT",
+  operations: "JARVIS_CONTROL_CENTER_OPERATIONS",
+  value: "JARVIS_CONTROL_CENTER_VALUE",
+  privacy: "JARVIS_CONTROL_CENTER_PRIVACY",
+  security: "JARVIS_CONTROL_CENTER_SECURITY"
+} as const;
+
+/**
+ * WP-H2: to enkelt-funksjoner kontrollsentrene får bak EGNE flagg (AV som standard, kun eksakt «on»; uten flagg finnes verken knappen eller verktøyet):
+ *  - `goldenSuite`: golden-suite-knappen (Sikkerhet-senteret + `executive.run_golden_suite`). Lesende, deterministisk, ingen modell.
+ *  - `autonomyRevoke`: tilbakekall av eierens autonomi-binding per domene (Autoritet-senteret + `executive.revoke_autonomy_binding`). Eier-kun, step-up, klasse C.
+ */
+export const CONTROL_FEATURE_FLAGS = {
+  goldenSuite: "JARVIS_CONTROL_GOLDEN_SUITE",
+  autonomyRevoke: "JARVIS_CONTROL_AUTONOMY_REVOKE"
 } as const;
 
 /**
@@ -231,4 +245,24 @@ export function activeRestrictedControlTools(env: Readonly<Record<string, string
 /** Valgene `financeToolIntent` får fra kallere i apps/api (delegerte jobber): leses fra miljøet ved hvert kall, så en endring av flaggene (krever restart av api) aldri kan gi en foreldet liste. */
 export function financeIntentOptions(env: Readonly<Record<string, string | undefined>> = process.env): FinanceIntentOptions {
   return { restrictedTools: activeRestrictedControlTools(env) };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// WP-H2 (gjennomgang M2): finansavledet tilstand utenfor Finans-senteret holdes tilbake fra skymodeller (`ControlCenterBuildContext.restrictFinance`)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Finans-verktøyene (`finance`, `finance_spend`, `finance_stripe` ...): samme regel som `RESTRICTED_TOOL_ID` i turn-context.ts. */
+const FINANCE_TOOL_ID = /^finance(_|$)/;
+
+/** Er revisjonsraden (verktøy-id + handling) en del av finansdomenet? `executive.enable_finance_kill_switch`, `executive.get_finance_center` og alle `finance*`-verktøy. Rader uten verktøy (innlogging osv.) er det ikke. */
+export function isFinanceAuditRow(toolId: string | null | undefined, action: string | null | undefined): boolean {
+  return (typeof toolId === "string" && FINANCE_TOOL_ID.test(toolId)) || (typeof action === "string" && action.includes("finance"));
+}
+
+/** SQL-form av `isFinanceAuditRow` for `audit_events` (og `action_confirmations`): kun rader som IKKE gjelder finansdomenet. NULL-trygt (rader uten `tool_id`/`action` beholdes). Fast tekst - aldri bygget fra data. */
+export const NOT_FINANCE_AUDIT_SQL = `(tool_id IS NULL OR tool_id !~ '^finance(_|$)') AND (action IS NULL OR action NOT LIKE '%finance%')`;
+
+/** Daglige jobber i finansdomenet (`finance-spend-integrity-sweep`, `finance-reconcile-sweep`, `stripe-payment-sync`, `vipps-payment-sync`, `neonomics-sweep`, `wallester-sweep`): navnet og tilstanden er finansavledet. */
+export function isFinanceJobName(name: string): boolean {
+  return /^(finance|stripe|vipps|neonomics|wallester)-/.test(name);
 }
