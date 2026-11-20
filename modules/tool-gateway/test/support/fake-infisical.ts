@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
  * WP-E1: lokal FAKE Infisical-server (ekte `node:http`, ingen nettverk ut av maskinen). Etterligner KUN det delsettet transporten bruker: `/api/status`, universal-auth-login,
  * `/api/v3/secrets/raw` (liste + enkelt, med `viewSecretValue`) og Secret Rotation V2 (`/api/v2/secret-rotations`, type-spesifikk `rotate-secrets`). Secrets har
  * BEVISST verdier ("SUPER-HEMMELIG-…") - testene beviser at de aldri kommer ut av transporten, heller ikke når serveren IGNORERER `viewSecretValue=false` (`leakValues`).
- * Brytere: `leakValues`, `rotationsStatus` (feature utilgjengelig), `rotationFails`, `silentlyIgnoreRotate`, `revokeTokens()`, `failNext`.
+ * Brytere: `leakValues`, `rotationsStatus` (feature utilgjengelig), `rotationFails`, `silentlyIgnoreRotate`, `revokeTokens()`, `failNext`, `failReadbackAfterRotate()` (WP-K M-1: rotasjons-listen/readback feiler ETTER at en rotate-POST er akseptert).
  * Gjennomgang av PR #324 (M1): `rotationErrorText` (teksten en feilet rotasjon skriver i `lastRotationJobError`) og meldingen i `failNext` kan settes til FIENDTLIG tekst (se `hostile.ts`).
  */
 export interface FakeSecret { key: string; value: string; version: number; createdAt: string; updatedAt: string; tags?: string[]; rotationId?: string; comment?: string }
@@ -29,6 +29,10 @@ export class FakeInfisical {
   silentlyIgnoreRotate = false;
   statusBody: unknown = { date: "2026-10-09T12:00:00.000Z", message: "Ok", emailConfigured: false, inviteOnlySignup: true, redisConfigured: true, secretScanningConfigured: false };
   loginCount = 0;
+  /** WP-K (M-1): antall `rotate-secrets`-POST-er serveren har AKSEPTERT (svart 2xx på). */
+  acceptedRotations = 0;
+  /** WP-K (M-1): feil som listen (`GET /api/v2/secret-rotations`) gir ETTER at en rotate-POST er akseptert - readback i `rotateSecrets`. `null` = av. */
+  private readbackFailure: { status: number; body: string; remaining: number; afterAccepted: number } | null = null;
   private tokens = new Set<string>();
   private readonly failures: Array<{ pattern: RegExp; status: number; remaining: number; message: string }> = [];
   private server: Server | undefined;
@@ -69,12 +73,29 @@ export class FakeInfisical {
     this.failures.push({ pattern, status, remaining: times, message });
   }
 
+  /**
+   * WP-K (M-1): etter at den NESTE `rotate-secrets`-POST-en (etter at bryteren er satt) er AKSEPTERT svarer rotasjons-listen med `status` (og `body`, standard et JSON-objekt; en ikke-JSON-kropp gir en JSON-feil hos klienten) `times` ganger
+   * (standard: til `clearReadbackFailure()`). Beviser at en feil i readback ETTER akseptert mutasjon aldri blir en retry-bar `failed`.
+   */
+  failReadbackAfterRotate(status: number, opts: { body?: string; times?: number } = {}): void {
+    this.readbackFailure = { status, body: opts.body ?? JSON.stringify({ message: "readback failed" }), remaining: opts.times ?? Number.POSITIVE_INFINITY, afterAccepted: this.acceptedRotations };
+  }
+
+  clearReadbackFailure(): void {
+    this.readbackFailure = null;
+  }
+
   requestsMatching(method: string, pattern: RegExp): InfisicalLoggedRequest[] {
     return this.requests.filter((r) => r.method === method && pattern.test(r.path));
   }
 
   private send(res: ServerResponse, status: number, body: unknown): void {
     const text = JSON.stringify(body);
+    res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+    res.end(text);
+  }
+
+  private sendRaw(res: ServerResponse, status: number, text: string): void {
     res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
     res.end(text);
   }
@@ -130,6 +151,11 @@ export class FakeInfisical {
       return s ? this.send(res, 200, { secret: this.secretView(s, hide) }) : this.send(res, 404, { message: "Secret not found" });
     }
     if (req.method === "GET" && url.pathname === "/api/v2/secret-rotations") {
+      const failure = this.readbackFailure;
+      if (failure && this.acceptedRotations > failure.afterAccepted && failure.remaining > 0) {
+        failure.remaining -= 1;
+        return this.sendRaw(res, failure.status, failure.body);
+      }
       if (this.rotationsStatus !== 200) return this.send(res, this.rotationsStatus, { message: "feature unavailable" });
       return this.send(res, 200, { secretRotations: [...this.rotations.values()] });
     }
@@ -137,6 +163,7 @@ export class FakeInfisical {
     if (req.method === "POST" && rotate) {
       const r = this.rotations.get(rotate[2]!);
       if (!r || r.type !== rotate[1]) return this.send(res, 404, { message: "Rotation not found" });
+      this.acceptedRotations += 1;
       if (this.silentlyIgnoreRotate) return this.send(res, 200, { secretRotation: r });
       if (this.rotationFails) {
         r.rotationStatus = "failed";

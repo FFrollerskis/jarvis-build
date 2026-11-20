@@ -1,5 +1,6 @@
 import type { JsonValue } from "@jarvis/contracts";
-import type { ToolTransport } from "./gateway.ts";
+import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
+import { abortableSleep, composeSignals, currentCallSignal, throwIfAborted } from "./call-signal.ts";
 import { guardedFetch, isRetrySafeStatus, VENDOR_FETCH_TIMEOUT_MS } from "./url-safety.ts";
 
 /**
@@ -68,9 +69,6 @@ export class McpProtocolError extends Error {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function safeHostFor(rawUrl: string): string {
   try {
@@ -110,13 +108,16 @@ function validatedServerUrl(credential: string): void {
 
 export class McpZapierTransport implements ToolTransport {
   /** Delt JSON-RPC POST/retry/SSE-deteksjon for BÅDE `tools/list` og `tools/call` - eneste forskjell mellom handlingene er selve `method`/`params` og hva kalleren gjør med `result`. */
-  private async callJsonRpc(method: string, params: JsonValue, credential: string): Promise<JsonValue | undefined> {
+  private async callJsonRpc(method: string, params: JsonValue, credential: string, callSignal: AbortSignal | undefined): Promise<JsonValue | undefined> {
     const host = safeHostFor(credential);
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      // WP-K (D-471, JARVIS-018): etter et tidsavbrudd sendes ALDRI et nytt forsøk (en `tools/call` kan allerede være utført hos Zapier), og venting mellom forsøk avbrytes.
+      throwIfAborted(callSignal);
       const response = await guardedFetch(credential, {
         method: "POST",
-        signal: AbortSignal.timeout(VENDOR_FETCH_TIMEOUT_MS),
+        // Eget 45 s-signal (eksplisitt signal velger bort det ambiente) - settes derfor sammen med gatewayens kallsignal her.
+        signal: composeSignals(callSignal, AbortSignal.timeout(VENDOR_FETCH_TIMEOUT_MS))!,
         headers: {
           "content-type": "application/json",
           accept: "application/json, text/event-stream"
@@ -140,16 +141,19 @@ export class McpZapierTransport implements ToolTransport {
       const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafeStatus(method === "tools/list" ? "GET" : "POST", response.status);
       lastError = new Error(`mcp_zapier_http_error_${response.status}:${host}`);
       if (!retryable || attempt === MAX_ATTEMPTS) break;
-      await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+      await abortableSleep(BASE_BACKOFF_MS * 2 ** (attempt - 1), callSignal);
     }
     throw lastError!;
   }
 
-  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
+  async invoke(
+    action: string, parameters: Record<string, JsonValue>, credential: string, _context?: ToolInvocationContext, signal?: AbortSignal
+  ): Promise<{ external_id?: string; data?: JsonValue }> {
     validatedServerUrl(credential);
+    const callSignal = signal ?? currentCallSignal();
 
     if (action === "list_tools") {
-      const result = (await this.callJsonRpc("tools/list", {}, credential)) as { tools?: JsonValue } | undefined;
+      const result = (await this.callJsonRpc("tools/list", {}, credential, callSignal)) as { tools?: JsonValue } | undefined;
       return { data: result?.tools ?? [] };
     }
 
@@ -159,7 +163,7 @@ export class McpZapierTransport implements ToolTransport {
         throw new Error("mcp_zapier_tool_name_required");
       }
       const toolArguments = (parameters["arguments"] as JsonValue | undefined) ?? {};
-      const result = (await this.callJsonRpc("tools/call", { name: toolName, arguments: toolArguments }, credential)) as McpToolCallResult | undefined;
+      const result = (await this.callJsonRpc("tools/call", { name: toolName, arguments: toolArguments }, credential, callSignal)) as McpToolCallResult | undefined;
       if (result?.isError) {
         // D-350: MCP sitt eget "kallet gikk gjennom, men verktøyet feilet internt"-signal -
         // vertsnavnet ALENE i feilteksten, ALDRI selve `content` (kan inneholde vilkårlig,

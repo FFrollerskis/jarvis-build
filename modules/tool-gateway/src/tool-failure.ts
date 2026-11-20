@@ -1,3 +1,4 @@
+import { isUnknownOutcomeReason } from "./gateway.ts";
 import { serviceLabel } from "./tool-catalog.ts";
 import type { Surface } from "./tool-manifest.ts";
 
@@ -25,6 +26,11 @@ export interface ToolFailureContext {
   /** Q-50 B: repoet modellen ba om og repoet samtalen/jobben er låst til (kun for `GITHUB_REPO_LOCKED`). */
   repo_requested?: string;
   repo_allowed?: string;
+  /**
+   * WP-K (delta-review L-1): kallet var en ren lesing (klasse A). En lesing har ingen bivirkning som «kan ha blitt utført», så ukjent utfall (tidsavbrudd) gir for den fortsatt det vanlige «prøv igjen senere»-rådet i stedet for «ikke
+   * kjør på nytt». Utelatt = konservativt: ukjent utfall behandles som en handling som KAN ha gått gjennom.
+   */
+  read_only?: boolean;
 }
 
 const label = (ctx: ToolFailureContext) => (ctx.tool_id ? serviceLabel(ctx.tool_id) : "tjenesten");
@@ -153,6 +159,17 @@ export function explainToolFailure(category: string, ctx: ToolFailureContext = {
       return { message: "Bekreftelsesporten er ikke tilgjengelig, så handlingen kan ikke legges til godkjenning. Si det til Tobias; ikke prøv igjen.", retry: "never" };
     default:
       break;
+  }
+  // WP-K (uavhengig delta-review L-1): UKJENT utfall (gateway-tidsavbrudd, `outcome_unknown:...`, rad som står reservert) er IKKE en vanlig feil. Tidligere falt `tool_failed:tool_timeout` og `tool_failed:outcome_unknown:...`
+  // gjennom til `explainTransportError` («prøv igjen senere»), mens `postcondition_*` ga «ikke kjør på nytt»: modellen ble bedt om å gjenta en ikke-idempotent handling som KAN ha gått gjennom. Samme råd som ved uverifisert utfall.
+  if (ctx.read_only !== true && isUnknownOutcomeReason(category)) {
+    // Kategorien kan bære en kort transportkode (aldri leverandørtekst): linjeskift/kontrolltegn fjernes og lengden kuttes, så den aldri kan forfalske linjer i forklaringen til modellen.
+    // eslint-disable-next-line no-control-regex
+    const code = category.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 100);
+    return {
+      message: `${svc}${act}: utfallet er UKJENT (${code}) - handlingen KAN ha blitt utført hos tjenesten selv om svaret uteble eller ikke kunne leses. Si det ærlig til Tobias og be ham sjekke i tjenesten; ikke kjør handlingen på nytt.`,
+      retry: "never"
+    };
   }
   if (category.startsWith("tool_failed:")) return explainTransportError(category.slice("tool_failed:".length), ctx);
   if (category.startsWith("preflight_failed:")) {

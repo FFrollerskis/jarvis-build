@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
-import type { DockerMutationAction, ToolGateway } from "@jarvis/tool-gateway";
+import { isUnknownOutcomeReason, type DockerMutationAction, type ToolGateway } from "@jarvis/tool-gateway";
 import { computeStateDiff } from "./diff.ts";
 import type { InfraExecution, InfraOperationalOutcome } from "./types.ts";
 
@@ -66,9 +66,11 @@ function determineOutcome(
   action: DockerMutationAction,
   executeOk: boolean,
   after: JsonValue | null,
-  targetImage: string | undefined
+  targetImage: string | undefined,
+  failureReason?: string
 ): InfraOperationalOutcome {
-  if (!executeOk) return "FAILED";
+  // WP-K (uavhengig delta-review L-1): et UKJENT utfall (gateway-tidsavbrudd, `outcome_unknown:...`, rad som står reservert) er ikke «ingenting skjedde» - ledgeren står `unverified`, så journalen sier UNKNOWN, ikke FAILED.
+  if (!executeOk) return failureReason !== undefined && isUnknownOutcomeReason(failureReason) ? "UNKNOWN" : "FAILED";
   if (!after || typeof after !== "object" || Array.isArray(after)) return "UNKNOWN";
   const state = after as Record<string, unknown>;
   if (action === "redeploy_container") {
@@ -148,11 +150,13 @@ export async function executeInfraMutation(
     idempotency_key: input.idempotency_key
   });
 
-  const { before, after, key_collision } = result.ok
+  // Et ukjent utfall har en før-tilstand i ledgeren (preflight kjørte) og trenger den for recovery (samme som `executeCloudMutation`); en vanlig feil har ingenting å lese.
+  const unknownOutcome = !result.ok && isUnknownOutcomeReason(result.reason);
+  const { before, after, key_collision } = result.ok || unknownOutcome
     ? await readToolExecutionState(deps.pool, input.tenant_id, input.idempotency_key, { tool_id: "docker", action: input.action })
     : { before: null, after: null, key_collision: false };
   const state_diff = computeStateDiff(before, after);
-  const verification_outcome = determineOutcome(input.action, result.ok, after, input.target_image);
+  const verification_outcome = determineOutcome(input.action, result.ok, after, input.target_image, result.ok ? undefined : result.reason);
   const recovery_plan = buildRecoveryPlan(input.action, before, input.target);
   const provider_receipt: JsonValue = result.ok
     ? ({ external_id: result.external_id ?? null, ...(key_collision ? { key_collision: true } : {}) } as unknown as JsonValue)

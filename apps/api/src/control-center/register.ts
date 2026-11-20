@@ -77,6 +77,8 @@ export interface ControlCenterWiring {
   authority?: AuthorityCenterDeps["authority"];
   killSwitch?: AuthorityCenterDeps["killSwitch"];
   infraGate?: AuthorityCenterDeps["infraGate"];
+  /** WP-K (JARVIS-053): status for den varige policy-journalen. Utelatt (journalen er AV) = ingen ekstra rad i Authority Center. */
+  policyAudit?: AuthorityCenterDeps["policyAudit"];
   /** Modellmeshens kompakte status (leverandørhelse) - gir modellleverandørene i Integration Center og AI Center en helse. */
   meshStatus?: IntegrationCenterDeps["meshStatus"];
   /** AI Center: ModelGateway (kun lesing: leverandørvisning, mesh, rådgivermodus). Uten gatewayen, verktøyregisteret og eier-kontrollene registreres ikke senteret. */
@@ -109,7 +111,8 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
     registry.register(createAuthorityCenter({
       pool: wiring.pool, env: wiring.env, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls, killSwitch: wiring.killSwitch,
       ...(wiring.authority ? { authority: wiring.authority } : {}),
-      ...(wiring.infraGate ? { infraGate: wiring.infraGate } : {})
+      ...(wiring.infraGate ? { infraGate: wiring.infraGate } : {}),
+      ...(wiring.policyAudit ? { policyAudit: wiring.policyAudit } : {})
     }));
   }
 }

@@ -1,5 +1,6 @@
 import type { JsonValue } from "@jarvis/contracts";
-import type { ToolTransport } from "./gateway.ts";
+import { OUTCOME_UNKNOWN_PREFIX, type ToolTransport } from "./gateway.ts";
+import { afterAcceptedMutation } from "./after-accepted-mutation.ts";
 import { ControlTargetHttpError, boolOrNull, isObj, jsonRequest, normalizeBaseUrl, numOrNull } from "./control-target-http.ts";
 import { vendorText, vendorTimestamp } from "./vendor-text.ts";
 
@@ -314,10 +315,16 @@ export class InfisicalTransport implements ToolTransport {
     // Typen kommer fra Infisicals EGEN liste og settes inn i en URL-sti - derfor streng validering (aldri `..`, `/`, store bokstaver eller lange verdier).
     if (current.type === null || !ROTATION_TYPE.test(current.type)) throw new Error("infisical_rotation_type_invalid");
     await this.authed(clientSecret, { method: "POST", path: `/api/v2/secret-rotations/${current.type}/${id.toLowerCase()}/rotate-secrets`, body: {} });
-    const after = await this.fetchRotations(clientSecret);
-    const updated = after.available ? after.rotations.find((r) => r.id?.toLowerCase() === id.toLowerCase()) : undefined;
-    const status = updated?.rotation_status ?? null;
-    if (status !== null && /fail|error/i.test(status)) throw new Error(`infisical_rotation_failed:${status.slice(0, 30)}`);
+    // WP-K (D-471, uavhengig review M-1): POST-en er AKSEPTERT. Fra her er ENHVER feil et UKJENT utfall (readback som gir 5xx/401/ikke-JSON, nettverksbrudd, uforståelig svar ...): kastet som vanlig feil ville raden endt
+    // `failed`, og et samme-nøkkel-replay ville sendt en ANDRE rotasjon (klasse D, `idempotent_external: false`). `outcome_unknown:` gir `unverified`, blokkert replay og et «utfall ukjent»-varsel til eieren.
+    const { updated, status } = await afterAcceptedMutation("infisical_rotation_readback_failed", async () => {
+      const after = await this.fetchRotations(clientSecret);
+      const found = after.available ? after.rotations.find((r) => r.id?.toLowerCase() === id.toLowerCase()) : undefined;
+      return { updated: found, status: found?.rotation_status ?? null };
+    });
+    // Leverandørens EGET svar etter den aksepterte POST-en sier «mislyktes/feil». Også dette er UKJENT utfall, ikke en retry-bar feil: statusen kan tilhøre et tidligere forsøk (rotasjonen kan kjøre asynkront -
+    // svarkroppen er ikke bekreftet) og en delvis utført rotasjon mot målet kan ikke utelukkes. Eieren avstemmer (`infisical.get_rotation`) og bruker en NY idempotensnøkkel.
+    if (status !== null && /fail|error/i.test(status)) throw new Error(`${OUTCOME_UNKNOWN_PREFIX}:infisical_rotation_failed:${status.slice(0, 30)}`);
     return { external_id: `rotation:${id.toLowerCase()}`, data: { rotated: true, rotation: (updated ?? current) as unknown as JsonValue } };
   }
 }

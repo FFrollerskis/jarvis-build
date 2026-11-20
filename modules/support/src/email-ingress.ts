@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
+import { correlationFields, type IdentityContext, type JsonValue, type MemorySpace, type RunCorrelation } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import { extractCounterpartEmails, extractEmailAddress, type BusinessService } from "@jarvis/business";
 import type { SupportService } from "./service.ts";
@@ -32,6 +32,29 @@ interface GmailMessage {
   cc?: string;
   subject?: string;
   at?: string;
+}
+
+/**
+ * Re-review LOW 6 (FINNES PÅ main, ikke WP-K): nøkkelen for det NØSTEDE `email.send`-kallet (klasse D) i `SupportEmailService.reply()`.
+ * Produksjon kjører `classDPipeline.enforce: true`, og da NEKTES et klasse D-kall uten `idempotency_key` (`class_d_idempotency_key_required`) - hver ekte `support.reply` sendte derfor ingenting.
+ * Nøkkelen er DETERMINISTISK (aldri tilfeldig: det ville brutt idempotensen) og avledet av det LOGISKE svaret: ticket + kallerens egen `idempotency_key` (parameteren til `support.reply`).
+ * Den har eget navnerom (`support-reply:`) fordi ledgeren (`tool_executions`) er nøklet på (tenant, nøkkel) UTEN verktøy: brukte vi kallerens rå nøkkel, ville et ytre `support.reply`-kall som bruker
+ * samme streng som sin egen ledger-nøkkel kollidert med sin egen reserverte rad (`execution_in_flight_or_outcome_unknown`). Ticket-id-er er `sup-tk-<uuid>` (ingen kolon), så formen er entydig.
+ * Nøkkelen er bevisst uavhengig av mottaker/emne/tekst: samme kallernøkkel = én utsendelse, også når en modell omformulerer teksten i en retry etter et tidsavbrudd (ellers ville en retry sendt en ny e-post).
+ */
+export function replySendIdempotencyKey(ticketId: string, replyKey: string): string {
+  return `support-reply:${ticketId}:${replyKey}`;
+}
+
+/**
+ * Delta-review L-4 (eksisterende feil, ikke fra WP-K-deltaen): `source_message_id` for den REGISTRERTE svar-hendelsen. Den var `reply:<kallernøkkel>` UTEN ticket, men hendelsesoppslaget (`findEventBySourceMessage`) og
+ * ingest-dedupen er nøklet på (tenant, kildetype, kildeinstans, `source_message_id`) - og alle Gmail-tickets i samme konto deler kildetype og instans. Samme kallernøkkel på en ANDRE ticket traff derfor hendelsen til den første:
+ * `reply()` ga `sent: true` (`ok: true`) uten at noe ble sendt - en stille drop. Nå scopet på ticket (`reply:<ticket_id>:<nøkkel>`; ticket-id-er er `sup-tk-<uuid>` uten kolon, så formen er entydig), akkurat som nøkkelen
+ * for det nøstede sendekallet (`replySendIdempotencyKey`). Et identisk gjentatt svar på SAMME ticket slås fortsatt opp og sendes ikke på nytt. Hendelser registrert før denne endringen bruker den gamle uscopede formen og gjenkjennes
+ * ikke (ingen finnes i produksjon: `support.reply` sendte aldri noe under håndhevet klasse D før LOW 6-fiksen).
+ */
+export function replyEventSourceMessageId(ticketId: string, replyKey: string): string {
+  return `reply:${ticketId}:${replyKey}`;
 }
 
 function sanitizeError(err: unknown): string {
@@ -98,12 +121,14 @@ export class SupportEmailService {
     tenantId: string,
     memorySpace: MemorySpace,
     identity: IdentityContext,
-    opts: { max?: number; query?: string } = {}
+    opts: { max?: number; query?: string; correlation?: Partial<RunCorrelation> } = {}
   ): Promise<GmailIngressStats> {
     const stats: GmailIngressStats = { scanned: 0, ingested: 0, ignored_not_support: 0, unmatched: 0, ambiguous: 0 };
     const result = await this.gateway.execute({
       identity, tool_id: "email", action: "list_messages",
-      parameters: { max: opts.max ?? 25, ...(opts.query ? { query: opts.query } : {}) }
+      parameters: { max: opts.max ?? 25, ...(opts.query ? { query: opts.query } : {}) },
+      // WP-K (JARVIS-054): `person_id: "system"`-kallet bærer jobb-/spor-ID videre til revisjon og policy-journal (tom når kallet ikke kommer fra en planlagt kjøring).
+      ...correlationFields(opts.correlation)
     });
     if (!result.ok) throw new Error(result.reason);
     const messages = ((result.data as { messages?: JsonValue[] } | undefined)?.messages ?? []) as GmailMessage[];
@@ -146,6 +171,9 @@ export class SupportEmailService {
    * SAMME `ingestMessage()`-mekanismen som ingress (§8) for å registrere
    * svaret som ETT ticket-event, uansett om selve utsendelsen lyktes eller
    * feilet (evidens bevares alltid - aldri stille tapt ved en send-feil).
+   * Re-review LOW 6: det nøstede `email.send` bærer en avledet `idempotency_key`
+   * (`replySendIdempotencyKey`) - uten den nektet den håndhevede klasse D-pipelinen
+   * (produksjon) HVER ekte utsendelse, og ledgeren dekker nå også selve sendingen.
    */
   async reply(
     tenantId: string,
@@ -157,12 +185,12 @@ export class SupportEmailService {
   ): Promise<{ sent: boolean; error?: string; ticket: SupportTicket | null; event: SupportTicketEvent }> {
     const ticket = await this.support.getTicket(tenantId, memorySpace, ticketId);
     if (!ticket) throw new Error("support_ticket_not_found");
-    // D-396 (JARVIS-046): idempotent svar - er et VELLYKKET `reply:<idempotency_key>` allerede registrert, sendes INTET på nytt (gateway kalles
+    // D-396 (JARVIS-046): idempotent svar - er et VELLYKKET `reply:<ticket_id>:<idempotency_key>` allerede registrert, sendes INTET på nytt (gateway kalles
     // ikke). Mislykkede forsøk lagres under en unik nøkkel (`reply-failed:...`) slik at samme idempotency_key kan prøves på nytt etter en feil.
+    // Delta-review L-4: nøkkelen er scopet på TICKET - samme kallernøkkel på en annen ticket er et annet logisk svar og skal sendes (ikke stille droppes).
     const replySourceInstance = ticket.source_instance_id ?? this.accountEmail;
-    const prior = await this.support.findEventBySourceMessage(
-      tenantId, memorySpace, ticket.source_type, replySourceInstance, `reply:${input.idempotency_key}`
-    );
+    const sentMessageId = replyEventSourceMessageId(ticket.ticket_id, input.idempotency_key);
+    const prior = await this.support.findEventBySourceMessage(tenantId, memorySpace, ticket.source_type, replySourceInstance, sentMessageId);
     if (prior) return { sent: true, ticket: await this.support.getTicket(tenantId, memorySpace, ticketId), event: prior };
     let sent = false;
     let error: string | undefined;
@@ -176,6 +204,9 @@ export class SupportEmailService {
       const result = await this.gateway.execute({
         identity, tool_id: "email", action: "send",
         parameters: { to: input.to, subject: input.subject, body: input.body },
+        // Re-review LOW 6: klasse D under `classDPipeline.enforce: true` (produksjon) NEKTER uten nøkkel (`class_d_idempotency_key_required`). Deterministisk avledet av ticket + kallerens nøkkel (se `replySendIdempotencyKey`);
+        // gir i tillegg ledger-idempotens på selve utsendelsen (en retry etter krasj mellom sending og registrering sender ikke på nytt; et ukjent utfall blokkerer replay).
+        idempotency_key: replySendIdempotencyKey(ticket.ticket_id, input.idempotency_key),
         ...(approval !== undefined ? { approval } : {})
       });
       sent = result.ok;
@@ -187,7 +218,7 @@ export class SupportEmailService {
       channel: ticket.channel, source_type: ticket.source_type,
       source_instance_id: ticket.source_instance_id ?? this.accountEmail,
       source_thread_id: ticket.source_thread_id ?? ticket.ticket_id,
-      source_message_id: sent ? `reply:${input.idempotency_key}` : `reply-failed:${input.idempotency_key}:${randomUUID()}`,
+      source_message_id: sent ? sentMessageId : `reply-failed:${input.idempotency_key}:${randomUUID()}`,
       subject: ticket.subject, summary: sent ? `Svar sendt til ${input.to}` : `Svar-forsoek feilet: ${error ?? "ukjent feil"}`,
       is_from_customer: false, entity_resolution: ticket.entity_resolution,
       ...(sent ? {} : { outbound_outcome: "failed_send" as const }),

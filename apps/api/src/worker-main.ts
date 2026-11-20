@@ -5,7 +5,7 @@ import { envInt, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { createWatchdogIncidentBridge, parseIncidentProducerConfig } from "./incident-producers.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
-import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
+import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPolicyAuditSinkFromEnv, createPool, installPolicyAuditDrain, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
@@ -14,7 +14,8 @@ import {
   CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, memoryToolDefinitions,
   ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets,
   INFRA_GATED_TOOL_IDS,
-  configuredGithubRepo, githubReposUnlocked
+  configuredGithubRepo, githubReposUnlocked,
+  configureGoogleOAuthClientSource, createVaultFirstConfigReader, primeGoogleDriveCredentialCheck
 } from "@jarvis/tool-gateway";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService, parseSupportSlaHours } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
@@ -157,6 +158,10 @@ await deviceRegistry.refresh().catch((err) => {
     error: err instanceof Error ? err.message : String(err)
   }));
 });
+// WP-K (D-471, JARVIS-053): varig policy-journal (AV som standard; `JARVIS_POLICY_AUDIT_SINK=db` skriver hver avgjørelse til `policy_decisions`). Samme sink-kode som api; retensjonssveipet kjører i api.
+// En sink-feil kan aldri endre en avgjørelse (telt i `policy.auditStats()` og sinkens egen statistikk). Uten flagget er `policyAuditSink` null og PolicyGateway bruker ringbufferen som før.
+const policyAuditSink = createPolicyAuditSinkFromEnv(pool);
+if (policyAuditSink) installPolicyAuditDrain(policyAuditSink);
 // v4.0 sovereign-owner (BO-11.1 §2-funn): samme authority-wiring som api -
 // uten denne kjørte workeren i legacy SCOPED-modus for owners D-kall.
 const policy = new PolicyGateway({
@@ -170,7 +175,8 @@ const policy = new PolicyGateway({
   authority: {
     owner_person_id: owner.owner_person_id,
     owner_tenants: ownerTenants
-  }
+  },
+  ...(policyAuditSink ? { auditSink: policyAuditSink.write } : {})
 });
 // D-181 (BLOCKER B1, D184): hoistet til en NAVNGITT konstant (var tidligere
 // inline i ToolGateway-konstruksjonen) slik at NØYAKTIG SAMME
@@ -199,6 +205,10 @@ const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerContr
   classDPipeline: { enforce: true },
   credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
 });
+// WP-K (D-471, JARVIS-056): samme hvelv-først-lesing av Google-klientens id/secret som apps/api/src/main.ts (API/worker-parity) - miljøet er en LOGGET-DEPRECATED fallback, og Drive-sjekken
+// (`driveTransportsIfConfigured()` under) måles hvelv-bevisst ÉN gang her, FØR `firstWaveTools()`.
+configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault: infisicalSecretProvider }));
+await primeGoogleDriveCredentialCheck((ref) => toolSecretProvider.get(ref));
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
