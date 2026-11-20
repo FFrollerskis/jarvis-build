@@ -326,6 +326,8 @@ export class AiRouter {
       const profile = this.registry.profileOrGeneric(name, rt.model);
       if (mode === "LOCAL" && profile.locality !== "local") continue;
       if (![...required].every((c) => profile.capabilities.includes(c))) continue;
+      // WP-G3: en leverandør dedikert til én capability (`local_vision` -> `vision`) er kun kandidat når kallet krever den (vanlig prat/bakgrunn velger den aldri på tillit).
+      if (profile.dedicated_to !== undefined && !required.has(profile.dedicated_to)) continue;
       if (!isSensitivityEligible(profile, input.sensitivity)) {
         sensitivityExcludedCount++;
         continue;

@@ -472,7 +472,15 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // uten FK til noen av de to andre - slettes sist for konsistens (samme
   // "ingen dinglende konfigurasjonsrad"-begrunnelse som
   // `health_retention_policies` over).
+  // WP-G3 (D-465, 133-137): kameraregister, øyeblikksbilder, inventar og opptaksforespørsler. Rekkefølge (barn før forelder): opptaksforespørsler (peker på kamera og bilde), så hendelsene
+  // (en AFTER DELETE-trigger sletter bildet når siste hendelse som peker på det forsvinner, og en annen fjerner hendelsens vektor i `memory_vectors`), så gjenværende bilder (pending/uten
+  // hendelse), inventaret (peker på rom), kameraene (bilder kaskaderer) og til slutt rommene. BEFORE DELETE-triggeren på `vision_snapshots` skriver en gravstein per slettet bilde, så
+  // bildeobjektet også slettes (reaperen i modules/vision/src/snapshots.ts) - `vision_snapshot_tombstones` er BEVISST IKKE med her (arbeidskø uten personopplysninger, se d395-baselinen).
+  add(result, "vision_capture_requests", await run(client, mode, "vision_capture_requests", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vision_event_observations", await run(client, mode, "vision_event_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "vision_snapshots", await run(client, mode, "vision_snapshots", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "vision_inventory_items", await run(client, mode, "vision_inventory_items", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "vision_cameras", await run(client, mode, "vision_cameras", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vision_rooms", await run(client, mode, "vision_rooms", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vision_retention_policies", await run(client, mode, "vision_retention_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
   // WP-G2 (D-464, UA-8, migrasjon 125): handlingsjournalen for kritiske hjem-/bilhandlinger. Eneste FK er sammensatt mot `person_tenants` (medlemskap) - ingen barnetabeller, rekkefølgen er likegyldig.
@@ -703,7 +711,12 @@ export async function planPerson(client: pg.PoolClient, mode: Mode, tenantId: st
     // `vision_retention_policies` BEVISST IKKE med her (tenant/space-nivå
     // POLICY-KONFIGURASJON, ikke person-eid data - samme begrunnelse som
     // `location_retention_policies`/`health_retention_policies` over).
+    // WP-G3 (D-465): samme rekkefølge som space-scope over (opptaksforespørsler, hendelser [trigger: bilde + vektor], gjenværende bilder, inventar, kameraer, rom).
+    add(result, "vision_capture_requests", await run(client, mode, "vision_capture_requests", "tenant_id = $1 AND person_id = $2", ownedValues));
     add(result, "vision_event_observations", await run(client, mode, "vision_event_observations", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "vision_snapshots", await run(client, mode, "vision_snapshots", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "vision_inventory_items", await run(client, mode, "vision_inventory_items", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "vision_cameras", await run(client, mode, "vision_cameras", "tenant_id = $1 AND person_id = $2", ownedValues));
     add(result, "vision_rooms", await run(client, mode, "vision_rooms", "tenant_id = $1 AND person_id = $2", ownedValues));
     // WP-G2 (D-464, UA-8): handlingsjournalen er person-eid via `actor_person_id` (RESTRICTIVE memory-space-RLS, derfor HER innenfor `forEachSpaceGroup`).
     add(result, "personal_action_journal", await run(client, mode, "personal_action_journal", "tenant_id = $1 AND actor_person_id = $2", ownedValues));

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  assertNoRestrictedMedia,
   classifyFetchError,
   classifyHttpStatus,
   envOrDefault,
@@ -71,6 +72,8 @@ export class AnthropicAdapter implements ModelProviderAdapter {
 
   /** Provider-nøytral request → Anthropic-format (tool_use/tool_result-blokker). */
   private buildBody(request: ModelRequest, stream: boolean): Record<string, unknown> {
+    // WP-G3 (D-465): et BEGRENSET kamerabilde forlater aldri maskinen - kastes FØR noe sendes (kroppen bygges før `fetch`).
+    assertNoRestrictedMedia(this.name, request);
     const messages: Array<Record<string, unknown>> = request.messages.map((m) => ({ role: m.role, content: toAnthropicContent(m.content) }));
     for (const ex of request.tool_exchanges ?? []) {
       messages.push({

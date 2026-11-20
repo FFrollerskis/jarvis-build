@@ -7,6 +7,7 @@ import type { DataSensitivity, ModelPurpose, RouterMode } from "@jarvis/contract
 import { createHash } from "node:crypto";
 import {
   ProviderError,
+  hasRestrictedMedia,
   textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
@@ -546,6 +547,16 @@ export class ModelGateway {
     return { ...input, request: { ...input.request, timeoutMs: resolved } };
   }
 
+  /**
+   * WP-G3 (D-465): BEGRENSEDE medier (kamerabilder, `ContentPart.restricted`) er SECRET_RESTRICTED og lokal-kun UANSETT hva kalleren oppga. Strammer KUN inn (sensitivitet opp til
+   * SECRET_RESTRICTED, betalte modeller av, ruting `LOCAL` med mindre en eksplisitt leverandør er valgt - og også da stenger ruterens sensitivitetsport alle skyleverandører). Uten en
+   * slik bildedel returneres NØYAKTIG samme objekt (ingen atferdsendring for noe eksisterende kall). Se også utførelseslåsen i `executePlan`, som gjelder uavhengig av ruteren.
+   */
+  private lockRestrictedMedia(input: CompleteInput): CompleteInput {
+    if (!hasRestrictedMedia(input.request)) return input;
+    return { ...input, sensitivity: "SECRET_RESTRICTED", paid_models_allowed: false, ...(input.provider === undefined ? { mode: "LOCAL" as const } : {}) };
+  }
+
 
   /**
    * D-399 (modellrådgiver): velger MODELL innenfor ruterens primære leverandør. Leverandørvalget (sensitivitet, betalte modeller, helse, capabilities) er allerede gjort av ruteren og
@@ -695,7 +706,7 @@ export class ModelGateway {
   }
 
   private async completeInner(rawInput: CompleteInput): Promise<ModelResult> {
-    const input = this.applyTimeoutOverride(rawInput);
+    const input = this.lockRestrictedMedia(this.applyTimeoutOverride(rawInput));
     const started = Date.now();
     const traceId = `trace-${randomUUID()}`;
 
@@ -783,9 +794,19 @@ export class ModelGateway {
       if (streamOpts?.signal?.aborted) throw new ProviderError(adapterName, "cancelled", `${adapterName}_cancelled`);
     };
 
+    // WP-G3 (D-465): utførelseslås for kamerabilder - sjekket her, rett før ethvert adapterkall, uavhengig av hva ruteren/rådgiveren/fallbacken ga.
+    const restrictedMedia = hasRestrictedMedia(baseRequest);
     for (const candidate of plan.candidates) {
       const adapter = this.byName.get(candidate.provider);
       if (!adapter || !adapter.available() || this.pausedSnapshot.has(candidate.provider)) {
+        continue;
+      }
+      if (restrictedMedia && this.registry.profileOrGeneric(adapter.name, adapter.model ?? candidate.model).locality !== "local") {
+        // Ukjent leverandør regnes som sky (`profileOrGeneric`: fail-closed). Aldri kalt; ingen innhold i loggen.
+        console.error(JSON.stringify({ msg: "restricted_media_blocked", provider: adapter.name }));
+        lastError = new ProviderError(adapter.name, "bad_request", `${adapter.name}_restricted_media_blocked`);
+        this.notifyAttemptFailed(input, adapter.name, "restricted_media_blocked", isCritic);
+        failedProviders.push(candidate.provider);
         continue;
       }
       // D-399: per-kall modell for DENNE kandidaten (kun når rådgiveren valgte en annen enn adapterens standard).
@@ -1085,7 +1106,7 @@ export class ModelGateway {
   }
 
   private async streamInner(rawInput: CompleteInput, onEvent: StreamHandler, signal?: AbortSignal): Promise<ModelResult> {
-    const input = this.applyTimeoutOverride(rawInput);
+    const input = this.lockRestrictedMedia(this.applyTimeoutOverride(rawInput));
     const started = Date.now();
     const traceId = `trace-${randomUUID()}`;
     this.enforceRateLimit(input.tenant_id);
@@ -1308,6 +1329,12 @@ export class ModelGateway {
         ...(input.sensitivity !== undefined ? { sensitivity: input.sensitivity } : {}),
         ...(input.paid_models_allowed !== undefined ? { paid_models_allowed: input.paid_models_allowed } : {})
       }, pool);
+      // WP-G3 (review A-L1): critic-forespørselen under er REN TEKST (tekstdelene + primærsvaret), så utførelseslåsen i `executePlan` (som leter etter `restricted`-bildedeler) slår aldri inn for criticen. Primærsvaret er derimot
+      // AVLEDET av kamerabildet (en beskrivelse av det) og skal aldri til en skyleverandør: var innkallingen BEGRENSET, må HVER critic-kandidat være lokal, ellers kastes (fanges under som `critic_error`; primærsvaret er uberørt).
+      // Dette er et eget lag under sensitivitetsarven (`lockRestrictedMedia` setter SECRET_RESTRICTED): en senere endring av den arven åpner ikke critic-veien mot sky.
+      if (hasRestrictedMedia(input.request) && criticPlan.candidates.some((c) => this.registry.profileOrGeneric(c.provider, c.model).locality !== "local")) {
+        throw new Error("critic_restricted_media_nonlocal");
+      }
       const lastUserMessage = [...input.request.messages].reverse().find((m) => m.role === "user");
       const lastUser = lastUserMessage ? textOnly(lastUserMessage.content) : "";
       // §30: critic er review-rolle - får ALDRI tools, kan aldri utføre side-effekter.

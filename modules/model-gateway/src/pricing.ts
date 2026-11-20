@@ -113,6 +113,8 @@ export const DEFAULT_PRICING: PricingTable = {
     // (30/150 øre per 1k) - fantomkostnad som traff 3 000-kr-hardgrensen.
     // Lokal inferens har ALDRI en API-kostnad (se `local_llm` over).
     gemma_local: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" },
+    // WP-G3 (D-465): lokal visjonsmodell for kamerabilder - lokal inferens har aldri en API-kostnad (se `local_llm` over).
+    local_vision: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" },
     // Deterministisk testprovider (ScriptedAdapter): aldri en reell kostnad.
     scripted: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" }
   },

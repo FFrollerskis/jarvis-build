@@ -33,6 +33,7 @@ import {
 } from "@jarvis/comms";
 import type { ConversationEngine } from "./conversation.ts";
 import { handlePersonalRoute, type PersonalApiDeps } from "./personal-routes.ts";
+import { handleVisionRoute, type VisionApiDeps } from "./vision-routes.ts";
 import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
@@ -164,6 +165,11 @@ export interface ApiDeps {
    * ALDRI et modellverktøy. Poolen er runtime-poolen (RLS håndheves) - tjenesten trenger ingen admin-rolle.
    */
   businessTenants?: { pool: pg.Pool };
+  /**
+   * WP-G3 (D-465, UA-9): `/vision/*` (eierens kamera-/«sist sett»-flate og iPhone-opptak på forespørsel, se `vision-routes.ts`). DORMANT: uten verdien finnes ingen av rutene (404, identisk med main);
+   * `main.ts` setter den KUN når `JARVIS_VISION_ENABLED=on`. Aldri et modellverktøy.
+   */
+  vision?: VisionApiDeps;
   /**
    * WP-D2 (UA-3 «churn/product usage»): innkommende webhook for produktbruk-hendelser fra eierens egne produkter (`POST /webhooks/product-usage`). DORMANT: uten verdien
    * svarer ruten 404; `main.ts` setter den KUN når `JARVIS_PRODUCT_USAGE_TENANT_ID` er satt. Det finnes ingen identitet å oppløse her: autentiseringen ER HMAC-signaturen
@@ -590,9 +596,9 @@ const WEB_COMMAND = fileURLToPath(new URL("../../web/command.html", import.meta.
  */
 const WEB_VOICE = fileURLToPath(new URL("../../web/voice.html", import.meta.url));
 
-/** Størrelsesbegrenset JSON-parsing (413 over grensen, 400 `malformed_json` ved ugyldig JSON). */
-async function readBody(req: IncomingMessage): Promise<unknown> {
-  return readJsonBody(req);
+/** Størrelsesbegrenset JSON-parsing (413 over grensen, 400 `malformed_json` ved ugyldig JSON). `maxBytes` (kun WP-G3 sin bildeopplasting) heves bare for ruten som eksplisitt ber om det. */
+async function readBody(req: IncomingMessage, maxBytes?: number): Promise<unknown> {
+  return maxBytes === undefined ? readJsonBody(req) : readJsonBody(req, maxBytes);
 }
 
 /**
@@ -761,9 +767,9 @@ interface AuthedRequest {
 }
 
 async function authedRequest(
-  req: IncomingMessage, res: ServerResponse, deps: ApiDeps, allowedKeys: readonly string[]
+  req: IncomingMessage, res: ServerResponse, deps: ApiDeps, allowedKeys: readonly string[], maxBytes?: number
 ): Promise<AuthedRequest | null> {
-  const raw = await readBody(req);
+  const raw = await readBody(req, maxBytes);
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     json(res, 400, { error: "malformed_request", request_id: requestIdOf(res) });
     return null;
@@ -1322,6 +1328,17 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { error: "tool_denied", reason: result.reason });
     }
     return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  // WP-G3 (D-465): `/vision/*` finnes KUN når `deps.vision` er satt (JARVIS_VISION_ENABLED=on); ellers faller alt til den vanlige 404-en. Ruten håndterer selv grant/eier/step-up (vision-routes.ts).
+  if (deps.vision && url.pathname.startsWith("/vision/")) {
+    const handled = await handleVisionRoute(req, url.pathname, deps.vision, {
+      authed: (keys, maxBytes) => authedRequest(req, res, deps, keys, maxBytes),
+      requireOwner: (identity, subject) => requireOwner(res, deps, identity, subject),
+      json: (status, body) => json(res, status, body),
+      requestId: () => requestIdOf(res)
+    });
+    if (handled) return;
   }
 
   if (deps.businessTenants && req.method === "POST" && url.pathname === "/owner/business-tenants") {
