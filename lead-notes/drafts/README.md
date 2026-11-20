@@ -8,7 +8,7 @@ Alt i denne mappen er utkast skrevet offline. Ingenting er postet. Fakta er hent
 - `git push --dry-run` virker og GitHub MCP (`mcp__github__*`) er tilkoblet. Hvis ikke: fortsatt `HARD_EXTERNAL_BLOCKER`.
 - Pushes IKKE: `integration/*`, `worktree-agent-*`, `review-k`, `main`, og hjelperefene `wp-b4-backup-before-history-fix` / `wp-b4-rewrite`.
 - `claude/lead-notes-2026-11` kan pushes som vanlig gren (sporbarhet), men får ALDRI PR og merges ALDRI til main.
-- Sesjonsgrenen `claude/hva-skjer-hvordan-ligger-0z3ztp` er 0 commits foran `origin/main`; ingenting å pushe der.
+- Sesjonsgrenen `claude/hva-skjer-hvordan-ligger-0z3ztp` (`ec3e684e` = `origin/main`) er 0 commits foran `origin/main`, men 591 commits foran den ELDRE eksterne sesjonsgrenen (`origin/claude/hva-skjer-hvordan-ligger-0z3ztp` = `c29aaf92`, 2026-10-05, PR #254). Det er det Stop-hooken teller. En push er en REN fast-forward (verifisert: `c29aaf92` er forfader til HEAD, 0 commits kun på den eksterne), den bærer ingen av mine endringer, og den er den billigste forbindelsestesten: GJØR DEN FØRST (`git push -u origin claude/hva-skjer-hvordan-ligger-0z3ztp`).
 
 ## 1. Avhengigheter (målt med `git merge-base --is-ancestor` og `git rev-list --count`)
 - K, H1 og I er uavhengige av hverandre og av resten. H2 inneholder H1.
