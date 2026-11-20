@@ -65,7 +65,9 @@ export const FORBIDDEN_MODEL_TOOL_IDS: ReadonlyArray<string> = [
   "growth_gbp",
   "growth_linkedin",
   "growth_youtube",
-  "growth_tiktok"
+  "growth_tiktok",
+  // WP-G1 (UA-7, D-463): utgående kommunikasjon (send/rediger/slett/reager, konto-allowlist, avmelding) - aldri på en modellflate. Modellen kan foreslå og utkaste; utsendelse går via eierens rute.
+  "comms"
 ];
 
 /** Handlingsnavn som indikerer skriving/sletting/sending/betaling/merge/kontroll. */
