@@ -1,0 +1,215 @@
+<title>Jarvis-sikkerhetskopi</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  /* Layout: ett smalt løp med tre trinn; knappen og kommandoblokken er det eneste som skal brukes. */
+  :root {
+    --bg: #f3f5f7;
+    --surface: #ffffff;
+    --fg: #14202b;
+    --muted: #54626f;
+    --line: #d5dce2;
+    --accent: #0a6c74;
+    --accent-fg: #ffffff;
+    --code-bg: #eef2f5;
+    --ok: #17794a;
+    --warn: #9a5b00;
+    --font-body: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f171e;
+      --surface: #16222b;
+      --fg: #e7edf2;
+      --muted: #9fb0bd;
+      --line: #2a3a46;
+      --accent: #46bdb4;
+      --accent-fg: #06201f;
+      --code-bg: #0c1319;
+      --ok: #55c98d;
+      --warn: #e0a24a;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f171e;
+    --surface: #16222b;
+    --fg: #e7edf2;
+    --muted: #9fb0bd;
+    --line: #2a3a46;
+    --accent: #46bdb4;
+    --accent-fg: #06201f;
+    --code-bg: #0c1319;
+    --ok: #55c98d;
+    --warn: #e0a24a;
+    color-scheme: dark;
+  }
+  body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 16px; line-height: 1.55; }
+  .wrap {
+    max-width: 46rem; margin: 0 auto;
+    padding-block: 28px 48px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: flex; flex-direction: column; gap: 20px;
+  }
+  h1 { font-size: 1.7rem; line-height: 1.2; margin: 0; font-weight: 600; text-wrap: balance; }
+  .lede { margin: 6px 0 0; color: var(--muted); max-width: 60ch; }
+  .step { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 18px 18px 20px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .step h2 { font-size: 1.05rem; margin: 0; font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
+  .step h2 .n { font-family: var(--font-mono); color: var(--accent); font-weight: 500; }
+  .step p { margin: 0; max-width: 62ch; }
+  .muted { color: var(--muted); font-size: 0.92rem; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  button { font: inherit; font-weight: 600; border-radius: 6px; padding: 10px 16px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); }
+  button:disabled { opacity: 0.55; cursor: not-allowed; }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .status { font-size: 0.95rem; min-height: 1.4em; }
+  .status.ok { color: var(--ok); }
+  .status.warn { color: var(--warn); }
+  .codewrap { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  pre { margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.6; white-space: pre; tab-size: 2; }
+  @media (prefers-reduced-motion: no-preference) { button { transition: opacity 0.15s ease; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Jarvis-sikkerhetskopi</h1>
+    <p class="lede">Filen med alt som er bygget (14 grener), og kommandoene som legger den på GitHub fra PC-en din. Siden er privat og kan slettes etterpå.</p>
+  </header>
+
+  <section class="step" aria-labelledby="s1">
+    <h2 id="s1"><span class="n">1</span>Last ned filen</h2>
+    <p>Åpne denne siden i nettleseren <strong>på PC-en</strong> (ikke på mobilen). Trykk knappen og bekreft i dialogen som kommer.</p>
+    <div class="row">
+      <button id="dl" type="button" disabled>Last ned jarvis-bundle-b.zip (5,4 MB)</button>
+      <span id="dl-status" class="status" role="status" aria-live="polite">Sjekker om nedlasting er mulig ...</span>
+    </div>
+    <p class="muted">Filen havner vanligvis i Nedlastinger. Du trenger ikke pakke den ut selv; blokken i trinn 2 gjør det.</p>
+  </section>
+
+  <section class="step" aria-labelledby="s2">
+    <h2 id="s2"><span class="n">2</span>Lim inn i PowerShell</h2>
+    <p>Åpne PowerShell, kopier hele blokken under og lim den inn. Hver <code>git push</code> skal vise <code>[new branch]</code>. Skriv inn GitHub-innlogging hvis nettleseren spør.</p>
+    <div class="codewrap">
+      <div class="row"><button id="cp1" class="ghost" type="button">Kopier blokken</button><span id="cp1-status" class="status" role="status" aria-live="polite"></span></div>
+      <pre id="blk1" tabindex="0">cd $HOME\jarvisbuild
+$zip = Get-ChildItem $HOME -Recurse -Filter "jarvis-bundle-b*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+$dir = Join-Path $env:TEMP "jarvis-bundle-b"
+Expand-Archive $zip -DestinationPath $dir -Force
+$b = Join-Path $dir "local-only-2026-11-22b.bundle"
+git bundle verify $b
+git fetch $b 'refs/heads/*:refs/remotes/bundle/*'
+git push origin refs/remotes/bundle/claude/wp-k-ledger-rester:refs/heads/claude/wp-k-ledger-rester
+git push origin refs/remotes/bundle/claude/wp-h1-control-centers:refs/heads/claude/wp-h1-control-centers
+git push origin refs/remotes/bundle/claude/wp-i-connector-sdk:refs/heads/claude/wp-i-connector-sdk
+git push origin refs/remotes/bundle/claude/wp-h2-control-centers:refs/heads/claude/wp-h2-control-centers
+git push origin refs/remotes/bundle/claude/wp-b3-evolution-centers:refs/heads/claude/wp-b3-evolution-centers
+git push origin refs/remotes/bundle/claude/wp-d3-growth-writes:refs/heads/claude/wp-d3-growth-writes
+git push origin refs/remotes/bundle/claude/wp-b4-claude-budget-pacing:refs/heads/claude/wp-b4-claude-budget-pacing
+git push origin refs/remotes/bundle/claude/wp-g1-comms:refs/heads/claude/wp-g1-comms
+git push origin refs/remotes/bundle/claude/wp-g2-personal:refs/heads/claude/wp-g2-personal
+git push origin refs/remotes/bundle/claude/wp-g3-vision:refs/heads/claude/wp-g3-vision
+git push origin refs/remotes/bundle/claude/wp-g4-situation-bridges:refs/heads/claude/wp-g4-situation-bridges
+git push origin refs/remotes/bundle/claude/d471-d474-konsolidering:refs/heads/claude/d471-d474-konsolidering
+git push origin refs/remotes/bundle/claude/wp-n1-restricted-history:refs/heads/claude/wp-n1-restricted-history
+git push origin refs/remotes/bundle/claude/lead-notes-2026-11:refs/heads/claude/lead-notes-2026-11</pre>
+    </div>
+    <p class="muted">Blokken bruker aldri <code>--force</code> og endrer ikke <code>main</code>. Står klonen din et annet sted enn <code>C:\Users\Tobia\jarvisbuild</code>, bytt ut første linje med <code>cd</code> til den mappen.</p>
+  </section>
+
+  <section class="step" aria-labelledby="s3">
+    <h2 id="s3"><span class="n">3</span>Sjekk og si fra</h2>
+    <p>Kjør linjen under. Du skal se 14 grener. Skriv deretter <strong>«pushet»</strong> i chatten med Claude, eller lim inn det som står hvis noe feilet.</p>
+    <div class="codewrap">
+      <div class="row"><button id="cp2" class="ghost" type="button">Kopier linjen</button><span id="cp2-status" class="status" role="status" aria-live="polite"></span></div>
+      <pre id="blk2" tabindex="0">git ls-remote --heads origin "claude/wp-*" "claude/d471-d474-konsolidering" "claude/lead-notes-2026-11"</pre>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  var btn = document.getElementById("dl");
+  var status = document.getElementById("dl-status");
+  var downloads = null;
+
+  function setStatus(el, text, kind) {
+    el.textContent = text;
+    el.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function selectText(node) {
+    try {
+      var range = document.createRange();
+      range.selectNodeContents(node);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (e) { /* ingen markering mulig */ }
+  }
+
+  function wireCopy(buttonId, blockId, statusId) {
+    var b = document.getElementById(buttonId);
+    var block = document.getElementById(blockId);
+    var s = document.getElementById(statusId);
+    b.addEventListener("click", function () {
+      var text = block.textContent;
+      var done = function () { setStatus(s, "Kopiert.", "ok"); };
+      var fallback = function () { selectText(block); setStatus(s, "Teksten er markert. Trykk Ctrl+C.", "warn"); };
+      try {
+        navigator.clipboard.writeText(text).then(done, fallback);
+      } catch (e) { fallback(); }
+    });
+  }
+  wireCopy("cp1", "blk1", "cp1-status");
+  wireCopy("cp2", "blk2", "cp2-status");
+
+  function noDownloads() {
+    downloads = null;
+    btn.disabled = true;
+    setStatus(status, "Nedlasting virker ikke i denne visningen. Åpne siden i nettleseren på PC-en (claude.ai) og prøv igjen.", "warn");
+  }
+
+  if (window.claude && typeof window.claude.use === "function") {
+    window.claude.use("downloads").then(function (d) {
+      if (!d) { noDownloads(); return; }
+      downloads = d;
+      btn.disabled = false;
+      setStatus(status, "Klar.", "");
+    }, noDownloads);
+  } else {
+    noDownloads();
+  }
+
+  btn.addEventListener("click", function () {
+    if (!downloads) { return; }
+    btn.disabled = true;
+    setStatus(status, "Henter filen ...", "");
+    fetch("jarvis-bundle-b.b64.txt").then(function (res) {
+      if (!res.ok) { throw { code: "http_" + res.status, message: "Kunne ikke hente filen." }; }
+      return res.text();
+    }).then(function (b64) {
+      setStatus(status, "Pakker ut filen ...", "");
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) { bytes[i] = bin.charCodeAt(i); }
+      if (bytes.length < 1000 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) { throw { code: "skadet_fil", message: "Filen er skadet." }; }
+      return new Blob([bytes], { type: "application/zip" });
+    }).then(function (blob) {
+      setStatus(status, "Bekreft lagringen i dialogen.", "");
+      return downloads.save({ filename: "jarvis-bundle-b.zip", data: blob });
+    }).then(function () {
+      setStatus(status, "Lagret. Gå til trinn 2.", "ok");
+    }, function (err) {
+      var code = err && err.code;
+      if (code === "declined") { setStatus(status, "Du avbrøt. Trykk på knappen igjen når du er klar.", "warn"); }
+      else if (code === "unavailable" || code === "not_granted" || code === "capability_disabled" || code === "capability_removed") { noDownloads(); return; }
+      else { setStatus(status, "Kunne ikke lagre filen (" + (code || "ukjent feil") + "). Prøv på nytt, eller si fra i chatten.", "warn"); }
+    }).then(function () {
+      if (downloads) { btn.disabled = false; }
+    });
+  });
+})();
+</script>
