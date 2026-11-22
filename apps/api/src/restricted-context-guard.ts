@@ -33,6 +33,17 @@ export function financeLockServedLocally(model: { provider: string; model: strin
 export const FINANCE_EXECUTION_LOCK: FinanceExecutionLock = { servedLocally: financeLockServedLocally };
 
 /**
+ * WP-N1 (fiks-runde 2, F2-B1): skal resultatet/tittelen/feilen til en bakgrunnsjobb som ble startet fra en LÅST tur (`restricted_origin`) holdes tilbake fra modellen som betjener DETTE kallet? Samme regel og samme fail-closed lokalitet som
+ * utførelseslåsen og `withholdFinanceFromCloud`: `false` KUN uten modell i løkka (eierens egne ruter) og for en leverandør som står i modellregisteret som LOKAL; `true` for sky og alt ukjent (tom/blank/feilstavet/STORE BOKSTAVER leverandør,
+ * ikke et objekt). Satt av `main.ts` på `TasksDelegateTransport` KUN med flagget på.
+ */
+export function withholdsRestrictedJobFromCloud(model: { provider: string; model: string } | undefined): boolean {
+  if (model === undefined) return false;
+  if (typeof model !== "object" || model === null || typeof model.provider !== "string" || model.provider.trim() === "") return true;
+  return !financeLockServedLocally(model);
+}
+
+/**
  * WP-N1 (fiks-runde 1, F-A2): lagringen av en bakgrunnsjobbs LEVERING i samtalen (`ChatJobs.sweepDeliveries` -> `saveMessage`). Flyttet ut av `main.ts` så den kan kjøres av en test. Leveringen lagres begrenset KUN når begrenset-vakten er på
  * OG jobben ble startet fra en LÅST tur (`opts.restricted`, fra `restricted_origin` i kontrakten); ellers er kallet NØYAKTIG det opprinnelige TRE-argumentskallet (flagg AV: kolonnen settes aldri).
  */

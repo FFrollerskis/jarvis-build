@@ -167,6 +167,11 @@ export interface ConversationDeps {
    * (3) minneuttrekket får ikke merkede rader som kontekst. Udefinert/`false` = NØYAKTIG som før N1: kolonnen settes aldri, `messages.save` kalles med tre argumenter, merker i historikken ignoreres helt.
    */
   restrictedContextGuard?: boolean;
+  /**
+   * WP-N1 (fiks-runde 2, F2-B1b): ble en jobb startet fra en LÅST tur (`restricted_origin`)? `main.ts` setter dette KUN med vakten på. Hurtigbanens `jobbstatus <id>` gjengir jobbens resultat i et svar; er jobben begrenset, låses turen FØR svaret
+   * lagres (bruker- og assistentrad lagres begrenset). Kan opprinnelsen ikke avgjøres (feil), regnes jobben som begrenset (fail-closed). Utelatt = `jobbstatus` er som før N1.
+   */
+  jobOrigin?: { isRestricted(identity: IdentityContext, taskId: string): Promise<boolean> };
 }
 
 type HistoryRow = { role: "assistant" | "user"; content: string; /** WP-N1: raden hører til en tur som var låst til SECRET_RESTRICTED (kun satt når vakten er på). */ restricted?: boolean };
@@ -1231,6 +1236,12 @@ export class ConversationEngine {
         const result = await this.deps.tasks.get(identity, intent.task_id);
         if (!result.ok) {
           return { reply: `Fant ikke jobben: ${result.reason}`, routed: "fast" };
+        }
+        // WP-N1 (F2-B1b): jobbens resultat er avledet av en LÅST tur når jobben ble startet derfra (`restricted_origin`) - svaret (og dermed brukermeldingen) lagres da begrenset, ellers ligger resultatet umerket i historikken og følger med til
+        // neste skytur. Låsen settes FØR svaret bygges og lagres; kan merkingen ikke gjøres, kastes turen uten at noe er lagret/gjengitt. Kun med vakten på (`marker` og `jobOrigin` finnes ellers ikke).
+        if (marker && this.deps.jobOrigin) {
+          const restrictedJob = await this.deps.jobOrigin.isRestricted(identity, intent.task_id).catch(() => true);
+          if (restrictedJob) await marker.lock(["fast_intent:task_status"]);
         }
         const res = result.value.result ? ` Resultat: ${JSON.stringify(result.value.result)}` : "";
         return { reply: `Jobb ${result.value.task_id}: ${result.value.status}.${res}`, routed: "fast" };

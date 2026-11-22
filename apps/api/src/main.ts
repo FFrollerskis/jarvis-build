@@ -159,7 +159,7 @@ import { CONTROL_FEATURE_FLAGS, controlCentersWithTools, flagOn } from "./contro
 import { createAutonomyAudit } from "./autonomy-audit.ts";
 import { createGoldenSuiteRunner } from "./golden-suite-runner.ts";
 import { servedByCloudModel } from "./cloud-tool-screen.ts";
-import { FINANCE_EXECUTION_LOCK, createDeliverySaver, parseRestrictedContextGuard } from "./restricted-context-guard.ts";
+import { FINANCE_EXECUTION_LOCK, createDeliverySaver, parseRestrictedContextGuard, withholdsRestrictedJobFromCloud } from "./restricted-context-guard.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { claudeBudgetBriefSource } from "./claude-budget-surfaces.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
@@ -1230,7 +1230,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // finnes KUN med JARVIS_KNOWLEDGE_CLAIM_WRITES=on, og står uansett på ingen modellflate.
       ...knowledgeToolDefinitions(new KnowledgeSearchTransport(knowledgeRetriever, knowledgeClaims), { claimWrites: knowledgeClaimWrites }),
       // D-416: delegeringsnivået (opprett lesende bakgrunnsjobb / les jobbstatus) over SAMME `taskService` (policy + kontraktsregler).
-      ...tasksDelegateToolDefinitions(new TasksDelegateTransport(taskService, chatJobs)),
+      // WP-N1 (F2-B1): med vakten på holder `get_task_status` tittel/resultat/feil fra en jobb startet fra en LÅST tur tilbake fra skymodeller. Vakten AV: nøyaktig konstruksjonen fra før N1 (ingen nytt argument).
+      ...tasksDelegateToolDefinitions(restrictedContextGuard.enabled ? new TasksDelegateTransport(taskService, chatJobs, withholdsRestrictedJobFromCloud) : new TasksDelegateTransport(taskService, chatJobs)),
       // D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger (kun lesing for modellen; skriving via dashbord-ruten).
       ...runRateToolDefinitions(new RunRateTransport(new RunRateService(pool))),
       // WP-E1 (UA-5): de kontrollerte skymålene (Cloudflare nå; Langfuse/Infisical/Postgres-drift legges til i samme fabrikk). SOVENDE uten credential;
@@ -1385,6 +1386,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     chatCandidates,
     // WP-N1 (Q-66/JARVIS-101): «begrenset»-merking av låste turer + lesing av merket. KUN med flagget på; utelatt = motoren er identisk med main (kolonnen settes aldri, merker i historikken ignoreres).
     ...(restrictedContextGuard.enabled ? { restrictedContextGuard: true } : {}),
+    // WP-N1 (F2-B1b): hurtigbanens `jobbstatus <id>` låser turen når jobben ble startet fra en LÅST tur. KUN med vakten på.
+    ...(restrictedContextGuard.enabled ? { jobOrigin: { isRestricted: (identity: Parameters<ChatJobs["isRestrictedOrigin"]>[0], taskId: string) => chatJobs.isRestrictedOrigin(identity, taskId) } } : {}),
     // EV-1 (D-412): hurtigbanens selvdiagnose går gjennom Tool Gateway (Policy + revisjon) - samme verktøy som modellen kan kalle.
     selfDiagnosis: {
       async run(identity, opts) {
