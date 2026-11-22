@@ -164,3 +164,16 @@ e8c23d4aaf5fefed111a0fa7e05145196e608b57:modules/comms/test/policy.test.ts:disco
 71ec3924d33c259a337982da7817be65921bdfbd:modules/vision/test/g3-ha-source.test.ts:generic-api-key:13
 71ec3924d33c259a337982da7817be65921bdfbd:modules/vision/test/g3-ha-pipeline.test.ts:generic-api-key:24
 2d332d71c132feb8e19a464ecb574c6db80eda62:apps/api/test/wpg3-vision-runtime.test.ts:generic-api-key:168
+
+# WP-N1 (D-477): gitleaks' generic-api-key rule flagged a test constant in
+# apps/api/test/wpn1-job-status.test.ts (commit e498cdf5, line 38): a Norwegian
+# test sentence (it contains the word HEMMELIG, i.e. "secret") assigned to a
+# constant whose name started with SECRET_. The sentence is a plain test string
+# used to prove that a locked job's result is withheld from cloud models; it is
+# not a credential, key, token or password. Verified manually. The constants were
+# renamed away from SECRET_* in a later commit, but gitleaks scans full history
+# and the original commit stays in the branch history. NB: the commit hash
+# changes when the N1 commits are cherry-picked onto main (PR day); add the new
+# fingerprint printed by `gitleaks detect --log-opts="origin/main..HEAD"` next to
+# this one.
+e498cdf5790872e61e91b658b30b31e45a5f42d8:apps/api/test/wpn1-job-status.test.ts:generic-api-key:38
