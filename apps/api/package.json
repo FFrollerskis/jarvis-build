@@ -12,7 +12,9 @@
   "dependencies": {
     "@jarvis/agreements": "workspace:*",
     "@jarvis/business": "workspace:*",
+    "@jarvis/comms": "workspace:*",
     "@jarvis/consent": "workspace:*",
+    "@jarvis/context": "workspace:*",
     "@jarvis/contracts": "workspace:*",
     "@jarvis/conversation-graph": "workspace:*",
     "@jarvis/core": "workspace:*",

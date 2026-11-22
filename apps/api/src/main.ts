@@ -136,6 +136,7 @@ import {
   ConversationGraphService, ConversationGraphSyncService, ConversationGraphTransport,
   runConversationGraphSyncForAllTenants
 } from "@jarvis/conversation-graph";
+import { buildCommsRuntime } from "./comms-wiring.ts";
 import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
@@ -160,6 +161,7 @@ import { servedByCloudModel } from "./cloud-tool-screen.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { claudeBudgetBriefSource } from "./claude-budget-surfaces.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
+import { createPersonalWiring } from "./personal-wiring.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
@@ -826,7 +828,17 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-B3 (D-475, EV-23): eierens avgjørelse om et endringsforslag (`executive.record_evolution_decision`, kun en registrering i revisjonssporet - ingen virkning) finnes KUN med JARVIS_CONTROL_EVOLUTION_APPROVAL=on OG når
   // Evolusjon-senteret faktisk er koblet inn (knappene bor der). Uten flagget finnes hverken verktøyet, skriveren eller ruten-navnet (flagg AV er identisk med main).
   const evolutionApprovalOn = flagOn(process.env, CONTROL_FEATURE_FLAGS.evolutionApproval) && controlCenters.has("evolution");
-  for (const tool of firstWaveTools({
+  // WP-G1 (D-463, UA-7): felles utgående kommunikasjon + signerte innkommende webhooks. DORMANT og NOT VERIFIED: alt AV = ingenting konstrueres (identisk med main). Ugyldig konfigurasjon kaster og stopper oppstarten.
+  const commsRuntime = buildCommsRuntime({
+    env: process.env, pool, graph: conversationGraphService, business: businessService, secrets: readSecretProvider,
+    warn: (event) => console.error(JSON.stringify({ msg: "comms_warn", ...event }))
+  });
+  // WP-G2 (D-464, UA-8 Personal Twin): kritiske hjem-/bilhandlinger, familie, helse-inntak, Apple CalDAV/CardDAV, personlig økonomi-lesing og kontekstmotor. ALT er AV som standard: uten `JARVIS_PERSONAL_*`-flagg er
+  // `personal.tools` tom, `filterTools` identiteten og `personal.deps` `undefined` (verktøylister, utvalg, rate-grenser og ruter er identiske med main, ingen ekstra loggline). Kun API-prosessen kobler det inn.
+  const personal = createPersonalWiring({ env: process.env, pool, gateway: toolGateway, readSecret: (ref) => readSecretProvider.get(ref), ownerPersonId: owner.owner_person_id, controls: { killSwitch, ownerControls } });
+  const personalLog = personal.describe();
+  if (personalLog) console.log(JSON.stringify(personalLog));
+  for (const tool of personal.filterTools(firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
     // D-247: `chatId` som en resolver mot `readSecretProvider` (samme
@@ -1218,9 +1230,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       ),
       // WP-D3 (UA-4 Growth): kun med flaggene på (se over). Eier-eksklusive navnerom (`growth_*`) som aldri står på en modellflate; skriving går alltid gjennom step-up + klasse D-kjeden.
       ...(growthWriteEnabled ? growthWriteToolDefinitions(growthWriteConfig, growthWriteTransports) : []),
-      ...(growthExperimentRegistry ? growthExperimentToolDefinitions(new GrowthExperimentTransport(growthExperimentRegistry)) : [])
+      ...(growthExperimentRegistry ? growthExperimentToolDefinitions(new GrowthExperimentTransport(growthExperimentRegistry)) : []),
+      // WP-G1 (D-463, UA-7): `comms.*` (felles utgående kommunikasjon - klasse D `outbound_message`, eier-kun, aldri en modellflate) registreres KUN med JARVIS_COMMS_OUTBOUND=on. Flagg AV = tom liste = identisk med main
+      // (ingen verktøy, ingen utvalgstreff, ingen rate-endring). Samme ene register-løkke som resten - ingen parallell registreringsvei.
+      ...commsRuntime.tools,
+      // WP-G2 (D-464): personlig-domenet (tom liste uten flagg). Eier-/step-up-krevende, aldri på en modellflate.
+      ...personal.tools
     ]
-  })) toolGateway.register(tool);
+  }))) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
   // lenger koblet til noen aktiv flate. Chat, tale, Telegram og executive-jobber
   // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
@@ -1468,6 +1485,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `buildSystemPrompt()`/`loadPersonality()`.
     personality: loadPersonalityConfig
   });
+  const commsApiDeps = commsRuntime.apiDeps(toolGateway);
+  commsRuntime.startSweeps(ownerTenants, owner.owner_person_id);
   // WP-G3 (D-465): UA-9-kjøretiden (pipeline, HA-poller, `/vision/*`-rutene, vedlikehold). `null` (ingenting bygget) uten JARVIS_VISION_ENABLED=on. Se vision-runtime.ts for flaggene.
   const visionRuntime = buildVisionRuntime({
     pool, env: process.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, ownerTenantId: owner.tenant_id, secrets: readSecretProvider,
@@ -1537,6 +1556,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           }
         }
       : {}),
+    // WP-G2 (D-464): `/personal/*` finnes KUN når minst ett JARVIS_PERSONAL_*-flagg er på; ellers 404 (identisk med main).
+    ...(personal.deps ? { personal: personal.deps } : {}),
     ...(process.env["JARVIS_PRODUCT_USAGE_TENANT_ID"]
       ? {
           productUsage: {
@@ -1546,7 +1567,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             })
           }
         }
-      : {})
+      : {}),
+    // WP-G1 (D-463, UA-7): webhook-rutene finnes KUN med JARVIS_COMMS_WEBHOOKS og eier-rutene /comms/* KUN med JARVIS_COMMS_OUTBOUND=on (uten flaggene er `comms` ikke satt = 404, identisk med main).
+    ...(commsApiDeps ? { comms: commsApiDeps } : {})
   };
   // D-416: lever ferdige bakgrunnsjobber tilbake til samtalen (nøyaktig én gang). Feil logges, stopper aldri prosessen.
   setInterval(
