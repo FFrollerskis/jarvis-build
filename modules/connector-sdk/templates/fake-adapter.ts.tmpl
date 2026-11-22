@@ -1,0 +1,21 @@
+import { createFakeConnector, type ContractAdapter, type FakeConnectorSpec } from "../../src/testing.ts";
+import { {{CONST}}_MANIFEST } from "../../src/manifests/{{ID}}.ts";
+
+/**
+ * FAKE-adapter for {{NAME_COMMENT}} (`{{ID}}`) - GENERERT av `ops/connector/new-connector.mjs` (WP-I, D-472). Ingen nettverk, ingen ekte leverandør, ingen ekte nøkler.
+ *
+ * Harnessen (`createFakeConnector`) modellerer Jarvis' kjøre-kontrakt (ToolGateway + transport) ut fra manifestet: parametervalidering før leverandøren, idempotens-ledger, autoritet, pause/tilbakekall,
+ * tidsavbrudd, helse, revisjon, redigering. Uten handlers bruker den en generisk ressursmodell - nok til å bevise kontrakten.
+ *
+ * TODO(fake): legg inn leverandørspesifikk oppførsel per handling hvor den betyr noe (les-data, skrive-effekt, readback). Siterer en handler tredjepartstekst, MÅ den gå gjennom `ctx.redact(...)`:
+ * kontraktstest-kittet feller en handler som lekker credential eller hemmelighetsformer.
+ */
+export function create{{PASCAL}}Fake(opts: Partial<Omit<FakeConnectorSpec, "manifest">> = {}): ContractAdapter {
+  return createFakeConnector({
+    manifest: {{CONST}}_MANIFEST,
+    handlers: {
+      // "{{TOOL_ID}}.list_items": { read: (_params, _state, ctx) => ({ items: [{ id: 1, title: ctx.providerText === null ? "sample" : ctx.redact(ctx.providerText) }] }) },
+    },
+    ...opts
+  });
+}

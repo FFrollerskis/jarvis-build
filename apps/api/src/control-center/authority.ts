@@ -30,7 +30,7 @@ import {
  *  - Aktive valgfrie policyer (kostnadsbudsjett, dagstak, klasse D-pipeline, credential-binding, step-up) og eksterne begrensninger (GitHub-repo-lås, destinasjons-allowlist, infra-mål).
  *  - Åpne bekreftelser (`action_confirmations`).
  *
- * DEFERRED (ikke stille utelatt): tilbakekall av en autonomi-binding (`situations.clear_autonomy_policy` har ingen HTTP-rute - pause av domenet stopper auto-ACT i mellomtiden), infra-modus-endring herfra og
+ * DEFERRED (ikke stille utelatt): tilbakekall av en autonomi-binding er DEFERRED uten `JARVIS_CONTROL_AUTONOMY_REVOKE=on` (WP-H2: da finnes `executive.revoke_autonomy_binding` på `/executive/mutate` og en knapp per binding i økta sitt eget rom; pause av domenet stopper auto-ACT i mellomtiden), infra-modus-endring herfra og
  * godkjenn/avvis av bekreftelser (utfører en handling; skjer i chat/dashbord der parametrene vises).
  */
 
@@ -161,6 +161,11 @@ export interface AuthorityCenterDeps {
    * Kun tellere og sikre etiketter - aldri avgjørelsesinnhold.
    */
   policyAudit?: () => { gateway: PolicyAuditStats; sink: PolicyAuditSinkStats };
+  /**
+   * WP-H2: tilby «Tilbakekall autonomi» per binding (`executive.revoke_autonomy_binding`, klasse C, eier-kun, step-up). AV som standard (`JARVIS_CONTROL_AUTONOMY_REVOKE`): uten den er senteret uendret fra H0.
+   * Knappen tilbys kun for bindinger i den innloggede økta sitt EGET minnerom (`clear_autonomy_policy` virker alltid i identitetens eget rom) - bindinger i andre rom vises med en forklaring i stedet.
+   */
+  autonomyRevoke?: boolean;
 }
 
 const kr = (ore: number): string => `${Math.round(ore / 100)} kr`;
@@ -275,16 +280,27 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
           const paused = allPaused || pausedDomains.has(p.domain);
           // Gjennomgang av PR #316 (M-1): kan domene-pausene ikke leses, VET vi ikke om en aktiv binding er stanset - da er den ukjent (aldri «i orden»), og faktaet sier null i stedet for «ikke pauset».
           const pauseUnknown = !pausesR.ok && p.enabled;
+          const ownSpace = p.memory_space_id === ctx.identity.memory_space_id;
+          if (deps.autonomyRevoke === true && ownSpace) {
+            actions.push(controlAction({
+              id: `authority.revoke_autonomy:${p.memory_space_id}:${p.domain}`, label: `Tilbakekall autonomi: ${p.domain}`, endpoint: "/executive/mutate",
+              body: { action: "revoke_autonomy_binding", parameters: { domain: p.domain } },
+              risk_class: riskOf(deps.toolGateway, "executive", "revoke_autonomy_binding"), requires_step_up: actionRequiresStepUp("revoke_autonomy_binding"), reversible: false,
+              description_no: `Fjerner bindingen som lar Jarvis utføre ${p.tool_id}.${p.action} selv i domenet «${p.domain}» (rommet ${p.memory_space_id}). Uten binding utfører Jarvis ingenting selv i domenet (fail-closed): situasjoner blir liggende som forslag til du handler. Parametrene til bindingen slettes og lagres ikke.`,
+              rollback_no: "Kan ikke angres herfra: bind domenet på nytt med situations.set_autonomy_policy (handling og parametre må da gis på nytt).",
+              section_id: "autonomy", item_id: `${p.memory_space_id}:${p.domain}`
+            }));
+          }
           return controlItem({
             id: `${p.memory_space_id}:${p.domain}`, label: `${p.domain} (${p.memory_space_id})`, status: pauseUnknown ? "UNKNOWN" : p.enabled && paused ? "WARN" : "OK", observed_at: p.updated_at,
-            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}`,
+            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
             facts: { tool: p.tool_id, action: p.action, risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id }
           });
         });
         items.sort(bySeverityThenLabel);
         sections.push(controlSection({
           id: "autonomy", title_no: "Delegert autonomi (Jarvis handler selv)", source: "situation_autonomy_policies (tenant + minnerom-RLS; parametre vises aldri)", observed_at: nowIso,
-          summary_no: `${items.length} autonomi-bindinger (${autonomyR.value.rows.filter((p) => p.enabled).length} aktive)${autonomyR.value.health_count > 0 ? `; ${autonomyR.value.health_count} i health-rommet (isolert, ikke listet)` : ""}. Pause domenet under «Pauser og tilbakekall» for å stanse auto-ACT; tilbakekall av selve bindingen er DEFERRED (ingen rute).`,
+          summary_no: `${items.length} autonomi-bindinger (${autonomyR.value.rows.filter((p) => p.enabled).length} aktive)${autonomyR.value.health_count > 0 ? `; ${autonomyR.value.health_count} i health-rommet (isolert, ikke listet)` : ""}. Pause domenet under «Pauser og tilbakekall» for å stanse auto-ACT; ${deps.autonomyRevoke === true ? "«Tilbakekall autonomi» fjerner selve bindingen (kun i økta sitt eget rom; bindinger i health-rommet er isolert og kan ikke tilbakekalles herfra)." : "tilbakekall av selve bindingen er DEFERRED (ingen rute)."}`,
           items
         }));
       } else {

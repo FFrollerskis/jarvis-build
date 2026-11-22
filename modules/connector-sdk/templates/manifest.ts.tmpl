@@ -1,0 +1,87 @@
+import { unknownField, type ActionSpec, type ConnectorManifest } from "../manifest.ts";
+
+/**
+ * {{NAME_COMMENT}} (`{{ID}}`) - connector-manifest, GENERERT av `ops/connector/new-connector.mjs` (WP-I, D-472). STATUS: `skeleton` - dette er et UTKAST, ikke fakta.
+ *
+ * RETTE REKKEFØLGE (CLAUDE.md regel 11 og 12 - ingen snarvei):
+ *  1. D-64 Core-vs-Adapter-porten FØR leverandøren velges: hva eier Jarvis (kanonisk tilstand/policy/minne), hva er leverandøren (kilde/sluk/utførelse)? Blir leverandøren en KJERNEAVHENGIGHET:
+ *     STOPP og meld `CORE_DEPENDENCY_DECISION_REQUIRED=true` til eieren - aldri et stille leverandørvalg. Sett `core_boundary.system_of_record` og `basis: "audited"` først DA.
+ *  2. D-41 kapabilitetsrevisjon mot OFFISIELL leverandørdokumentasjon (lese/skrive/slette/tilgangsstyring; scopes for FULL nyttig tilgang - aldri gjettet; risikoklasse A-D per handling; eier vs delegert;
+ *     idempotens; trygg test-sandbox). Ikke-implementert kapabilitet merkes DEFERRED/PARTIAL i `d41_audit.gaps` - aldri stille utelatt.
+ *  3. Registrer connectoren i `modules/tool-gateway/src/connector-registry.ts` og verktøydefinisjonene i `integrations.ts` (registeret er sannheten; manifestet BESKRIVER og sjekkes mot det).
+ *  4. Erstatt hver `unknownField(...)` og hver TODO under med en ekte verdi. Sett `completeness: "full"` og `source: "authored"`, og legg manifestet til i `FULL_MANIFESTS`
+ *     (`modules/connector-sdk/src/manifests/index.ts`). CI-vakten (`guard.test.ts`) feiler til alt stemmer med registeret og runbooken og testene finnes.
+ */
+
+/** TODO(manifest): handlingene må være NØYAKTIG de som registreres i verktøydefinisjonene (risikoklasse, effekt, rate limit, tidsavbrudd, idempotens, skjema). Radene under er plassholdere. */
+const actions: ActionSpec[] = [
+{{ACTIONS}}
+];
+
+export const {{CONST}}_MANIFEST: ConnectorManifest = {
+  schema_version: "1",
+  completeness: "skeleton",
+  source: "authored",
+  identity: {
+    id: {{ID_JSON}},
+    name: {{NAME_JSON}},
+    vendor: {{VENDOR_VALUE}},
+    version: { manifest: "0.1.0", provider_api: unknownField("TODO: API-versjonen koden faktisk kaller") },
+    owner: { kind: "tenant_owner", ref: "owner" },
+    environment: unknownField("TODO: deployment + trygg test-sandbox (D-41 j)")
+  },
+  auth: {
+    type: unknownField("TODO: oauth2 | api_key | service_account | mtls | device_token | app_installation"),
+    scopes: { declared_by_actions: [], provider: unknownField("TODO: leverandørens tillatelser for FULL nyttig tilgang, lest mot offisiell dokumentasjon") },
+    rotation: unknownField("TODO: credential_kind + rotasjonsmetode (EV-17)")
+  },
+  capabilities: {
+    read: { status: "implemented" },
+    write: { status: {{WRITE_STATUS}} },
+    actions: { status: "not_implemented" },
+    webhooks: unknownField("TODO: tilbyr leverandøren webhooks, og er de bygget?"),
+    sync: unknownField("TODO: daglig synk-jobb?"),
+    search: { status: "not_implemented", items: [] }
+  },
+  authority: { owner: unknownField("TODO"), delegated: unknownField("TODO"), tenant: unknownField("TODO") },
+  reversibility: { snapshot_support: unknownField("TODO") },
+  idempotency: {{IDEMPOTENCY}},
+  limits: { rate_limits: unknownField("TODO: leverandørens rate limits"), quotas: unknownField("TODO") },
+  trust: {
+    output: { class: "untrusted" },
+    injection_exposure: unknownField("TODO: none | possible | high"),
+    sanitization: unknownField("TODO")
+  },
+  data: {
+    schemas: unknownField("TODO"), provenance: unknownField("TODO"), freshness: unknownField("TODO"),
+    retention: unknownField("TODO"), delete_semantics: unknownField("TODO")
+  },
+  operations: {
+    health_check: unknownField("TODO: live_probe (registerets live_test) eller presence_only"),
+    timeout: { max_ms: {{TIMEOUT_MS}} },
+    circuit_breaker: unknownField("TODO"),
+    metrics: unknownField("TODO"),
+    runbook: { path: {{RUNBOOK_JSON}} },
+    maintenance_owner: unknownField("TODO")
+  },
+  secrets: {
+    refs: [{ ref: {{SECRET_REF_JSON}}, required: true, purpose: unknownField("TODO: hva credentialen brukes til") }],
+    model_visibility: "never"
+  },
+  tests: {
+    fake_adapter: { status: "present", paths: [{{FAKE_PATH_JSON}}] },
+    contract: { status: "present", paths: [{{CONTRACT_PATH_JSON}}] },
+    live_smoke: unknownField("TODO: live smoke mot sandbox (BLOCKED_EXTERNAL til eieren har gitt credential)"),
+    authority: unknownField("TODO"), recovery: unknownField("TODO"), security: unknownField("TODO")
+  },
+  d41_audit: unknownField("TODO: D-41-revisjonen (se punkt 2 over)"),
+  // D-64: svarene på Core-vs-Adapter-porten (system_of_record, core_dependency_decision_required) skal IKKE forhåndssvares av malen. De står som ukjent til porten er kjørt og beslutningen er loggført; da settes
+  // `basis: "audited"`, begge svar og `decision_refs: ["D-<id>"]` (beslutningen i DECISIONS_AND_ASSUMPTIONS.md som loggførte porten).
+  core_boundary: {
+    system_of_record: unknownField("TODO: JARVIS_CANONICAL | EXTERNAL_CANONICAL | HYBRID_WITH_CLEAR_AUTHORITY - svaret fra D-64-porten, ikke en standard"),
+    basis: "unassessed",
+    external_role: unknownField("TODO: D-64-rollen (kilde/sluk/utførelsesleverandør)"),
+    core_dependency_decision_required: unknownField("TODO: CORE_DEPENDENCY_DECISION_REQUIRED (true = STOPP og meld til eieren) - svaret fra D-64-porten")
+  },
+  actions
+};
