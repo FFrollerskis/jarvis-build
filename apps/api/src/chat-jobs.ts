@@ -95,6 +95,12 @@ export interface DelegatedJobView {
   withheld?: true;
   /** WP-N1 (F2-B1): kort norsk forklaring, kun sammen med `withheld`. Uten sifre, id-er, tellinger og leverandørnavn. */
   note_no?: string;
+  /**
+   * WP-N1 (fiks-runde 3, R3-1): TRUSTED boolean. `true` KUN i det UHOLDTE, modellvendte viewet (en LOKAL modell, begrenset-vakten på) for en jobb startet fra en LÅST tur - det lokale svaret kan gjengi resultatet, så samtalemotoren
+   * (`trackedExecutor`) låser turen når en `tasks.get_task_status`-output bærer feltet. Settes av `present` fra kontraktens `restricted_origin` (trusted kode) - aldri fra tittel, resultat, feil eller parametere. Utelatt ellers: eierens ruter,
+   * vakten AV, jobber uten merket og det tilbakeholdte skyviewet har ikke feltet.
+   */
+  restricted?: true;
 }
 
 interface JobRow {
@@ -152,11 +158,21 @@ function withheldView(r: JobRow): DelegatedJobView {
   };
 }
 
-/** WP-N1 (F2-B1): `opts.withholdRestricted` er KUN satt av `TasksDelegateTransport` når begrenset-vakten er på og kallet betjenes av en skymodell/ukjent modell. Uten valget er alt som før N1. */
+/**
+ * WP-N1 (F2-B1): `opts.withholdRestricted` er KUN satt av `TasksDelegateTransport` når begrenset-vakten er på og kallet betjenes av en skymodell/ukjent modell. Uten valget er alt som før N1.
+ * WP-N1 (R3-1): `opts.markRestricted` er KUN satt av transporten når vakten er på og kallet betjenes av en LOKAL modell: viewet er det fulle, men en jobb med `restricted_origin` får den trusted booleanen `restricted: true`.
+ */
 export interface JobViewOptions {
   withholdRestricted?: true;
+  markRestricted?: true;
 }
-const present = (r: JobRow, opts: JobViewOptions | undefined): DelegatedJobView => (opts?.withholdRestricted === true && r.restricted_origin === "true" ? withheldView(r) : toView(r));
+function present(r: JobRow, opts: JobViewOptions | undefined): DelegatedJobView {
+  if (r.restricted_origin === "true") {
+    if (opts?.withholdRestricted === true) return withheldView(r);
+    if (opts?.markRestricted === true) return { ...toView(r), restricted: true as const };
+  }
+  return toView(r);
+}
 
 const DELEGATED = `contract->'input'->'data'->>'delegated_from_chat' = 'true'`;
 
@@ -361,14 +377,21 @@ export class TasksDelegateTransport implements ToolTransport {
     }
     if (action === "get_task_status") {
       // WP-N1 (F2-B1): resultatet av en jobb startet fra en LÅST tur nås ellers av en skymodell (leveringsmeldingen merkes, men dette verktøyet leste jobben rått). Holdes tilbake VED UTFØRELSE, som utførelseslåsen for finans.
-      const withhold = this.withholdRestrictedFromCloud?.(context?.servingModel) === true;
-      const opts: JobViewOptions = { withholdRestricted: true };
+      // WP-N1 (R3-1): en LOKAL modell får fortsatt det fulle viewet (D-378 pkt 2), men en jobb med `restricted_origin` bærer den trusted booleanen `restricted: true`, så samtalemotoren låser turen (svaret kan gjengi resultatet).
+      // Eierens ruter (ingen `servingModel`) og vakten AV (ingen predikat) får NØYAKTIG det gamle viewet og kallformen (to argumenter).
+      const model = context?.servingModel;
+      const withhold = this.withholdRestrictedFromCloud?.(model) === true;
+      const opts: JobViewOptions | undefined = withhold
+        ? { withholdRestricted: true }
+        : this.withholdRestrictedFromCloud !== undefined && model !== undefined
+          ? { markRestricted: true }
+          : undefined;
       const id = parameters["task_id"];
       if (typeof id === "string" && id.length > 0) {
-        const job = withhold ? await this.jobs.get(identity, id, opts) : await this.jobs.get(identity, id);
+        const job = opts ? await this.jobs.get(identity, id, opts) : await this.jobs.get(identity, id);
         return { data: { job: (job ?? null) as unknown as JsonValue } };
       }
-      const jobs = withhold ? await this.jobs.list(identity, 8, opts) : await this.jobs.list(identity, 8);
+      const jobs = opts ? await this.jobs.list(identity, 8, opts) : await this.jobs.list(identity, 8);
       return { data: { jobs: jobs as unknown as JsonValue } };
     }
     throw new Error(`unknown_tasks_action:${action}`);

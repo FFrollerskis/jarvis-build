@@ -44,6 +44,19 @@ export function withholdsRestrictedJobFromCloud(model: { provider: string; model
 }
 
 /**
+ * WP-N1 (fiks-runde 3, R3-1): bærer en verktøyoutput et restricted-origin-jobbview til en LOKAL modell? Kun `tasks.get_task_status` (kilden er stemplet av `MeshToolExecutor` fra verktøynøkkelen, aldri fra modellen eller utdataene)
+ * og kun den TRUSTED booleanen `restricted: true` som `ChatJobs` setter fra kontraktens `restricted_origin` på `job`/`jobs[]`. En utkuttet output (`MeshToolExecutor.maxOutputChars` gir `{ truncated: true, preview }`) kan ikke avgjøres og regnes som
+ * bærer (fail-closed: en utkuttet liste kan ha skjult feltet). Samtalemotoren (`trackedExecutor`) låser turen når dette er sant, så svaret som kan gjengi resultatet lagres begrenset. Skymodeller får det tilbakeholdte viewet uten feltet.
+ */
+export function toolOutputBearsRestrictedJob(source: string | undefined, output: unknown): boolean {
+  if (source !== "tasks.get_task_status" || typeof output !== "object" || output === null) return false;
+  const o = output as { job?: unknown; jobs?: unknown; truncated?: unknown };
+  if (o.truncated === true) return true;
+  const restricted = (view: unknown): boolean => typeof view === "object" && view !== null && (view as { restricted?: unknown }).restricted === true;
+  return restricted(o.job) || (Array.isArray(o.jobs) && o.jobs.some(restricted));
+}
+
+/**
  * WP-N1 (fiks-runde 2, F2-A1): skal en GODKJENT bekreftelse utføres med `restrictedOrigin`? Kun delegeringen av en bakgrunnsjobb (`tasks.delegate_background_task`) som ble foreslått i en LÅST tur: kortet bærer da `restricted_turn`
  * (satt av `MeshToolExecutor` fra turbildet, aldri fra modellen). Utførelsen flytter fra executoren til `/confirmations` når turen er tainted eller handlingen er på handlingsnivå, og uten dette mistet jobben `restricted_origin`
  * (leveringen ble lagret umerket). Alt annet - andre verktøy, kort uten grunnen (ALLE kort med vakten AV: `turn.restricted` settes aldri) - gir `false`, så godkjenningsrutens kall er identisk med før N1.

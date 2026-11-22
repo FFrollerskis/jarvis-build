@@ -32,7 +32,7 @@ import { randomUUID } from "node:crypto";
 import { chatKnowledgeWithheldNote, chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
 import { LOCAL_FALLBACK_ERROR_KINDS, claudeBudgetRouteNote, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, reserveModelNote, stripSourceMarkerIds, stripSystemNotes } from "./tool-turn-route.ts";
 import { DEFAULT_CHAT_CANDIDATES, type ChatCandidates } from "./chat-candidates.ts";
-import { FAST_INTENT_RESTRICTED, RestrictedTurnMarker } from "./restricted-context-guard.ts";
+import { FAST_INTENT_RESTRICTED, RestrictedTurnMarker, toolOutputBearsRestrictedJob } from "./restricted-context-guard.ts";
 
 export interface ConversationDeps {
   messages: MessageStore;
@@ -169,7 +169,7 @@ export interface ConversationDeps {
   restrictedContextGuard?: boolean;
   /**
    * WP-N1 (fiks-runde 2, F2-B1b): ble en jobb startet fra en LÅST tur (`restricted_origin`)? `main.ts` setter dette KUN med vakten på. Hurtigbanens `jobbstatus <id>` gjengir jobbens resultat i et svar; er jobben begrenset, låses turen FØR svaret
-   * lagres (bruker- og assistentrad lagres begrenset). Kan opprinnelsen ikke avgjøres (feil), regnes jobben som begrenset (fail-closed). Utelatt = `jobbstatus` er som før N1.
+   * lagres (bruker- og assistentrad lagres begrenset). Kan opprinnelsen ikke avgjøres (feil, eller `jobOrigin` mangler med vakten på - R3-2), regnes jobben som begrenset (fail-closed). Vakten AV: `jobbstatus` er som før N1 (ingen markør, ingen oppslag).
    */
   jobOrigin?: { isRestricted(identity: IdentityContext, taskId: string): Promise<boolean> };
 }
@@ -690,6 +690,10 @@ export class ConversationEngine {
           if (o && o.confirmation_required === true && typeof o.confirmation_id === "string" && !confirmations.some((c) => c.confirmation_id === o.confirmation_id)) {
             confirmations.push({ confirmation_id: o.confirmation_id, tool: out.source ?? call.tool_name, status: o.status ?? "confirmation_required" });
           }
+          // WP-N1 (R3-1): en LOKAL modell i en tur som ikke var låst (dagstak, `JARVIS_TOOL_TURN_MODEL=off` eller fallback) får det fulle jobbviewet fra `tasks.get_task_status`; bærer det en restricted-origin-jobb (den TRUSTED booleanen
+          // `restricted`, satt av `ChatJobs` fra kontrakten - aldri fra tekst, og kun fra denne kilden), låses turen NÅ: brukermeldingen merkes og alle svar som lagres for turen (som kan gjengi resultatet) lagres begrenset. En SKYmodell
+          // får det tilbakeholdte viewet uten feltet og trenger ingen lås. Kaster merkingen, feiler turen (`restricted_marking_failed`) som ved lås før modellkallet. Kun med vakten på (`marker` finnes ellers ikke).
+          if (marker && !servedByCloudModel(call) && toolOutputBearsRestrictedJob(out.source, out.output)) await marker.lock(["tool_output:tasks.get_task_status"]);
           return out;
         }
       });
@@ -1239,8 +1243,9 @@ export class ConversationEngine {
         }
         // WP-N1 (F2-B1b): jobbens resultat er avledet av en LÅST tur når jobben ble startet derfra (`restricted_origin`) - svaret (og dermed brukermeldingen) lagres da begrenset, ellers ligger resultatet umerket i historikken og følger med til
         // neste skytur. Låsen settes FØR svaret bygges og lagres; kan merkingen ikke gjøres, kastes turen uten at noe er lagret/gjengitt. Kun med vakten på (`marker` og `jobOrigin` finnes ellers ikke).
-        if (marker && this.deps.jobOrigin) {
-          const restrictedJob = await this.deps.jobOrigin.isRestricted(identity, intent.task_id).catch(() => true);
+        // WP-N1 (R3-2): med vakten på og UTEN `jobOrigin` (feilkoblet motor) kan opprinnelsen ikke avgjøres: fail-closed (turen låses), som ved oppslagsfeil. Vakten AV: `marker` finnes ikke og ingenting endres.
+        if (marker) {
+          const restrictedJob = this.deps.jobOrigin ? await this.deps.jobOrigin.isRestricted(identity, intent.task_id).catch(() => true) : true;
           if (restrictedJob) await marker.lock(["fast_intent:task_status"]);
         }
         const res = result.value.result ? ` Resultat: ${JSON.stringify(result.value.result)}` : "";
