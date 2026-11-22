@@ -373,6 +373,13 @@ export function chatReadTierMeshTools(
 }
 
 /**
+ * WP-N1 (fiks-runde 2, F2-A1): grunnen en bekreftelse får når den opprettes i en tur som er LÅST til SECRET_RESTRICTED (`TurnContext.restricted`, kun satt av samtalemotoren med begrenset-vakten på). Kortet bærer den i `taint_reasons`, og
+ * `/confirmations` bruker den etter godkjenning til å utføre en delegert bakgrunnsjobb med `restrictedOrigin` (ellers mistet jobben merket når utførelsen flyttet fra executoren til godkjenningsruten). Nøytral intern kode: ingen innhold,
+ * tall eller leverandørnavn. Settes IKKE på turens taint (kun på kortets grunner), så den kan aldri gjøre en ren tur «tainted».
+ */
+export const RESTRICTED_TURN_REASON = "restricted_turn";
+
+/**
  * Del 3 (JARVIS-002/014): bekreftelsesport (strukturell grensesnitt - implementert av `ConfirmationStore` i @jarvis/core). Executoren bruker den
  * KUN i en tainted tur for handlinger som krever ny bekreftelse. Modellen når aldri denne porten.
  */
@@ -514,7 +521,8 @@ export class MeshToolExecutor {
       if (isAct || taintedNeeds) {
         const gate = this.guards.confirmations;
         const identity = this.identity as { tenant_id: string; person_id: string; device_id?: string; session_id?: string };
-        const reasons = [...(turn?.taint?.reasons ?? []), ...(isAct ? ["owner_action_tier"] : [])];
+        // WP-N1 (F2-A1): en bekreftelse opprettet i en LÅST tur bærer `restricted_turn`, så godkjenningsruten kan utføre en delegert jobb med `restrictedOrigin`. Uten merket på turen (vakten AV) er listen NØYAKTIG som før N1.
+        const reasons = [...(turn?.taint?.reasons ?? []), ...(isAct ? ["owner_action_tier"] : []), ...(turn?.restricted === true ? [RESTRICTED_TURN_REASON] : [])];
         const check = gate
           ? await gate.checkAndConsume({ tool_id: mapped.tool_id, action: mapped.action, parameters: parameters as Record<string, JsonValue> }, identity, reasons)
           : ({ ok: false, reason: "confirmation_unavailable" } as { ok: false; reason: string; confirmation_id?: string });

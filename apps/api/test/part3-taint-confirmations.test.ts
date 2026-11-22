@@ -301,7 +301,8 @@ describe("D-382: eierens godkjenning UTFØRER kallet (approveAndTake) - bundet, 
     const id = (first as { confirmation_id: string }).confirmation_id;
     // Godkjenning fra en ANNEN enhet (dashbord på telefonen) - samme person.
     const taken = await store.approveAndTake({ ...identity, device_id: "dev-phone" }, id);
-    expect(taken).toEqual({ confirmation_id: id, tool_id: "todoist", action: "create_task", parameters: actCall.parameters });
+    // WP-N1 (F2-A1): `approveAndTake` returnerer i tillegg grunnene kortet ble opprettet med (`taint_reasons`).
+    expect(taken).toEqual({ confirmation_id: id, tool_id: "todoist", action: "create_task", parameters: actCall.parameters, taint_reasons: ["owner_action_tier"] });
     expect(await store.approveAndTake(identity, id)).toBeNull();
     await store.recordResult(identity, id, { ok: true, data: { id: "t-1" } });
     const row = await admin.query("SELECT status, result, executed_at, decided_via_device_id FROM action_confirmations WHERE confirmation_id = $1", [id]);

@@ -37,6 +37,7 @@ import { handleVisionRoute, type VisionApiDeps } from "./vision-routes.ts";
 import { handleSituationSignalRoute, type SituationSignalApiDeps } from "./situation-signal-routes.ts";
 import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
+import { confirmationRestrictsOrigin } from "./restricted-context-guard.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
   FORBIDDEN_IDENTITY_BODY_KEYS, HttpError, RateLimiter, clientKey, newRequestId, readJsonBody, readRawBodyLimited
@@ -1458,7 +1459,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         tool_id: taken.tool_id,
         action: taken.action,
         parameters: taken.parameters,
-        idempotency_key: `confirmation:${taken.confirmation_id}`
+        idempotency_key: `confirmation:${taken.confirmation_id}`,
+        // WP-N1 (F2-A1): en delegert bakgrunnsjobb godkjent fra en kort opprettet i en LÅST tur utføres med `restrictedOrigin` (kortets `restricted_turn`, satt av trusted kode) - ellers mister kontrakten `restricted_origin` og leveringen lagres umerket.
+        // Kort uten grunnen (alle kort med begrenset-vakten AV) gir NØYAKTIG kallet fra før N1.
+        ...(confirmationRestrictsOrigin(taken) ? { restrictedOrigin: true as const } : {})
       });
       const stored: JsonValue = result.ok
         ? { ok: true, data: (result.data ?? null) as JsonValue, external_id: result.external_id ?? null }

@@ -99,6 +99,18 @@ export type ConfirmationCheck =
   | { ok: true; confirmation_id: string }
   | { ok: false; reason: "confirmation_required" | "confirmation_pending" | "confirmation_rejected" | "confirmation_expired" | "confirmation_binding_mismatch"; confirmation_id?: string };
 
+/**
+ * Det trusted lag utfører etter eierens godkjenning (`approveAndTake`). `taint_reasons` (WP-N1 F2-A1) er grunnene kortet ble opprettet med (ubetrodd output, handlingsnivå, `restricted_turn` fra en LÅST tur); godkjenningsruten leser dem til å
+ * avgjøre om en delegert jobb skal utføres med `restrictedOrigin`. Grunnene er data fra trusted lag (aldri fra modellen) og endrer ikke bindingen.
+ */
+export interface TakenConfirmation {
+  confirmation_id: string;
+  tool_id: string;
+  action: string;
+  parameters: Record<string, JsonValue>;
+  taint_reasons: string[];
+}
+
 export interface PendingConfirmation {
   confirmation_id: string;
   tool_id: string;
@@ -332,17 +344,17 @@ export class ConfirmationStore {
   async approveAndTake(
     decider: Pick<IdentityContext, "tenant_id" | "person_id" | "device_id">,
     confirmationId: string
-  ): Promise<{ confirmation_id: string; tool_id: string; action: string; parameters: Record<string, JsonValue> } | null> {
+  ): Promise<TakenConfirmation | null> {
     return withTenantTransaction(this.pool, decider.tenant_id, async (client) => {
       const found = await client.query(
-        `SELECT confirmation_id, tool_id, action, parameters, call_fingerprint, binding_hash, nonce, expires_at, device_id
+        `SELECT confirmation_id, tool_id, action, parameters, call_fingerprint, binding_hash, nonce, expires_at, device_id, taint_reasons
            FROM action_confirmations
           WHERE confirmation_id = $1 AND tenant_id = $2 AND person_id = $3 AND status = 'pending' AND expires_at > now()
           FOR UPDATE`,
         [confirmationId, decider.tenant_id, decider.person_id]
       );
       const row = found.rows[0] as
-        | { confirmation_id: string; tool_id: string; action: string; parameters: Record<string, JsonValue> | null; call_fingerprint: string; binding_hash: string; nonce: string; expires_at: Date; device_id: string | null }
+        | { confirmation_id: string; tool_id: string; action: string; parameters: Record<string, JsonValue> | null; call_fingerprint: string; binding_hash: string; nonce: string; expires_at: Date; device_id: string | null; taint_reasons: string[] | null }
         | undefined;
       if (!row || row.parameters === null) return null;
       // Bindingen beregnes på nytt fra det som FAKTISK ble lagret (inkl. enheten kallet kom fra - godkjenningen kan skje fra en annen
@@ -366,7 +378,7 @@ export class ConfirmationStore {
         action: row.action,
         payload: { confirmation_id: row.confirmation_id, binding_hash: row.binding_hash, executes: true }
       });
-      return { confirmation_id: row.confirmation_id, tool_id: row.tool_id, action: row.action, parameters: row.parameters };
+      return { confirmation_id: row.confirmation_id, tool_id: row.tool_id, action: row.action, parameters: row.parameters, taint_reasons: Array.isArray(row.taint_reasons) ? row.taint_reasons : [] };
     });
   }
 

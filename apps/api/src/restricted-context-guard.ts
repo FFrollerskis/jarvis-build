@@ -1,6 +1,6 @@
 import type { IdentityContext } from "@jarvis/contracts";
 import type { FastIntent, MessageStore } from "@jarvis/core";
-import type { FinanceExecutionLock } from "@jarvis/tool-gateway";
+import { RESTRICTED_TURN_REASON, type FinanceExecutionLock } from "@jarvis/tool-gateway";
 import { servedByCloudModel } from "./cloud-tool-screen.ts";
 
 /**
@@ -41,6 +41,15 @@ export function withholdsRestrictedJobFromCloud(model: { provider: string; model
   if (model === undefined) return false;
   if (typeof model !== "object" || model === null || typeof model.provider !== "string" || model.provider.trim() === "") return true;
   return !financeLockServedLocally(model);
+}
+
+/**
+ * WP-N1 (fiks-runde 2, F2-A1): skal en GODKJENT bekreftelse utføres med `restrictedOrigin`? Kun delegeringen av en bakgrunnsjobb (`tasks.delegate_background_task`) som ble foreslått i en LÅST tur: kortet bærer da `restricted_turn`
+ * (satt av `MeshToolExecutor` fra turbildet, aldri fra modellen). Utførelsen flytter fra executoren til `/confirmations` når turen er tainted eller handlingen er på handlingsnivå, og uten dette mistet jobben `restricted_origin`
+ * (leveringen ble lagret umerket). Alt annet - andre verktøy, kort uten grunnen (ALLE kort med vakten AV: `turn.restricted` settes aldri) - gir `false`, så godkjenningsrutens kall er identisk med før N1.
+ */
+export function confirmationRestrictsOrigin(taken: { tool_id: string; action: string; taint_reasons?: readonly string[] }): boolean {
+  return taken.tool_id === "tasks" && taken.action === "delegate_background_task" && (taken.taint_reasons ?? []).includes(RESTRICTED_TURN_REASON);
 }
 
 /**
