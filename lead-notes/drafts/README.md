@@ -33,6 +33,7 @@ Alt i denne mappen er utkast skrevet offline. Ingenting er postet. Fakta er hent
 | 10 | `claude/wp-g3-vision` | pr-10 | B3, D3 merget |
 | 11 | `claude/wp-g4-situation-bridges` | pr-11 | B3, D3, B4, G2, G3 merget (+ testtilpasning `87b49a65`) |
 | 12 | `claude/d471-d474-konsolidering` | pr-12 | oppdater `PROJECT_STATUS.md` først (se §4) |
+| 13 | `claude/wp-n1-restricted-history` | pr-13 | ALLE 12 over merget; egne commits cherry-picks oppå oppdatert `main` (se §9) |
 
 Siden grenene er stablet via integrasjonsmerger viser PR-diffen mot `main` først kun egen endring når forgjengerne er merget. Åpnes PR-er tidligere, skriv i PR-teksten at diffen inneholder forgjengerne.
 
@@ -83,3 +84,9 @@ Hver tilstand = `origin/main` + alle forgjengerne merget (to-forelder) + den akt
 | +G4 og `87b49a65` (`11b`) | 975 / 16 654 | 5 kjente røde |
 | +docs (`12`) | == `integration/post-merge-test-2` (full suite 16 649 av 16 654) | grønn |
 **Test-tilpasningene er nødvendige (målt):** uten `ca13dace` feiler `apps/api/test/wpg1-comms-routes.test.ts` (1 test) i G2-tilstanden; med den består 29/29. Uten `87b49a65` feiler `modules/situations/test/wpg2-autonomy-step-up.test.ts` (2 av 5) i G4-tilstanden; med den består 5/5. De MÅ derfor med i henholdsvis G2-PR-en og G4-PR-en. Forventet CI per PR i den rekkefølgen: grønn bortsett fra de fem kjente sandkasse-feilene (som skal være grønne/ikke relevante på GitHub-runnere; ikke verifisert der).
+
+## 9. WP-N1 (PR 13): begrenset-merking av samtalehistorikk + utførelseslås for finance/finance_* (bygget 2026-11-22, etter kjeden)
+- Grenen `claude/wp-n1-restricted-history` er bygget OPPÅ `refs/rehearsal/12-docs` (`7de8924f`, alle ni deler + docs), IKKE oppå `main`. Den kan derfor IKKE pushes og åpnes som PR direkte (diffen ville vise alle forgjengerne). Når PR 1-12 er merget (main-treet er da identisk med `12-docs`-treet): `git fetch origin main && git checkout -b claude/wp-n1-pr origin/main && git cherry-pick $(git rev-list --reverse 7de8924f..claude/wp-n1-restricted-history)` (kun N1s egne commits; skal gå uten konflikter siden basetreet er identisk; ellers: stopp og beskriv). Push som `claude/wp-n1-restricted-history` (hvis navnet ikke er tatt av bundle-pushen) eller `claude/wp-n1-pr`.
+- Migrasjon 140 (neste ledige etter 139 fra G4): sjekk at `origin/main` ikke har fått en annen migrasjon med nummer 140 siden (`migration_prefix_duplicate`).
+- Test før PR: `pnpm install --frozen-lockfile`, typecheck, lint, `check:containment`, N1-testene og ALLE testfiler som leser `main.ts`/`worker-main.ts` (kildetekst-vakter: ua3-business-events-host-run-wiring, wpf1-review-source-guards m.fl.).
+- Draft-PR; PR-tekst: `pr-13-wp-n1-restricted-history.md` (lages etter siste review). Merge kun etter reglene i §5. N1 aktiveres ALDRI før NAS-verifisering (runbook `docs/runbooks/WPN1_RESTRICTED_HISTORY.md`), og flagget `JARVIS_RESTRICTED_CONTEXT_GUARD` skal stå PÅ før/sammen med `JARVIS_CONTROL_CENTER_FINANCE` og `_VALUE`.
