@@ -36,7 +36,7 @@ export const JOB_STALE_MS = 36 * HOUR_MS;
 /** Over dette (minutter siste 30 døgn) regnes en connector som kostbar å vedlikeholde. */
 export const MAINTENANCE_WARN_MINUTES_30D = 180;
 const AUDIT_WINDOW_MS = 7 * 24 * HOUR_MS;
-const JOB_WINDOW_DAYS = 14;
+export const JOB_WINDOW_DAYS = 14;
 
 /** Daglig helsesveip (`runConnectorHealthSweep`, `main.ts`): kjører live-testen mot hver konfigurert connector. */
 export const CONNECTOR_HEALTH_SWEEP_JOB = "connector-health-sweep";

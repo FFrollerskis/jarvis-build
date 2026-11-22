@@ -1,12 +1,20 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type { IdentityContext } from "@jarvis/contracts";
 import { scanForSecrets } from "@jarvis/core";
-import { ControlCenterRegistry } from "@jarvis/executive";
+import { ControlCenterRegistry, type GoldenSuiteControl, type InfraStatusReport, type ValueReport } from "@jarvis/executive";
 import { resolveAuthorityMode, type AuthorityConfig } from "@jarvis/policy";
+import type { BackupStatusRead } from "../backup-status.ts";
+import { createAgentCenter } from "./agent.ts";
 import { createAiCenter, type AiCenterDeps } from "./ai.ts";
 import { createAuthorityCenter, type AuthorityCenterDeps } from "./authority.ts";
+import { createFinanceCenter } from "./finance.ts";
 import { createIntegrationCenter, type IntegrationCenterDeps } from "./integration.ts";
-import type { ControlCenterPool } from "./shared.ts";
+import { createMemoryCenter } from "./memory.ts";
+import { createOperationsCenter } from "./operations.ts";
+import { createPrivacyCenter } from "./privacy.ts";
+import { createSecurityCenter } from "./security.ts";
+import { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS, flagOn, type ControlCenterPool } from "./shared.ts";
+import { createValueCenter } from "./value.ts";
 
 export type { ControlCenterPool } from "./shared.ts";
 
@@ -24,6 +32,9 @@ export type { ControlCenterPool } from "./shared.ts";
 export function ownerPredicate(authority: AuthorityConfig): (identity: IdentityContext) => boolean {
   return (identity) => resolveAuthorityMode(authority, identity) === "SOVEREIGN";
 }
+
+// Flaggobjektene (`CONTROL_CENTER_FLAGS`, `CONTROL_FEATURE_FLAGS`) bor i `shared.ts` og re-eksporteres her (se kommentaren der): `main.ts` leser dem derfra, så importlinjen fra denne fabrikken forblir uendret.
+export { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS };
 
 /** Redigerer hemmeligheter i alle menneskelesbare strenger i en rapport (siste forsvarslinje). FAST: ikke en parameter noe sted. */
 const redactSecrets = (text: string): string => scanForSecrets(text).text;
@@ -54,13 +65,13 @@ export function createControlCenterRegistry(wiring: ControlCenterRegistryWiring)
  * WP-H0 (UA-11 Admin Control Center): ÉN plass der kontrollsentrene kobles til registeret. Hvert senter er en `ControlCenterDefinition` (se `@jarvis/executive` sin `control-center/types.ts`) i sin
  * EGEN fil i denne mappen (`integration.ts`, `authority.ts`, `ai.ts`, ...), slik at flere byggeagenter kan legge til sentre uten å røre hverandres filer.
  *
- * KROKPUNKT FOR NYE SENTRE (Finance, Memory, Agent, Operations, Value, Privacy, Security): legg til én linje i `registerControlCenters()` under, og utvid `ControlCenterWiring` med det senteret trenger
- * (additivt). Agent Center: bruk `agents.ts` (`readActiveTasks`, `activeTaskRows` med avbryt-handlingen) i stedet for en egen jobbleser, så to sentre aldri viser samme jobb med to ulike knapper.
+ * KROKPUNKT FOR NYE SENTRE (Operations, Value, Privacy, Security - H2): legg til én linje i `registerControlCenters()` under, og utvid `ControlCenterWiring` med det senteret trenger
+ * (additivt). WP-H1 koblet inn Finance (`finance.ts`), Memory (`memory.ts`) og Agent (`agent.ts`, som bruker `agents.ts`: `readActiveTasks`/`activeTaskRows` med avbryt-handlingen, så to sentre aldri viser
+ * samme jobb med to ulike knapper) - hver bak sitt flagg i `CONTROL_CENTER_FLAGS`.
  *
- * VALUE-KROKPUNKT (WP-C4 ER på main, merget 2026-10-09; koblingen hit er bevisst utsatt til H1/H2): verdirapporten kommer fra `ExecutiveService.getValueReport(tenantId)` → `ValueReport` med verdiløkker V1-V5,
- * Builder Loop-beredskap og V5-forslag (`modules/executive/src/value/*`; `main.ts` gir tjenesten `value: { source, facts }`). Når den kobles: (1) legg til `valueReport?: (tenantId: string) => Promise<ValueReport>` i
- * `ControlCenterWiring`, (2) lag `value.ts` i denne mappen (`createValueCenter`: én seksjon per verdiløkke, `measured` fra rapporten, ingen egne handlinger - V2-push og V5-forslag har egne brytere), og
- * (3) registrer den her med id `value`. Til da står `value` i oversiktens `unregistered`-liste (aldri «i orden»).
+ * WP-H2 koblet inn Drift (`operations.ts`), Verdi (`value.ts`), Personvern (`privacy.ts`) og Sikkerhet (`security.ts`) - hver bak sitt flagg i `CONTROL_CENTER_FLAGS`. Drift og Verdi leser rapportene til `ExecutiveService`
+ * (`getInfraStatus`/`getValueReport`, WP-E1/WP-C4) gjennom LATE funksjoner i `ControlCenterWiring` (tjenesten bygges etter sentrene i `main.ts`); de lager ingen egen kobling og har ingen egne handlinger.
+ * Til sammen er alle ti sentre fra masterplan kap. 21 koblet inn bak flagg - et senter uten flagg (eller uten sine avhengigheter) står i oversiktens `unregistered`-liste («ikke koblet inn», aldri «i orden»).
  *
  * `main.ts` bygger `ControlCenterWiring` ÉN gang fra de allerede konstruerte tjenestene (ingen nye instanser, ingen ny tilkobling). Sentrene leser kun eksisterende kilder; de skriver ingenting.
  */
@@ -86,6 +97,16 @@ export interface ControlCenterWiring {
   councilLimiter?: AiCenterDeps["councilLimiter"];
   evolutionReport?: AiCenterDeps["evolutionReport"];
   maxActiveJobs?: AiCenterDeps["maxActiveJobs"];
+  /** WP-H2 Value Center: `ExecutiveService.getValueReport` (lat - tjenesten bygges etter sentrene). Uten den registreres ikke Verdi-senteret. */
+  valueReport?: (tenantId: string) => Promise<ValueReport>;
+  /** WP-H2 Operations Center: `ExecutiveService.getInfraStatus` (lat). Uten den registreres ikke Drift-senteret. */
+  infraStatus?: (tenantId: string) => Promise<InfraStatusReport>;
+  /** WP-H2 Operations Center: backup-statusfilen (`backupStatusSourceFromEnv()`); utelatt = backup og restore-øvelser er UKJENT. */
+  backupStatus?: () => Promise<BackupStatusRead>;
+  /** WP-H2 Operations Center: når API-prosessen startet (prosess-oppetid). */
+  processStartedAt?: () => Date;
+  /** WP-H2 Security Center: golden-suite-kjøreren. Brukes KUN med `JARVIS_CONTROL_GOLDEN_SUITE=on`. */
+  goldenSuite?: GoldenSuiteControl;
 }
 
 export function registerControlCenters(registry: ControlCenterRegistry, wiring: ControlCenterWiring): void {
@@ -109,7 +130,30 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
     registry.register(createAuthorityCenter({
       pool: wiring.pool, env: wiring.env, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls, killSwitch: wiring.killSwitch,
       ...(wiring.authority ? { authority: wiring.authority } : {}),
-      ...(wiring.infraGate ? { infraGate: wiring.infraGate } : {})
+      ...(wiring.infraGate ? { infraGate: wiring.infraGate } : {}),
+      // WP-H2: per-binding tilbakekall-knapp i Autoritet-senteret - kun med JARVIS_CONTROL_AUTONOMY_REVOKE=on (uten flagg er senteret uendret fra H0).
+      ...(flagOn(wiring.env, CONTROL_FEATURE_FLAGS.autonomyRevoke) ? { autonomyRevoke: true } : {})
+    }));
+  }
+  // WP-H1: Finans, Minne og Agenter - hver bak sitt flagg (AV som standard), kun lesing av eksisterende tabeller. Uten verktøyregisteret (risikoklasse for knappene) registreres ikke Finans/Agenter.
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.finance) && wiring.toolGateway) registry.register(createFinanceCenter({ pool: wiring.pool, toolGateway: wiring.toolGateway }));
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.memory)) registry.register(createMemoryCenter({ pool: wiring.pool, env: wiring.env }));
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.agent) && wiring.toolGateway) registry.register(createAgentCenter({ pool: wiring.pool, toolGateway: wiring.toolGateway }));
+  // WP-H2: Drift, Verdi, Personvern og Sikkerhet - hver bak sitt flagg (AV som standard), kun lesing av eksisterende kilder. Et senter uten sine avhengigheter registreres IKKE (ærlig «ikke koblet inn»).
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.operations) && wiring.infraStatus) {
+    registry.register(createOperationsCenter({
+      pool: wiring.pool, infraStatus: wiring.infraStatus,
+      ...(wiring.backupStatus ? { backupStatus: wiring.backupStatus } : {}),
+      ...(wiring.processStartedAt ? { processStartedAt: wiring.processStartedAt } : {}),
+      ...(wiring.maxActiveJobs !== undefined ? { maxActiveJobs: wiring.maxActiveJobs } : {})
+    }));
+  }
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.value) && wiring.valueReport) registry.register(createValueCenter({ valueReport: wiring.valueReport }));
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.privacy)) registry.register(createPrivacyCenter({ pool: wiring.pool, env: wiring.env }));
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.security) && wiring.toolGateway && wiring.ownerControls && wiring.killSwitch) {
+    registry.register(createSecurityCenter({
+      pool: wiring.pool, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls, killSwitch: wiring.killSwitch,
+      ...(flagOn(wiring.env, CONTROL_FEATURE_FLAGS.goldenSuite) && wiring.goldenSuite ? { goldenSuite: wiring.goldenSuite } : {})
     }));
   }
 }

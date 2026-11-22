@@ -1,5 +1,5 @@
 import { chatReadTierMeshTools, curatedReadOnlyMeshTools, type MeshToolMapping } from "./mesh-bridge.ts";
-import { CHAT_READ_TIER } from "./chat-read-tier.ts";
+import { CHAT_READ_TIER, OPTIONAL_TIER_KEYS } from "./chat-read-tier.ts";
 import { CHAT_ACT_TIER } from "./chat-act-tier.ts";
 import { CHAT_DELEGATE_TIER, DELEGATE_WRITE_KEYS } from "./chat-delegate-tier.ts";
 import { inferEffect } from "./tool-manifest.ts";
@@ -147,7 +147,8 @@ export function assertChatReadTier(
     if (MODEL_SURFACE_ALLOWLIST.some((b) => b.tool_id === a.tool_id && b.action === a.action)) violations.push(`${k}: allerede i minimumssettet`);
     const def = registered.get(k);
     if (!def) {
-      if (!options.allowUnregistered) violations.push(`${k}: ikke registrert i ToolGateway`);
+      // Gjennomgang M1: kontrollsenter-lesetoolene registreres kun med flagget på (`OPTIONAL_TIER_KEYS`) - uregistrert er da riktig, ikke en feil.
+      if (!options.allowUnregistered && !OPTIONAL_TIER_KEYS.has(`${a.tool_id}.${a.action}`)) violations.push(`${k}: ikke registrert i ToolGateway`);
       continue;
     }
     if (def.capability_class !== "A") violations.push(`${k}: klasse ${def.capability_class}, kun klasse A (lesing) er tillatt`);

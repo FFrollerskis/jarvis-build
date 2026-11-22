@@ -48,7 +48,12 @@ export interface TaskCounts {
   cancelled_24h: number;
 }
 
-export async function readActiveTasks(pool: ControlCenterPool, tenantId: string): Promise<ActiveTaskRow[]> {
+/**
+ * WP-H1: `limit` er valgfri (standard 50, som i H0 - AI Center er uendret). Agent Center ber om flere (`AGENT_CENTER_MAX_ACTIVE_ROWS`) og viser selv hvor mange som ikke vises, slik at dekningen av kjørende
+ * agenter og jobber (JARVIS-087 del 2) aldri skjules bak en stille avkortning. Grensen er et heltall 1-500 (aldri bygget fra data).
+ */
+export async function readActiveTasks(pool: ControlCenterPool, tenantId: string, limit: number = MAX_ACTIVE_ROWS): Promise<ActiveTaskRow[]> {
+  const rowLimit = Number.isInteger(limit) && limit >= 1 && limit <= 500 ? limit : MAX_ACTIVE_ROWS;
   const rows = await tenantRead(pool, tenantId, (query) => query(
     `SELECT task_id, status, attempts, created_at, claimed_at, lease_expires_at, worker_id, cancel_requested, (last_error IS NOT NULL) AS has_error,
             coalesce(contract->>'agent_profile', 'ukjent') AS agent_profile,
@@ -58,7 +63,7 @@ export async function readActiveTasks(pool: ControlCenterPool, tenantId: string)
        FROM tasks
       WHERE tenant_id = $1 AND status IN ('created', 'running', 'paused')
       ORDER BY (status = 'running') DESC, created_at
-      LIMIT ${MAX_ACTIVE_ROWS}`,
+      LIMIT ${rowLimit}`,
     [tenantId]
   ));
   return rows.map((r) => ({

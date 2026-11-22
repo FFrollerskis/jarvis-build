@@ -2,7 +2,10 @@ import type { SloReport } from "./slo/index.ts";
 import { composeSloReport, SLO_CATALOG } from "./slo/index.ts";
 import { composeEvolutionReport, type EvolutionReport } from "./evolution/index.ts";
 import { composeAiMeshReport, type AiMeshReport } from "./ai-mesh/index.ts";
-import { composeControlCenterOverview, explainControlCenterNo, type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport } from "./control-center/index.ts";
+import {
+  composeControlCenterOverview, explainControlCenterNo,
+  type ControlCenterBuildOptions, type ControlCenterId, type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport, type GoldenSuiteControl, type GoldenSuiteRunResult
+} from "./control-center/index.ts";
 import {
   composeValueReport, deriveChangeFreeze, describeValueLoops, evaluateBuilderLoopReadiness, proposeOpsActions,
   type ValueMeasurementSource, type ValueMeasurement, type ValueReport, type ValueRuntimeFacts, type ValueWindows
@@ -112,6 +115,11 @@ export interface ExecutiveServiceOptions {
    */
   controlCenters?: ControlCenterRegistry;
   /**
+   * Gjennomgang M2: er modellen som betjener kallet en LOKAL modell? Lokale modeller får se finansdata (D-378 punkt 2: kun skyen er utestengt); alt annet - sky, ukjent leverandør - regnes som sky (fail-closed).
+   * Utelatt = ingen modell regnes som lokal, så ethvert kall fra en modell holder finans tilbake. I drift: leverandørregisterets `locality` (`servedByCloudModel`, `apps/api/src/cloud-tool-screen.ts`).
+   */
+  servedLocally?: (model: { provider: string; model: string }) => boolean;
+  /**
    * WP-H0 (JARVIS-087): avbryt en bakgrunnsjobb/agent fra kontrollsenteret. Den EKSISTERENDE kanselleringsveien (`TaskService.cancel`: klasse B-policy, `requestCancel`, revisjon `task.cancelled`) injiseres fra
    * `apps/api`; executive-laget har ingen egen kanselleringslogikk. Uten denne avvises handlingen (`executive_tasks_not_configured`).
    */
@@ -128,13 +136,30 @@ export interface ExecutiveServiceOptions {
    * `producers_interval_ms` kommer fra kjøretidskonfig; `mode` er den delte infra-modusen (NORMAL/DEGRADED/PAUSED). Uten `infra` er hendelser og endringer `not_measured` (aldri 0).
    */
   infra?: { source: InfraStatusSource; producers_enabled: boolean; producer_names: readonly string[]; producers_interval_ms: number; mode?: () => Promise<string | null> };
+  /**
+   * WP-H2: golden-suite-kjøreren (injisert fra `apps/api`; kun med `JARVIS_CONTROL_GOLDEN_SUITE=on`). Deterministisk og lesende: ingen modell, ingen database, ingen skriving. Uten kjører avvises `run_golden_suite`.
+   */
+  goldenSuite?: GoldenSuiteControl;
+  /**
+   * WP-H2 (gjennomgang L1): skriver en revisjonsrad (append-only `audit_events`) som er COMMITTET før en autonomi-binding slettes (`revokeAutonomyBinding`). Injisert fra `apps/api` (`withTenantTransaction` + `writeAudit`);
+   * executive-pakken har ingen databasetilgang selv. Utelatt eller kastende = tilbakekallet avvises (fail-closed).
+   */
+  autonomyAudit?: (identity: IdentityContext, entry: { type: string; tool_id: string; action: string; payload: Record<string, unknown> }) => Promise<void>;
+  /**
+   * WP-H2: lat binding. Konstruktøren legger seg selv i holderen, slik at kontrollsentrene (som bygges FØR tjenesten i `main.ts`) kan lese `getValueReport`/`getInfraStatus` når en forespørsel kommer -
+   * uten at tjenesten må konstrueres tidligere eller flyttes ut av `additionalTools`-listen (komposisjonsroten er låst av `executive-wiring.test.ts`).
+   */
+  holder?: { service?: ExecutiveService };
 }
 
 export class ExecutiveService {
   constructor(
     private readonly gateway: ToolGateway,
     private readonly options: ExecutiveServiceOptions = {}
-  ) {}
+  ) {
+    // WP-H2: lat binding - se `ExecutiveServiceOptions.holder`.
+    if (options.holder !== undefined) options.holder.service = this;
+  }
 
   /**
    * Henter (via `situations.get_queue`, ALDRI en egen spørring) + pause-/
@@ -194,6 +219,53 @@ export class ExecutiveService {
   /** Rent gjennomslag til `situations.unpause_domain`. */
   async resumeDomain(identity: IdentityContext, domain: string): Promise<ToolResult> {
     return this.gateway.execute({ identity, tool_id: "situations", action: "unpause_domain", parameters: { domain } });
+  }
+
+  /**
+   * WP-H2: tilbakekall av eierens autonomi-binding (D-160, `situation_autonomy_policies`) for ÉTT domene. Slettingen er et gjennomslag til `situations.clear_autonomy_policy` med den UENDREDE identiteten (D-68): motoren
+   * velger rommet fra identiteten (kun kallerens eget minnerom), og dens EGEN sovereign-eier-port (`assertAutonomyAuthority`) gjelder i tillegg til policyen. Ingen egen slettelogikk her.
+   *
+   * Gjennomgang L1: SLETTINGEN KAN IKKE ANGRES (parametrene til bindingen lagres ellers ingen steder), så FØR DELETE leses bindingen (`situations.list_autonomy_policies`, kallerens eget rom) og en
+   * revisjonsrad med FØR-BILDET (domene, verktøy, handling, aktiv/av, parametre, hvem som satte den) skrives og COMMITTES (`autonomyAudit`, injisert fra apps/api: `writeAudit` i egen transaksjon). FAIL-CLOSED i alle
+   * tre ledd: kan bindingen ikke leses, kan revisjonsraden ikke skrives, eller mangler `autonomyAudit`, utføres INGEN sletting. Mangler bindingen (`existed: false`) skrives raden likevel (forsøket er revisjonsverdig) og
+   * slettingen er idempotent (`removed: false`).
+   */
+  async revokeAutonomyBinding(identity: IdentityContext, domain: string): Promise<ToolResult> {
+    const audit = this.options.autonomyAudit;
+    if (audit === undefined) return { ok: false, reason: "autonomy_audit_not_configured" };
+    const listed = await this.gateway.execute({ identity, tool_id: "situations", action: "list_autonomy_policies", parameters: {} });
+    if (!listed.ok) return { ok: false, reason: `before_image_unreadable:${listed.reason.slice(0, 60)}` };
+    if (!Array.isArray(listed.data)) return { ok: false, reason: "before_image_unreadable:unexpected_shape" };
+    const row = (listed.data as unknown[]).find((r) => typeof r === "object" && r !== null && (r as { domain?: unknown }).domain === domain) as Record<string, unknown> | undefined;
+    const before = row === undefined
+      ? null
+      : {
+        domain, tool_id: String(row["tool_id"] ?? ""), action: String(row["action"] ?? ""), enabled: row["enabled"] === true,
+        parameters: (row["parameters"] ?? null) as JsonValue, actor_person_id: row["actor_person_id"] === undefined || row["actor_person_id"] === null ? null : String(row["actor_person_id"]),
+        updated_at: row["updated_at"] === undefined || row["updated_at"] === null ? null : String(row["updated_at"])
+      };
+    try {
+      await audit(identity, {
+        type: "autonomy_binding.revoke_requested", tool_id: "executive", action: "revoke_autonomy_binding",
+        payload: {
+          domain, memory_space: identity.memory_space_id, existed: before !== null, before,
+          recovery: before === null ? "ingen binding å gjenopprette" : "set_autonomy_policy med verdiene i `before` (domene, tool_id, action, enabled, parameters)"
+        }
+      });
+    } catch {
+      return { ok: false, reason: "autonomy_audit_write_failed" };
+    }
+    return this.gateway.execute({ identity, tool_id: "situations", action: "clear_autonomy_policy", parameters: { domain } });
+  }
+
+  /**
+   * WP-H2: golden-suite-knappen - kjører den deterministiske suiten via den injiserte kjøreren (ingen modell, ingen database, ingen skriving). Uten kjører (flagget AV) finnes ikke handlingen; dette er en ekstra
+   * lukket dør hvis verktøyet likevel skulle bli registrert uten kjører.
+   */
+  async runGoldenSuite(): Promise<GoldenSuiteRunResult> {
+    const suite = this.options.goldenSuite;
+    if (suite === undefined) throw new Error("golden_suite_not_configured");
+    return suite.run();
   }
 
   /** Rent gjennomslag til `situations.get_pause_state`. */
@@ -465,6 +537,17 @@ export class ExecutiveService {
   }
 
   /**
+   * WP-H1/H2: lese-porten for de per-senter verktøyene (`executive.get_<senter>_center`). SAMME port som `authorizeInfraStatus` (eier OG enhetssignert økt, `authorizeRead`) og FAIL-CLOSED også uten register:
+   * i motsetning til `get_control_center` (H0, slipper gjennom uten register fordi det da ikke er noe å lekke) har disse verktøyene ingen grunn til å være åpne for noen når eier-registeret mangler.
+   * Avslaget er en vanlig `tool.denied`-revisjonsrad FØR noe bygges.
+   */
+  authorizeControlCenterRead(identity: IdentityContext): { allowed: boolean; reason: string } {
+    const registry = this.options.controlCenters;
+    if (!registry) return { allowed: false, reason: "control_center_owner_check_not_configured" };
+    return registry.authorizeRead(identity);
+  }
+
+  /**
    * WP-H0 (JARVIS-087): eier-kun-porten for kontrollsenterets MUTASJONER (`cancel_task`). I motsetning til lesingen over er den FAIL-CLOSED også uten register: en skrivehandling slippes aldri gjennom fordi
    * «det ikke er noe å lekke». Samme eier-predikat (`isOwner`, i drift `resolveAuthorityMode(...) === "SOVEREIGN"`) som kontrollsentrene bruker.
    */
@@ -475,17 +558,34 @@ export class ExecutiveService {
   }
 
   /** WP-H0: oversikt over de ti kontrollsentrene (registrerte bygges, øvrige listes som ikke koblet inn). RENT lesende. */
-  async getControlCenterOverview(identity: IdentityContext): Promise<ControlCenterOverview> {
+  async getControlCenterOverview(identity: IdentityContext, options: { withhold?: readonly ControlCenterId[]; restrictFinance?: boolean } = {}): Promise<ControlCenterOverview> {
     const registry = this.options.controlCenters;
-    if (registry) return registry.overview(identity);
+    if (registry) return registry.overview(identity, options);
     return composeControlCenterOverview([], new Date());
   }
 
+  /** Gjennomgang M2: betjenes kallet av en SKYmodell? `false` uten modell (siden/ruten) og for en lokal modell; `true` for sky og alt ukjent (fail-closed). */
+  isCloudServed(model: { provider: string; model: string } | undefined): boolean {
+    if (model === undefined) return false;
+    const local = this.options.servedLocally;
+    if (local === undefined) return true;
+    try {
+      return local(model) !== true;
+    } catch {
+      return true;
+    }
+  }
+
+  /** Er senteret registrert (flagg på og avhengigheter koblet)? Brukes for at en holdt-tilbake-melding aldri skal gis for et senter som ikke finnes. */
+  hasControlCenter(id: string): boolean {
+    return this.options.controlCenters?.has(id) === true;
+  }
+
   /** WP-H0: full rapport for ETT senter + deterministisk forklaring, eller `null` når senteret ikke er koblet inn. RENT lesende. */
-  async getControlCenterReport(identity: IdentityContext, center: string): Promise<{ report: ControlCenterReport; explanation_no: string } | null> {
+  async getControlCenterReport(identity: IdentityContext, center: string, options: ControlCenterBuildOptions = {}): Promise<{ report: ControlCenterReport; explanation_no: string } | null> {
     const registry = this.options.controlCenters;
     if (!registry) return null;
-    const report = await registry.report(center, identity);
+    const report = await registry.report(center, identity, options);
     return report === null ? null : { report, explanation_no: explainControlCenterNo(report) };
   }
 
