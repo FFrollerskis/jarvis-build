@@ -165,18 +165,28 @@ export function classifyContentSensitivity(input: SensitivityInput): Sensitivity
 export const RECENT_HISTORY_WINDOW = 4;
 
 /**
+ * WP-N1 (Q-66, JARVIS-101): nivået til ÉN historikkmelding. En melding merket `restricted === true` (lagret av samtalemotoren fra en tur som var låst til SECRET_RESTRICTED, `messages.restricted`) er SECRET_RESTRICTED
+ * UANSETT tekst - et lokalt svar fra en låst tur kan gjengi det følsomme uten at noe stikkord står der. Alt annet (ingen merking, `false`, `undefined`, andre verdier enn eksakt `true`) klassifiseres etter teksten
+ * som før, så kallere uten merking (og et flagg som er AV, der motoren aldri setter feltet) får NØYAKTIG den gamle oppførselen.
+ */
+function messageSensitivity(message: { content: string; restricted?: boolean }): DataSensitivity {
+  return message.restricted === true ? "SECRET_RESTRICTED" : classifyContentSensitivity({ texts: [message.content] }).sensitivity;
+}
+
+/**
  * D-384: én gammel helse-/finansmelding skal ikke låse HELE resten av samtalen (opptil 20 meldinger) til lokal modell.
  * Meldinger i det nylige vinduet beholdes alltid (og klassifiseres som før - et oppfølgingsspørsmål trenger konteksten). Eldre meldinger som
  * ALENE er strengere enn `ceiling` (nivået turen allerede har fra meldingen og det valgte minnet) holdes UTENFOR konteksten, så de aldri
  * sendes til en modell som ikke har lov til å se dem. Rekkefølgen på de som beholdes er uendret.
+ * WP-N1: en melding merket `restricted` regnes som SECRET_RESTRICTED uansett tekst (se `messageSensitivity`); par-regelen gjelder uendret.
  */
-export function partitionHistoryBySensitivity<T extends { content: string; role?: string }>(
+export function partitionHistoryBySensitivity<T extends { content: string; role?: string; restricted?: boolean }>(
   history: ReadonlyArray<T>,
   ceiling: DataSensitivity,
   recentWindow: number = RECENT_HISTORY_WINDOW
 ): { kept: T[]; withheld: number } {
   const cutoff = Math.max(0, history.length - recentWindow);
-  const drop = history.map((message, index) => index < cutoff && RANK[classifyContentSensitivity({ texts: [message.content] }).sensitivity] > RANK[ceiling]);
+  const drop = history.map((message, index) => index < cutoff && RANK[messageSensitivity(message)] > RANK[ceiling]);
   // Gjennomgang nr. 2 av WP-A (D-451): PARREGELEN gjelder også her. Svaret rett etter en holdt-tilbake brukermelding («Du har 45 000 igjen.») gjengir det følsomme uten at et stikkord står der, og spørsmålet rett før et
   // holdt-tilbake svar hører til det samme; de følger med ut også når de selv ligger i det nylige vinduet. (Halen fra første følsomme melding gjelder fortsatt bare i det nylige vinduet, se `withholdSensitiveMessages`.)
   const direct = [...drop];
@@ -205,14 +215,15 @@ export function partitionHistoryBySensitivity<T extends { content: string; role?
  *    berørte det følsomme i det nylige vinduet - prisen er mindre kontekst, ikke svakere personvern.
  * `protect` kan peke ut meldinger som aldri tas med av halen (eierens nåværende melding, som sendes uansett); en melding som likevel parres bort av en følsom nabo vises i `withheld`, så kalleren kan stoppe.
  * Rekkefølgen på de som beholdes er uendret. Det som holdes utenfor går aldri til skyen; den lokale reserveruten får fortsatt hele historikken.
+ * WP-N1: en melding merket `restricted` er «direkte følsom» uansett tekst (se `messageSensitivity`) - par-regelen, halen og `protect` gjelder uendret.
  */
-export function withholdSensitiveMessages<T extends { role: string; content: string }>(
+export function withholdSensitiveMessages<T extends { role: string; content: string; restricted?: boolean }>(
   messages: ReadonlyArray<T>,
   options: { ceiling?: DataSensitivity; recentWindow?: number; protect?: (message: T, index: number) => boolean } = {}
 ): { kept: T[]; withheld: T[] } {
   const ceiling = options.ceiling ?? "BUSINESS_CONFIDENTIAL";
   const recentWindow = options.recentWindow ?? RECENT_HISTORY_WINDOW;
-  const direct = messages.map((message) => RANK[classifyContentSensitivity({ texts: [message.content] }).sensitivity] > RANK[ceiling]);
+  const direct = messages.map((message) => RANK[messageSensitivity(message)] > RANK[ceiling]);
   const drop = [...direct];
   direct.forEach((isDirect, index) => {
     if (!isDirect) return;
