@@ -202,6 +202,16 @@ describe("C: markRestricted - idempotent, kun egen tenant og egen sesjon", () =>
     expect((await rowOf(id))?.restricted).toBe(false);
   });
 
+  it("dybdeforsvar: de EKSPLISITTE tenant- og sesjonsklausulene holder også UTEN RLS (en superbruker-pool omgår RLS, men en annen tenants identitet merker likevel ingenting)", async () => {
+    const noRls = new MessageStore(admin);
+    const id = await store.save(idA1, "user", "uten RLS");
+    expect(await noRls.markRestricted({ ...idB1, session_id: "s-a1" }, id)).toBe(false); // samme sesjons-id, feil tenant: kun tenant-klausulen stopper den
+    expect(await noRls.markRestricted({ ...idA1, session_id: "s-a2" }, id)).toBe(false); // riktig tenant, feil sesjon: kun sesjonsklausulen stopper den
+    expect((await rowOf(id))?.restricted).toBe(false);
+    expect(await noRls.markRestricted(idA1, id)).toBe(true);
+    expect((await rowOf(id))?.restricted).toBe(true);
+  });
+
   it("direkte SQL fra app-rollen under en ANNEN tenants kontekst treffer heller ingenting (RLS USING), og lagring med feil tenant-sesjon avvises", async () => {
     const id = await store.save(idA1, "user", "RLS-sjekk");
     const res = await withTenantTransaction(app, "t-b", (c) => c.query("UPDATE messages SET restricted = true WHERE message_id = $1", [id]));
