@@ -117,6 +117,30 @@ describe("A: JARVIS-101 - feilen og rettelsen", () => {
   });
 });
 
+describe("A2: samme lekkasje med PRODUKSJONENS verktøyutvalg (ikke den faste velgeren)", () => {
+  // Fraser der produksjonsutvalget velger finansverktøy (låser turen: `min_sensitivity`) mens teksten selv er PUBLIC (målt i denne økten).
+  const NEUTRAL_FINANCE_ASKS = ["hvordan går det med kontoen min?", "hvilke bankforbindelser har jeg koblet til", "list banksamtykkene mine", "hvilke banker er tilgjengelige"];
+
+  it("hver av dem: flagg AV lekker det lokale svaret til neste skytur, flagg PÅ merker raden og holder den utenfor - med de ekte finansverktøyene valgt av det ekte utvalget", async () => {
+    for (const ask of NEUTRAL_FINANCE_ASKS) {
+      expect(classifyContentSensitivity({ texts: [ask] }).sensitivity, ask).toBe("PUBLIC_OR_LOW_SENSITIVITY");
+      const offFirst = await off({ text: ask, production_selection: true });
+      expect(offFirst.gateway[0]!.sensitivity, ask).toBe("SECRET_RESTRICTED");
+      expect(offFirst.gateway[0]!.tools!.some((t) => t.startsWith("finance_")), ask).toBe(true);
+      const offSecond = await off({ text: CLOUD_ASK, prior: offFirst.rows_after, production_selection: true });
+      expect(offSecond.gateway[0]!.preference, ask).toEqual(["anthropic"]);
+      expect(text(offSecond), ask).toContain("assistant: svar 0"); // lekkasjen på main
+
+      const onFirst = await run({ text: ask, production_selection: true });
+      expect(onFirst.events, ask).toEqual(["save:user", "mark", "gateway", "save:assistant:restricted"]);
+      const onSecond = await run({ text: CLOUD_ASK, prior: onFirst.rows_after, production_selection: true });
+      expect(onSecond.gateway[0]!.preference, ask).toEqual(["anthropic"]);
+      expect(onSecond.gateway[0]!.messages, ask).toEqual([`user: ${CLOUD_ASK}`]);
+      expect(onSecond.marks, ask).toBe(0);
+    }
+  });
+});
+
 describe("B: hvert lagringssted merkes riktig", () => {
   it("verktøyutvalg-lås (D-381), tekst, minne (helse-rom og «special»), og en merket rad i konteksten låser og merker turen - hver på sin egen grunn", async () => {
     const cases: Array<[string, Omit<Scenario, "id">, string]> = [

@@ -48,6 +48,11 @@ export interface Scenario {
   streaming?: boolean;
   /** Eksplisitt `provider`-valg (API/tale-enhet). */
   provider?: string;
+  /**
+   * Bruk PRODUKSJONENS verktøyutvalg (`selectSurfaceTools` over hele produksjonsflaten) i stedet for den faste velgeren. Kun for flagg-PÅ-tester (ingen baseline-scenarier bruker det: utvalget
+   * kan endre seg legitimt med senere WP-er, mens baseline skal måle motoren alene). Lastes dynamisk så main-kopien aldri kjører den.
+   */
+  production_selection?: boolean;
 }
 
 export interface GatewayCall {
@@ -179,6 +184,18 @@ export async function runScenario(scenario: Scenario, channel: ChannelName, opti
   } as unknown as ConstructorParameters<typeof ConversationEngine>[0]["messages"];
   const context = { build: async () => ({ history: rows(20), open_tasks: [] }) } as unknown as ConstructorParameters<typeof ConversationEngine>[0]["context"];
 
+  const production = scenario.production_selection ? await import("./fast-path-harness.ts") : undefined;
+  const { selectSurfaceTools } = production ? await import("@jarvis/tool-gateway") : { selectSurfaceTools: undefined };
+  const toolsDeps = production && selectSurfaceTools
+    ? {
+        definitions: production.PRODUCTION_SURFACE.map((m) => m.def) as unknown as ToolDefinition[],
+        select: ({ surface, text, recent_owner_messages }: { surface: Surface; text: string; recent_owner_messages?: string[] }) => {
+          const sel = selectSurfaceTools(surface, text, production.PRODUCTION_SURFACE, { recent_owner_messages: recent_owner_messages ?? [] });
+          return { definitions: sel.selected.map((m) => m.def) as unknown as ToolDefinition[], limits: sel.limits, tool_ids: sel.selected.map((m) => m.tool_id), ...(sel.min_sensitivity ? { min_sensitivity: sel.min_sensitivity } : {}) };
+        }
+      }
+    : { definitions: ALL_DEFINITIONS, select };
+
   const executor: ToolExecutor = {
     execute: async (call: ToolCallRequest): Promise<ToolResultMessage> => {
       toolResults.push({ tool: call.tool_name, success: true });
@@ -274,10 +291,10 @@ export async function runScenario(scenario: Scenario, channel: ChannelName, opti
       }
     },
     tools: {
-      definitions: ALL_DEFINITIONS,
+      definitions: toolsDeps.definitions,
       executorFor: () => executor,
       catalog: () => "katalog",
-      select
+      select: toolsDeps.select
     },
     ...guardOptions
   } as unknown as ConstructorParameters<typeof ConversationEngine>[0]);
