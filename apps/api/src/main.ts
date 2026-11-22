@@ -1378,6 +1378,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     toolTurnRoute,
     toolTurnDayCap: toolTurnRoute !== null && toolTurnDailyCapOre > 0 ? { cap_ore: toolTurnDailyCapOre, spentToday: (tenantId) => dailySpentOre(pool, tenantId) } : null,
     chatCandidates,
+    // WP-N1 (Q-66/JARVIS-101): «begrenset»-merking av låste turer + lesing av merket. KUN med flagget på; utelatt = motoren er identisk med main (kolonnen settes aldri, merker i historikken ignoreres).
+    ...(restrictedContextGuard.enabled ? { restrictedContextGuard: true } : {}),
     // EV-1 (D-412): hurtigbanens selvdiagnose går gjennom Tool Gateway (Policy + revisjon) - samme verktøy som modellen kan kalle.
     selfDiagnosis: {
       async run(identity, opts) {

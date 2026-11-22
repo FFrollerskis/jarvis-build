@@ -60,7 +60,9 @@ export class RestrictedTurnMarker {
     return this.isLocked;
   }
 
-  async lock(): Promise<void> {
+  /** `reasons` = fast ordforråd fra rutingen (`text:finance`, `tool_selection:SECRET_RESTRICTED`, `history:restricted`, `fast_intent:cost_report` ...) - logges ÉN gang ved låsingen, aldri innhold. */
+  async lock(reasons: readonly string[] = []): Promise<void> {
+    if (!this.isLocked) console.log(JSON.stringify({ msg: "n1_restricted_turn_locked", reasons }));
     this.isLocked = true;
     if (this.userMarked) return;
     if (typeof this.userMessageId !== "string" || this.userMessageId === "") throw new Error("restricted_marking_no_message_id");

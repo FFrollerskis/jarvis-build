@@ -73,8 +73,11 @@ export function localOnlyNote(reasons: readonly string[]): string {
   const parts: string[] = [];
   if (fromText.length > 0) parts.push(`meldingen eller de siste meldingene berører ${joinNo(fromText)}`);
   if (fromMemory.length > 0) parts.push(`${joinNo(fromMemory)} ble brukt som kontekst`);
+  // WP-N1: en nylig melding er MERKET begrenset (den hørte til en tur som ble holdt lokalt) - finnes kun når begrenset-vakten (N1-flagget, se `restricted-context-guard.ts`) er på. Uten grunnen under er teksten uendret fra før N1.
+  const restrictedHistory = reasons.includes("history:restricted");
+  if (restrictedHistory) parts.push("de siste meldingene hørte til en tur som ble holdt lokalt");
   const why = parts.length > 0 ? parts.join(", og ") : "innholdet er klassifisert som følsomt";
-  const hint = fromText.length > 0 ? " Dette varer til emnet ikke lenger er blant de siste meldingene." : "";
+  const hint = fromText.length > 0 || restrictedHistory ? " Dette varer til emnet ikke lenger er blant de siste meldingene." : "";
   return `\n\n(Svart på den lokale modellen: ${why}, og slikt sendes aldri til skyen.${hint})`;
 }
 

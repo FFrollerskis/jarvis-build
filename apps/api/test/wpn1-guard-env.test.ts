@@ -86,6 +86,7 @@ describe("ingen direkte flaggavlesing utenfor parseren", () => {
     expect(main).not.toContain(FLAG);
     expect(main).toContain("parseRestrictedContextGuard(process.env)");
     expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ financeExecutionLock: \{ servedLocally: /);
+    expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ restrictedContextGuard: true \} : \{\}\)/); // og til samtalemotoren
   });
 });
 
