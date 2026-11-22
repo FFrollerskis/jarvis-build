@@ -94,11 +94,12 @@ describe("kontrolltest: sammenligningen er ikke tom (den oppdager en forskjell n
       expect(differing.has(`restricted_neutral_recent.github/${channel}`)).toBe(true);
       expect(differing.has(`empty.finance/${channel}`)).toBe(true);
       expect(differing.has(`fast.cost/${channel}`)).toBe(true);
+      expect(differing.has(`fast.status/${channel}`)).toBe(true); // F-A4: selvdiagnose/status kan bære AI-kost i øre og er nå merket begrenset
     }
   });
 
   it("scenarier som ALDRI berører noe begrenset er identiske med main også med flagget PÅ (vakten endrer ikke vanlige turer)", async () => {
-    for (const id of ["clean.github", "clean.plain", "clean.email", "empty.plain", "empty.github", "pr_then_clean.github", "fast.status", "fast.help", "fast.light", "council.explicit", "error.budget", "daycap.github"]) {
+    for (const id of ["clean.github", "clean.plain", "clean.email", "empty.plain", "empty.github", "pr_then_clean.github", "fast.help", "fast.light", "council.explicit", "error.budget", "daycap.github"]) {
       const scenario = SCENARIOS.find((s) => s.id === id)!;
       for (const channel of CHANNELS) {
         const got = await runScenario(scenario, channel, { guard: true });

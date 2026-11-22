@@ -59,10 +59,12 @@ export interface ConversationDeps {
    * D-424: «… i bakgrunnen» for hurtigbanen (`tasks.delegate_background_task` via Tool Gateway/Policy - eierens egen melding, ikke modellens valg).
    * D-449: `options.cloudAllowed` er motorens EGEN avgjørelse (samme regler som chatten bruker for en verktøytur: eierens ruteoverstyring, de siste meldingene, minnerommet, innlimt tekst) - kun `true`
    * lar jobben bruke skyruten. Udefinert/`false` = jobben kjører lokalt som før D-449 (fail-closed).
+   * WP-N1 (F-A2): `options.restricted` er KUN satt (og da `true`) når begrenset-vakten er på og ruteavgjørelsen er LÅST til SECRET_RESTRICTED - leveringen av jobbresultatet lagres da begrenset i samtalen. Uten (vakten AV) er
+   * `options` nøyaktig som før N1 (`{ cloudAllowed }`).
    * Svaret har `cloud`: om jobben FAKTISK fikk skyflagget. Det kan være `false` selv når motoren sa ja, fordi transporten gjør en egen kontroll av selve jobbteksten (gjennomgang nr. 4: et slikt stille
    * lokalt-utfall skal ha merknad).
    */
-  delegateBackground?: { run(identity: IdentityContext, prompt: string, options?: { cloudAllowed: boolean }): Promise<{ started: boolean; reply: string; cloud: boolean } | null> };
+  delegateBackground?: { run(identity: IdentityContext, prompt: string, options?: { cloudAllowed: boolean; restricted?: true }): Promise<{ started: boolean; reply: string; cloud: boolean } | null> };
   /** D-395: injiserbar begrenser for automatisk råd-trigger (tester); default bygges fra JARVIS_COUNCIL_AUTO_MAX_PER_HOUR. */
   councilAutoLimiter?: CouncilAutoTriggerLimiter;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
@@ -425,9 +427,10 @@ export class ConversationEngine {
 
     if (intent) {
       const started = Date.now();
-      const { restricted: delegatedRestricted, ...result } = await this.handleFastIntent(identity, intent, text, surface, provider);
-      // WP-N1: svar som bærer finansavledet innhold (kostnads-/verdirapporten, AI-kost i øre, Q-64 pkt 1) og bakgrunnsjobber der ruteavgjørelsen er låst til SECRET_RESTRICTED, merkes begrenset (brukermelding og svar).
-      if (marker && (FAST_INTENT_RESTRICTED[intent.kind] || delegatedRestricted === true)) await marker.lock([`fast_intent:${intent.kind}`]);
+      // WP-N1: svar som bærer finansavledet innhold (AI-kost i øre: kostnads-, verdi- og tjenestemålsrapporten og selvdiagnosen, Q-64 pkt 1 strengeste regel) merkes begrenset (brukermelding og svar) FØR intensjonen kjøres. Bakgrunnsjobber
+      // låses inne i `handleFastIntent` FØR jobben startes (F-A6: en kastet merking skal ikke etterlate en kjørende jobb).
+      if (marker && FAST_INTENT_RESTRICTED[intent.kind]) await marker.lock([`fast_intent:${intent.kind}`]);
+      const result = await this.handleFastIntent(identity, intent, text, surface, provider, marker);
       await this.deps.trace.record({
         trace_id: `trace-${randomUUID()}`,
         kind: "fast_route",
@@ -697,7 +700,8 @@ export class ConversationEngine {
       let withheldKnowledgeFromCloud = 0; // WP-D1: kunnskapstreff har egen merknad (egen prefiks i SYSTEM_NOTE_PREFIXES)
       const screenedExecutor = (): ToolExecutor =>
         cloudScreenedExecutor(
-          this.deps.tools!.executorFor(identity, turn),
+          // WP-N1 (F-A2): en LÅST tur (kun med vakten på) gir executoren et turbilde med `restricted: true` (samme `taint`/`calls`-objekter), så delegerte bakgrunnsjobber får `restricted_origin`. Vakten AV: `turn` uendret.
+          this.deps.tools!.executorFor(identity, marker?.locked === true ? { ...turn, restricted: true as const } : turn),
           ({ tool, withheld }) => {
             if (tool.startsWith("knowledge.")) withheldKnowledgeFromCloud += withheld;
             else withheldFromCloud += withheld;
@@ -1155,8 +1159,9 @@ export class ConversationEngine {
     intent: NonNullable<ReturnType<typeof fastRoute>>,
     text: string,
     surface: Surface,
-    provider: string | undefined
-  ): Promise<ChatReply & { restricted?: boolean }> {
+    provider: string | undefined,
+    marker?: RestrictedTurnMarker
+  ): Promise<ChatReply> {
     switch (intent.kind) {
       case "system_status":
       case "self_diagnosis": {
@@ -1186,11 +1191,14 @@ export class ConversationEngine {
       }
       case "delegate_background": {
         const cloud: { allowed: boolean; reasons: string[]; restricted?: boolean } = this.deps.delegateBackground ? await this.delegationCloudDecision(identity, text, surface, provider) : { allowed: false, reasons: [] };
+        // WP-N1: er ruteavgjørelsen LÅST til SECRET_RESTRICTED (kun med vakten på; `routing_unreadable` regnes som låst, fail-closed), låses turen FØR jobben startes - brukermeldingen merkes, og en kastet merking etterlater ingen kjørende jobb (F-A6).
+        // Det gjelder også når jobben ikke lar seg starte (svaret under merkes likevel, C11). `restricted` følger med til jobben, så leveringen av resultatet lagres begrenset (F-A2).
+        if (marker && cloud.restricted === true) await marker.lock(["fast_intent:delegate_background"]);
         const started = this.deps.delegateBackground
-          ? await this.deps.delegateBackground.run(identity, intent.prompt, { cloudAllowed: cloud.allowed }).catch(() => null)
+          ? await this.deps.delegateBackground.run(identity, intent.prompt, { cloudAllowed: cloud.allowed, ...(cloud.restricted === true ? { restricted: true as const } : {}) }).catch(() => null)
           : null;
         if (started === null) {
-          return { reply: "Jeg fikk ikke startet bakgrunnsjobben (verktøyet svarte ikke eller ble avslått). Ingenting er startet.", routed: "fast", ...(cloud.restricted === true ? { restricted: true } : {}) };
+          return { reply: "Jeg fikk ikke startet bakgrunnsjobben (verktøyet svarte ikke eller ble avslått). Ingenting er startet.", routed: "fast" };
         }
         // D-447-prinsippet: en jobb som tvinges til den lokale modellen skal ikke gjøre det usynlig (ingen merknad på tale; kun kategorier, aldri innhold). Kun når jobben faktisk ble startet.
         // Lokalt kan skyldes motorens avgjørelse (`cloud.reasons`) ELLER transportens egen kontroll av jobbteksten (motoren sa ja, men jobben fikk likevel ikke skyflagget, gjennomgang nr. 4).
@@ -1198,7 +1206,7 @@ export class ConversationEngine {
         const localReasons = cloud.allowed ? ["job_text_gate"] : cloud.reasons;
         if (jobLocal) console.log(JSON.stringify({ msg: "d449_fast_delegate_local", reasons: localReasons }));
         const note = jobLocal && surface !== "voice" ? jobLocalOnlyNote(localReasons) : "";
-        return { reply: `${started.reply}${note}`, routed: "fast", ...(cloud.restricted === true ? { restricted: true } : {}) };
+        return { reply: `${started.reply}${note}`, routed: "fast" };
       }
       case "help":
         return {

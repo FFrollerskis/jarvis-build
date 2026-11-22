@@ -227,7 +227,7 @@ describe("B: hvert lagringssted merkes riktig", () => {
       expect(savedAssistant(o)[0]!.restricted, kind).toBe(FAST_INTENT_RESTRICTED[kind as keyof typeof FAST_INTENT_RESTRICTED]);
       expect((o.result as { routed: string }).routed, kind).toBe("fast");
     }
-    expect(Object.entries(FAST_INTENT_RESTRICTED).filter(([, v]) => v).map(([k]) => k).sort()).toEqual(["cost_report", "value_report"]);
+    expect(Object.entries(FAST_INTENT_RESTRICTED).filter(([, v]) => v).map(([k]) => k).sort()).toEqual(["cost_report", "self_diagnosis", "slo_report", "system_status", "value_report"]);
     const cost = await run({ text: "hva koster du", prior: HISTORIES["clean"]! });
     expect(cost.events).toEqual(["save:user", "mark", "save:assistant:restricted"]); // låst FØR svaret lagres; ingen modell
   });
@@ -374,7 +374,7 @@ describe("E: smitten (kjent begrensning) er målt, og strukturvaktene mot nye la
     for (const line of source.split("\n").filter((l) => l.includes("this.saveAssistant("))) expect(line.trim(), line).toMatch(/, marker\);$/); // hvert kall gir markøren videre
   });
 
-  it("strukturvakt: de eneste produksjonsstedene som lagrer meldinger er motoren (via saveAssistant og brukermeldingen) og bakgrunnsjobb-leveringen (main.ts saveMessage, bevisst IKKE merket: se runbooken)", () => {
+  it("strukturvakt: de eneste produksjonsstedene som lagrer meldinger er motoren (via saveAssistant og brukermeldingen) og bakgrunnsjobb-leveringen (main.ts saveMessage + ChatJobs.sweepDeliveries: merkes når kontrakten bærer restricted_origin, F-A2)", () => {
     const root = fileURLToPath(new URL("../../../", import.meta.url));
     const files = ["apps/api/src/conversation.ts", "apps/api/src/main.ts", "apps/api/src/chat-jobs.ts", "apps/api/src/server.ts", "apps/api/src/worker-main.ts"];
     const hits: string[] = [];
@@ -384,6 +384,8 @@ describe("E: smitten (kjent begrensning) er målt, og strukturvaktene mot nye la
         if (/\bmessages\.save\(|MessageStore\(pool\)\.save\(|\.saveMessage\(|options\.saveMessage\(/.test(line)) hits.push(`${file}:${line.trim().slice(0, 70)}`);
       }
     }
-    expect(hits.map((h) => h.split(":")[0])).toEqual(["apps/api/src/conversation.ts", "apps/api/src/conversation.ts", "apps/api/src/conversation.ts", "apps/api/src/main.ts", "apps/api/src/chat-jobs.ts"]);
+    // conversation.ts: brukermeldingen + saveAssistant (to grener); chat-jobs.ts: sveipet kaller saveMessage uten/med merke (to grener). main.ts lagrer leveringen via `createDeliverySaver` (restricted-context-guard.ts, testet i wpn1-job-delivery.test.ts).
+    expect(hits.map((h) => h.split(":")[0])).toEqual(["apps/api/src/conversation.ts", "apps/api/src/conversation.ts", "apps/api/src/conversation.ts", "apps/api/src/chat-jobs.ts", "apps/api/src/chat-jobs.ts"]);
+    expect(readFileSync(join(root, "apps/api/src/main.ts"), "utf8")).toContain("saveMessage: createDeliverySaver(new MessageStore(pool), restrictedContextGuard.enabled)");
   });
 });

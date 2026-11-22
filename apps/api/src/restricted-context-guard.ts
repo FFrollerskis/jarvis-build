@@ -33,17 +33,31 @@ export function financeLockServedLocally(model: { provider: string; model: strin
 export const FINANCE_EXECUTION_LOCK: FinanceExecutionLock = { servedLocally: financeLockServedLocally };
 
 /**
+ * WP-N1 (fiks-runde 1, F-A2): lagringen av en bakgrunnsjobbs LEVERING i samtalen (`ChatJobs.sweepDeliveries` -> `saveMessage`). Flyttet ut av `main.ts` så den kan kjøres av en test. Leveringen lagres begrenset KUN når begrenset-vakten er på
+ * OG jobben ble startet fra en LÅST tur (`opts.restricted`, fra `restricted_origin` i kontrakten); ellers er kallet NØYAKTIG det opprinnelige TRE-argumentskallet (flagg AV: kolonnen settes aldri).
+ */
+export function createDeliverySaver(
+  store: Pick<MessageStore, "save">,
+  guardEnabled: boolean
+): (identity: IdentityContext, role: "assistant", content: string, opts?: { restricted: true }) => Promise<unknown> {
+  return (identity, role, content, opts) =>
+    guardEnabled && opts?.restricted === true ? store.save(identity, role, content, { restricted: true }) : store.save(identity, role, content);
+}
+
+/**
  * Hurtigbane-intensjonene (`fastRoute`) hvis SVAR bærer finansavledet innhold, og som derfor merkes begrenset når flagget er på (K3: «rask bane som svarer fra finans-/helseverktøy»). Objektet er `Record` over ALLE
  * intensjonene, så en NY intensjon i `FastIntent` ikke kompilerer før noen har tatt stilling til den (og en test låser at tabellen og runbooken er like).
  *  - `cost_report` (`run_rate.get_cost_overview`) og `value_report` (`executive.get_value_report`): AI-kostnad i øre. Q-64 pkt 1 er ikke avgjort, og STRENGESTE regel gjelder til eieren svarer (Verdi-senteret holdes tilbake fra sky,
- *    H2): svaret merkes derfor begrenset. Svarer eieren «nei» (driftsdata, ikke privat økonomi), settes begge til `false`.
- *  - `delegate_background`: ikke avgjort av intensjonen, men av ruteavgjørelsen (`delegationCloudDecision` sier om turen er låst til SECRET_RESTRICTED) - se `ConversationEngine.handleFastIntent`.
- *  - øvrige (status, selvdiagnose, SLO, evolusjon, jobbstyring, hjelp, lys): ingen finans-/helsedata i svaret (verifisert: ingen `finance`-referanse i selvdiagnosen/SLO/evolusjon).
+ *    H2): svaret merkes derfor begrenset. Svarer eieren «nei» (driftsdata, ikke privat økonomi), settes ALLE fem under til `false` (Q-2).
+ *  - `slo_report` (`executive.get_slo_report`) og selvdiagnosen (`self_diagnosis`, og `system_status` som viser de samme funnene i kortform): driftsforverringen kan inneholde «Kostnad per kall økte fra 3 til 6.7 øre (+122 %)»
+ *    (`apps/api/src/slo-source.ts`, `detectDrift`/`composeSloReport`) - AI-kost i øre, samme klasse som `cost_report` (fiks-runde 1, F-A4). Konsekvens (smitte, se runbooken): en slik tur holder samtalen lokal så lenge den merkede raden er blant de siste meldingene.
+ *  - `delegate_background`: ikke avgjort av intensjonen, men av ruteavgjørelsen (`delegationCloudDecision` sier om turen er låst til SECRET_RESTRICTED) - se `ConversationEngine.handleFastIntent` (turen låses FØR jobben startes).
+ *  - øvrige (evolusjonsrapport, jobbstyring, hjelp, lys): ingen finans-/helsedata i svaret (verifisert: ingen `finance`-referanse og ingen øre-beløp i evolusjonsrapporten).
  */
 export const FAST_INTENT_RESTRICTED: Readonly<Record<FastIntent["kind"], boolean>> = {
-  system_status: false,
-  self_diagnosis: false,
-  slo_report: false,
+  system_status: true,
+  self_diagnosis: true,
+  slo_report: true,
   evolution_report: false,
   cost_report: true,
   value_report: true,

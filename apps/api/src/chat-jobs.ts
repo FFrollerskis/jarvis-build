@@ -120,8 +120,11 @@ function toView(r: JobRow): DelegatedJobView {
 const DELEGATED = `contract->'input'->'data'->>'delegated_from_chat' = 'true'`;
 
 export interface ChatJobsOptions {
-  /** Lagrer leveringsmeldingen i opprinnelig økt (samtalehistorikk). */
-  saveMessage(identity: IdentityContext, role: "assistant", content: string): Promise<unknown>;
+  /**
+   * Lagrer leveringsmeldingen i opprinnelig økt (samtalehistorikk). `opts.restricted` (WP-N1, F-A2) er kun med når jobben ble startet fra en tur som var LÅST til SECRET_RESTRICTED (`restricted_origin` i kontrakten): leveringen
+   * lagres da begrenset (`messages.restricted`), så den ikke følger historikken til en senere skytur. Uten merket i kontrakten (og alltid med begrenset-vakten AV) kalles den med TRE argumenter, som før N1.
+   */
+  saveMessage(identity: IdentityContext, role: "assistant", content: string, opts?: { restricted: true }): Promise<unknown>;
   /** Valgfritt varsel (Telegram) - best effort, feil stopper aldri leveringen. */
   notify?(text: string): Promise<void>;
   log?(event: Record<string, unknown>): void;
@@ -173,9 +176,10 @@ export class ChatJobs {
    */
   async sweepDeliveries(base: IdentityContext): Promise<number> {
     const pending = await withTenantTransaction(this.pool, base.tenant_id, (client) =>
-      client.query<JobRow & { provenance: string | null }>(
+      client.query<JobRow & { provenance: string | null; restricted_origin: string | null }>(
         `SELECT task_id, goal, status, result, last_error, created_at, finished_at, delivered_at,
-                contract->'input'->>'provenance' AS provenance
+                contract->'input'->>'provenance' AS provenance,
+                contract->'input'->'data'->>'restricted_origin' AS restricted_origin
            FROM tasks
           WHERE delivered_at IS NULL AND status IN ('completed', 'failed', 'cancelled') AND ${DELEGATED}
           ORDER BY finished_at NULLS LAST LIMIT 10`
@@ -191,7 +195,11 @@ export class ChatJobs {
       const text = renderDelivery(view);
       const sessionId = row.provenance?.startsWith("chat:") ? row.provenance.slice("chat:".length) : undefined;
       try {
-        if (sessionId) await this.options.saveMessage({ ...base, session_id: sessionId }, "assistant", text);
+        // WP-N1 (F-A2): en jobb startet fra en LÅST tur (`restricted_origin`, satt av `TasksDelegateTransport` fra trusted kode) leveres begrenset. Kun eksakt `true` (JSON-teksten «true») teller; uten merket er kallet NØYAKTIG som før N1.
+        if (sessionId) {
+          if (row.restricted_origin === "true") await this.options.saveMessage({ ...base, session_id: sessionId }, "assistant", text, { restricted: true });
+          else await this.options.saveMessage({ ...base, session_id: sessionId }, "assistant", text);
+        }
         delivered += 1;
         this.options.log?.({ msg: "chat_job_delivered", task_id: row.task_id, status: row.status });
       } catch (error) {
@@ -269,7 +277,10 @@ export class TasksDelegateTransport implements ToolTransport {
             ...(useTools ? { tools: true } : {}),
             // D-449 (Q-50, eierens ja): jobber MED verktøy får bruke chattens skyrute (workeren avgjør selv ved kjøring: konfigurert rute, dagstak, fallback). Flagget settes her i trusted
             // kode; `POST /tasks/submit` avviser det i en innsendt kontrakt (det kan ikke forfalskes via API-et), og workeren klassifiserer oppgaveteksten på nytt uansett.
-            ...(cloudToolTurns ? { cloud_tool_turns_allowed: true } : {})
+            ...(cloudToolTurns ? { cloud_tool_turns_allowed: true } : {}),
+            // WP-N1 (F-A2): jobben ble delegert fra en tur som er LÅST til SECRET_RESTRICTED (D-378; satt av trusted kode: hurtigbanen eller `MeshToolExecutor`, aldri fra parametere) - leveringen av resultatet lagres da
+            // begrenset i samtalen (`ChatJobs.sweepDeliveries`). Settes kun når merket finnes, så en kontrakt uten (vakten AV) er byte-identisk med før N1. Merket kan bare ØKE begrensningen, så det trenger ikke være reservert i `/tasks/submit`.
+            ...(context?.restrictedOrigin === true ? { restricted_origin: true } : {})
           },
           trust_level: "internal",
           provenance: `chat:${identity.session_id}`

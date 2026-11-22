@@ -100,11 +100,11 @@ describe("ingen direkte flaggavlesing utenfor parseren", () => {
 });
 
 describe("hurtigbane-tabellen dekker hver intensjon eksplisitt", () => {
-  it("alle FastIntent-typer står i tabellen, og kun kostnads-/verdirapportene (AI-kost i øre, Q-64 pkt 1 strengeste regel) er merket begrenset", () => {
+  it("alle FastIntent-typer står i tabellen, og kun rapportene som kan bære AI-kost i øre (kostnad, verdi, tjenestemål, selvdiagnose og statuskortformen; Q-64 pkt 1 strengeste regel) er merket begrenset", () => {
     const fastRouter = read("modules/core/src/services/fast-router.ts");
     const kinds = [...fastRouter.matchAll(/\| \{ kind: "([a-z_]+)"/g)].map((m) => m[1]!).sort();
     expect(kinds.length).toBeGreaterThanOrEqual(12);
     expect(Object.keys(FAST_INTENT_RESTRICTED).sort()).toEqual(kinds);
-    expect(Object.entries(FAST_INTENT_RESTRICTED).filter(([, restricted]) => restricted).map(([kind]) => kind).sort()).toEqual(["cost_report", "value_report"]);
+    expect(Object.entries(FAST_INTENT_RESTRICTED).filter(([, restricted]) => restricted).map(([kind]) => kind).sort()).toEqual(["cost_report", "self_diagnosis", "slo_report", "system_status", "value_report"]);
   });
 });

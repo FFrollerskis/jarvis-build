@@ -86,8 +86,11 @@ export interface Observation {
   council: Array<{ sensitivity: string | null; paid_models_allowed: boolean | null }>;
   logs: string[];
   ingest: Array<{ text: string; recent_turns: string[] | null }>;
-  delegate: Array<{ prompt: string; cloud_allowed: boolean | null }>;
+  /** `restricted` finnes KUN når motoren ba om en begrenset levering (fiks-runde 1, F-A2) - med flagg AV er formen som på main. */
+  delegate: Array<{ prompt: string; cloud_allowed: boolean | null; restricted?: true }>;
   tool_results: Array<{ tool: string; success: boolean }>;
+  /** Antall ganger motoren ga executoren et turbilde med `restricted: true` (F-A2). Finnes KUN når > 0 (med flagg AV er observasjonen som på main). */
+  tool_turn_restricted?: number;
 }
 
 export const baseIdentity: IdentityContext = { person_id: "p1", tenant_id: "t1", memory_space_id: "personal", session_id: "s1", device_id: "d1", channel: "web", auth_strength: "active" };
@@ -158,6 +161,7 @@ export async function runScenario(scenario: Scenario, channel: ChannelName, opti
   const councilCalls: Observation["council"] = [];
   const ingest: Observation["ingest"] = [];
   const delegate: Observation["delegate"] = [];
+  let turnRestricted = 0;
   const toolResults: Observation["tool_results"] = [];
   let marks = 0;
   let nextId = 0;
@@ -285,14 +289,14 @@ export async function runScenario(scenario: Scenario, channel: ChannelName, opti
     costReport: { run: async () => "Kostnad siste 7 dager: 12 kr." },
     valueReport: { run: async () => "Bruk: 14 samtaler." },
     delegateBackground: {
-      run: async (_identity: unknown, prompt: string, opts?: { cloudAllowed: boolean }) => {
-        delegate.push({ prompt, cloud_allowed: opts?.cloudAllowed ?? null });
+      run: async (_identity: unknown, prompt: string, opts?: { cloudAllowed: boolean; restricted?: true }) => {
+        delegate.push({ prompt, cloud_allowed: opts?.cloudAllowed ?? null, ...(opts?.restricted === true ? { restricted: true as const } : {}) });
         return { started: true, reply: STARTED, cloud: scenario.delegateCloud ?? opts?.cloudAllowed === true };
       }
     },
     tools: {
       definitions: toolsDeps.definitions,
-      executorFor: () => executor,
+      executorFor: (_identity: unknown, turn?: { restricted?: true }) => { if (turn?.restricted === true) turnRestricted += 1; return executor; },
       catalog: () => "katalog",
       select: toolsDeps.select
     },
@@ -316,7 +320,7 @@ export async function runScenario(scenario: Scenario, channel: ChannelName, opti
     spyErr.mockRestore();
   }
   const rowsAfter: Row[] = store.map((m) => ({ role: m.role, content: m.content, ...(m.restricted ? { restricted: true } : {}) }));
-  return { result, gateway, saved, events, rows_after: rowsAfter, marks, tokens, council: councilCalls, logs, ingest, delegate, tool_results: toolResults };
+  return { result, gateway, saved, events, rows_after: rowsAfter, marks, tokens, council: councilCalls, logs, ingest, delegate, tool_results: toolResults, ...(turnRestricted > 0 ? { tool_turn_restricted: turnRestricted } : {}) };
 }
 
 function pushLog(logs: string[], line: unknown): void {

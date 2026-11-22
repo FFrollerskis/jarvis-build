@@ -159,7 +159,7 @@ import { CONTROL_FEATURE_FLAGS, controlCentersWithTools, flagOn } from "./contro
 import { createAutonomyAudit } from "./autonomy-audit.ts";
 import { createGoldenSuiteRunner } from "./golden-suite-runner.ts";
 import { servedByCloudModel } from "./cloud-tool-screen.ts";
-import { FINANCE_EXECUTION_LOCK, parseRestrictedContextGuard } from "./restricted-context-guard.ts";
+import { FINANCE_EXECUTION_LOCK, createDeliverySaver, parseRestrictedContextGuard } from "./restricted-context-guard.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { claudeBudgetBriefSource } from "./claude-budget-surfaces.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
@@ -771,7 +771,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   };
   // D-416: chat og agenter er to løp - delegerte bakgrunnsjobber (kø), levering av resultat tilbake til samtalen (melding + Telegram).
   const chatJobs = new ChatJobs(pool, {
-    saveMessage: (identity, role, content) => new MessageStore(pool).save(identity, role, content),
+    // WP-N1 (F-A2): en levering fra en jobb startet av en LÅST tur (`restricted_origin` i kontrakten) lagres begrenset - KUN med vakten på. Flagg AV (eller uten merket) = det opprinnelige TRE-argumentskallet (kolonnen settes aldri).
+    saveMessage: createDeliverySaver(new MessageStore(pool), restrictedContextGuard.enabled),
     notify: (text) => sendTelegram(`🔔 ${text}`),
     log: (event) => console.log(JSON.stringify(event))
   });
@@ -1432,7 +1433,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           idempotency_key: `fast-delegate:${identity.session_id}:${Date.now()}`,
           // D-449 (Q-50): hurtigbanen bruker ingen modell - oppgaveteksten ER eierens egne ord (ordrett). Eneste sted `contentOrigin` settes, og KUN når samtalemotoren har avgjort at chatten ville latt en
           // verktøytur gå til sky (eierens ruteoverstyring, de siste meldingene, minnerom og innlimt tekst, se `delegationCloudDecision`). Uten merket (eller `servingModel`) kjører jobben lokalt.
-          ...(options?.cloudAllowed === true ? { contentOrigin: "owner_direct" as const } : {})
+          ...(options?.cloudAllowed === true ? { contentOrigin: "owner_direct" as const } : {}),
+          // WP-N1 (F-A2): samtalemotoren har avgjort at ruten er LÅST til SECRET_RESTRICTED (kun med vakten på) - leveringen av jobbresultatet lagres da begrenset (`restricted_origin` i kontrakten). Uten merket: ingen ny nøkkel.
+          ...(options?.restricted === true ? { restrictedOrigin: true as const } : {})
         });
         if (!result.ok) return null;
         const data = result.data as { started?: unknown; message?: unknown; cloud_tool_turns?: unknown } | undefined;

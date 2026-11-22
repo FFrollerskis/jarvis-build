@@ -329,6 +329,13 @@ export interface ToolInvocationContext {
    */
   contentOrigin?: "owner_direct";
   /**
+   * WP-N1 (fiks-runde 1, F-A2): innholdet i `parameters` stammer fra en tur som er LÅST til SECRET_RESTRICTED (D-378: helse/finans, kun lokal modell). En transport som oppretter varig tilstand ut fra kallet (i dag: `tasks.delegate_background_task`,
+   * som bærer det som `restricted_origin` i jobbkontrakten, så leveringen av resultatet lagres begrenset i samtalen) må ikke la den miste dette merket. Settes KUN av trusted kode i kallerens `ToolGateway.execute()`-kall, ALDRI fra
+   * `parameters` - SAMME disiplin som `servingModel`/`contentOrigin`. Nøyaktig TO godkjente setter-steder i produksjonskoden (låst av `wpn1-job-delivery.test.ts`): (1) hurtigbanen i `main.ts` (`delegateBackground`, kun når samtalemotoren
+   * har avgjort at ruten er låst), (2) `MeshToolExecutor` (videreformidler `TurnContext.restricted`, satt av samtalemotoren når turen er låst). Uten dem (vakten AV) er det aldri satt, og alt er som før N1.
+   */
+  restrictedOrigin?: true;
+  /**
    * WP-K (D-471, JARVIS-054): korrelasjons-ID-ene fra det YTRE kallet (`ToolGateway.execute({ task_id, trace_id })`), slik at en transport som gjør NØSTEDE gateway-kall (f.eks. `business.sync_business_events`,
    * som leser Gmail/Calendar som `person_id: "system"`) kan bære dem videre til revisjonsradene og policy-avgjørelsene det nøstede kallet gir. Settes KUN av gatewayen, aldri fra `parameters`.
    */
@@ -751,6 +758,8 @@ export class ToolGateway {
     servingModel?: { provider: string; model: string };
     /** D-449: se `ToolInvocationContext.contentOrigin` sitt filhode (kun trusted kode setter den). */
     contentOrigin?: "owner_direct";
+    /** WP-N1 (F-A2): se `ToolInvocationContext.restrictedOrigin` (kun trusted kode setter den). */
+    restrictedOrigin?: true;
     /** D-394 (JARVIS-054): korrelasjons-ID-er som følger HVER audit-rad for dette kallet. */
     task_id?: string;
     trace_id?: string;
@@ -923,6 +932,7 @@ export class ToolGateway {
       ...(request.approval !== undefined ? { approval: request.approval } : {}),
       ...(request.servingModel !== undefined ? { servingModel: request.servingModel } : {}),
       ...(request.contentOrigin !== undefined ? { contentOrigin: request.contentOrigin } : {}),
+      ...(request.restrictedOrigin === true ? { restrictedOrigin: true as const } : {}),
       ...(request.idempotency_key !== undefined ? { idempotency_key: request.idempotency_key } : {}),
       // WP-K (JARVIS-054): nøstede kall fra transporten (system-synk via `business.sync_business_events`) bærer samme korrelasjon videre.
       ...corr

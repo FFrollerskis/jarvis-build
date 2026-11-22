@@ -34,6 +34,11 @@ export interface TurnContext {
   limits: SurfaceLimits;
   /** Samlede verktøykall så langt i turen. */
   calls: { total: number };
+  /**
+   * WP-N1 (fiks-runde 1, F-A2): `true` når samtalemotoren har låst turen til SECRET_RESTRICTED (D-378: helse/finans, kun lokal modell) OG begrenset-vakten (WP-N1-flagget) er på. Settes KUN av trusted kode (samtalemotoren,
+   * aldri modellen/verktøyet); `MeshToolExecutor` sender det videre som `restrictedOrigin` til hvert verktøykall, så en bakgrunnsjobb som delegeres fra en LÅST tur kan få leveringen sin lagret begrenset. Utelatt = som før N1.
+   */
+  restricted?: true;
 }
 
 /** Kanaler der selve inputen er upålitelig fra første stund (tale-transkripsjon: STT-feil, omgivelser, andres stemmer). */

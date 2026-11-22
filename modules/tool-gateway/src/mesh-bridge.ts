@@ -546,7 +546,9 @@ export class MeshToolExecutor {
       // D-317: `call.provider`/`.model` er stemplet av selve adapteren som genererte
       // DENNE turen (se ToolCallRequest sitt filhode i provider-adapters) - ALDRI fra
       // modell-oppgitte argumenter, SAMME trusted-lag-kanal som identity/approval.
-      servingModel: { provider: call.provider, model: call.model }
+      servingModel: { provider: call.provider, model: call.model },
+      // WP-N1 (F-A2): turen er låst til SECRET_RESTRICTED (satt av samtalemotoren, aldri fra argumentene) - en delegert bakgrunnsjobb får da leveringen sin lagret begrenset. Uten merket (vakten AV): ingen ny nøkkel.
+      ...(this.turn?.restricted === true ? { restrictedOrigin: true as const } : {})
     });
     if (!result.ok) {
       // WP-K (delta-review L-1): ukjent utfall på en HANDLING gir «ikke kjør på nytt» (retry never); en ren lesing (klasse A) har ingenting å ha utført og beholder «prøv igjen senere».
