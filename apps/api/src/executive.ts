@@ -1,6 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import { DataSensitivitySchema, ModelPurposeSchema } from "@jarvis/contracts";
-import { NoEligibleProviderError, classifyContentSensitivity, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
+import { NoEligibleProviderError, claudeBudgetClosureOf, classifyContentSensitivity, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
 import { ProviderError } from "@jarvis/provider-adapters";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
 import { filterMeshToolsForJob, financeToolIntent, type MeshToolMapping } from "@jarvis/tool-gateway";
@@ -186,7 +186,11 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
                 kind: err instanceof ProviderError ? err.kind : "provider_preference_exhausted"
               }));
               route = "local_fallback";
+              // WP-B4 (N1): var det Claude-kreditten som stengte skyruten (gatewayen merker rutefeilen), sier jobben det: omkjøringen under har `paid_models_allowed: false`, tar ingen kredittbeslutning og bærer derfor ingen
+              // `claude_budget` selv - uten dette svarte jobben lokalt uten en eneste merknad. Lukkingen er kun kategorier fra gatewayen (aldri fra kontrakten), og den påføres kun når omkjøringen ikke har sin egen.
+              const closure = claudeBudgetClosureOf(err);
               result = await opts.gateway.completeWithTools(meshInput, { tools, executor });
+              if (closure !== undefined && result.metadata?.["claude_budget"] === undefined) result = { ...result, metadata: { ...result.metadata, claude_budget: closure } };
             }
           }
         } else {

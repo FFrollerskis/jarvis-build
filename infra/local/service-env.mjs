@@ -161,6 +161,8 @@ export const CONNECTOR_ENV = [
   "JARVIS_GOOGLE_CLIENT_SECRET",
   "JARVIS_GOOGLE_CLOUD_PROJECT_ID",
   "JARVIS_GOOGLE_SEARCH_CONSOLE_REFRESH_TOKEN",
+  // WP-G1 (D-463, P2e): Google Contacts - EGEN refresh-token med `contacts`-scope (eierens samtykke, BLOCKED_EXTERNAL live). Tom = kontakt-handlingene feiler lukket. Kun api.
+  "JARVIS_GOOGLE_CONTACTS_TOKEN",
   "JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN",
   "JARVIS_GOOGLE_MAPS_API_KEY",
   "JARVIS_GOOGLE_PLACES_API_KEY",
@@ -173,6 +175,8 @@ export const CONNECTOR_ENV = [
   "JARVIS_HA_ROOMS",
   "JARVIS_HA_TOKEN",
   "JARVIS_HUBSPOT_API_KEY",
+  // WP-G1 (D-463): Instagram-/Messenger-tilgangstokener (Meta Send API) og Teams' delegerte refresh-token. Tomme = kanalen kan ikke sende (credential_ref_unresolved). Kun api.
+  "JARVIS_INSTAGRAM_ACCESS_TOKEN",
   "JARVIS_INFISICAL_ROTATION_IDS",
   "JARVIS_JIRA_API_TOKEN",
   "JARVIS_JIRA_BASE_URL",
@@ -184,6 +188,7 @@ export const CONNECTOR_ENV = [
   "JARVIS_META_ADS_ACCESS_TOKEN",
   "JARVIS_META_ADS_AD_ACCOUNT_ID",
   "JARVIS_META_ADS_API_VERSION",
+  "JARVIS_META_PAGE_ACCESS_TOKEN",
   "JARVIS_MICROSOFT_CLIENT_ID",
   "JARVIS_MICROSOFT_CLIENT_SECRET",
   "JARVIS_MICROSOFT_REFRESH_TOKEN",
@@ -216,6 +221,7 @@ export const CONNECTOR_ENV = [
   "JARVIS_SUPPORT_INBOX_EMAILS",
   "JARVIS_SUPPORT_SLA_HOURS",
   "JARVIS_TAVILY_API_KEY",
+  "JARVIS_TEAMS_REFRESH_TOKEN",
   "JARVIS_TELEGRAM_CHAT_ID",
   "JARVIS_TELEGRAM_TOKEN",
   "JARVIS_TIKTOK_ACCESS_TOKEN",
@@ -275,13 +281,54 @@ export const WORKER_CONNECTOR_ENV = [
 ];
 /** Webhook-hemmeligheter - KUN api (mottar webhooks). */
 export const WEBHOOK_ENV = [
+  // WP-G1 (D-463, UA-7): signeringshemmeligheter for POST /webhooks/comms/{slack,meta,twilio,telnyx}. Twilio-ruten bruker den EKSISTERENDE JARVIS_TWILIO_AUTH_TOKEN (MESSAGING_AUTOMATION_ENV). Tom/manglende = ruten svarer 503 (fail-closed).
+  "JARVIS_META_APP_SECRET",
+  "JARVIS_META_WEBHOOK_VERIFY_TOKEN",
   "JARVIS_NEONOMICS_WEBHOOK_API_KEY",
   // WP-D2 (UA-3 «churn/product usage»): HMAC-hemmelighet for POST /webhooks/product-usage (eierens egne produkter). Tom = ruten svarer 503 selv om tenanten er satt.
   "JARVIS_PRODUCT_USAGE_WEBHOOK_SECRET",
+  "JARVIS_SLACK_SIGNING_SECRET",
   "JARVIS_STRIPE_WEBHOOK_SECRET",
+  "JARVIS_TELNYX_WEBHOOK_PUBLIC_KEY",
   "JARVIS_VIPPS_WEBHOOK_SECRET",
   "JARVIS_WALLESTER_WEBHOOK_BASIC_PASSWORD",
   "JARVIS_WALLESTER_WEBHOOK_BASIC_USER"
+];
+/**
+ * WP-G1 (D-463, UA-7 Communications Hub): flagg og IKKE-hemmelig konfigurasjon for felles utgående kommunikasjon, innkommende webhooks, kontakter, møtetranskripsjon, utgående AI-ringing og oppfølgingssveip.
+ * ALT er AV som standard (kun den eksakte verdien `on` slår et flagg på; tom = AV) og NOT VERIFIED. KUN api (worker kjører ingen kommunikasjonsflate). Ingen hemmeligheter her - credentials er vault-referansene
+ * (`JARVIS_SLACK_BOT_TOKEN` m.fl. i CONNECTOR_ENV/MESSAGING_AUTOMATION_ENV) og signeringshemmelighetene i WEBHOOK_ENV.
+ */
+export const COMMS_ENV = [
+  "JARVIS_COMMS_AI_DISCLOSURE_TEXT",
+  "JARVIS_COMMS_CALLS",
+  "JARVIS_COMMS_CALL_WINDOW_END",
+  "JARVIS_COMMS_CALL_WINDOW_START",
+  "JARVIS_COMMS_CHANNELS",
+  "JARVIS_COMMS_CONTACTS",
+  "JARVIS_COMMS_INBOUND_RETENTION_DAYS",
+  "JARVIS_COMMS_LOG_RETENTION_DAYS",
+  "JARVIS_COMMS_MAX_CALLS_PER_NUMBER_DAY",
+  "JARVIS_COMMS_MAX_COLD_PER_RECIPIENT_DAY",
+  "JARVIS_COMMS_MAX_PER_ACCOUNT_HOUR",
+  "JARVIS_COMMS_MAX_PER_RECIPIENT_DAY",
+  "JARVIS_COMMS_MEDIA_URL_HOSTS",
+  "JARVIS_COMMS_MEETINGS",
+  "JARVIS_COMMS_MEETING_RETENTION_DAYS",
+  "JARVIS_COMMS_MEMORY_SPACE",
+  "JARVIS_COMMS_OUTBOUND",
+  "JARVIS_COMMS_PUBLIC_BASE_URL",
+  "JARVIS_COMMS_QUIET_END",
+  "JARVIS_COMMS_QUIET_HOURS",
+  "JARVIS_COMMS_QUIET_START",
+  "JARVIS_COMMS_REPLY_AFTER_HOURS",
+  "JARVIS_COMMS_REPLY_SWEEP",
+  "JARVIS_COMMS_REPLY_WINDOW_DAYS",
+  "JARVIS_COMMS_TEMPLATES_WITH_DISCLOSURE",
+  "JARVIS_COMMS_TENANT_ID",
+  "JARVIS_COMMS_VENDOR_READS",
+  "JARVIS_COMMS_WEBHOOKS",
+  "JARVIS_META_GRAPH_VERSION"
 ];
 /** Media-/hjem-/underholdnings-leverandører - KUN api. */
 export const MEDIA_HOME_ENV = [
@@ -350,7 +397,7 @@ const WORKER_EXCLUDES = new Set(["JARVIS_BRIEF_HOUR", "JARVIS_BROWSER_GATEWAY_TO
 
 /** Hva hver tjeneste får videresendt fra operatørens `.env` (interpolasjon `${NAVN:-}` i compose). */
 export const SERVICE_ENV = {
-  api: [...CORE_ENV, ...MODEL_ENV, ...CONNECTOR_ENV, ...WEBHOOK_ENV, ...MEDIA_HOME_ENV, ...MESSAGING_AUTOMATION_ENV, "LANGFUSE_BASE_URL", "JARVIS_API_PORT", "JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", "JARVIS_CONSTITUTION_PUBKEY_SHA256",
+  api: [...CORE_ENV, ...MODEL_ENV, ...CONNECTOR_ENV, ...WEBHOOK_ENV, ...MEDIA_HOME_ENV, ...MESSAGING_AUTOMATION_ENV, ...COMMS_ENV, "LANGFUSE_BASE_URL", "JARVIS_API_PORT", "JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", "JARVIS_CONSTITUTION_PUBKEY_SHA256",
     // D-433: nød-/utviklingsbryter - API-et tømmer `executive`-køen selv (standard: worker-containeren eier køen).
     "JARVIS_API_DRAINS_EXECUTIVE",
     // EV-1 (D-412): bygg-sha og versjon som selvdiagnosen viser (uten dem vises bygget som UKJENT).

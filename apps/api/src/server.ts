@@ -27,6 +27,10 @@ import {
 import { ProductUsageError, UsageImportError, USAGE_LIMITS, USAGE_WEBHOOK_SIGNATURE_HEADER, type ProductUsageService } from "@jarvis/business";
 import { CONTROL_CENTER_READ_TOOLS, isControlCenterId, isExtensionControlCenterId } from "@jarvis/executive";
 import { GROWTH_EXPERIMENT_TOOL_ACTIONS, executeGrowthWrite, type GrowthWriteExecutorDeps, type GrowthWriteStatusFilter } from "@jarvis/growth";
+import {
+  COMMS_CONTACT_READ_ACTIONS, COMMS_KNOWN_ACTIONS, COMMS_MEETING_READ_ACTIONS, COMMS_READ_ACTIONS, COMMS_VENDOR_READ_ACTIONS, WEBHOOK_MAX_BYTES as COMMS_WEBHOOK_MAX_BYTES, executeCommsOwnerAction, previewCommsSend,
+  type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel
+} from "@jarvis/comms";
 import type { ConversationEngine } from "./conversation.ts";
 import { handlePersonalRoute, type PersonalApiDeps } from "./personal-routes.ts";
 import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
@@ -167,6 +171,18 @@ export interface ApiDeps {
    * noe parses eller skrives. Tenanten er eier-konfigurert, aldri avledet fra innholdet.
    */
   productUsage?: { service: ProductUsageService };
+  /**
+   * WP-G1 (D-463, UA-7 Communications Hub - resterende deler). DORMANT og `NOT VERIFIED`: `main.ts` setter hver del KUN med sitt eget flagg (`JARVIS_COMMS_WEBHOOKS` / `JARVIS_COMMS_OUTBOUND`); uten verdien finnes ingen av rutene
+   * (404, identisk med main) og de er heller ikke i den strenge per-IP-grensen.
+   *  - `webhooks`: `POST|GET /webhooks/comms/{slack,meta,twilio,telnyx}` - KUN leverandørene i `providers`. SAMME «signatur ER autentisering»-prinsipp som `/webhooks/stripe`: ingen identitet å oppløse, rå kropp med hard
+   *    størrelsesgrense FØR signaturen, svar uten innholdsekko. Innholdet er UBETRODD data i Ingestion Zone (ingen vei til verktøy/modell/utsendelse) - se `@jarvis/comms` `webhooks/ingest.ts`.
+   *  - `outbound`: eierens `POST /comms/preview` (tørrkjøring av policyen) og `POST /comms/action`. Grant -> KUN den suverene eieren (`ownerGate`) -> step-up (signert enhet) for sending/redigering/sletting/konto-administrasjon -> `gateway.execute()`
+   *    (policy, eier-binding, klasse D-kjeden, idempotens, varsling). Ruten har ingen egen sendevei og ingen egen sjekk å omgå, og er ALDRI et modellverktøy.
+   */
+  comms?: {
+    webhooks?: { service: CommsWebhookService; providers: ReadonlySet<CommsWebhookProvider> };
+    outbound?: { gateway: ToolGateway; funnel: OutboundFunnel };
+  };
   /**
    * Remediering del 2 (JARVIS-065): den ENE validerte eier-identiteten (fra `loadOwnerConfig`). Brukes KUN til å fylle
    * visningsfeltene (`person_id`/`tenant_id`) i de statiske sidene - aldri som autoritet (autoritet kommer alltid fra
@@ -644,6 +660,37 @@ const AUTH_ROUTES: ReadonlySet<string> = new Set([
   "/webhooks/product-usage"
 ]);
 
+/**
+ * WP-G1 (D-463): de fire signerte kommunikasjons-webhook-rutene. De er KUN med i den strenge per-IP-grensen (som `AUTH_ROUTES`) når `deps.comms.webhooks` er satt og leverandøren er slått på - uten flagg er stien
+ * en vanlig 404 helt uten grensen (flagg AV = identisk med main, også for rate limits; `AUTH_ROUTES` er bevisst uendret).
+ */
+const COMMS_WEBHOOK_ROUTES: ReadonlyMap<string, CommsWebhookProvider> = new Map<string, CommsWebhookProvider>([
+  ["/webhooks/comms/slack", "slack"], ["/webhooks/comms/meta", "meta"], ["/webhooks/comms/twilio", "twilio"], ["/webhooks/comms/telnyx", "telnyx"]
+]);
+
+function commsStrictRoutes(deps: ApiDeps | undefined): ReadonlySet<string> {
+  const webhooks = deps?.comms?.webhooks;
+  if (webhooks === undefined) return new Set<string>();
+  return new Set([...COMMS_WEBHOOK_ROUTES].filter(([, provider]) => webhooks.providers.has(provider)).map(([path]) => path));
+}
+
+/** Eierens `/comms/action`: kroppsnøklene (identitet kan aldri være med - `grantBodyOrReject`), og hvilke handlinger som IKKE krever step-up (leser + registrering av en avmelding, som reduserer risiko). */
+const COMMS_ACTION_BODY_KEYS = ["grant_token", "action", "parameters", "idempotency_key"] as const;
+const COMMS_PREVIEW_BODY_KEYS = ["grant_token", "parameters"] as const;
+const COMMS_STEP_UP_EXEMPT: ReadonlySet<string> = new Set([...COMMS_READ_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_MEETING_READ_ACTIONS, "record_opt_out"]);
+
+/**
+ * B-M5: ÉN normalisering av forespørselsstien, brukt av BÅDE de strenge per-IP-begrenserne og rutingen (`route()` bruker `new URL(...).pathname`). Begrenseren nøklet før på den RÅ stien, så `/webhooks/comms/./slack` og
+ * `/webhooks/comms/%2e/slack` (samme rute etter URL-normalisering) aldri traff grensen (kun den romslige 600/min/IP-grensen gjaldt). Samme mønster gjaldt de eksisterende `AUTH_ROUTES`. Ugyldig URL faller tilbake til den rå stien.
+ */
+export function normalizedRequestPath(rawUrl: string | undefined): string {
+  try {
+    return new URL(rawUrl ?? "/", "http://localhost").pathname;
+  } catch {
+    return (rawUrl ?? "/").split("?")[0] ?? "/";
+  }
+}
+
 const limiterRegistry = new WeakMap<ServerResponse, RateLimiters>();
 
 function limitersFor(limits: ApiRateLimits): RateLimiters {
@@ -657,13 +704,14 @@ function limitersFor(limits: ApiRateLimits): RateLimiters {
 
 export function createApiServer(deps?: ApiDeps): Server {
   const limiters = limitersFor({ ...DEFAULT_RATE_LIMITS, ...(deps?.rateLimits ?? {}) });
+  const commsStrict = commsStrictRoutes(deps);
   return createServer((req, res) => {
     const requestId = newRequestId();
     res.setHeader("x-request-id", requestId);
     limiterRegistry.set(res, limiters);
     const peer = clientKey(req);
-    const path = (req.url ?? "/").split("?")[0] ?? "/";
-    const allowed = limiters.ip.take(peer) && (!AUTH_ROUTES.has(path) || limiters.auth.take(`${peer}|${path}`));
+    const path = normalizedRequestPath(req.url);
+    const allowed = limiters.ip.take(peer) && (!(AUTH_ROUTES.has(path) || commsStrict.has(path)) || limiters.auth.take(`${peer}|${path}`));
     if (!allowed) {
       req.resume();
       res.setHeader("retry-after", String(limiters.ip.retryAfterSeconds(peer)));
@@ -1796,6 +1844,103 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       }
       throw err;
     }
+  }
+
+  // WP-G1 (D-463, P1d): signerte kommunikasjons-webhooks (Slack/Meta/Twilio/Telnyx). DORMANT: uten `deps.comms.webhooks` (main.ts setter den KUN med JARVIS_COMMS_WEBHOOKS) og leverandøren i `providers` finnes ikke ruten (404,
+  // identisk med main). SAMME «signatur ER autentisering»-prinsipp som /webhooks/stripe og /webhooks/product-usage: INGEN identitet å oppløse, kroppen leses som RÅ bytes med en HARD størrelsesgrense FØR signaturen vurderes
+  // (413), og alt som ikke består verifiseringen avvises uten å lese kroppen videre. Svaret ekkoer aldri meldingsinnhold. Innholdet er UBETRODD data i Ingestion Zone: inntaket har ingen vei til verktøy, modell, minne eller utsendelse.
+  const commsWebhookProvider = deps.comms?.webhooks !== undefined ? COMMS_WEBHOOK_ROUTES.get(url.pathname) : undefined;
+  if (commsWebhookProvider !== undefined && deps.comms?.webhooks?.providers.has(commsWebhookProvider) === true) {
+    if (req.method !== "POST") req.resume();
+    const rawBody = req.method === "POST" ? await readRawBodyLimited(req, COMMS_WEBHOOK_MAX_BYTES) : Buffer.alloc(0);
+    const headers: Record<string, string | undefined> = {};
+    for (const [name, value] of Object.entries(req.headers)) headers[name.toLowerCase()] = typeof value === "string" ? value : undefined;
+    const out = await deps.comms.webhooks.service.handle(commsWebhookProvider, {
+      method: req.method ?? "GET", headers, rawBody, pathAndQuery: url.pathname + url.search, query: url.searchParams
+    });
+    if (typeof out.body === "string") {
+      // Meta-håndtrykket (GET) forventer at `hub.challenge` ekkoes som ren tekst.
+      res.writeHead(out.status, { "content-type": "text/plain; charset=utf-8" });
+      res.end(out.body);
+      return;
+    }
+    if (commsWebhookProvider === "twilio" && out.status === 200) {
+      // Twilio forventer TwiML (eller en tom 2xx): en tom <Response/> = ingen automatisk svarmelding. Tellerne står i tjenestens egen logg, ikke i svaret.
+      res.writeHead(200, { "content-type": "text/xml; charset=utf-8" });
+      res.end("<Response></Response>");
+      return;
+    }
+    return json(res, out.status, out.body);
+  }
+
+  // WP-G1 (D-463, P1b): eierens kommunikasjonsflate. DORMANT: uten `deps.comms.outbound` (JARVIS_COMMS_OUTBOUND=on) finnes ingen av rutene (404). Alt går via `gateway.execute()` (verktøyene i `@jarvis/comms`): policy, eier-binding,
+  // klasse D-kjeden (idempotensnøkkel, preflight, ledger, readback, eier-varsling) og den felles utgående policyen kjøres der - ruten har ingen egen sendevei og ingen egen sjekk å omgå, og er ALDRI et modellverktøy. Rekkefølge,
+  // som `/executive/mutate`: ugyldig handling -> grant -> KUN suveren eier (`ownerGate`, samme predikat som kontrollsentrene) -> step-up (signert enhet) for alt unntatt lesing/avmeldingsregistrering -> gateway.
+  if (deps.comms?.outbound !== undefined && req.method === "POST" && url.pathname === "/comms/preview") {
+    const parsedBody = grantBodyOrReject(res, await readBodyOrUndefined(req), COMMS_PREVIEW_BODY_KEYS);
+    if (!parsedBody) return;
+    if (parsedBody["parameters"] !== undefined && (typeof parsedBody["parameters"] !== "object" || parsedBody["parameters"] === null || Array.isArray(parsedBody["parameters"]))) {
+      return json(res, 400, { error: "malformed_request", reason: "parameters_malformed", request_id: requestIdOf(res) });
+    }
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason, request_id: requestIdOf(res) });
+    }
+    if (!(await requireOwner(res, deps, resolved.identity, { tool_id: "comms", action: "preview" }))) return;
+    const preview = await previewCommsSend({ ...deps.comms.outbound, ownerGate: deps.ownerGate }, resolved.identity, (parsedBody["parameters"] ?? {}) as Record<string, JsonValue>);
+    if (!preview.ok) {
+      if (preview.status !== "denied" && preview.reason === "owner_required") return json(res, 403, { error: "owner_required", reason: "owner_required", request_id: requestIdOf(res) });
+      return json(res, 400, { error: "malformed_request", reason: preview.status === "denied" ? "policy_denied" : preview.reason, request_id: requestIdOf(res) });
+    }
+    return json(res, 200, { ok: true, data: preview.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.comms?.outbound !== undefined && req.method === "POST" && url.pathname === "/comms/action") {
+    const parsedBody = grantBodyOrReject(res, await readBodyOrUndefined(req), COMMS_ACTION_BODY_KEYS);
+    if (!parsedBody) return;
+    const action = parsedBody["action"];
+    if (typeof action !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
+    }
+    if (!COMMS_KNOWN_ACTIONS.includes(action)) {
+      return json(res, 400, { error: "malformed_request", reason: "action_not_allowed", request_id: requestIdOf(res) });
+    }
+    if (parsedBody["parameters"] !== undefined && (typeof parsedBody["parameters"] !== "object" || parsedBody["parameters"] === null || Array.isArray(parsedBody["parameters"]))) {
+      return json(res, 400, { error: "malformed_request", reason: "parameters_malformed", request_id: requestIdOf(res) });
+    }
+    if (parsedBody["idempotency_key"] !== undefined && typeof parsedBody["idempotency_key"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "idempotency_key_malformed", request_id: requestIdOf(res) });
+    }
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason, request_id: requestIdOf(res) });
+    }
+    if (!(await requireOwner(res, deps, resolved.identity, { tool_id: "comms", action }))) return;
+    const stepUp = COMMS_STEP_UP_EXEMPT.has(action) ? undefined : ownerStepUpDenial(resolved.identity);
+    if (stepUp !== undefined) {
+      return json(res, 403, { error: "step_up_required", reason: stepUp, request_id: requestIdOf(res) });
+    }
+    const result = await executeCommsOwnerAction({ ...deps.comms.outbound, ownerGate: deps.ownerGate }, resolved.identity, {
+      action, parameters: (parsedBody["parameters"] ?? {}) as Record<string, JsonValue>,
+      ...(typeof parsedBody["idempotency_key"] === "string" ? { idempotency_key: parsedBody["idempotency_key"] } : {})
+    });
+    if (result.ok) {
+      return json(res, 200, {
+        ok: true, ...(result.external_id !== undefined ? { external_id: result.external_id } : {}), data: result.data, output_trust: result.output_trust,
+        deduplicated: result.deduplicated, session_id: resolved.identity.session_id
+      });
+    }
+    if (result.status === "denied") {
+      // En policy-avvisning er et fullt, strukturert svar (ALLE regelutfall, aldri innhold) + journal-id som bevis - ikke en generisk feil.
+      return json(res, 403, { error: "comms_policy_denied", denial_codes: result.denial_codes, rules: result.rules, journal_id: result.journal_id, request_id: requestIdOf(res) });
+    }
+    if (result.status === "rejected") {
+      if (result.reason === "owner_required") return json(res, 403, { error: "owner_required", reason: "owner_required", request_id: requestIdOf(res) });
+      return json(res, 400, { error: "malformed_request", reason: result.reason, request_id: requestIdOf(res) });
+    }
+    return json(res, 403, { error: "tool_denied", reason: result.reason, request_id: requestIdOf(res) });
   }
 
   if (deps.finance && req.method === "POST" && url.pathname === "/webhooks/neonomics") {
