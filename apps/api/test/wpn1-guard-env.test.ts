@@ -87,7 +87,7 @@ describe("ingen direkte flaggavlesing utenfor parseren", () => {
     expect(main).toContain("parseRestrictedContextGuard(process.env)");
     expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ financeExecutionLock: FINANCE_EXECUTION_LOCK \} : \{\}\)/); // prediktatet bor i restricted-context-guard.ts (F-A1/F-B2)
     expect(main.match(/financeExecutionLock/g)).toHaveLength(1);
-    expect(main).not.toMatch(/servedLocally: \(model: \{ provider: string; model: string \}\) => !servedByCloudModel/); // ingen inline-kopi av prediktatet
+    expect(main).not.toMatch(/servedLocally: \(model[^)]*\) =>/); // ingen inline-kopi av prediktatet (heller ikke uten parametertype - F2-A3: den utypede kopien slapp gjennom den gamle vakten)
     expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ restrictedContextGuard: true \} : \{\}\)/); // og til samtalemotoren
   });
 
@@ -96,6 +96,27 @@ describe("ingen direkte flaggavlesing utenfor parseren", () => {
     expect(main.match(/withholdFinanceFromCloud/g)).toHaveLength(1);
     expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ withholdFinanceFromCloud: true \} : \{\}\)/);
     expect(read("apps/api/src/worker-main.ts")).not.toContain("withholdFinanceFromCloud"); // worker: flagget er api-only
+  });
+});
+
+describe("F2-A3: ÉN lokalitetsregel - executive-tjenestens `servedLocally` er `financeLockServedLocally`, og ingen annen kode kopierer uttrykket", () => {
+  const code = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+
+  it("main.ts: `servedLocally: financeLockServedLocally,` (nøyaktig én forekomst, importert fra vakt-filen), og ingen bruk av `servedByCloudModel` i kode (kun kommentarer)", () => {
+    const main = read("apps/api/src/main.ts");
+    expect(main.match(/servedLocally:/g)).toHaveLength(1);
+    expect(main).toContain("        servedLocally: financeLockServedLocally,\n");
+    expect(main).toMatch(/import \{[^}]*\bfinanceLockServedLocally\b[^}]*\} from "\.\/restricted-context-guard\.ts";/);
+    expect(code(main)).not.toContain("servedByCloudModel");
+    expect(code(main)).not.toMatch(/=>\s*!\s*servedByCloudModel/);
+    expect(code(read("apps/api/src/worker-main.ts"))).not.toContain("servedByCloudModel");
+    expect(code(read("apps/api/src/worker-main.ts"))).not.toContain("servedLocally");
+  });
+
+  it("kun fire produksjonsfiler i apps/api/src bruker `servedByCloudModel` i kode (definisjonen, prediktatet, samtalemotoren og ruten for kostnadsnotatet) - en ny bruker må vurderes mot låsen, ikke kopieres inn", () => {
+    const dir = join(ROOT, "apps/api/src");
+    const users = sourceFiles(dir).filter((f) => code(readFileSync(f, "utf8")).includes("servedByCloudModel")).map((f) => f.slice(dir.length + 1)).sort();
+    expect(users).toEqual(["cloud-tool-screen.ts", "conversation.ts", "restricted-context-guard.ts", "tool-turn-route.ts"]);
   });
 });
 

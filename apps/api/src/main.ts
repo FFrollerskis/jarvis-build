@@ -158,8 +158,7 @@ import { createControlCenterRegistry, ownerPredicate, registerControlCenters } f
 import { CONTROL_FEATURE_FLAGS, controlCentersWithTools, flagOn } from "./control-center/shared.ts";
 import { createAutonomyAudit } from "./autonomy-audit.ts";
 import { createGoldenSuiteRunner } from "./golden-suite-runner.ts";
-import { servedByCloudModel } from "./cloud-tool-screen.ts";
-import { FINANCE_EXECUTION_LOCK, createDeliverySaver, parseRestrictedContextGuard, withholdsRestrictedJobFromCloud } from "./restricted-context-guard.ts";
+import { FINANCE_EXECUTION_LOCK, createDeliverySaver, financeLockServedLocally, parseRestrictedContextGuard, withholdsRestrictedJobFromCloud } from "./restricted-context-guard.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { claudeBudgetBriefSource } from "./claude-budget-surfaces.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
@@ -1169,8 +1168,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         },
         controlCenters,
         // Gjennomgang M2: finansdata er SECRET_RESTRICTED (D-378) - en SKYmodell får aldri finans-senteret (holdes tilbake ved utførelse i executive-transporten, uansett hvilke verktøy turens utvalg valgte); en lokal modell
-        // og siden får det. Lokalitet kommer fra leverandørregisteret (SAMME `servedByCloudModel` som chattens verktøyskjerm); ukjent leverandør regnes som sky (fail-closed).
-        servedLocally: (model) => !servedByCloudModel({ provider: model.provider }),
+        // og siden får det. Lokalitet kommer fra leverandørregisteret; ukjent leverandør regnes som sky (fail-closed). WP-N1 (F2-A3): SAMME prediktat som ToolGateway-låsen (`financeLockServedLocally` i `restricted-context-guard.ts`,
+        // `!servedByCloudModel`) - ingen inline-kopi (identisk oppførsel som før; kopien var den eneste som ikke var testet).
+        servedLocally: financeLockServedLocally,
         // WP-N1 (review B, F-B1): nøstede finansavlesninger (`get_control_surface_status`/`get_delegation_board` -> `finance.get_kill_switch`) holdes tilbake fra skymodeller KUN med vakten på (flagg AV: feltet settes ikke = identisk med main).
         ...(restrictedContextGuard.enabled ? { withholdFinanceFromCloud: true } : {}),
         // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling bruker den EKSISTERENDE kanselleringsveien (samme `taskService` som chatens «avbryt jobb <id>»).
