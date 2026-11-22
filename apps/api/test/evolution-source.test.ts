@@ -146,6 +146,41 @@ describe("EV-16: kostnad og kapasitet", () => {
     const s = await costSection(ctxOf(deps({ handlers: [[/GROUP BY 1, 2/, () => []], [/::bigint/, () => [{ n: 0 }]]] })));
     expect(s.findings.join("\n")).toContain("ingen utregnet rekkevidde");
   });
+  describe("M1 (WP-B3-gjennomgang): trenden regner med HELE månedens forbruk, ikke bare 15-dagersvinduet", () => {
+    // 20. oktober kl. 10:00 UTC: vinduet (`at >= now - 15 døgn`) starter 5. oktober kl. 10:00 - 16 kalenderdøgn der det første og det siste er delvise. Jevnt 10 000 øre (100 kr) per døgn, delt på to leverandører.
+    const NOW20 = new Date("2026-10-20T10:00:00.000Z");
+    const windowRows = Array.from({ length: 16 }, (_, i) => {
+      const partial = i === 0 || i === 15;
+      const total = partial ? 4_000 : 10_000;
+      const d = `2026-10-${String(5 + i).padStart(2, "0")}`;
+      return [{ day: d, provider: "anthropic", ore: Math.round(total * 0.7) }, { day: d, provider: "gemma_local", ore: total - Math.round(total * 0.7) }];
+    }).flat();
+    const MTD = 19 * 10_000 + 4_000;
+    const run = (mtd: number, rows = windowRows, now = NOW20) => costSection({ ...ctxOf(deps({ env: { JARVIS_COST_WARN_ORE: "290000" }, handlers: [[/GROUP BY 1, 2/, () => rows], [/::bigint/, () => [{ n: mtd }]]] })), now });
+
+    it("dag 20, jevnt 100 kr/døgn, hardgrense 3000 kr: trenden sier ca. 10-11 døgn (ATTENTION) - ikke «ca. 15-16 døgn» OK som før fiksen", async () => {
+      const s = await run(MTD);
+      const days = Number(/hardgrensen nås om ca\. ([\d.]+) dager/.exec(s.findings.join("\n"))?.[1]);
+      expect(days).toBeGreaterThan(9);
+      expect(days).toBeLessThanOrEqual(12);
+      expect(s.status).toBe("ATTENTION"); // varselgrensen er hevet over forbruket: kun trenden (<= 14 døgn) gir oppmerksomhet
+      expect(s.findings.join("\n")).toMatch(/Rekkevidde til hardgrensen med dagens tempo: 10\./);
+    });
+
+    it("vinduet dekker hele måneden (dag 10): uendret trend (ca. 21 døgn, OK) - frøet er 0", async () => {
+      const rows = Array.from({ length: 10 }, (_, i) => [{ day: `2026-10-${String(i + 1).padStart(2, "0")}`, provider: "anthropic", ore: i === 9 ? 4_000 : 10_000 }]).flat();
+      const s = await run(9 * 10_000 + 4_000, rows, new Date("2026-10-10T10:00:00.000Z"));
+      expect(s.status).toBe("OK");
+      expect(Number(/hardgrensen nås om ca\. ([\d.]+) dager/.exec(s.findings.join("\n"))?.[1] ?? "99")).toBeGreaterThan(14);
+    });
+
+    it("usamstemte summer (dagssummene langt over månedssummen) gir en ærlig «ikke målt» - aldri en trend som ser grei ut", async () => {
+      const s = await run(50_000);
+      expect(s.findings.join("\n")).toContain("Trenden er ikke målt: dagssummene og månedssummen stemmer ikke overens.");
+      expect(s.findings.join("\n")).not.toMatch(/hardgrensen nås om ca\./);
+      expect(s.findings.join("\n")).not.toContain("For lite data i måneden");
+    });
+  });
 });
 
 describe("EV-17: nøkler og tilkoblinger", () => {

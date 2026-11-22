@@ -223,6 +223,14 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // hard FK) - samme barnetabell-tier som marketing_attributions/
   // marketing_spend_events over, slettes FØR marketing_campaigns.
   add(result, "marketing_campaign_observations", await run(client, mode, "marketing_campaign_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-D3 (D-459, 112-114): plattform-skrivejournalen (komposittnøkkel -> marketing_campaigns; `marketing_campaign_execution_commands.execution_write_id` peker på den, og kommandoene er
+  // slettet ALLEREDE først i denne blokken). Så eksperimentregisteret: utfall -> observasjoner -> varianter (komposittnøkler til eksperimentet og til kampanjen) -> planer, alle FØR
+  // `marketing_experiments` og `marketing_campaigns`. Kundedata (ikke append-only systemrevisjon), samme klassifisering som resten av marketing_*.
+  add(result, "growth_write_journal", await run(client, mode, "growth_write_journal", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "marketing_experiment_outcomes", await run(client, mode, "marketing_experiment_outcomes", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "marketing_experiment_observations", await run(client, mode, "marketing_experiment_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "marketing_experiment_variants", await run(client, mode, "marketing_experiment_variants", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "marketing_experiment_plans", await run(client, mode, "marketing_experiment_plans", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_experiments", await run(client, mode, "marketing_experiments", "tenant_id = $1 AND memory_space_id = $2", tv));
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2,
   // 039_finance_spend_integrity.sql): `finance_spend_records` har en FK ->
