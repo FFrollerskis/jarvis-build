@@ -408,6 +408,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // med SPECIFIC_PROVIDER-override, samme budsjett/kost/helse/trace/
   // sensitivitet/paid_models_allowed-håndhevelse som alle andre kall).
   const aiCouncil = new AiCouncil(gateway, pool);
+  // WP-N1 (Q-66/JARVIS-101 + Q-64 pkt 3): ÉN flaggavlesing (parseren; kun eksakt «on»). Flagg AV (standard) = verken gatewayen eller samtalemotoren får noe av dette, og begge er identiske med main.
+  // Står bevisst HER og ikke mellom `readSecretProvider` og selve gateway-konstruksjonen: `ua3-business-events-host-run-wiring.test.ts` låser at ingen setninger står mellom dem (kun kommentarer).
+  const restrictedContextGuard = parseRestrictedContextGuard(process.env);
+  console.log(JSON.stringify({ msg: "restricted_context_guard", enabled: restrictedContextGuard.enabled }));
   // BO-03: Tool Gateway m/live transporter (aktiveres av credentials i .env),
   // Daily Brief-kilder, morgenlevering og Telegram-kommandoer.
   // K1 (D-164): `ownerControls` konstruert lenger opp (delt med `policy`).
@@ -438,9 +442,6 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // leverer dekoratøren installasjonstokenet under SAMME ref (`JARVIS_GITHUB_TOKEN`); privatnøkkelen leses fra vaulten ved hver signering.
   const githubAuth = createGitHubAuth({ secrets: baseSecretProvider, env: process.env });
   const readSecretProvider = githubAuth.secretProvider(baseSecretProvider);
-  // WP-N1 (Q-66/JARVIS-101 + Q-64 pkt 3): ÉN flaggavlesing (parseren; kun eksakt «on»). Flagg AV (standard) = verken gatewayen eller samtalemotoren får noe av dette, og begge er identiske med main.
-  const restrictedContextGuard = parseRestrictedContextGuard(process.env);
-  console.log(JSON.stringify({ msg: "restricted_context_guard", enabled: restrictedContextGuard.enabled }));
   // Del 3 (JARVIS-013/043): klasse D-pipelinen er HÅRD i produksjon (nøkkel + full kjede + out-of-band-varsler; varsleren bindes sent under).
   const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
     classDPipeline: { enforce: true },
