@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +7,7 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import type { CapturedImage, VisionSource, VisionSourceCamera, VisionSourceEvent } from "../../src/source.ts";
 import type { VisionModelCall, VisionModelGateway, VisionModelResultLike } from "../../src/classifier.ts";
+import { jpegBytes } from "./images.ts";
 
 /**
  * WP-G3 (D-465): felles testoppsett for UA-9-integrasjonstestene (ekte embedded Postgres, NOSUPERUSER/NOBYPASSRLS-rolle som runtime). Testdoblene ligger BEVISST her
@@ -20,9 +20,15 @@ export interface VisionDb {
   stop: () => Promise<void>;
 }
 
-export async function startVisionDb(prefix: string): Promise<VisionDb> {
+export interface VisionDbOptions {
+  /** Klyngens locale (initdb `--locale`), f.eks. `C.UTF-8` (Unicode-bevisst ctype, slik produksjonsbildet `en_US.utf8` er) eller `C`. Utelatt = miljøets standard. Kodeoppsettet er alltid UTF8. */
+  locale?: string;
+}
+
+export async function startVisionDb(prefix: string, options: VisionDbOptions = {}): Promise<VisionDb> {
   const dir = await mkdtemp(join(tmpdir(), `jarvis-pg-${prefix}-`));
-  const leased = await startLeasedEmbeddedPostgres((port) => new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false }));
+  const initdbFlags = options.locale === undefined ? [] : ["--encoding=UTF8", `--locale=${options.locale}`];
+  const leased = await startLeasedEmbeddedPostgres((port) => new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false, ...(initdbFlags.length > 0 ? { initdbFlags } : {}) }));
   await leased.postgres.createDatabase("jarvis_test");
   const admin = new pg.Pool({ host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: "postgres", password: "pw" });
   admin.on("error", () => undefined);
@@ -61,9 +67,9 @@ export async function seedTenant(db: VisionDb, tenant: string): Promise<Omit<See
   return { tenant, owner, other };
 }
 
-/** Unike, gyldige JPEG-bytes (magic bytes + tilfeldig innhold) - hver kall gir en ny sha256. */
+/** Unike JPEG-bytes med et strukturelt gyldig hode (SOI/JFIF/SOF 64x48/SOS, se images.ts) + tilfeldig innhold - hver kall gir en ny sha256. */
 export function makeJpeg(size = 512): Uint8Array {
-  return Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, ...randomBytes(size)]);
+  return jpegBytes({ size });
 }
 
 export const NOT_AN_IMAGE = new TextEncoder().encode("<html><script>alert(1)</script></html>");

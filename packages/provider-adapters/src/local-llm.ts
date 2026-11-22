@@ -161,6 +161,45 @@ const LOCAL_VISION_MEDIA_TYPES: ReadonlySet<string> = new Set(["image/jpeg", "im
 const BASE64_BODY = /^[A-Za-z0-9+/]+={0,2}$/;
 const MAX_LOCAL_IMAGE_BASE64_CHARS = 28 * 1024 * 1024;
 
+/**
+ * WP-G3 (review A-L6): tak på svarkroppen fra den dedikerte visjonsidentiteten. Klassifisereren ber om maks 500 tokens (noen KB), så 1 MiB er rause rom; en lokal server som svarer med mer (feil, kompromittert
+ * eller en endeløs strøm) avbrytes ved grensen i stedet for å fylle api-prosessens minne. Øvrige identiteter (`local_llm`/`gemma_local`) leser uendret med `response.json()`.
+ */
+const MAX_LOCAL_VISION_RESPONSE_BYTES = 1024 * 1024;
+
+async function readJsonLimited(response: Response, maxBytes: number): Promise<unknown> {
+  const declared = Number(response.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error("response_too_large");
+  }
+  if (response.body === null) throw new Error("response_no_body");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("response_too_large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const all = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    all.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return JSON.parse(new TextDecoder().decode(all));
+}
+
 function toOpenAiVisionContent(provider: string, content: ChatMessage["content"]): string | Array<Record<string, unknown>> {
   if (typeof content === "string") return content;
   if (!content.some((part) => part.type === "image")) return textOnly(content);
@@ -294,12 +333,14 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
       usage?: { prompt_tokens: number; completion_tokens: number };
     };
     try {
-      body = (await response.json()) as typeof body;
+      // WP-G3 (review A-L6): visjonsidentiteten leser svaret med et bytetak; øvrige identiteter er uendret (`response.json()`).
+      body = (this.vision ? await readJsonLimited(response, MAX_LOCAL_VISION_RESPONSE_BYTES) : await response.json()) as typeof body;
       if (!Array.isArray(body.choices)) {
         throw new Error("mangler choices");
       }
-    } catch {
-      throw new ProviderError(this.name, "invalid_response", `${this.name}_invalid_response`);
+    } catch (err) {
+      const tooLarge = this.vision && err instanceof Error && err.message === "response_too_large";
+      throw new ProviderError(this.name, "invalid_response", tooLarge ? `${this.name}_response_too_large` : `${this.name}_invalid_response`);
     }
     const message = body.choices[0]?.message;
     const text = stripThinking(message?.content ?? "");

@@ -12,6 +12,7 @@ export * from "./classifier.ts";
 export * from "./source.ts";
 export * from "./ha-source.ts";
 export * from "./cameras.ts";
+export type { VisionChangeProvenance } from "./audit.ts";
 export * from "./snapshots.ts";
 export * from "./inventory.ts";
 export * from "./embeddings.ts";

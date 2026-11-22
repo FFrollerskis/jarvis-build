@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import {
@@ -10,7 +10,10 @@ import {
 } from "@jarvis/vision";
 import { FakeDevice, TestDeviceRegistry } from "../../../modules/vision/test/support/fake-device.ts";
 import { detectionsJson, makeJpeg, NOT_AN_IMAGE, ScriptedGateway, seedTenant, startVisionDb, type VisionDb } from "../../../modules/vision/test/support/harness.ts";
+import { jpegBytes } from "../../../modules/vision/test/support/images.ts";
+import { RateLimiter } from "../src/http-guard.ts";
 import { createApiServer, type ApiDeps } from "../src/server.ts";
+import type { VisionStatusReport } from "../src/vision-routes.ts";
 
 /**
  * WP-G3 (D-465): `/vision/*` over HTTP mot en ekte Postgres (app-rolle, RLS): dormant (404), grant/eier/step-up-rekkefølgen, typet bekreftelse for sletting, enhets-id kun fra grantet og den enhetssignerte
@@ -35,9 +38,14 @@ const grants = new Map<string, Grant>();
 
 const OWNER_ID = (identity: IdentityContext): boolean => identity.person_id === T.owner && identity.tenant_id === T.tenant && identity.delegation_id === undefined;
 
-function makeDeps(withFeature: boolean): ApiDeps {
+function makeDeps(withFeature: boolean, extra: { uploadLimiter?: RateLimiter; verified?: string[]; status?: () => VisionStatusReport } = {}): ApiDeps {
   return {
-    grants: { verify: async (token: string) => (grants.has(token) ? { ok: true, grant: grants.get(token) } : { ok: false, reason: "grant_invalid" }) },
+    grants: {
+      verify: async (token: string) => {
+        extra.verified?.push(token);
+        return grants.has(token) ? { ok: true, grant: grants.get(token) } : { ok: false, reason: "grant_invalid" };
+      }
+    },
     identity: { resolveIdentity: async (i: Record<string, string>) => ({ ok: true, identity: { ...i, memory_space_id: i["memory_space"] } }) },
     owner: { tenant_id: T.tenant, person_id: T.owner },
     ownerGate: OWNER_ID,
@@ -48,7 +56,9 @@ function makeDeps(withFeature: boolean): ApiDeps {
             capture: new VisionCaptureService(db.app, cameras, pipeline(), registry),
             lastSeen: new VisionLastSeenService(db.app, { embeddings, inventory }),
             inventory,
-            maxUploadBytes: MAX_UPLOAD
+            maxUploadBytes: MAX_UPLOAD,
+            ...(extra.uploadLimiter !== undefined ? { uploadLimiter: extra.uploadLimiter } : {}),
+            ...(extra.status !== undefined ? { status: extra.status } : {})
           }
         }
       : {})
@@ -127,7 +137,7 @@ const upload = (request: { request_id: string }, bytes: Uint8Array, over: Record
 
 describe("dormant: uten deps.vision finnes ingen rute", () => {
   it("alle ruter gir 404 selv med gyldig eier-grant; med deps.vision gir feil metode/ukjent sti også 404", async () => {
-    for (const path of ["/vision/cameras/list", "/vision/cameras/register", "/vision/capture/request", "/vision/capture/upload", "/vision/last-seen", "/vision/inventory"]) {
+    for (const path of ["/vision/cameras/list", "/vision/cameras/register", "/vision/capture/request", "/vision/capture/upload", "/vision/last-seen", "/vision/inventory", "/vision/status"]) {
       expect((await post(urlDormant, path, { grant_token: "owner-signed" })).status, path).toBe(404);
     }
     expect((await fetch(`${url}/vision/cameras/list`)).status).toBe(404); // GET
@@ -151,7 +161,7 @@ describe("kropp, grant, eier og step-up - alt avvises FØR noe skrives", () => {
 
   it("en annen person i samme tenant får 403 owner_required på alle eier-ruter; enhets-rutene er personbundne", async () => {
     const bodies: Array<[string, Record<string, unknown>]> = [
-      ["/vision/cameras/list", {}], ["/vision/last-seen", { query: "x" }], ["/vision/inventory", {}],
+      ["/vision/cameras/list", {}], ["/vision/status", {}], ["/vision/last-seen", { query: "x" }], ["/vision/inventory", {}],
       ["/vision/cameras/register", { label: "x", source_type: "iphone", source_ref: "d", zone_kind: "home", route_policy: "local_only" }],
       ["/vision/cameras/update", { camera_id: "c", label: "x" }], ["/vision/cameras/remove", { camera_id: "c", confirm: true, confirm_camera_id: "c" }], ["/vision/capture/request", { camera_id: "c" }]
     ];
@@ -235,7 +245,7 @@ describe("iPhone-opptak på forespørsel (enhetssignert engangsopplasting)", () 
     const bytes = makeJpeg();
     const done = await call("/vision/capture/upload", "phone", upload(request, bytes));
     expect(done.status, JSON.stringify(done.body)).toBe(200);
-    expect(done.body["data"]).toEqual({ request: { request_id: request.request_id, state: "fulfilled" }, outcome: { status: "recorded", reason: "ok_store_snapshot", classification_status: "classified", detection_count: 1, snapshot_stored: true } });
+    expect(done.body["data"]).toEqual({ request: { request_id: request.request_id, state: "fulfilled" }, outcome: { status: "recorded", reason: "ok_store_snapshot", classification_status: "classified", detection_count: 1, snapshot_stored: true, inventory_skipped: 0 } });
     expect(JSON.stringify(done.body)).not.toMatch(/ryggsekk|data_base64|signature/);
     expect(gateway.calls).toHaveLength(1);
     expect(gateway.calls[0]).toMatchObject({ mode: "LOCAL", sensitivity: "SECRET_RESTRICTED", paid_models_allowed: false });
@@ -251,6 +261,32 @@ describe("iPhone-opptak på forespørsel (enhetssignert engangsopplasting)", () 
     expect(seen.body["data"]).toMatchObject({ query: "ryggsekk", found: true, last: { object_label: "ryggsekk", room_name: "Gangen", has_snapshot: true, source_type: "iphone" }, inventory_present_now: true });
     const items = await call("/vision/inventory", "owner-signed", { room_id: roomId });
     expect(items.body["data"]["items"].map((i: { object_label: string }) => i.object_label)).toContain("ryggsekk");
+  });
+
+  it("review delta2 A LOW-E3 + B LOW-E1: et opptak der inventaret for en etikett hoppes over (databasen avviser den: CHECK strammet inn) melder `inventory_skipped` i svaret - kun tallet, aldri etiketten - mens hendelsen og neste objekts inventar er lagret", async () => {
+    const check = "vision_inventory_items_object_label_check";
+    const original = ((await db.admin.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1`, [check])).rows[0] as { def: string }).def.replace(/^CHECK\s*/, "").replace(/\s+NOT VALID$/, "");
+    await db.admin.query(`ALTER TABLE vision_inventory_items DROP CONSTRAINT ${check}`);
+    // NOT VALID: den strammere regelen gjelder nye rader. Samme drift mellom JS-regelen og CHECK-en som savepointet i pipelinen beskytter mot.
+    await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${check} CHECK (object_label <> 'driftet') NOT VALID`);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      gateway.text = detectionsJson([{ event_type: "object_detected", object_label: "driftet", confidence: 0.9 }, { event_type: "object_detected", object_label: "lommebok", confidence: 0.8 }]);
+      const request = (await call("/vision/capture/request", "owner-signed", { camera_id: mainCamera, idempotency_key: "idem-skip-0001", ttl_seconds: 120 })).body["data"] as { request_id: string };
+      const done = await call("/vision/capture/upload", "phone", upload(request, makeJpeg()));
+      expect(done.status, JSON.stringify(done.body)).toBe(200);
+      expect(done.body["data"]["outcome"]).toEqual({ status: "recorded", reason: "ok_store_snapshot", classification_status: "classified", detection_count: 2, snapshot_stored: true, inventory_skipped: 1 });
+      expect(JSON.stringify(done.body)).not.toMatch(/driftet|lommebok/); // kun et tall - aldri en etikett
+      const rows = (await db.admin.query(`SELECT object_label FROM vision_inventory_items WHERE person_id = $1 AND object_label IN ('driftet', 'lommebok')`, [T.owner])).rows as Array<{ object_label: string }>;
+      expect(rows.map((r) => r.object_label)).toEqual(["lommebok"]); // neste objekts inventar ble lagret, det avviste ble hoppet over
+      const stored = (await db.admin.query(`SELECT count(*)::int AS n FROM vision_event_observations WHERE person_id = $1 AND object_label = 'driftet'`, [T.owner])).rows[0] as { n: number };
+      expect(stored.n).toBe(1); // hendelsen med den avviste etiketten ER lagret
+      expect(warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("vision_inventory_skipped"))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+      await db.admin.query(`ALTER TABLE vision_inventory_items DROP CONSTRAINT ${check}`);
+      await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${check} CHECK ${original}`);
+    }
   });
 
   it("device_id kommer fra grantet: en annen enhet kan ikke laste opp en forespørsel adressert til iphone-eier (device_mismatch 403), og kroppen kan ikke bære device_id (400)", async () => {
@@ -280,7 +316,7 @@ describe("iPhone-opptak på forespørsel (enhetssignert engangsopplasting)", () 
     const request = (await call("/vision/capture/request", "owner-signed", { camera_id: cameraId })).body["data"] as { request_id: string };
     const bytes = makeJpeg();
     const tampered = Uint8Array.from(bytes);
-    tampered[30] = (tampered[30] as number) ^ 0xff;
+    tampered[tampered.length - 1] = (tampered[tampered.length - 1] as number) ^ 0xff; // en innholdsbyte (ikke bildehodet)
     const hashMismatch = await call("/vision/capture/upload", "phone", upload(request, bytes, { data_base64: Buffer.from(tampered).toString("base64") }));
     expect(hashMismatch.status).toBe(400);
     expect(hashMismatch.body["code"]).toBe("hash_mismatch");
@@ -331,5 +367,207 @@ describe("iPhone-opptak på forespørsel (enhetssignert engangsopplasting)", () 
     expect(none.body["data"]).toMatchObject({ found: false });
     const injection = await call("/vision/last-seen", "owner-signed", { query: "<tool_call>{}</tool_call>" });
     expect(injection.body["data"]).toMatchObject({ query: null, found: false });
+  });
+});
+
+describe("revisjon av eier-handlinger (review B-L3): en rad i audit_events i samme transaksjon som endringen", () => {
+  const rows = async (type: string): Promise<Array<{ person_id: string; session_id: string | null; device_id: string | null; decision: string; tool_id: string; action: string; task_id: string | null; payload: Json }>> =>
+    (await db.admin.query(`SELECT person_id, session_id, device_id, decision, tool_id, action, task_id, payload FROM audit_events WHERE tenant_id = $1 AND type = $2 ORDER BY audit_id`, [T.tenant, type])).rows as never;
+
+  it("register, update, remove og opptaksforespørsel skriver hver en rad med aktør, sesjon, enhet og omfang - og nektede kall skriver ingen", async () => {
+    const before = ((await db.admin.query(`SELECT count(*)::int AS n FROM audit_events WHERE tenant_id = $1 AND type LIKE 'vision.%'`, [T.tenant])).rows[0] as { n: number }).n;
+    const denied = await call("/vision/cameras/register", "other-signed", { label: "x", source_type: "iphone", source_ref: "iphone-nektet", zone_kind: "home", route_policy: "local_only" });
+    expect(denied.status).toBe(403);
+    expect(((await db.admin.query(`SELECT count(*)::int AS n FROM audit_events WHERE tenant_id = $1 AND type LIKE 'vision.%'`, [T.tenant])).rows[0] as { n: number }).n).toBe(before);
+
+    const id = await iphone("Revisjon", "iphone-revisjon", "store_snapshot");
+    const request = (await call("/vision/capture/request", "owner-signed", { camera_id: id, ttl_seconds: 60 })).body["data"] as { request_id: string };
+    await call("/vision/cameras/update", "owner-signed", { camera_id: id, label: "Omdøpt", enabled: false, cooldown_seconds: 90 });
+    expect((await call("/vision/cameras/remove", "owner-signed", { camera_id: id, confirm: true, confirm_camera_id: id })).status).toBe(200);
+
+    const registered = (await rows("vision.camera_registered")).find((r) => r.payload["camera_id"] === id);
+    expect(registered).toMatchObject({ person_id: T.owner, session_id: "s-owner", device_id: "web-owner", decision: "ALLOW", tool_id: "vision", action: "camera_register", task_id: "vision-api:camera_register" });
+    expect(registered?.payload).toMatchObject({ source_type: "iphone", zone_kind: "home", route_policy: "store_snapshot", enabled: true, room_id: roomId });
+    const updated = (await rows("vision.camera_updated")).find((r) => r.payload["camera_id"] === id);
+    expect(updated).toMatchObject({ action: "camera_update", device_id: "web-owner" });
+    expect(updated?.payload).toMatchObject({ changed: ["cooldown_seconds", "enabled", "label"], enabled: false, cooldown_seconds: 90 });
+    const requested = (await rows("vision.capture_requested")).find((r) => r.payload["request_id"] === request.request_id);
+    expect(requested).toMatchObject({ action: "capture_request", session_id: "s-owner", device_id: "web-owner" });
+    expect(requested?.payload).toMatchObject({ camera_id: id, target_device_id: "iphone-revisjon", ttl_ms: 60_000 });
+    const removed = (await rows("vision.camera_removed")).find((r) => r.payload["camera_id"] === id);
+    expect(removed).toMatchObject({ action: "camera_remove", person_id: T.owner, device_id: "web-owner" });
+    expect(removed?.payload).toMatchObject({ snapshots_removed: 0, events_retained: true });
+    // ingen etikett, bilde eller modelltekst i revisjonen
+    expect(JSON.stringify([registered, updated, requested, removed])).not.toMatch(/Revisjon|Omdøpt|ryggsekk|data_base64/);
+  });
+
+  it("fjerning av et kamera med lagrede bilder dokumenterer OMFANGET (antall bilder som følger kameraet ut)", async () => {
+    const id = await iphone("Med bilder", "iphone-med-bilder", "store_snapshot");
+    const device = new FakeDevice("iphone-med-bilder", T.tenant, T.owner);
+    registry.register(device);
+    grants.set("phone-med-bilder", grant({ channel: "mobile", session_id: "s-pmb", device_id: "iphone-med-bilder" }));
+    for (let i = 0; i < 2; i += 1) {
+      const request = (await call("/vision/capture/request", "owner-signed", { camera_id: id })).body["data"] as { request_id: string };
+      const res = await call("/vision/capture/upload", "phone-med-bilder", upload(request, makeJpeg(), {}, device));
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+    }
+    expect(((await db.admin.query(`SELECT count(*)::int AS n FROM vision_snapshots WHERE camera_id = $1`, [id])).rows[0] as { n: number }).n).toBe(2);
+    expect((await call("/vision/cameras/remove", "owner-signed", { camera_id: id, confirm: true, confirm_camera_id: id })).status).toBe(200);
+    const removed = (await rows("vision.camera_removed")).find((r) => r.payload["camera_id"] === id);
+    expect(removed?.payload).toMatchObject({ snapshots_removed: 2 });
+  });
+
+  it("review delta LOW-D5/D7: en fjerning eller endring som gir 404 (ukjent kamera, eller en ANNEN persons kamera) skriver INGEN revisjonsrad - revisjon dokumenterer det som faktisk skjedde", async () => {
+    const count = async (type: string): Promise<number> => ((await db.admin.query(`SELECT count(*)::int AS n FROM audit_events WHERE tenant_id = $1 AND type = $2`, [T.tenant, type])).rows[0] as { n: number }).n;
+    const removedBefore = await count("vision.camera_removed");
+    const updatedBefore = await count("vision.camera_updated");
+    const ghost = "vis-cam-finnes-ikke";
+    const gone = await call("/vision/cameras/remove", "owner-signed", { camera_id: ghost, confirm: true, confirm_camera_id: ghost });
+    expect(gone).toMatchObject({ status: 404, body: { error: "camera_not_found" } });
+    expect(await call("/vision/cameras/update", "owner-signed", { camera_id: ghost, label: "x" })).toMatchObject({ status: 404, body: { error: "camera_not_found" } });
+    // En annen persons kamera i samme tenant/space: tjenesten er person-scopet og gir false/null - og skriver heller ingen rad (selv med audit-flagget satt).
+    const others = await cameras.registerCamera(T.tenant, "home", { person_id: T.other, label: "Annens", source_type: "iphone", source_ref: "iphone-annens-d7", zone_kind: "home", route_policy: "local_only" });
+    const provenance = { task_id: "t-d7", session_id: "s-d7", device_id: "d-d7", audit: true };
+    expect(await cameras.removeCamera(T.tenant, "home", T.owner, others.camera_id, { confirm: true, ...provenance })).toBe(false);
+    expect(await cameras.updateCamera(T.tenant, "home", T.owner, others.camera_id, { label: "y" }, provenance)).toBeNull();
+    expect(await count("vision.camera_removed")).toBe(removedBefore);
+    expect(await count("vision.camera_updated")).toBe(updatedBefore);
+    expect((await cameras.getCamera(T.tenant, "home", T.other, others.camera_id))?.label).toBe("Annens"); // og kameraet er urørt
+    // Kontroll (non-vakuitet): en ekte fjerning av kameraets egen eier skriver NØYAKTIG én rad.
+    expect(await cameras.removeCamera(T.tenant, "home", T.other, others.camera_id, { confirm: true, ...provenance })).toBe(true);
+    expect(await count("vision.camera_removed")).toBe(removedBefore + 1);
+  });
+
+  it("samme transaksjon: feiler revisjonsraden, rulles endringen tilbake (ingen kamera uten revisjon)", async () => {
+    await db.admin.query(`ALTER TABLE audit_events ADD CONSTRAINT zz_block_vision_register CHECK (type <> 'vision.camera_registered') NOT VALID`);
+    try {
+      await expect(cameras.registerCamera(T.tenant, "home", { person_id: T.owner, label: "Atomisk", source_type: "iphone", source_ref: "iphone-atomisk", zone_kind: "home", route_policy: "local_only" }, { audit: true })).rejects.toThrow(/zz_block_vision_register/);
+      expect(((await db.admin.query(`SELECT count(*)::int AS n FROM vision_cameras WHERE source_ref = 'iphone-atomisk'`)).rows[0] as { n: number }).n).toBe(0);
+      // uten audit-flagget (interne kallere/tester) er oppførselen uendret og raden blokkeres ikke
+      await expect(cameras.registerCamera(T.tenant, "home", { person_id: T.owner, label: "Uten revisjon", source_type: "iphone", source_ref: "iphone-uten-rev", zone_kind: "home", route_policy: "local_only" })).resolves.toMatchObject({ source_ref: "iphone-uten-rev" });
+    } finally {
+      await db.admin.query(`ALTER TABLE audit_events DROP CONSTRAINT zz_block_vision_register`);
+    }
+  });
+});
+
+describe("ukjent rom ved kameraregistrering (review B-L5): 400 vision_validation, aldri 500", () => {
+  it("rom som ikke finnes og et rom som tilhører en annen person gir 400 med field room_id - og ingenting registreres", async () => {
+    const otherRoom = (await vision.createRoom(T.tenant, "home", { person_id: T.other, name: "Annens rom" })).room_id;
+    for (const room of ["rm-finnes-ikke", otherRoom]) {
+      const res = await call("/vision/cameras/register", "owner-signed", { label: "Rom-test", source_type: "iphone", source_ref: `iphone-rom-${room.slice(-6)}`, zone_kind: "home", route_policy: "local_only", room_id: room });
+      expect(res.status, room).toBe(400);
+      expect(res.body, room).toMatchObject({ error: "vision_validation", field: "room_id", detail: "room_not_found" });
+    }
+    expect(((await db.admin.query(`SELECT count(*)::int AS n FROM vision_cameras WHERE source_ref LIKE 'iphone-rom-%'`)).rows[0] as { n: number }).n).toBe(0);
+    // eierens eget rom virker fortsatt
+    const ok = await call("/vision/cameras/register", "owner-signed", { label: "Eget rom", source_type: "iphone", source_ref: "iphone-eget-rom", zone_kind: "home", route_policy: "local_only", room_id: roomId });
+    expect(ok.status).toBe(200);
+  });
+});
+
+describe("review delta LOW-D5/D22: bare rom-FK-en er en valideringsfeil", () => {
+  it("et FK-brudd mot en ANNEN fremmednøkkel (personen finnes ikke i tenanten) mappes IKKE til room_not_found: det er en ekte databasefeil som kastes videre", async () => {
+    const attempt = cameras.registerCamera(T.tenant, "home", { person_id: "person-finnes-ikke", label: "Spøkelse", source_type: "iphone", source_ref: "iphone-d22", zone_kind: "home", route_policy: "local_only" });
+    await expect(attempt).rejects.toMatchObject({ code: "23503", constraint: "vision_cameras_person_tenant_fkey" });
+    await attempt.catch((err: unknown) => {
+      expect((err as Error).name).not.toBe("VisionCameraValidationError");
+      expect((err as Error).message).not.toContain("room_not_found");
+    });
+    expect(((await db.admin.query(`SELECT count(*)::int AS n FROM vision_cameras WHERE source_ref = 'iphone-d22'`)).rows[0] as { n: number }).n).toBe(0);
+  });
+});
+
+describe("opplastingsruten (review B-L4 og B-L6)", () => {
+  it("egen per-IP-grense FØR kroppen leses: etter grensen gir ruten 429 uten at grantet verifiseres, og øvrige ruter er upåvirket", async () => {
+    const verified: string[] = [];
+    const base = await listen(makeDeps(true, { uploadLimiter: new RateLimiter(3, 60_000), verified }));
+    const bogus = { grant_token: "bogus", data_base64: "A".repeat(2_000) };
+    for (let i = 0; i < 3; i += 1) expect((await post(base, "/vision/capture/upload", bogus)).status, `kall ${i + 1}`).toBe(403);
+    expect(verified).toEqual(["bogus", "bogus", "bogus"]);
+    const limited = await post(base, "/vision/capture/upload", { ...bogus, data_base64: "A".repeat(60_000) });
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toMatchObject({ error: "rate_limited", reason: "upload_rate_limited" });
+    expect(verified).toHaveLength(3); // det fjerde kallet nådde aldri grant-verifiseringen
+    expect((await post(base, "/vision/cameras/list", { grant_token: "owner-signed" })).status).toBe(200);
+    // uten en konfigurert grense (andre servere) er ruten uendret
+    expect((await post(url, "/vision/capture/upload", bogus)).status).toBe(403);
+  });
+
+  it("review delta LOW-D5/D10: grensen er PER KLIENT (nøkkel = klientadressen), ikke global - klient A som er stoppet påvirker ikke klient B, og hver klient har sin egen tidsskranke", async () => {
+    const base = await listen(makeDeps(true, { uploadLimiter: new RateLimiter(2, 60_000) }));
+    // Serveren lytter på loopback: `clientKey` bruker da SISTE element i x-forwarded-for som klientnøkkel (slik en omvendt proxy foran api-et setter det).
+    const asClient = (ip: string, body: unknown): Promise<Response> =>
+      fetch(`${base}/vision/capture/upload`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": ip }, body: JSON.stringify(body) });
+    const bogus = { grant_token: "bogus", data_base64: "A".repeat(500) };
+    expect((await asClient("203.0.113.10", bogus)).status).toBe(403);
+    expect((await asClient("203.0.113.10", bogus)).status).toBe(403);
+    const blocked = await asClient("203.0.113.10", bogus);
+    expect(blocked.status).toBe(429); // klient A er tom
+    expect(await blocked.json()).toMatchObject({ error: "rate_limited", reason: "upload_rate_limited" });
+    // Klient B (annen adresse) har full kvote: 2 kall slipper gjennom til grant-sjekken (403), først det tredje stoppes.
+    expect((await asClient("203.0.113.11", bogus)).status).toBe(403);
+    expect((await asClient("203.0.113.11", bogus)).status).toBe(403);
+    expect((await asClient("203.0.113.11", bogus)).status).toBe(429);
+    // En klient kan ikke flytte seg ut av grensen ved å legge en annen adresse FORAN sin egen (kun SISTE element teller, som proxyen setter).
+    expect((await asClient("198.51.100.99, 203.0.113.10", bogus)).status).toBe(429);
+    expect((await asClient("203.0.113.10, 203.0.113.12", bogus)).status).toBe(403);
+  });
+
+  it("et bilde som er STØRRE enn standard JSON-kropp (64 KiB base64) men innenfor maxUploadBytes godtas - det hevede kroppstaket virker; og taket er nøyaktig maxUploadBytes", async () => {
+    const request = async (): Promise<{ request_id: string }> => (await call("/vision/capture/request", "owner-signed", { camera_id: mainCamera })).body["data"] as { request_id: string };
+    const sixty = jpegBytes({ size: 60_000 }); // ca. 80 KB som base64: over standard JSON-grense (64 KiB), under maxUploadBytes
+    expect(Math.ceil((sixty.length * 4) / 3)).toBeGreaterThan(64 * 1024);
+    const ok = await call("/vision/capture/upload", "phone", upload(await request(), sixty));
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    const headerLength = jpegBytes({ size: 0 }).length;
+    const exact = jpegBytes({ size: MAX_UPLOAD - headerLength }); // nøyaktig maxUploadBytes
+    expect(exact.length).toBe(MAX_UPLOAD);
+    expect((await call("/vision/capture/upload", "phone", upload(await request(), exact))).status).toBe(200);
+    const over = jpegBytes({ size: MAX_UPLOAD - headerLength + 1 }); // én byte for mye
+    const tooBig = await call("/vision/capture/upload", "phone", upload(await request(), over));
+    expect(tooBig.status).toBe(400);
+    expect(tooBig.body).toMatchObject({ error: "malformed_request", reason: "byte_length" });
+  });
+});
+
+describe("/vision/status (review B-L8): eierens helsebilde - kun lesing, kun eier, kun koder og tall", () => {
+  const REPORT: VisionStatusReport = {
+    poller: { enabled: true, last_tick_at: "2026-11-18T12:00:00.000Z", last_status: "ok", last_reason: null, last_source_error: "home_assistant_error_503", consecutive_failures: 3, next_delay_ms: 160_000 },
+    maintenance: {
+      light: { at: "2026-11-18T12:05:00.000Z", failed: 1, tombstones_deleted: 4, tombstones_failed: 1, tombstones_stuck: 1, temp_files_purged: 0, temp_files_truncated: false }, full: null,
+      light_run: { running_since: "2026-11-18T12:00:00.000Z", skipped_ticks: 3, abandoned_runs: 1 }
+    },
+    ingest: { inventory_label_invalid: 2, inventory_label_rejected: 1, last_inventory_skip_at: "2026-11-18T12:06:00.000Z" },
+    storage: { maintenance_enabled: true, writing_enabled: false },
+    classifier: true,
+    embeddings: false
+  };
+
+  it("eieren får helsebildet (lesing: ingen step-up kreves), og svaret er nøyaktig det kjøretiden rapporterer", async () => {
+    const base = await listen(makeDeps(true, { status: () => REPORT }));
+    for (const token of ["owner-signed", "owner-active"]) {
+      const res = await post(base, "/vision/status", { grant_token: token });
+      expect(res.status, token).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, data: REPORT });
+    }
+  });
+
+  it("uten grant 401, ugyldig grant 403, annen person i samme tenant 403 owner_required, og kroppen kan ikke bære identitetsfelt eller ukjente felt (400)", async () => {
+    const base = await listen(makeDeps(true, { status: () => REPORT }));
+    expect((await post(base, "/vision/status", {})).status).toBe(401);
+    expect((await post(base, "/vision/status", { grant_token: "bogus" })).status).toBe(403);
+    const other = await post(base, "/vision/status", { grant_token: "other-signed" });
+    expect(other.status).toBe(403);
+    expect(await other.json()).toMatchObject({ error: "owner_required" });
+    expect((await post(base, "/vision/status", { grant_token: "owner-signed", person_id: "x" })).status).toBe(400);
+    expect((await post(base, "/vision/status", { grant_token: "owner-signed", surprise: 1 })).status).toBe(400);
+  });
+
+  it("uten en status-kilde (kjøretiden satte ingen) er ruten 503 status_unavailable - aldri en tom, villedende «alt ok»", async () => {
+    const res = await call("/vision/status", "owner-signed");
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ error: "status_unavailable" });
+    expect(res.body["data"]).toBeUndefined();
   });
 });

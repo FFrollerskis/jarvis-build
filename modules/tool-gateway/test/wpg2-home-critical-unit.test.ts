@@ -345,7 +345,9 @@ describe("F: transporten mot fake Home Assistant", () => {
   it("kommando akseptert men uvirksom (state endres aldri): matched=false, og tilstanden er den gamle", async () => {
     ha.set("switch.b", { state: "off", mode: "ineffective" });
     const result = await run(transport(), "critical_switch", { entity: "switch.b", on: true });
-    expect(result.data).toMatchObject({ matched: false, settled: true });
+    // Review A (MEDIUM-1): en UENDRET tilstand er ikke «settlet» - transporten venter ut fristen (utstyret kan vise gammel tilstand en stund) før den gir opp; aldri en antatt suksess.
+    expect(result.data).toMatchObject({ matched: false, settled: false });
+    expect((result.data as { polls: number }).polls).toBeGreaterThan(3);
     expect(stateOf(result)["state"]).toBe("off");
   });
 

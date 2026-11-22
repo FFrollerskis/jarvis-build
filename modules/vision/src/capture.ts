@@ -2,6 +2,7 @@ import { randomUUID, verify, type KeyObject } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import { writeVisionAudit } from "./audit.ts";
 import type { VisionCameraService } from "./cameras.ts";
 import { inspectImage, VisionImageError } from "./image.ts";
 import type { IngestOutcome, VisionIngestPipeline } from "./pipeline.ts";
@@ -94,6 +95,10 @@ export interface CaptureContext {
   person_id: string;
   task_id: string;
   session_id?: string | undefined;
+  /** Eier-enheten som ba om opptaket (fra grantet) - kun for revisjonsraden. */
+  device_id?: string | undefined;
+  /** `true` = skriv en revisjonsrad (`vision.capture_requested`) i SAMME transaksjon som forespørselen (review B-L3). Satt av eier-ruten. */
+  audit?: boolean | undefined;
 }
 
 export interface CaptureServiceOptions {
@@ -144,7 +149,14 @@ export class VisionCaptureService {
          RETURNING *`,
         [`vis-cap-${randomUUID()}`, ctx.tenant_id, ctx.memory_space, ctx.person_id, camera.camera_id, camera.source_ref, input.idempotency_key ?? null, ttl, ctx.task_id, ctx.session_id ?? null, (pending.rows[0] as { n: number }).n, CAPTURE_MAX_PENDING_PER_CAMERA]
       );
-      if (inserted.rows[0]) return inserted.rows[0] as CaptureRequest;
+      if (inserted.rows[0]) {
+        const created = inserted.rows[0] as CaptureRequest;
+        await writeVisionAudit(client, ctx.tenant_id, ctx.person_id, { task_id: ctx.task_id, session_id: ctx.session_id, device_id: ctx.device_id, audit: ctx.audit }, {
+          type: "vision.capture_requested", action: "capture_request",
+          payload: { request_id: created.request_id, camera_id: camera.camera_id, target_device_id: created.device_id, expires_at: created.expires_at, ttl_ms: ttl, idempotent: input.idempotency_key !== undefined }
+        });
+        return created;
+      }
       if (input.idempotency_key !== undefined) {
         const existing = await client.query(`SELECT * FROM vision_capture_requests WHERE tenant_id = $1 AND memory_space_id = $2 AND person_id = $3 AND idempotency_key = $4`, [ctx.tenant_id, ctx.memory_space, ctx.person_id, input.idempotency_key]);
         if (existing.rows[0]) return existing.rows[0] as CaptureRequest;

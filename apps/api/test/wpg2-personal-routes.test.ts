@@ -62,9 +62,9 @@ describe("A: flagg AV - rutene og wiringen finnes ikke", () => {
     expect(wiring.deps?.actions?.domains.get("home")).toEqual({ toolId: "home-assistant", readAction: HOME_CRITICAL_READ_ACTION });
     expect([...(wiring.deps?.actions?.domains.keys() ?? [])]).toEqual(["home"]);
     expect(wiring.filterTools(homeAssistantTools()).map((d) => d.action)).toEqual(["list_states", "read_state", "light_set", "climate_set"]);
-    expect(wiring.describe()).toEqual({ msg: "personal_twin", home_critical: { targets: 0, settle_ms: 20_000, legacy_lock_alarm_removed: true } });
+    expect(wiring.describe()).toEqual({ msg: "personal_twin", home_critical: { targets: 0, settle_ms: 20_000, alarm_settle_ms: 90_000, legacy_lock_alarm_removed: true } });
     const withTargets = createPersonalWiring({ env: { JARVIS_PERSONAL_HOME_CRITICAL: "on", JARVIS_PERSONAL_HOME_TARGETS: "lock.a, cover.b ,bogus", JARVIS_PERSONAL_HOME_SETTLE_MS: "30000" }, pool: {} as never, gateway: {} as never, readSecret: async () => null });
-    expect(withTargets.describe()).toEqual({ msg: "personal_twin", home_critical: { targets: 2, settle_ms: 30_000, legacy_lock_alarm_removed: true } });
+    expect(withTargets.describe()).toEqual({ msg: "personal_twin", home_critical: { targets: 2, settle_ms: 30_000, alarm_settle_ms: 90_000, legacy_lock_alarm_removed: true } });
   });
 });
 
@@ -107,6 +107,7 @@ function harness(opts: {
     calls.push("run");
     if (input.action === "boom") throw new Error("personal_action_idempotency_conflict");
     if (input.action === "crash") throw new Error("noe uventet med hemmelighet-123");
+    if (input.action === "busy") throw new Error("personal_action_target_busy");
     return { action: { action_id: "a1" } as never, outcome: "SUCCESS", reason: null, replayed: false };
   });
   const gatewayExecute = vi.fn(async () => { calls.push("gateway.execute"); return opts.readResult ?? { ok: true, output_trust: "untrusted", data: { entity_id: "lock.a", state: "locked", settled: true, usable: true } }; });
@@ -180,6 +181,16 @@ describe("B: /personal/actions/mutate - rekkefølge og porter (funksjonelt, med 
     await handlePersonalRoute(other.ctx);
     expect(other.responses).toEqual([{ status: 400, body: { error: "personal_action_rejected", generic: true } }]);
     expect(JSON.stringify(other.responses)).not.toContain("hemmelighet-123");
+  });
+
+  it("et opptatt mål (en annen handling mot SAMME mål er i flukt) gir 409 med den faste koden `personal_action_target_busy` - ikke et generisk 400 eller en feiltekst: «ikke utført, prøv igjen» (fiks-runde 2, review A NY-2)", async () => {
+    const busy = harness({ path: "/personal/actions/mutate", body: { ...body, action: "busy" } });
+    await handlePersonalRoute(busy.ctx);
+    expect(busy.responses).toEqual([{ status: 409, body: { error: "personal_action_rejected", reason: "personal_action_target_busy", request_id: "req-1" } }]);
+    // Andre egne koder forblir 400 (kun «opptatt» er et forsøk-igjen-svar).
+    const conflict = harness({ path: "/personal/actions/mutate", body: { ...body, action: "boom" } });
+    await handlePersonalRoute(conflict.ctx);
+    expect(conflict.responses[0]?.status).toBe(400);
   });
 
   it("ruter uten `deps.actions` håndteres ikke (false -> 404 hos kalleren), og ikke-POST/andre stier likeså", async () => {
@@ -261,7 +272,12 @@ describe("D: server.ts og main.ts - krokene er få og betingede (kildevakt)", ()
   });
 
   it("main.ts: personal opprettes fra miljøet, filtrerer firstWaveTools, legger verktøyene til sist og setter `personal` i ApiDeps KUN når deps finnes; loggen er betinget", () => {
-    expect(MAIN).toMatch(/const personal = createPersonalWiring\(\{ env: process\.env, pool, gateway: toolGateway, readSecret: \(ref\) => readSecretProvider\.get\(ref\), ownerPersonId: owner\.owner_person_id \}\);/);
+    // `controls` (fiks-runde review B MEDIUM-1): DAV-rutene går utenom ToolGateway og må selv høre kill switch og credential-revokering. Det MÅ være de SAMME instansene (én `killSwitch`, én `ownerControls`) som PolicyGateway/ToolGateway bruker.
+    expect(MAIN).toMatch(/const personal = createPersonalWiring\(\{ env: process\.env, pool, gateway: toolGateway, readSecret: \(ref\) => readSecretProvider\.get\(ref\), ownerPersonId: owner\.owner_person_id, controls: \{ killSwitch, ownerControls \} \}\);/);
+    expect(MAIN.match(/const killSwitch = /g)).toHaveLength(1);
+    expect(MAIN.match(/const ownerControls = /g)).toHaveLength(1);
+    expect(MAIN).toMatch(/new PolicyGateway\(\{[^}]{0,200}\n\s+killSwitch,\n/);
+    expect(MAIN).toMatch(/\n\s+controls: ownerControls,\n/);
     expect(MAIN).toMatch(/if \(personalLog\) console\.log\(JSON\.stringify\(personalLog\)\);/);
     expect(MAIN).toContain("for (const tool of personal.filterTools(firstWaveTools({");
     expect(MAIN).toMatch(/\.\.\.personal\.tools\s*\]\s*\}\)\)\) toolGateway\.register\(tool\);/);

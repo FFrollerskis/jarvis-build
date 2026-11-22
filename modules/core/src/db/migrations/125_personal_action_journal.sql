@@ -5,7 +5,8 @@
 --   * `request_digest` (sha256 av de kanoniserte parameterne): samme nøkkel med ANNEN nyttelast AVVISES, aldri «det lagrede resultatet» (samme prinsipp som `growth_write_journal`);
 --   * før-/etter-tilstand (redigert, begrenset - kun enumererte tilstandsord, tall og tidsstempler) knyttet til MÅLET (entitets-/kjøretøy-id), slik at «feil sluttilstand» er ett oppslag;
 --   * `outcome_unknown` er en førsteklasses status (UTFALL UKJENT etter en akseptert kommando, eller en sluttilstand som ikke ble bekreftet): raden blir stående til en avstemming har satt
---     `applied`/`failed` - en ny kommando med SAMME nøkkel utføres aldri;
+--     `applied`/`failed` - en ny kommando med SAMME nøkkel utføres aldri. MERK (ærlig, review A LOW-9): triggeren TILLATER overgangen, men INGEN kode avstemmer i dag (`DEFERRED`: eier-rute/jobb); eieren
+--     leser målets nåtilstand (`/personal/actions/read`) og avgjør selv;
 --   * `risk_direction` (reduces/increases/neutral): om handlingen gjør noe TRYGGERE (låse, armere, lukke) eller mindre trygt (låse opp, avarmere, åpne). Det er faktaene en senere, eier-besluttet
 --     autonomi-lemping ville støttet seg på (Q-G2-1); ingenting i koden lemper på step-up på grunnlag av den.
 -- Kjerne-kolonnene er UFORANDERLIGE (trigger), og statusen kan bare gå requested -> applied|failed|outcome_unknown og outcome_unknown -> applied|failed. Terminale statuser endres aldri igjen.
@@ -36,6 +37,10 @@ CREATE TABLE personal_action_journal (
   task_id           text,
   session_id        text,
   trace_id          text,
+  -- Varslingsstatus (fiks-runde review A LOW-8): ble det umiddelbare eier-varselet levert? `NULL` = ikke forsøkt (avvist før handlingen) / ukjent; `false` + `notify_error` (kort, sanert kode) = handlingen står, men eieren ble IKKE varslet
+  -- (retry-markør: en senere jobb/eier kan finne `notified = false`). Operasjonell metadata: kan oppdateres også etter terminal status (selve handlingens proveniens kan ikke).
+  notified          boolean,
+  notify_error      text CHECK (notify_error IS NULL OR char_length(notify_error) <= 160),
   requested_at      timestamptz NOT NULL DEFAULT now(),
   completed_at      timestamptz,
   created_at        timestamptz NOT NULL DEFAULT now(),
@@ -55,7 +60,9 @@ BEGIN
      OR NEW.domain IS DISTINCT FROM OLD.domain OR NEW.tool_id IS DISTINCT FROM OLD.tool_id OR NEW.action IS DISTINCT FROM OLD.action OR NEW.risk_class IS DISTINCT FROM OLD.risk_class
      OR NEW.risk_direction IS DISTINCT FROM OLD.risk_direction OR NEW.target_ref IS DISTINCT FROM OLD.target_ref OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
      OR NEW.request_digest IS DISTINCT FROM OLD.request_digest OR NEW.actor_person_id IS DISTINCT FROM OLD.actor_person_id OR NEW.source IS DISTINCT FROM OLD.source
-     OR NEW.requested_at IS DISTINCT FROM OLD.requested_at THEN
+     OR NEW.requested_at IS DISTINCT FROM OLD.requested_at
+     -- Proveniens (regel 4, fiks-runde review A LOW-6): korrelasjons-id-ene og opprettelsestidspunktet kan ikke omskrives etterpå.
+     OR NEW.task_id IS DISTINCT FROM OLD.task_id OR NEW.session_id IS DISTINCT FROM OLD.session_id OR NEW.trace_id IS DISTINCT FROM OLD.trace_id OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
     RAISE EXCEPTION 'personal_action_journal_immutable_column' USING ERRCODE = '23514';
   END IF;
   IF OLD.status = 'requested' AND NEW.status NOT IN ('requested', 'applied', 'failed', 'outcome_unknown') THEN
@@ -64,9 +71,9 @@ BEGIN
   IF OLD.status = 'outcome_unknown' AND NEW.status NOT IN ('outcome_unknown', 'applied', 'failed') THEN
     RAISE EXCEPTION 'personal_action_journal_invalid_transition' USING ERRCODE = '23514';
   END IF;
-  -- Terminale statuser (applied/failed) endres aldri igjen.
+  -- Terminale statuser (applied/failed) endres aldri igjen (heller ikke ferdigstillingstidspunktet).
   IF OLD.status IN ('applied', 'failed') AND (NEW.status IS DISTINCT FROM OLD.status OR NEW.before_state IS DISTINCT FROM OLD.before_state OR NEW.after_state IS DISTINCT FROM OLD.after_state
-     OR NEW.failure_code IS DISTINCT FROM OLD.failure_code OR NEW.external_id IS DISTINCT FROM OLD.external_id) THEN
+     OR NEW.failure_code IS DISTINCT FROM OLD.failure_code OR NEW.external_id IS DISTINCT FROM OLD.external_id OR NEW.completed_at IS DISTINCT FROM OLD.completed_at) THEN
     RAISE EXCEPTION 'personal_action_journal_terminal_status' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;

@@ -59,7 +59,7 @@ describe("L1: stille-timer-grensen kl. 22 (mutant QH-1)", () => {
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: COMMS_CHANNELS.join(",") });
   const warm: OutboundPolicyState = {
     account_authorized: true, recipient_opted_out: false, sends_last_24h_to_recipient: 0, calls_last_24h_to_recipient: 0, sends_last_hour_from_account: 0, last_inbound_at: null,
-    recipient_identity: { identity_id: "id-1", confidence: 1 }, target: null, marketing: { prior_consent: false, reservation_register: "unverified" }
+    recipient_identity: { identity_id: "id-1", confidence: 1, match_method: "exact_phone_e164" }, target: null, marketing: { prior_consent: false, reservation_register: "unverified" }
   };
   const sms: OutboundRequest = { kind: "message", channel: "sms", account_ref: "+4791000000", recipient: "+4790000000", purpose: "transactional", content: { text: "Hei, timen din er bekreftet." } };
   const at = (utc: string) => evaluateOutboundPolicy(sms, warm, config, new Date(utc)).denial_codes;

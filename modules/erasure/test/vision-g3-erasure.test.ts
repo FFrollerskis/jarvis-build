@@ -21,6 +21,7 @@ import { VisionService } from "../../vision/src/service.ts";
 import { VisionSnapshotService } from "../../vision/src/snapshots.ts";
 import { LocalFsStorageAdapter } from "../../vision/src/storage.ts";
 import { VisionCaptureService } from "../../vision/src/capture.ts";
+import { jpegBytes } from "../../vision/test/support/images.ts";
 
 /**
  * WP-G3 (D-465): Q-20-erasure dekker NÅ HELE UA-9-avtrykket - kameraer, hendelser, lagrede bilder, vektorer, inventar og opptaksforespørsler - bevist ende-til-ende mot den
@@ -45,7 +46,7 @@ const PERSON_B = "person-g3-b";
 const identity = (): IdentityContext => ({ person_id: OWNER, tenant_id: TENANT, memory_space_id: "personal", session_id: "sess-g3-erase", device_id: "dev-g3", channel: "api", auth_strength: "active" });
 
 function jpeg(): Uint8Array {
-  return Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, ...Array.from({ length: 64 }, () => Math.floor(Math.random() * 256))]);
+  return jpegBytes({ size: 64 }); // strukturelt gyldig hode (SOF 64x48): inspectImage leser målene fra hodet (review A-L6)
 }
 
 async function files(): Promise<string[]> {

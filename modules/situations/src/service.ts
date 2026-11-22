@@ -3,7 +3,7 @@ import type pg from "pg";
 import { writeAudit } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { JsonValue, MemorySpace, IdentityContext } from "@jarvis/contracts";
-import type { ToolGateway, ToolResult } from "@jarvis/tool-gateway";
+import { autonomyBindingBlocker, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import {
   SetSituationAutonomyPolicyInputSchema,
   SetSituationNotificationPolicyInputSchema,
@@ -426,6 +426,17 @@ export function renderAutonomyParameters(
   };
   const rendered = render(parameters) as Record<string, JsonValue>;
   return missing ? null : rendered;
+}
+
+/**
+ * Kastet ved `setAutonomyPolicy()` for en binding som ALDRI kan lykkes (WP-G2 fiks-runde review A LOW-4): de kritiske hjem-/bilhandlingene krever en enhetssignert eier-økt, og sveipens identitet har ikke den. Fail-closed
+ * ved BINDING, ikke først ved kjøring (der den bare ville blitt nektet og situasjonen eskalert).
+ */
+export class SituationAutonomyUnbindableError extends Error {
+  constructor(public readonly toolId: string, public readonly action: string, public readonly reason: string) {
+    super(`situation_autonomy_binding_never_succeeds:${toolId}.${action}:${reason}`);
+    this.name = "SituationAutonomyUnbindableError";
+  }
 }
 
 /** D-160: kastet av `setAutonomyPolicy()`/`clearAutonomyPolicy()` når aktøren ikke er den konfigurerte sovereign-eieren (eller ingen autoritet er konfigurert - fail-closed). */
@@ -1597,6 +1608,9 @@ export class SituationEngine {
     for (const name of used) {
       if (!(AUTONOMY_PLACEHOLDERS as readonly string[]).includes(name)) throw new SituationAutonomyPlaceholderError(name);
     }
+    // Fail-closed ved BINDING: en binding som aldri kan lykkes (kritisk hjem-/bilhandling som krever en enhetssignert eier-økt) avvises nå, ikke først ved kjøring.
+    const blocker = autonomyBindingBlocker(value.tool_id, value.action);
+    if (blocker !== null) throw new SituationAutonomyUnbindableError(value.tool_id, value.action, blocker);
     return withDomainAdvisoryLocks(this.pool, [value.domain], () =>
       withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
         const { rows } = await client.query(

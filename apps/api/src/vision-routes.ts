@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import type { IdentityContext } from "@jarvis/contracts";
 import { ownerStepUpDenial } from "@jarvis/tool-gateway";
+import { clientKey, type RateLimiter } from "./http-guard.ts";
 import { VisionCameraValidationError, VisionCaptureError, type CaptureRequest, type SignedCaptureUpload, type VisionCameraService, type VisionCaptureService, type VisionInventoryService, type VisionLastSeenService } from "@jarvis/vision";
 
 /**
@@ -9,13 +10,48 @@ import { VisionCameraValidationError, VisionCaptureError, type CaptureRequest, t
  *
  * Alle ruter er `POST` med JSON-kropp og `grant_token` (som resten av kontrollrutene): identitet, tenant, person, space og enhet kommer UTELUKKENDE fra det verifiserte grantet - kroppen kan aldri
  * bære dem (`authed` avviser identitetsfelt og ukjente felt FØR grantet løses). Tre klasser:
- *   - eier-LES (`cameras/list`, `last-seen`, `inventory`): grant + eier-port (`deps.ownerGate`).
+ *   - eier-LES (`cameras/list`, `status`, `last-seen`, `inventory`): grant + eier-port (`deps.ownerGate`).
  *   - eier-SKRIV (`cameras/register|update|remove`, `capture/request`): grant + eier-port + STEP-UP (enhetssignert økt fra en eier-kanal, samme regel som øvrige kontrollhandlinger).
  *     `remove` krever i tillegg TYPET bekreftelse (`confirm: true` + `confirm_camera_id` = kameraets id; ingen destruktiv handling uten eksplisitt bekreftelse, CLAUDE.md regel 8).
  *   - ENHET (`capture/pending`, `capture/upload`): grant der `device_id` KOMMER FRA GRANTET (aldri fra kroppen). Opplastingen er i tillegg enhetssignert (Ed25519 over request_id/tenant/person/enhet/hash/
  *     lengde/type/tid, se `captureSigningBytes`) og engangs - se modules/vision/src/capture.ts. Enhetens økt må ha SAMME memory space som kameraet (grantets scope).
  * Svar inneholder aldri bildebytes, modellens rå tekst eller hemmeligheter; opplastingssvaret har kun utfallskoder og antall.
  */
+/** Utfall av siste vedlikeholdskjøring (kun tall og tidspunkt, aldri innhold). */
+export interface VisionMaintenanceStatus {
+  at: string;
+  failed: number;
+  tombstones_deleted: number;
+  tombstones_failed: number;
+  tombstones_stuck: number;
+  /** Foreldreløse skriverester fjernet av siste kjøring (kun den daglige FULLE kjøringen rydder dem; alltid 0 for lett vedlikehold). */
+  temp_files_purged: number;
+  /** Review delta2 B LOW-E3: temp-sveipet nådde sin øvre grense for antall oppføringer og ble avbrutt (resten ryddes av en senere kjøring). Aldri stille: også én logglinje. Alltid false for lett vedlikehold. */
+  temp_files_truncated: boolean;
+}
+
+/** Eierens helsebilde (review B-L8): poller, vedlikehold og hva som er koblet inn. Ingen vertsnavn, URL-er, tokens eller innhold - kun koder, tall og tidspunkt. */
+export interface VisionStatusReport {
+  poller: { enabled: false } | { enabled: true; last_tick_at: string | null; last_status: string | null; last_reason: string | null; last_source_error: string | null; consecutive_failures: number; next_delay_ms: number };
+  maintenance: {
+    light: VisionMaintenanceStatus | null;
+    full: VisionMaintenanceStatus | null;
+    /**
+     * Review delta2 B LOW-E2: vakten rundt lett vedlikehold er synlig. `running_since` = starttidspunktet til kjøringen som holder vakten akkurat nå (`null` = ingen pågår; en gammel verdi betyr at en kjøring henger),
+     * `skipped_ticks` = tikk som ble hoppet over fordi en kjøring pågikk (kumulativt siden prosessstart), `abandoned_runs` = kjøringer som har stått lenger enn tidsgrensen og er regnet som forlatt (ikke ferdige ennå).
+     */
+    light_run: { running_since: string | null; skipped_ticks: number; abandoned_runs: number };
+  };
+  /**
+   * Kumulativt siden prosessen startet (kun tall og tidspunkt): inventarskrivinger som ble hoppet over i LAGREDE hendelser (review delta2 A LOW-E3 + B LOW-E1). `invalid` = etiketten har ikke inventarform,
+   * `rejected` = databasen avviste en etikett JS-regelen godtok (drift mellom regelsettene). Hendelsene er lagret i begge tilfeller; det er inventaret for den etiketten som mangler. Aldri etikettinnhold.
+   */
+  ingest: { inventory_label_invalid: number; inventory_label_rejected: number; last_inventory_skip_at: string | null };
+  storage: { maintenance_enabled: boolean; writing_enabled: boolean };
+  classifier: boolean;
+  embeddings: boolean;
+}
+
 export interface VisionApiDeps {
   cameras: VisionCameraService;
   capture: VisionCaptureService;
@@ -23,6 +59,13 @@ export interface VisionApiDeps {
   inventory: VisionInventoryService;
   /** Maks bildestørrelse i opplastingen (bytes). */
   maxUploadBytes: number;
+  /**
+   * Streng per-IP-grense for opplastingsruten, sjekket FØR kroppen leses (review B-L4): opplastingen har et hevet kroppstak (ca. 7 MB mot 64 KiB ellers) og serveren leser kroppen FØR grantet verifiseres, så uten egen
+   * grense kunne en uautentisert klient strømme mange MB per forespørsel opp til den generelle IP-grensen (600/min). Utelatt = ingen ekstra grense (kun den generelle).
+   */
+  uploadLimiter?: RateLimiter;
+  /** Helsebilde for `/vision/status` (satt av kjøretiden). Utelatt = ruten gir `status_unavailable`. */
+  status?: () => VisionStatusReport;
 }
 
 export interface VisionRouteHelpers {
@@ -46,6 +89,7 @@ interface RouteSpec {
 
 const ROUTES: Readonly<Record<string, RouteSpec>> = {
   "/vision/cameras/list": { access: "owner_read", action: "cameras_list", keys: [] },
+  "/vision/status": { access: "owner_read", action: "status", keys: [] },
   "/vision/last-seen": { access: "owner_read", action: "last_seen", keys: ["query"] },
   "/vision/inventory": { access: "owner_read", action: "inventory", keys: ["room_id"] },
   "/vision/cameras/register": { access: "owner_write", action: "camera_register", keys: ["label", "source_type", "source_ref", "trigger_entities", "room_id", "zone_kind", "route_policy", "cooldown_seconds", "enabled"] },
@@ -96,6 +140,14 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
   const spec = ROUTES[pathname];
   if (spec === undefined || req.method !== "POST") return false;
   const maxBytes = spec.upload === true ? Math.ceil((deps.maxUploadBytes * 4) / 3) + 8_192 : undefined;
+  if (spec.upload === true && deps.uploadLimiter !== undefined) {
+    const peer = clientKey(req);
+    if (!deps.uploadLimiter.take(peer)) {
+      req.resume(); // kroppen leses/bufres aldri: en avvist forespørsel koster ingen minne
+      h.json(429, { error: "rate_limited", reason: "upload_rate_limited", retry_after_seconds: deps.uploadLimiter.retryAfterSeconds(peer), request_id: h.requestId() });
+      return true;
+    }
+  }
   const authed = await h.authed(spec.keys, maxBytes);
   if (authed === null) return true;
   const { identity, body } = authed;
@@ -126,8 +178,17 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
         h.json(200, { ok: true, data: { cameras: await deps.cameras.listCameras(tenant, space, person) } });
         return true;
       }
+      case "/vision/status": {
+        if (deps.status === undefined) {
+          h.json(503, { error: "status_unavailable", request_id: requestId });
+          return true;
+        }
+        h.json(200, { ok: true, data: deps.status() });
+        return true;
+      }
       case "/vision/cameras/register": {
-        const camera = await deps.cameras.registerCamera(tenant, space, { person_id: person, ...pick(body, spec.keys) } as never, { task_id: "vision-api:camera_register", session_id: identity.session_id });
+        // Review B-L3: revisjonsrad i samme transaksjon (audit: true); ukjent rom gir 400 `vision_validation` (field room_id, review B-L5) via tjenesten.
+        const camera = await deps.cameras.registerCamera(tenant, space, { person_id: person, ...pick(body, spec.keys) } as never, { task_id: "vision-api:camera_register", session_id: identity.session_id, device_id: identity.device_id, audit: true });
         h.json(200, { ok: true, data: camera });
         return true;
       }
@@ -136,7 +197,7 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
         if (cameraId === null) return bad("camera_id");
         const { camera_id: _omit, ...patch } = pick(body, spec.keys);
         void _omit;
-        const camera = await deps.cameras.updateCamera(tenant, space, person, cameraId, patch as never);
+        const camera = await deps.cameras.updateCamera(tenant, space, person, cameraId, patch as never, { task_id: "vision-api:camera_update", session_id: identity.session_id, device_id: identity.device_id, audit: true });
         if (camera === null) {
           h.json(404, { error: "camera_not_found", request_id: requestId });
           return true;
@@ -152,7 +213,7 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
           h.json(409, { error: "confirmation_required", reason: "confirm_true_and_confirm_camera_id_required", confirm_camera_id_required: cameraId, request_id: requestId });
           return true;
         }
-        const removed = await deps.cameras.removeCamera(tenant, space, person, cameraId, { confirm: true });
+        const removed = await deps.cameras.removeCamera(tenant, space, person, cameraId, { confirm: true, task_id: "vision-api:camera_remove", session_id: identity.session_id, device_id: identity.device_id, audit: true });
         if (!removed) {
           h.json(404, { error: "camera_not_found", request_id: requestId });
           return true;
@@ -168,7 +229,7 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
         const key = body["idempotency_key"];
         if (key !== undefined && typeof key !== "string") return bad("idempotency_key");
         const request = await deps.capture.requestCapture(
-          { tenant_id: tenant, memory_space: space, person_id: person, task_id: "vision-api:capture_request", session_id: identity.session_id },
+          { tenant_id: tenant, memory_space: space, person_id: person, task_id: "vision-api:capture_request", session_id: identity.session_id, device_id: identity.device_id, audit: true },
           { camera_id: cameraId, idempotency_key: key as string | undefined, ttl_ms: ttl === undefined ? undefined : Math.round((ttl as number) * 1000) }
         );
         h.json(200, { ok: true, data: publicRequest(request) });
@@ -210,7 +271,12 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
           ok: true,
           data: {
             request: { request_id: result.request.request_id, state: result.request.state },
-            outcome: { status: result.outcome.status, reason: result.outcome.reason, classification_status: result.outcome.classification_status, detection_count: result.outcome.detection_count, snapshot_stored: result.outcome.snapshot_id !== undefined }
+            // `inventory_skipped`: antall inventarskrivinger hoppet over for dette opptaket (review delta2 A LOW-E3 + B LOW-E1) - kun et tall, aldri en etikett.
+            outcome: {
+              status: result.outcome.status, reason: result.outcome.reason, classification_status: result.outcome.classification_status, detection_count: result.outcome.detection_count,
+              snapshot_stored: result.outcome.snapshot_id !== undefined,
+              inventory_skipped: (result.outcome.inventory_skipped?.invalid ?? 0) + (result.outcome.inventory_skipped?.rejected ?? 0)
+            }
           }
         });
         return true;

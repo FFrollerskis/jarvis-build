@@ -2,14 +2,15 @@ import type pg from "pg";
 import { FamilyService } from "@jarvis/context";
 import type { IdentityContext } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
+import type { KillSwitch, OwnerControls } from "@jarvis/policy";
 import { BankingService } from "@jarvis/finance";
 import { HEALTH_INTAKE_MAX_DELETES, HEALTH_INTAKE_MAX_SAMPLES, HEALTH_INTAKE_SOURCE_TYPE, HealthIntakeService, HealthService, MetricTypeSchema } from "@jarvis/health";
 import { LocationService } from "@jarvis/location";
 import {
-  AppleDavClient, FetchDavTransport, PERSONAL_CONFIG_NAMES, parseDavCollections,
+  AppleDavClient, FetchDavTransport, PERSONAL_CONFIG_NAMES, parseDavCollections, type DavSendGuard,
   CAR_CRITICAL_OPS, CAR_READ_ACTION, CAR_TOOL_ID, CarTransport, UnconfiguredCarAdapter, carCriticalConfigFromEnv, carCriticalToolDefinitions,
   HOME_CRITICAL_OPS, HOME_CRITICAL_READ_ACTION, HOME_ASSISTANT_TOOL_ID, HomeAssistantCriticalTransport, PERSONAL_FLAG_NAMES, PERSONAL_SECRET_REFS, PersonalActionJournal,
-  executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, legacyCriticalActionsToDrop, personalActionIndex, personalFlagOn,
+  executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, homeSettleMsFor, legacyCriticalActionsToDrop, personalActionIndex, personalFlagOn,
   type CarAdapter, type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { familySharedDataReaders, type HealthReadApi, type LocationReadApi } from "./personal-family-readers.ts";
@@ -51,6 +52,13 @@ export interface PersonalWiringInput {
   healthReader?: HealthReadApi;
   /** IANA-tidssone for «skritt i dag» (standard `Europe/Oslo`). */
   timeZone?: string;
+  /**
+   * Eierens stoppkontroller (fiks-runde review B MEDIUM-1): DAV-rutene går utenom ToolGateway, så kill switch og credential-revokering må sjekkes av dem selv, FØR hver utsendelse. Uten denne registreres IKKE DAV-rutene (fail closed).
+   * Må være de SAMME instansene som `PolicyGateway`/`ToolGateway` bruker (LIVE `*Durable`-sjekker, delt mellom prosesser).
+   */
+  controls?: { killSwitch: Pick<KillSwitch, "isActiveDurable">; ownerControls: Pick<OwnerControls, "isRevokedDurable"> };
+  /** KUN tester: virtuell klokke for HA-transportens venteløkke (uten den brukes ekte tid). Gjør at «domenets ventetid brukes faktisk» kan bevises gjennom selve oppkoblingen uten å vente 90 s (fiks-runde 2, review A NY-2). */
+  homeTimers?: { now?: () => number; sleep?: (ms: number) => Promise<void> };
 }
 
 export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring {
@@ -64,14 +72,16 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
   if (personalFlagOn(env, PERSONAL_FLAG_NAMES.homeCritical)) {
     const config = homeCriticalConfigFromEnv(env);
     const transport = new HomeAssistantCriticalTransport({
-      baseUrl: () => readSecret("JARVIS_HA_BASE_URL"), alarmCode: () => readSecret(PERSONAL_SECRET_REFS.homeAlarmCode), settleMs: config.settleMs, pollMs: config.pollMs
+      baseUrl: () => readSecret("JARVIS_HA_BASE_URL"), alarmCode: () => readSecret(PERSONAL_SECRET_REFS.homeAlarmCode), settleMs: config.settleMs, pollMs: config.pollMs,
+      ...(config.settleMsByDomain ? { settleMsByDomain: config.settleMsByDomain } : {}),
+      ...(input.homeTimers?.now ? { now: input.homeTimers.now } : {}), ...(input.homeTimers?.sleep ? { sleep: input.homeTimers.sleep } : {})
     });
     tools.push(...homeCriticalToolDefinitions(transport, config));
     dropLegacyHome = true;
     domains.set("home", { toolId: HOME_ASSISTANT_TOOL_ID, readAction: HOME_CRITICAL_READ_ACTION });
     entries.push(...HOME_CRITICAL_OPS.map((op): PersonalActionIndexEntry => ({ domain: "home", toolId: HOME_ASSISTANT_TOOL_ID, op })));
     // `targets: 0` er en gyldig (fail-closed) tilstand: verktøyene finnes, men hver mutasjon nektes til eieren har listet sine egne entiteter.
-    log["home_critical"] = { targets: config.targets.size, settle_ms: config.settleMs, legacy_lock_alarm_removed: true };
+    log["home_critical"] = { targets: config.targets.size, settle_ms: config.settleMs, alarm_settle_ms: homeSettleMsFor(config, "alarm_control_panel"), legacy_lock_alarm_removed: true };
   }
 
   if (personalFlagOn(env, PERSONAL_FLAG_NAMES.car)) {
@@ -115,20 +125,35 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
 
   // Apple Kalender/Påminnelser/Kontakter (P2e): KUN ruter (`/personal/dav/*`), aldri verktøy. Samlingene er en allowlist fra eieren; passordet (app-spesifikt, D-108) hentes per forespørsel fra vaulten. Live mot iCloud er `BLOCKED_EXTERNAL`.
   let dav: PersonalDavDeps | undefined;
-  if (personalFlagOn(env, PERSONAL_FLAG_NAMES.appleDav)) {
+  if (personalFlagOn(env, PERSONAL_FLAG_NAMES.appleDav) && input.controls === undefined) {
+    // FAIL CLOSED (fiks-runde review B MEDIUM-1): uten kill switch og credential-revokering ville DAV-rutene (som går utenom ToolGateway) ikke kunne stoppes av eieren - da registreres de ikke.
+    log["apple_dav"] = { registered: false, reason: "controls_missing" };
+  } else if (personalFlagOn(env, PERSONAL_FLAG_NAMES.appleDav) && input.controls !== undefined) {
     const { collections, rejected } = parseDavCollections(env[PERSONAL_CONFIG_NAMES.appleDavAccounts]);
+    const { killSwitch, ownerControls } = input.controls;
+    // Stoppvakten FØR hver utsendelse (gatewayen hører kill switch og revokering for verktøykall; DAV er ruter utenom den): kill switch aktiv eller en av iCloud-referansene tilbakekalt = ingenting sendes.
+    const guard: DavSendGuard = async () => {
+      if (await killSwitch.isActiveDurable()) return "kill_switch_active";
+      for (const ref of [PERSONAL_SECRET_REFS.appleDavUser, PERSONAL_SECRET_REFS.appleDavAppPassword]) if (await ownerControls.isRevokedDurable(ref)) return "credential_revoked";
+      return null;
+    };
     const transport = new FetchDavTransport({
-      collections,
+      collections, guard,
       credentials: async () => {
         const [user, password] = [await readSecret(PERSONAL_SECRET_REFS.appleDavUser), await readSecret(PERSONAL_SECRET_REFS.appleDavAppPassword)];
         return user && password ? { user, password } : null;
       }
     });
     dav = {
+      guard,
       client: new AppleDavClient({ transport, collections }),
+      // Et forsøk stoppkontrollene stoppet (`decision: "DENY"`) skrives som `tool.denied` med årsaken - samme type som et avslått verktøykall, så sikkerhetssenteret teller den; alt annet er mutasjonssporet (`dav.mutation`). Aldri innhold.
       audit: (identity, entry) =>
         withTenantTransaction(pool, identity.tenant_id, (client) =>
-          writeAudit(client, identity, { type: "dav.mutation", decision: "ALLOW", tool_id: "apple_dav", action: entry.action, payload: { collection: entry.collection, ...(entry.uid !== undefined ? { uid: entry.uid } : {}), outcome: entry.outcome, channel: identity.channel } })
+          writeAudit(client, identity, {
+            type: entry.decision === "DENY" ? "tool.denied" : "dav.mutation", decision: entry.decision ?? "ALLOW", ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+            tool_id: "apple_dav", action: entry.action, payload: { collection: entry.collection, ...(entry.uid !== undefined ? { uid: entry.uid } : {}), outcome: entry.outcome, channel: identity.channel }
+          })
         )
     };
     log["apple_dav"] = { registered: true, collections: collections.length, rejected_entries: rejected, live: "BLOCKED_EXTERNAL" };

@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { AppleDavClient, DavError, parseDavCollections } from "@jarvis/tool-gateway";
-import { FakeDavServer } from "../../../modules/tool-gateway/test/support/fake-dav-server.ts";
+import { AppleDavClient, DavError, parseDavCollections, type DavTransport } from "@jarvis/tool-gateway";
+import { FakeDavServer, ics } from "../../../modules/tool-gateway/test/support/fake-dav-server.ts";
 import { FORBIDDEN_IDENTITY_BODY_KEYS } from "../src/http-guard.ts";
 import { DAV_ERROR_STATUS, DAV_ROUTES, type DavAuditEntry, type PersonalDavDeps } from "../src/personal-dav.ts";
 import { handlePersonalRoute, type PersonalRouteContext } from "../src/personal-routes.ts";
@@ -18,8 +18,10 @@ const owner: IdentityContext = { person_id: "p-owner", tenant_id: "t-owner", mem
 const CAL = "https://caldav.example.com/u1/cal/";
 const { collections } = parseDavCollections(`calendar:privat=${CAL}`);
 
+const openControls = { killSwitch: { isActiveDurable: async () => false }, ownerControls: { isRevokedDurable: async () => false } };
+
 describe("A: flagg og wiring", () => {
-  const base = { pool: {} as never, gateway: {} as never };
+  const base = { pool: {} as never, gateway: {} as never, controls: openControls };
   it("uten flagg finnes ingen DAV-avhengighet; kun `on` registrerer rutene, aldri et verktøy; ugyldige samlinger forkastes og telles; uten passord sendes ingenting (fail closed)", async () => {
     for (const value of [undefined, "", "true", "1", "ON"]) {
       const w = createPersonalWiring({ ...base, readSecret: async () => null, env: value === undefined ? {} : { JARVIS_PERSONAL_APPLE_DAV: value } });
@@ -40,7 +42,7 @@ describe("A: flagg og wiring", () => {
     const queries: Array<{ text: string; values: unknown[] }> = [];
     const client = { query: vi.fn(async (text: string, values: unknown[] = []) => { queries.push({ text, values }); return { rows: [], rowCount: 0 }; }), release: vi.fn() };
     const pool = { connect: async () => client } as never;
-    const w = createPersonalWiring({ pool, gateway: {} as never, readSecret: async () => null, env: { JARVIS_PERSONAL_APPLE_DAV: "on", JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS: `calendar:privat=${CAL}` } });
+    const w = createPersonalWiring({ pool, gateway: {} as never, controls: openControls, readSecret: async () => null, env: { JARVIS_PERSONAL_APPLE_DAV: "on", JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS: `calendar:privat=${CAL}` } });
     await w.deps?.dav?.audit(owner, { action: "create", collection: "privat", uid: "jarvis-abc", outcome: "SUCCESS" });
     const insert = queries.find((q) => q.text.includes("INSERT INTO audit_events"));
     expect(insert?.values).toEqual(expect.arrayContaining(["t-owner", "p-owner", "dav.mutation", "apple_dav", "create"]));
@@ -48,11 +50,157 @@ describe("A: flagg og wiring", () => {
     expect(payload).toEqual({ collection: "privat", uid: "jarvis-abc", outcome: "SUCCESS", channel: "web" });
     expect(queries.some((q) => q.text.includes("set_config"))).toBe(true);
   });
+
+  it("fiks-runde 2 (NY-4): en DENY-rad (forsøket stoppet av stoppkontrollene) skrives som `tool.denied` med årsaken og uten innhold; mutasjonssporet er uendret `dav.mutation`/ALLOW uten årsak", async () => {
+    const queries: Array<{ text: string; values: unknown[] }> = [];
+    const client = { query: vi.fn(async (text: string, values: unknown[] = []) => { queries.push({ text, values }); return { rows: [], rowCount: 0 }; }), release: vi.fn() };
+    const pool = { connect: async () => client } as never;
+    const w = createPersonalWiring({ pool, gateway: {} as never, controls: openControls, readSecret: async () => null, env: { JARVIS_PERSONAL_APPLE_DAV: "on", JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS: `calendar:privat=${CAL}` } });
+    const insertOf = () => queries.filter((q) => q.text.includes("INSERT INTO audit_events")).at(-1);
+    const payloadOf = (q: { values: unknown[] } | undefined) => JSON.parse(q?.values.find((v) => typeof v === "string" && v.startsWith("{")) as string) as Record<string, unknown>;
+    await w.deps?.dav?.audit(owner, { action: "update", collection: "privat", outcome: "blocked", decision: "DENY", reason: "kill_switch_active" });
+    const denied = insertOf();
+    expect(denied?.values).toEqual(expect.arrayContaining(["t-owner", "p-owner", "tool.denied", "DENY", "kill_switch_active", "apple_dav", "update"]));
+    expect(denied?.values).not.toContain("dav.mutation");
+    expect(payloadOf(denied)).toEqual({ collection: "privat", outcome: "blocked", channel: "web" }); // aldri innhold
+    await w.deps?.dav?.audit(owner, { action: "create", collection: "privat", uid: "jarvis-abc", outcome: "SUCCESS" });
+    const plain = insertOf();
+    expect(plain?.values).toEqual(expect.arrayContaining(["dav.mutation", "ALLOW"]));
+    expect(plain?.values).not.toContain("DENY");
+    expect(plain?.values).not.toContain("tool.denied");
+  });
+});
+
+describe("A2: stoppvakten - kill switch og credential-revokering stopper DAV (review B MEDIUM-1: rutene går utenom ToolGateway)", () => {
+  const env = { JARVIS_PERSONAL_APPLE_DAV: "on", JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS: `calendar:privat=${CAL}` };
+  const wire = (controls: Parameters<typeof createPersonalWiring>[0]["controls"], readSecret: (ref: string) => Promise<string | null> = async () => "fake-secret") =>
+    createPersonalWiring({ pool: {} as never, gateway: {} as never, readSecret, env, ...(controls ? { controls } : {}) });
+
+  it("uten stoppkontroller registreres IKKE DAV-rutene (fail closed): eieren ville ikke kunnet stoppe dem", () => {
+    const w = wire(undefined);
+    expect(w.deps?.dav).toBeUndefined();
+    expect(w.describe()).toEqual({ msg: "personal_twin", apple_dav: { registered: false, reason: "controls_missing" } });
+  });
+
+  it("kill switch aktiv: ingen nettkall og credentials leses ikke engang - for lesing, opprettelse, endring og sletting", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const secret = vi.fn(async () => "fake-secret");
+    const w = wire({ killSwitch: { isActiveDurable: async () => true }, ownerControls: { isRevokedDurable: async () => false } }, secret);
+    const client = w.deps!.dav!.client;
+    const fields = { summary: "x", start: "2026-12-01T08:00:00Z" };
+    for (const call of [() => client.list("privat"), () => client.get("privat", "uid-123456"), () => client.create("privat", "idem-key-0001", fields), () => client.update("privat", "uid-123456", '"e1"', { summary: "y" }), () => client.remove("privat", "uid-123456", '"e1"')]) {
+      await expect(call()).rejects.toMatchObject({ code: "dav_kill_switch_active" });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(secret).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("tilbakekalt credential (bruker ELLER app-passord): ingen nettkall; kun den tilbakekalte referansen stopper, og alle andre ref-er er upåvirket", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    for (const ref of ["JARVIS_PERSONAL_APPLE_DAV_USER", "JARVIS_PERSONAL_APPLE_DAV_APP_PASSWORD"]) {
+      const w = wire({ killSwitch: { isActiveDurable: async () => false }, ownerControls: { isRevokedDurable: async (r: string) => r === ref } });
+      await expect(w.deps!.dav!.client.list("privat"), ref).rejects.toMatchObject({ code: "dav_credential_revoked" });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("en vakt som feiler (database nede) er fail-closed `dav_guard_unavailable`: aldri «fortsett»", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const w = wire({ killSwitch: { isActiveDurable: async () => { throw new Error("db nede"); } }, ownerControls: { isRevokedDurable: async () => false } });
+    await expect(w.deps!.dav!.client.list("privat")).rejects.toMatchObject({ code: "dav_guard_unavailable" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  const ALL_BODY = { collection: "privat", idempotency_key: "idem-key-0001", fields: { summary: "Hemmelig tittel", start: "2026-12-01T08:00:00Z" }, uid: "uid-123456", expected_etag: '"e1"', confirm_uid: "uid-123456" };
+  const noContent = (v: unknown): void => { expect(JSON.stringify(v)).not.toMatch(/Hemmelig|idem-key|expected_etag|uid-123456|fields|summary/); };
+
+  it("ruten: vakten FØR klienten (503 `dav_blocked`, ingen klientkall, ingen `requested`-rad) og nøyaktig ÉN DENY-rad med årsaken og uten innhold - for lesing, opprettelse og sletting og for alle tre årsakene; `collections` er lokal og påvirkes ikke", async () => {
+    const cases: Array<[string, NonNullable<PersonalDavDeps["guard"]>]> = [
+      ["kill_switch_active", async () => "kill_switch_active"], ["credential_revoked", async () => "credential_revoked"], ["dav_guard_unavailable", async () => { throw new Error("db nede"); }]
+    ];
+    for (const [reason, guard] of cases) {
+      for (const path of ["/personal/dav/list", "/personal/dav/create", "/personal/dav/delete"]) {
+        const h = harness({ path, body: ALL_BODY, guard });
+        await handlePersonalRoute(h.ctx);
+        expect(h.responses.at(-1), `${reason} ${path}`).toEqual({ status: 503, body: { error: "dav_blocked", reason, request_id: "req-1" } });
+        expect(h.calls.filter((c) => ["list", "get", "create", "update", "remove"].includes(c)), `${reason} ${path}`).toEqual([]);
+        expect(h.audits, `${reason} ${path}`).toEqual([{ action: path.slice("/personal/dav/".length), collection: "privat", outcome: "blocked", decision: "DENY", reason }]);
+        noContent(h.audits);
+      }
+    }
+    const local = harness({ path: "/personal/dav/collections", body: {}, guard: async () => "kill_switch_active" });
+    await handlePersonalRoute(local.ctx);
+    expect(local.responses.at(-1)?.status).toBe(200);
+    expect(local.audits).toEqual([]); // `collections` sender ingenting og revideres ikke
+  });
+
+  it("DENY-raden er best effort: en revisjon som feiler (avvist ELLER kastet synkront) endrer ikke stoppen - fortsatt 503 `dav_blocked`, ingen klientkall", async () => {
+    for (const mode of ["rejects", "throws"] as const) {
+      const h = harness({ path: "/personal/dav/update", body: ALL_BODY, guard: async () => "credential_revoked" });
+      (h.ctx.deps.dav as { audit: unknown }).audit = mode === "rejects" ? async () => { throw new Error("db nede"); } : () => { throw new Error("db nede"); };
+      await handlePersonalRoute(h.ctx);
+      expect(h.responses.at(-1), mode).toEqual({ status: 503, body: { error: "dav_blocked", reason: "credential_revoked", request_id: "req-1" } });
+      expect(h.calls.filter((c) => ["list", "get", "create", "update", "remove"].includes(c)), mode).toEqual([]);
+    }
+  });
+
+  it("stopp MIDT i en operasjon (transportens vakt, mellom to forespørsler): ÉN DENY-rad i stedet for `rejected:` - for mutasjon (etter `requested`) og for lesing; en annen avvisning revideres som før", async () => {
+    for (const [code, reason] of [["dav_kill_switch_active", "kill_switch_active"], ["dav_credential_revoked", "credential_revoked"], ["dav_guard_unavailable", "dav_guard_unavailable"]] as const) {
+      const update = harness({ path: "/personal/dav/update", body: ALL_BODY, fail: new DavError(code) });
+      await handlePersonalRoute(update.ctx);
+      expect(update.responses.at(-1), code).toEqual({ status: 503, body: { error: "dav_rejected", reason: code, request_id: "req-1" } });
+      expect(update.audits, code).toEqual([{ action: "update", collection: "privat", uid: "uid-123456", outcome: "requested" }, { action: "update", collection: "privat", outcome: "blocked", decision: "DENY", reason }]);
+      const read = harness({ path: "/personal/dav/get", body: ALL_BODY, fail: new DavError(code) });
+      await handlePersonalRoute(read.ctx);
+      expect(read.audits, code).toEqual([{ action: "get", collection: "privat", outcome: "blocked", decision: "DENY", reason }]);
+      noContent([update.audits.at(-1), read.audits]);
+    }
+    const other = harness({ path: "/personal/dav/update", body: ALL_BODY, fail: new DavError("etag_mismatch") });
+    await handlePersonalRoute(other.ctx);
+    expect(other.audits.map((a) => [a.outcome, a.decision])).toEqual([["requested", undefined], ["rejected:etag_mismatch", undefined]]);
+    const otherRead = harness({ path: "/personal/dav/get", body: ALL_BODY, fail: new DavError("not_found") });
+    await handlePersonalRoute(otherRead.ctx);
+    expect(otherRead.audits).toEqual([]); // en vanlig avvisning av lesing revideres ikke (som før)
+  });
+
+  it("ende-til-ende med ekte klient: kill switch slås på mellom GET og PUT i en endring - PUT sendes aldri, ressursen er uendret, og sporet er `requested` + ÉN DENY", async () => {
+    const server = new FakeDavServer();
+    const etag = server.seed(`${CAL}stop-uid-0001.ics`, ics("stop-uid-0001", "Gammel", "20261201T080000Z"));
+    const stopAfterRead: DavTransport = { request: async (req) => { if (req.method === "PUT") throw new DavError("dav_kill_switch_active"); return server.request(req); } };
+    const real = new AppleDavClient({ transport: stopAfterRead, collections, now: () => new Date("2026-11-18T10:00:00Z") });
+    const h = harness({ path: "/personal/dav/update", body: { collection: "privat", uid: "stop-uid-0001", expected_etag: etag, fields: { summary: "Ny" } }, real });
+    await handlePersonalRoute(h.ctx);
+    expect(h.responses.at(-1)).toEqual({ status: 503, body: { error: "dav_rejected", reason: "dav_kill_switch_active", request_id: "req-1" } });
+    expect(server.requests.map((r) => r.method)).toEqual(["GET"]);
+    expect(server.store.get(`${CAL}stop-uid-0001.ics`)?.body).toContain("SUMMARY:Gammel");
+    expect(h.audits.map((a) => [a.outcome, a.decision, a.reason])).toEqual([["requested", undefined, undefined], ["blocked", "DENY", "kill_switch_active"]]);
+  });
+
+  it("vakten er PÅKREVD (NY-4): typen krever den (`@ts-expect-error` feiler typesjekken hvis den blir valgfri igjen), og en kaller uten typesjekk som glemmer den får fail-closed 503 `dav_guard_unavailable` + ÉN DENY-rad, aldri en klient uten stopp", async () => {
+    // @ts-expect-error `guard` er påkrevd i PersonalDavDeps: en wiring som glemmer den kompilerer ikke
+    const forgotten: PersonalDavDeps = { client: {} as never, audit: async () => undefined };
+    expect(forgotten.guard).toBeUndefined();
+    for (const path of ["/personal/dav/list", "/personal/dav/delete"]) {
+      const h = harness({ path, body: ALL_BODY });
+      delete (h.ctx.deps.dav as unknown as { guard?: unknown }).guard; // omgår typene
+      await handlePersonalRoute(h.ctx);
+      expect(h.responses.at(-1), path).toEqual({ status: 503, body: { error: "dav_blocked", reason: "dav_guard_unavailable", request_id: "req-1" } });
+      expect(h.calls.filter((c) => ["list", "get", "create", "update", "remove"].includes(c)), path).toEqual([]);
+      expect(h.audits, path).toEqual([{ action: path.slice("/personal/dav/".length), collection: "privat", outcome: "blocked", decision: "DENY", reason: "dav_guard_unavailable" }]);
+    }
+  });
+
+  it("hver DavError-kode fra vakten har en statuskode (503)", () => {
+    for (const code of ["dav_kill_switch_active", "dav_credential_revoked", "dav_guard_unavailable"] as const) expect(DAV_ERROR_STATUS[code], code).toBe(503);
+  });
 });
 
 interface Harness { ctx: PersonalRouteContext; calls: string[]; responses: Array<{ status: number; body: Record<string, unknown> }>; audits: DavAuditEntry[]; client: Record<string, ReturnType<typeof vi.fn>> }
 
-function harness(opts: { path: string; body?: Record<string, unknown>; owner?: boolean; stepUp?: string; auditFails?: boolean; fail?: unknown; dav?: false; method?: string; real?: AppleDavClient }): Harness {
+function harness(opts: { path: string; body?: Record<string, unknown>; owner?: boolean; stepUp?: string; auditFails?: boolean; fail?: unknown; dav?: false; method?: string; real?: AppleDavClient; guard?: PersonalDavDeps["guard"] }): Harness {
   const calls: string[] = [];
   const audits: DavAuditEntry[] = [];
   const responses: Harness["responses"] = [];
@@ -62,7 +210,8 @@ function harness(opts: { path: string; body?: Record<string, unknown>; owner?: b
   for (const name of ["list", "get", "create", "update", "remove"]) client[name] = vi.fn(async () => { calls.push(name); if (opts.fail !== undefined) throw opts.fail; return name === "list" ? [] : name === "get" ? null : { outcome: "SUCCESS", uid: "jarvis-1", etag: '"e"' }; });
   const dav: PersonalDavDeps = {
     client: (opts.real ?? client) as unknown as PersonalDavDeps["client"],
-    audit: async (_i, entry) => { calls.push(`audit:${entry.outcome}`); if (opts.auditFails === true && entry.outcome === "requested") throw new Error("db nede"); audits.push(entry); }
+    audit: async (_i, entry) => { calls.push(`audit:${entry.outcome}`); if (opts.auditFails === true && entry.outcome === "requested") throw new Error("db nede"); audits.push(entry); },
+    guard: opts.guard ?? (async () => null) // påkrevd (fiks-runde 2, NY-4): testene som ikke handler om stopp sier «ingen stopp» eksplisitt
   };
   const ctx: PersonalRouteContext = {
     req: { method: opts.method ?? "POST" } as never, res: {} as never, url: new URL(opts.path, "http://localhost"), deps: opts.dav === false ? {} : { dav },
@@ -183,5 +332,46 @@ describe("C: ende-til-ende med ekte klient mot en falsk DAV-server", () => {
     const deleted = await run("/personal/dav/delete", { collection: "privat", uid: result.uid, expected_etag: etag, confirm_uid: result.uid });
     expect((deleted.responses[0]?.body["result"] as { outcome: string }).outcome).toBe("SUCCESS");
     expect(server.store.size).toBe(0);
+  });
+});
+
+describe("D: deltakere - bekreftelsen fra eieren (review B LOW-7: endring/sletting kan sende e-post til andre)", () => {
+  it("`allow_attendee_notification` finnes KUN på update/delete; utelatt = false, `true` sendes videre, en ikke-boolsk verdi avvises (400) uten at klienten nås", async () => {
+    for (const [path, route] of Object.entries(DAV_ROUTES)) expect(route.keys.includes("allow_attendee_notification"), path).toBe(path.endsWith("/update") || path.endsWith("/delete"));
+    const upd = { collection: "privat", uid: "abcdef-1", expected_etag: '"e1"', fields: { summary: "y" } };
+    const del = { collection: "privat", uid: "abcdef-1", expected_etag: '"e1"', confirm_uid: "abcdef-1" };
+    for (const [path, base, method] of [["/personal/dav/update", upd, "update"], ["/personal/dav/delete", del, "remove"]] as const) {
+      const off = harness({ path, body: base });
+      await handlePersonalRoute(off.ctx);
+      expect(off.client[method]?.mock.calls[0]?.at(-1), path).toEqual({ allowAttendeeNotification: false });
+      const on = harness({ path, body: { ...base, allow_attendee_notification: true } });
+      await handlePersonalRoute(on.ctx);
+      expect(on.client[method]?.mock.calls[0]?.at(-1), path).toEqual({ allowAttendeeNotification: true });
+      for (const bad of ["true", 1, null, {}]) {
+        const h = harness({ path, body: { ...base, allow_attendee_notification: bad } });
+        await handlePersonalRoute(h.ctx);
+        expect(h.client[method], `${path} ${JSON.stringify(bad)}`).not.toHaveBeenCalled();
+        expect(h.responses[0], path).toEqual({ status: 400, body: { error: "dav_rejected", reason: "invalid_input", request_id: "req-1" } });
+      }
+    }
+    expect(DAV_ERROR_STATUS.attendees_confirmation_required).toBe(409);
+  });
+
+  it("ende-til-ende: en hendelse med deltakere gir 409 `attendees_confirmation_required` (revidert som avvist, ingen PUT/DELETE sendt) uten bekreftelsen, og går gjennom med den", async () => {
+    const server = new FakeDavServer();
+    const real = new AppleDavClient({ transport: server, collections, now: () => new Date("2026-11-18T10:00:00Z") });
+    const etag = server.seed(`${CAL}att-uid-0001.ics`, ics("att-uid-0001", "Møte", "20261201T080000Z", ["ORGANIZER:mailto:meg@example.com", "ATTENDEE;CN=Ola:mailto:ola@example.com"]));
+    const run = async (path: string, body: Record<string, unknown>) => { const h = harness({ path, body, real }); await handlePersonalRoute(h.ctx); return h; };
+    const denied = await run("/personal/dav/update", { collection: "privat", uid: "att-uid-0001", expected_etag: etag, fields: { summary: "Ny" } });
+    expect(denied.responses[0]).toEqual({ status: 409, body: { error: "dav_rejected", reason: "attendees_confirmation_required", request_id: "req-1" } });
+    expect(denied.audits.map((a) => a.outcome)).toEqual(["requested", "rejected:attendees_confirmation_required"]);
+    const deniedDelete = await run("/personal/dav/delete", { collection: "privat", uid: "att-uid-0001", expected_etag: etag, confirm_uid: "att-uid-0001" });
+    expect(deniedDelete.responses[0]).toMatchObject({ status: 409, body: { reason: "attendees_confirmation_required" } });
+    expect(server.requests.filter((r) => r.method === "PUT" || r.method === "DELETE")).toHaveLength(0);
+    const ok = await run("/personal/dav/update", { collection: "privat", uid: "att-uid-0001", expected_etag: etag, fields: { summary: "Ny" }, allow_attendee_notification: true });
+    expect(ok.responses[0]).toMatchObject({ status: 200, body: { result: { outcome: "SUCCESS" } } });
+    const newEtag = (ok.responses[0]?.body["result"] as { etag: string }).etag;
+    const gone = await run("/personal/dav/delete", { collection: "privat", uid: "att-uid-0001", expected_etag: newEtag, confirm_uid: "att-uid-0001", allow_attendee_notification: true });
+    expect(gone.responses[0]).toMatchObject({ status: 200, body: { result: { outcome: "SUCCESS" } } });
   });
 });

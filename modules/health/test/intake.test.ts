@@ -152,7 +152,7 @@ describe("C: ugyldige prøver avvises per prøve med en kode - aldri verdien - o
         sample(17, { source_type: "noe_annet" }),
         sample(18, { source_instance_id: "annen-enhet" }),
         sample(19, { person_id: "p-noen-andre" }),
-        sample(20, { observed_at: "i går" }),
+        sample(20, { observed_at: 12345 }), // ikke en streng = vanlig per-prøve-feil (en MALFORMET streng avvises derimot som hele batchen, review B MEDIUM-2 - se under)
         "ikke et objekt",
         null,
         sample(21, { metric_type: "heart_rate_variability_ms", value: 48.5, unit: "ms" }) // og EN gyldig til slutt: alt over stopper den ikke
@@ -167,6 +167,8 @@ describe("C: ugyldige prøver avvises per prøve med en kode - aldri verdien - o
     expect(JSON.stringify(result)).not.toMatch(/5000|0\.97|blood_glucose|noe_annet|p-noen-andre/); // verken verdier eller innsendte strenger ekkoes tilbake
     expect((await rows(TENANT, P1)).some((r) => r["external_sample_id"] === id(21))).toBe(true);
     for (const n of [10, 11, 12, 13, 14, 15, 17, 18, 19, 20]) expect((await rows(TENANT)).some((r) => r["external_sample_id"] === id(n))).toBe(false);
+    // en malformet tidsstempel-STRENG avvises som hele batchen (400 med indeks) FØR transaksjonen - ikke som en databasefeil midt i den
+    await expect(intake.ingestBatch(who(P1), { samples: [sample(22, { observed_at: "i går" })] })).rejects.toMatchObject({ code: "invalid_timestamps", indexes: [0] });
   });
 
   it("alle ti metrikker kan tas inn med sin kanoniske enhet; en ugyldig størrelse mot grensene avvises", async () => {

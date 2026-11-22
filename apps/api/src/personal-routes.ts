@@ -10,8 +10,9 @@ import { handleFinanceRead, type PersonalFinanceDeps } from "./personal-finance-
 
 /**
  * WP-G2 (D-464, UA-8 Personal Twin): HTTP-rutene under `/personal/*`. ALT er dormant: `deps.personal` finnes KUN når minst ett `JARVIS_PERSONAL_*`-flagg er på (se `personal-wiring.ts`), og hver rutefamilie finnes kun med sitt eget flagg
- * - uten dem er `/personal/*` en vanlig 404, identisk med main. Rutene omgår ingenting: eier-kun (`requireOwner`), enhetssignert økt for alt som endrer noe (`stepUpDenial`), og utførelsen går UTELUKKENDE via
- * `ToolGateway.execute()`/domenetjenestene (policy, mål-allowlist, step-up, klasse D-kjeden, journal). Identitet/tenant/memory space kommer fra det verifiserte grantet (`authed`), aldri fra kroppen.
+ * - uten dem er `/personal/*` en vanlig 404, identisk med main. Rutene omgår ingen vern de selv skal ha: eier-kun (`requireOwner`), enhetssignert økt for alt som endrer noe (`stepUpDenial`), og utførelsen er av TO slag. `/personal/actions/*` går UTELUKKENDE via
+ * `ToolGateway.execute()` (policy, kill switch, credential-revokering, mål-allowlist, step-up, klasse D-kjeden, journal). Familie, helse, økonomi og DAV er RUTER, ikke verktøy: de går via domenetjenestene/klienten UTENOM gatewayen og har derfor sine EGNE vern
+ * (grant-scope, eier-kun, step-up, revisjon, og for DAV en egen stoppvakt: kill switch + tilbakekalte credentials FØR hver utsendelse, se `personal-dav.ts`). Identitet/tenant/memory space kommer fra det verifiserte grantet (`authed`), aldri fra kroppen.
  * Modulen kjenner ikke `server.ts`: hjelpefunksjonene gis inn (`PersonalRouteContext`), slik at server.ts bare trenger ÉN kroklinje.
  */
 export interface PersonalActionDomainDeps {
@@ -106,7 +107,7 @@ export function healthIntakeDenial(identity: Pick<IdentityContext, "auth_strengt
   return undefined;
 }
 
-const HEALTH_INTAKE_STATUS: Readonly<Record<string, number>> = { empty_batch: 400, invalid_request: 400, batch_too_large: 413 };
+const HEALTH_INTAKE_STATUS: Readonly<Record<string, number>> = { empty_batch: 400, invalid_request: 400, invalid_timestamps: 400, batch_too_large: 413 };
 
 async function handleHealthIngest(ctx: PersonalRouteContext, health: PersonalHealthDeps): Promise<boolean> {
   const authed = await ctx.authed(["samples", "deleted_external_sample_ids"]);
@@ -117,7 +118,8 @@ async function handleHealthIngest(ctx: PersonalRouteContext, health: PersonalHea
     const result = await health.intake.ingestBatch(authed.identity, { samples: authed.body["samples"], deleted_external_sample_ids: authed.body["deleted_external_sample_ids"] });
     ctx.json(200, { source: "apple_health", ...result });
   } catch (err) {
-    if (err instanceof HealthIntakeError) ctx.json(HEALTH_INTAKE_STATUS[err.code] ?? 400, { error: "health_intake_rejected", reason: err.code, request_id: ctx.requestId() });
+    // `indexes` (kun for `invalid_timestamps`): posisjonene til prøvene med ugyldig tidsstempel - aldri verdiene.
+    if (err instanceof HealthIntakeError) ctx.json(HEALTH_INTAKE_STATUS[err.code] ?? 400, { error: "health_intake_rejected", reason: err.code, ...(err.indexes !== undefined ? { indexes: err.indexes.slice(0, 250) } : {}), request_id: ctx.requestId() });
     else if (err instanceof HealthRetentionPolicyRequiredError) ctx.json(409, { error: "health_retention_policy_required", request_id: ctx.requestId() });
     else ctx.domainFailure(500, "health_intake_failed", new Error(err instanceof Error ? err.name : "unknown")); // aldri feilmeldingen: den kan sitere helseverdier
   }
@@ -287,7 +289,8 @@ async function handleActionRoute(ctx: PersonalRouteContext, actions: PersonalAct
     } catch (err) {
       // Kun VÅRE egne, bevisste feilkoder vises til eieren; alt annet logges og blir generisk.
       const reason = err instanceof Error ? err.message : "";
-      if (/^personal_action_[a-z_]+(?::|$)/.test(reason)) ctx.json(400, { error: "personal_action_rejected", reason: reason.slice(0, 80), request_id: ctx.requestId() });
+      // `personal_action_target_busy` = en annen handling mot SAMME mål er i flukt (målets prosess-lokale lås): 409 «ikke utført, prøv igjen» - ingenting er sendt.
+      if (/^personal_action_[a-z_]+(?::|$)/.test(reason)) ctx.json(reason === "personal_action_target_busy" ? 409 : 400, { error: "personal_action_rejected", reason: reason.slice(0, 80), request_id: ctx.requestId() });
       else ctx.domainFailure(400, "personal_action_rejected", err);
     }
     return true;

@@ -6,7 +6,7 @@ import { isIndeterminateTransportError, transportErrorKind } from "../transport-
 import { encodePathSegment, guardedFetch } from "../url-safety.ts";
 import { settleUntil, type Params } from "./critical-ops.ts";
 import {
-  HOME_CRITICAL_OPS, HOME_CRITICAL_READ_ACTION, HOME_WAIT_FOR_MATCH_ACTIONS, homeServiceCall, isHomeCriticalEntityId, normalizeHomeCriticalState
+  HOME_CRITICAL_OPS, HOME_CRITICAL_READ_ACTION, HOME_WAIT_FOR_MATCH_ACTIONS, homeServiceCall, homeSettleMsFor, isHomeCriticalEntityId, normalizeHomeCriticalState, type HomeCriticalConfig
 } from "./home-critical.ts";
 
 /**
@@ -24,7 +24,9 @@ export interface HomeCriticalTransportDeps {
   baseUrl: () => Promise<string | null>;
   /** Vault-oppslag for alarmpanelets kode (hvis panelet krever den). `null`/tom = ingen kode sendes. */
   alarmCode?: () => Promise<string | null>;
+  /** Standard ventetid på sluttilstand; `settleMsByDomain` overstyrer per domene (alarm: utgangsforsinkelse). */
   settleMs: number;
+  settleMsByDomain?: HomeCriticalConfig["settleMsByDomain"];
   pollMs: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -103,12 +105,15 @@ export class HomeAssistantCriticalTransport implements ToolTransport {
     await this.send(call.domain, call.service, data, credential);
 
     // ETTER akseptert kommando: enhver feil herfra er «utfall ukjent», aldri en vanlig, retry-bar feil.
+    // VENT PÅ SLUTTILSTANDEN (review A, MEDIUM-1): til tilstanden matcher, ELLER den har ENDRET seg fra før-tilstanden og er settlet (en feil sluttilstand: jammed, feil modus - vises umiddelbart), ELLER fristen går ut.
+    // Utstyr som aldri viser en overgangstilstand (MQTT/Zigbee) kan vise den GAMLE tilstanden noen lesinger etter kommandoen: «settlet» alene er ikke nok - uendret tilstand venter ut fristen (domenets ventetid; alarm med utgangsforsinkelse lengst).
     const waitForMatch = HOME_WAIT_FOR_MATCH_ACTIONS.has(action);
+    const deadlineMs = homeSettleMsFor({ settleMs: this.deps.settleMs, ...(this.deps.settleMsByDomain ? { settleMsByDomain: this.deps.settleMsByDomain } : {}) }, call.domain);
     const settled = await afterAcceptedMutation("home_readback_failed", () => settleUntil({
       read: () => this.readEntity(entity, credential),
-      isSettled: (state) => !waitForMatch && state["settled"] === true,
+      isSettled: (state) => !waitForMatch && state["settled"] === true && state["state"] !== before["state"],
       matches: (state) => op.post(state, p),
-      deadlineMs: this.deps.settleMs, pollMs: this.deps.pollMs,
+      deadlineMs, pollMs: Math.max(this.deps.pollMs, Math.ceil(deadlineMs / 60)),
       ...(this.deps.now ? { now: this.deps.now } : {}), ...(this.deps.sleep ? { sleep: this.deps.sleep } : {})
     }));
     return { external_id: `${call.domain}.${call.service}:${entity}`, data: { settled: settled.settled, matched: settled.matched, polls: settled.polls, state: settled.state } };

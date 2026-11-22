@@ -5,7 +5,7 @@ import { ConversationGraphService } from "@jarvis/conversation-graph";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type ClassDNotification, type SecretProvider } from "@jarvis/tool-gateway";
 import {
-  CommsStore, CommsTransport, OutboundFunnel, SlackAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, commsToolDefinitions, executeCommsOwnerAction, parseCommsConfig, type AdapterMap
+  CommsStore, CommsTransport, OutboundFunnel, SlackAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, commsToolDefinitions, executeCommsOwnerAction, parseCommsConfig, scopedIdempotencyKey, type AdapterMap
 } from "../src/index.ts";
 import { OWNER, TENANT_A, startCommsDb, type CommsDb } from "./support/harness.ts";
 
@@ -86,7 +86,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 const callParams = (over: Record<string, JsonValue> = {}): Record<string, JsonValue> => ({ channel: "phone", account_ref: TWILIO_PHONE, recipient: phone(), purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, dette gjelder timen din i morgen.", ...over });
 const startCall = (over: Record<string, JsonValue> = {}, idem = key("call")) => executeCommsOwnerAction(deps(), owner, { action: "start_call", parameters: callParams(over), idempotency_key: idem });
-const journalOf = async (requestId: string) => (await db.admin.query("SELECT kind, status, denial_codes, content_length, provider_message_id FROM comms_outbound_log WHERE request_id = $1 ORDER BY created_at", [requestId])).rows as
+const journalOf = async (userKey: string) => (await db.admin.query("SELECT kind, status, denial_codes, content_length, provider_message_id FROM comms_outbound_log WHERE request_id = $1 ORDER BY created_at", [scopedIdempotencyKey(TENANT_A, "start_call", userKey)])).rows as
   Array<{ kind: string; status: string; denial_codes: string[]; content_length: number; provider_message_id: string | null }>;
 const denied = (r: Awaited<ReturnType<typeof startCall>>): string[] => {
   if (r.ok || r.status !== "denied") throw new Error(`forventet avslag: ${JSON.stringify(r)}`);

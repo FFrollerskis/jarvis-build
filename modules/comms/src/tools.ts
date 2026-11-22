@@ -145,9 +145,9 @@ export function commsToolDefinitions(deps: CommsToolDeps): ToolDefinition[] {
     },
     {
       ...common, tool_id: "comms", action: "record_opt_out",
-      description: "Registrer en mottakers avmelding (f.eks. at mottakeren ba om å slippe utenfor kanalen). TENANT-BRED: gjelder alle våre kontoer, alle rom og alle kanaler som deler identifikator (telefon = SMS + WhatsApp + samtale). `account_ref` er valgfri (`*` eller en gyldig kontoreferanse; en skrivefeil avvises). Kan aldri oppheves av eieren - kun mottakerens egen START på kanalen",
+      description: "Registrer en mottakers avmelding (f.eks. at mottakeren ba om å slippe utenfor kanalen). TENANT-BRED: gjelder alle våre kontoer, alle rom og alle kanaler som deler identifikator (telefon = SMS + WhatsApp + samtale). `account_ref` er valgfri (`*` eller en gyldig kontoreferanse; en skrivefeil avvises). Registreringen er EIERREGISTRERT og oppheves ALDRI av noen START (kun avmeldinger som kom fra et stopp-ord eller leverandørfeil løftes av mottakerens egen START, og kun på samme kanal) og ikke av eieren heller: det finnes ingen angrevei i Jarvis for en feilregistrering (eier-angre med bevis er DEFERRED). Én rad per kanal og kilde",
       input_schema: cast(RecordOptOutSchema),
-      capability_class: "B", scopes: ["comms.admin"], reversible: false, rollback_procedure: "ingen: en avmelding oppheves kun av mottakerens egen START (mottakerens rett går foran)", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      capability_class: "B", scopes: ["comms.admin"], reversible: false, rollback_procedure: "ingen: en eierregistrert avmelding kan verken oppheves av eieren eller av en START (mottakerens rett går foran; en feilregistrering kan i dag kun rettes utenfor Jarvis - eier-angre med bevis og step-up er DEFERRED)", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, output_trust: "internal"
     }
   ];

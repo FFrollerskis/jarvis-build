@@ -144,6 +144,23 @@ describe("C: klienten mot en falsk server - les, opprett, endre, slett med readb
     expect(await code(client.list("privat", { from: "2026-12-01", to: "2026-12-02" }))).toBe("dav_malformed_response");
   });
 
+  it("review B MEDIUM-3: `If-Match` følger PUT (endring) og DELETE - en ANNEN klient som endrer ressursen mellom vår GET og PUT/DELETE blir ikke overskrevet/slettet (412 -> etag_mismatch)", async () => {
+    const { server, client } = mk();
+    const url = `${CAL}u-uid-0002.ics`;
+    const etag = server.seed(url, ics("u-uid-0002", "Original", "20261201T080000Z"));
+    server.onNext("PUT", (s) => { s.seed(url, ics("u-uid-0002", "Annen klient sin endring", "20261201T080000Z")); }); // etter vår GET, FØR vår PUT
+    expect(await code(client.update("privat", "u-uid-0002", etag, { summary: "Min endring" }))).toBe("etag_mismatch");
+    expect(server.requests.find((r) => r.method === "PUT")?.headers["If-Match"]).toBe(etag);
+    expect(server.store.get(url)?.body).toContain("Annen klient sin endring"); // ikke overskrevet
+
+    const url2 = `${CAL}d-uid-0003.ics`;
+    const e2 = server.seed(url2, ics("d-uid-0003", "Slettes", "20261201T080000Z"));
+    server.onNext("DELETE", (s) => { s.seed(url2, ics("d-uid-0003", "Endret av annen", "20261201T080000Z")); });
+    expect(await code(client.remove("privat", "d-uid-0003", e2))).toBe("etag_mismatch");
+    expect(server.requests.find((r) => r.method === "DELETE")?.headers["If-Match"]).toBe(e2);
+    expect(server.store.has(url2)).toBe(true); // ikke slettet
+  });
+
   it("endre: kun oppgitte egenskaper, SEQUENCE økes, varsler beholdes, ny etag; gammel etag og samtidig endring gir etag_mismatch; gjentakende arrangement kan ikke flyttes", async () => {
     const { server, client } = mk();
     const etag = server.seed(`${CAL}u-uid-0001.ics`, ics("u-uid-0001", "Gammel", "20261201T080000Z", ["BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT15M", "END:VALARM"]));
@@ -244,7 +261,9 @@ describe("C: klienten mot en falsk server - les, opprett, endre, slett med readb
 describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
   const collections: DavCollection[] = [{ name: "privat", kind: "calendar", url: CAL }];
   const creds = async () => ({ user: "eier@example.com", password: "app-passord-fake-123" });
-  const make = (fetchFn: unknown, extra: Partial<ConstructorParameters<typeof FetchDavTransport>[0]> = {}) => new FetchDavTransport({ collections, credentials: creds, fetchFn: fetchFn as unknown as DavFetch, ...extra });
+  /** Stoppvakten er påkrevd (fiks-runde 2, NY-4): testene som ikke handler om stopp sier det eksplisitt («ingen stopp»). */
+  const noStop = async (): Promise<null> => null;
+  const make = (fetchFn: unknown, extra: Partial<ConstructorParameters<typeof FetchDavTransport>[0]> = {}) => new FetchDavTransport({ collections, credentials: creds, guard: noStop, fetchFn: fetchFn as unknown as DavFetch, ...extra });
   const ok = () => vi.fn(async () => new Response("<ok/>", { status: 207, headers: { ETag: '"e1"' } }));
 
   it("sender Basic-autentisering fra vault-verdier, aldri redirect, og gir status/hoder/innhold; kun URL-er under en samling", async () => {
@@ -265,7 +284,7 @@ describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
 
   it("uten credentials sendes ingenting (fail closed); redirect, for stort svar og nettfeil gir kode uten å lekke passord/feiltekst", async () => {
     const f = ok();
-    expect(await code(new FetchDavTransport({ collections, credentials: async () => null, fetchFn: f as unknown as DavFetch }).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_credentials_unavailable");
+    expect(await code(new FetchDavTransport({ collections, credentials: async () => null, guard: noStop, fetchFn: f as unknown as DavFetch }).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_credentials_unavailable");
     expect(f).not.toHaveBeenCalled();
     expect(await code(make(vi.fn(async () => new Response("", { status: 302, headers: { Location: "https://evil.example.net/" } }))).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_redirect_refused");
     expect(await code(make(ok(), { maxBytes: 3 }).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_response_too_large");
@@ -282,7 +301,7 @@ describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
     const spy = vi.spyOn(globalThis, "fetch");
     try {
       spy.mockResolvedValue(new Response("<ok/>", { status: 207, headers: { ETag: '"e1"' } }));
-      const transport = new FetchDavTransport({ collections, credentials: creds }); // ingen fetchFn: standarden er guardedFetch
+      const transport = new FetchDavTransport({ collections, credentials: creds, guard: noStop }); // ingen fetchFn: standarden er guardedFetch
       expect((await transport.request({ method: "GET", url: `${CAL}a.ics`, headers: {} })).status).toBe(207);
       const [url, init] = spy.mock.calls[0] as unknown as [string, RequestInit & { headers: Record<string, string> }];
       expect(url).toBe(`${CAL}a.ics`);
@@ -333,5 +352,47 @@ describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
     const client = new AppleDavClient({ transport: make(fetchFn), collections, now: () => NOW });
     expect(await code(client.create("privat", "idem-key-0009", { summary: "x", start: "2026-12-01T08:00:00Z" }))).toBe("dav_auth_rejected");
     expect(calls.every((u) => u.startsWith(CAL))).toBe(true);
+  });
+
+  /** En `DavFetch` som lar den falske serveren svare (ingen nettverk). */
+  const serverFetch = (server: FakeDavServer): DavFetch => (async (u: string, init?: RequestInit) => {
+    const res = await server.request({ method: init?.method as never, url: u, headers: (init?.headers ?? {}) as Record<string, string>, ...(init?.body ? { body: String(init.body) } : {}) });
+    return new Response(res.status === 204 ? null : res.body, { status: res.status, headers: res.headers });
+  }) as unknown as DavFetch;
+
+  it("review B MEDIUM-1: stoppvakten kjøres FØR HVER utsendelse - en kill switch som slås på MIDT i en endring (mellom GET og PUT) stopper PUT-en (bevist ikke utført) og ressursen er uendret", async () => {
+    const server = new FakeDavServer();
+    const url = `${CAL}g-uid-0004.ics`;
+    const etag = server.seed(url, ics("g-uid-0004", "Gammel", "20261201T080000Z"));
+    let active = false;
+    const transport = new FetchDavTransport({ collections, credentials: creds, fetchFn: serverFetch(server), guard: async () => (active ? "kill_switch_active" : null) });
+    const client = new AppleDavClient({ transport, collections, now: () => NOW });
+    server.onNext("GET", () => { active = true; }); // vakten slipper GET-en gjennom; kill switch slås på rett etterpå
+    expect(await code(client.update("privat", "g-uid-0004", etag, { summary: "Ny" }))).toBe("dav_kill_switch_active");
+    expect(server.requests.map((r) => r.method)).toEqual(["GET"]);
+    expect(server.store.get(url)?.body).toContain("SUMMARY:Gammel");
+    // og med kill switch på sendes ingenting i det hele tatt
+    const before = server.requests.length;
+    expect(await code(client.remove("privat", "g-uid-0004", etag))).toBe("dav_kill_switch_active");
+    expect(await code(client.list("privat"))).toBe("dav_kill_switch_active");
+    expect(server.requests).toHaveLength(before);
+  });
+
+  it("vakten: tilbakekalt credential og en vakt som feiler (fail-closed) gir sine koder - verken credentials eller fetch røres", async () => {
+    for (const [guard, expected] of [[async () => "credential_revoked" as const, "dav_credential_revoked"], [async (): Promise<null> => { throw new Error("db nede"); }, "dav_guard_unavailable"]] as const) {
+      const f = ok();
+      const credentials = vi.fn(creds);
+      const transport = new FetchDavTransport({ collections, credentials, fetchFn: f as unknown as DavFetch, guard });
+      expect(await code(transport.request({ method: "GET", url: `${CAL}a.ics`, headers: {} })), expected).toBe(expected);
+      expect(f).not.toHaveBeenCalled();
+      expect(credentials).not.toHaveBeenCalled();
+    }
+  });
+
+  it("fiks-runde 2 (delta-review B NY-4): vakten er PÅKREVD - typen krever den (`@ts-expect-error` feiler typesjekken hvis den blir valgfri igjen), og en kaller som omgår typene får en kastet feil ved konstruksjon i stedet for en transport uten stopp", () => {
+    // @ts-expect-error `guard` er påkrevd i FetchDavTransportOptions: en ny wiring som glemmer den kompilerer ikke
+    expect(() => new FetchDavTransport({ collections, credentials: creds })).toThrow("dav_guard_required");
+    for (const guard of [undefined, null, "på", {}]) expect(() => new FetchDavTransport({ collections, credentials: creds, guard } as never), String(guard)).toThrow("dav_guard_required");
+    expect(() => new FetchDavTransport({ collections, credentials: creds, guard: noStop })).not.toThrow();
   });
 });

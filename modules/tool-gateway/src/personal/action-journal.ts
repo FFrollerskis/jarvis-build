@@ -21,6 +21,8 @@ export interface PersonalActionRow {
   action_id: string; tenant_id: string; memory_space_id: string; domain: ActionDomain; tool_id: string; action: string; risk_class: "C" | "D"; risk_direction: RiskDirection;
   target_ref: string; idempotency_key: string; request_digest: string; status: ActionStatus; failure_code: string | null; before_state: JsonValue | null; after_state: JsonValue | null;
   external_id: string | null; actor_person_id: string; source: ActionSource; task_id: string | null; session_id: string | null; trace_id: string | null;
+  /** Ble det umiddelbare eier-varselet levert? `null` = ikke forsøkt/ukjent; `false` + `notify_error` = handlingen står, men eieren ble IKKE varslet (retry-markør). */
+  notified: boolean | null; notify_error: string | null;
   requested_at: string; completed_at: string | null; created_at: string; updated_at: string;
 }
 
@@ -35,6 +37,9 @@ export interface CompleteActionInput {
   before_state?: JsonValue | null;
   after_state?: JsonValue | null;
   external_id?: string | null;
+  /** Varslingsstatus fra klasse D-kjeden (`undefined` = ikke forsøkt/ukjent: eksisterende verdi beholdes). */
+  notified?: boolean | undefined;
+  notify_error?: string | null | undefined;
 }
 
 /** Deterministisk JSON (sorterte nøkler) - grunnlaget for forespørselens digest. */
@@ -91,22 +96,30 @@ export class PersonalActionJournal {
     });
   }
 
+  /**
+   * Ferdigstiller en ÅPEN rad (`requested`, eller `outcome_unknown` som avklares). Er raden allerede terminal (`applied`/`failed`) - en samtidig forespørsel med SAMME nøkkel rakk det først - gjelder det LAGREDE utfallet:
+   * raden returneres uendret, aldri et databaseunntak hos taperen og aldri en overskriving (fiks-runde review A LOW-5). Kalleren sammenligner `row.status` med det den ville skrevet.
+   */
   async complete(tenantId: string, memorySpace: MemorySpace, actionId: string, patch: CompleteActionInput): Promise<PersonalActionRow> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
         `UPDATE personal_action_journal
             SET status = $3, failure_code = $4, before_state = COALESCE($5::jsonb, before_state), after_state = COALESCE($6::jsonb, after_state),
-                external_id = COALESCE($7, external_id), completed_at = now(), updated_at = now()
-          WHERE tenant_id = $1 AND action_id = $2 RETURNING *`,
+                external_id = COALESCE($7, external_id), notified = COALESCE($8::boolean, notified), notify_error = CASE WHEN $8::boolean IS NULL THEN notify_error ELSE $9 END,
+                completed_at = now(), updated_at = now()
+          WHERE tenant_id = $1 AND action_id = $2 AND status IN ('requested', 'outcome_unknown') RETURNING *`,
         [
           tenantId, actionId, patch.status, patch.failure_code === undefined || patch.failure_code === null ? null : patch.failure_code.slice(0, 160),
           patch.before_state === undefined || patch.before_state === null ? null : JSON.stringify(sanitizeActionState(patch.before_state)),
           patch.after_state === undefined || patch.after_state === null ? null : JSON.stringify(sanitizeActionState(patch.after_state)),
-          patch.external_id === undefined || patch.external_id === null ? null : redactVendorText(patch.external_id, 300)
+          patch.external_id === undefined || patch.external_id === null ? null : redactVendorText(patch.external_id, 300),
+          patch.notified === undefined ? null : patch.notified, patch.notify_error === undefined || patch.notify_error === null ? null : patch.notify_error.replace(/[^A-Za-z0-9_:.-]/g, "_").slice(0, 160)
         ]
       );
-      if (!rows[0]) throw new Error("personal_action_not_found");
-      return asRow(rows[0]);
+      if (rows[0]) return asRow(rows[0]);
+      const existing = await client.query(`SELECT * FROM personal_action_journal WHERE tenant_id = $1 AND action_id = $2`, [tenantId, actionId]);
+      if (!existing.rows[0]) throw new Error("personal_action_not_found");
+      return asRow(existing.rows[0]);
     });
   }
 

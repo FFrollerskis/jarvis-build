@@ -5,7 +5,8 @@ import type { VisionCamera } from "./cameras.ts";
 import type { VisionClassifier, VisionDetection } from "./classifier.ts";
 import type { VisionEmbeddingService } from "./embeddings.ts";
 import { DEFAULT_MAX_IMAGE_BYTES, inspectImage, type InspectedImage } from "./image.ts";
-import type { VisionInventoryService } from "./inventory.ts";
+import type { SightingInput, VisionInventoryService } from "./inventory.ts";
+import { isInventoryLabel } from "./labels.ts";
 import { routeVisionEvent, type VisionRouteReason } from "./policy.ts";
 import { SnapshotInProgressError, type VisionSnapshotRow, type VisionSnapshotService } from "./snapshots.ts";
 import type { CapturedImage, VisionSource, VisionSourceCamera } from "./source.ts";
@@ -26,7 +27,8 @@ import type { VisionClassificationStatus, VisionEventType, VisionObservationInpu
  *      utløseren, ingen objekter) med `classification_status`.
  *   6. LAGRING (kun `store_snapshot` i hjemmesonen): pending-rad -> bytes -> committet SAMMEN med hendelsene (snapshots.ts). Feiler skrivingen, skrives hendelsene uten bilde.
  *   7. ATOMISK SKRIVING: hendelsen, objekthendelsene, bildepekeren, vektorene og inventaret committes i ÉN transaksjon (alt eller ingenting). Embedding beregnes FØR transaksjonen (en tregere
- *      modellserver holder aldri en databasetransaksjon åpen) og er ikke fatal hvis den feiler (`backfillMissing` fyller etter).
+ *      modellserver holder aldri en databasetransaksjon åpen) og er ikke fatal hvis den feiler (`backfillMissing` fyller etter). Unntak fra «alt eller ingenting» (review delta D1): en etikett
+ *      som ikke kan bli INVENTAR hoppes over for den raden (note `inventory_label_invalid`/`inventory_label_rejected`, se `recordInventory`) - inventaret er avledet, hendelsen er sannheten.
  *   8. MERKING (regel 4): alle rader bærer person/tenant/space, kilde og `task_id` (+ `session_id`); proveniens for klassifiseringen (`classifier`) og status lagres.
  * Per-hendelse-feil kaster aldri ut av pipelinen (en sensor som feiler skal ikke stoppe de andre): de gir `status: "failed"` med en stabil feilkode - aldri innhold.
  */
@@ -40,6 +42,15 @@ export interface IngestContext {
 
 export type IngestStatus = "recorded" | "duplicate" | "discarded" | "cooldown" | "failed";
 
+/**
+ * Antall inventarskrivinger som ble HOPPET OVER for én hendelse, per årsak (review delta2 A LOW-E3 + B LOW-E1): `invalid` = etiketten har ikke inventarform (JS-forhåndssjekken, `isInventoryLabel`), `rejected` = databasen
+ * avviste en etikett JS-regelen godtok (CHECK-en er strammet inn eller JS-regelen har drevet fra SQL). Kun tall - aldri etikettinnhold. Hendelsen selv er trygt lagret i begge tilfeller; det er INVENTARET for den etiketten som mangler.
+ */
+export interface InventorySkips {
+  invalid: number;
+  rejected: number;
+}
+
 export interface IngestOutcome {
   status: IngestStatus;
   reason: VisionRouteReason | "duplicate" | "cooldown" | "camera_scope_mismatch" | "pipeline_error";
@@ -49,6 +60,16 @@ export interface IngestOutcome {
   detection_count: number;
   /** Stabile koder for ikke-fatale avvik (ingen bilde, modell utilgjengelig, embedding feilet ...) og for `failed`. */
   notes: string[];
+  /** Kun satt når minst én inventarskriving ble hoppet over i en LAGRET hendelse (review delta2 A LOW-E3 + B LOW-E1). Tellerne står også i `stats()` og, per poll-runde, i `PollSummary`. */
+  inventory_skipped?: InventorySkips;
+}
+
+/** Kumulativt siden prosessen startet (kun tall og tidspunkt, aldri innhold): det eieren ser i `/vision/status` (review delta2 A LOW-E3 + B LOW-E1). */
+export interface VisionIngestStats {
+  inventory_label_invalid: number;
+  inventory_label_rejected: number;
+  /** Tidspunkt for siste hoppede inventarskriving, eller `null` hvis ingen. */
+  last_inventory_skip_at: string | null;
 }
 
 export interface CapturedEventSpec {
@@ -93,6 +114,9 @@ export interface PollSummary {
   failed: number;
   /** Kilden feilet som helhet (f.eks. HA nede): én kort kode, ingen innhold. */
   source_error?: string;
+  /** Review delta2 A LOW-E3 + B LOW-E1: antall inventarskrivinger hoppet over i lagrede hendelser denne runden (se `InventorySkips`). Kun til stede når > 0. Kun tall, aldri innhold. */
+  inventory_label_invalid?: number;
+  inventory_label_rejected?: number;
 }
 
 class DuplicateRaceError extends Error {
@@ -102,10 +126,25 @@ class DuplicateRaceError extends Error {
 }
 
 const MAX_OBJECTS_PER_EVENT = 8;
+const INVENTORY_SAVEPOINT = "vision_inventory";
+const INVENTORY_LABEL_CHECK = "vision_inventory_items_object_label_check";
+
+/** Stabil kode, ingen duplikater (to objekter i samme hendelse kan gi samme avvik). */
+function addNote(notes: string[], code: string): void {
+  if (!notes.includes(code)) notes.push(code);
+}
+
+/** Kun etikett-CHECK-en i inventartabellen (SQLSTATE 23514 + constraintnavn) - ikke en annen CHECK, og aldri FK/RLS/tilkoblingsfeil. */
+function isInventoryLabelViolation(err: unknown): boolean {
+  const e = err as { code?: unknown; constraint?: unknown } | null;
+  return e !== null && typeof e === "object" && e.code === "23514" && e.constraint === INVENTORY_LABEL_CHECK;
+}
 
 function errorCode(err: unknown): string {
   const pgCode = (err as { code?: unknown } | null)?.code;
-  if (typeof pgCode === "string" && /^[0-9A-Z]{5}$/.test(pgCode)) return `db_${pgCode.toLowerCase()}`;
+  // SQLSTATE har alltid 5 tegn og minst ett siffer (`23505`, `42P01`, `XX000`). Et 5-tegns Node-feilnummer (`EPERM`, `EPIPE`, `EBUSY`) har ikke siffer og er et filsystem-/nettverksavvik, ikke en databasefeil (ble tidligere `db_eperm`).
+  if (typeof pgCode === "string" && /^(?=[0-9A-Z]*[0-9])[0-9A-Z]{5}$/.test(pgCode)) return `db_${pgCode.toLowerCase()}`;
+  if (typeof pgCode === "string" && /^E[A-Z0-9]{2,15}$/.test(pgCode)) return `os_${pgCode.toLowerCase()}`;
   const message = (err as Error | null)?.message;
   if (typeof message === "string") {
     const m = /^([a-z0-9_]{3,60})(?::|$)/.exec(message);
@@ -121,11 +160,28 @@ export class VisionIngestPipeline {
   private readonly maxImageBytes: number;
   private readonly lastProcessed = new Map<string, number>();
   private readonly inFlight = new Set<string>();
+  private readonly inventorySkipTotals: InventorySkips = { invalid: 0, rejected: 0 };
+  private lastInventorySkipAt: string | null = null;
 
   constructor(private readonly options: VisionPipelineOptions) {
     this.now = options.now ?? (() => new Date());
     this.maxSnapshotAgeMs = options.maxSnapshotAgeMs ?? 60_000;
     this.maxImageBytes = options.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
+  }
+
+  /** Kumulative tellere siden prosessen startet (review delta2 A LOW-E3 + B LOW-E1). Telles først ETTER at hendelsens transaksjon er committet: en tilbakerullet hendelse teller aldri. */
+  stats(): VisionIngestStats {
+    return { inventory_label_invalid: this.inventorySkipTotals.invalid, inventory_label_rejected: this.inventorySkipTotals.rejected, last_inventory_skip_at: this.lastInventorySkipAt };
+  }
+
+  /** Teller og logger hoppede inventarskrivinger for ÉN committet hendelse: én strukturert logglinje (kode og tall, aldri etikettinnhold). */
+  private reportInventorySkips(camera: VisionCamera, skips: InventorySkips): void {
+    if (skips.invalid + skips.rejected === 0) return;
+    this.inventorySkipTotals.invalid += skips.invalid;
+    this.inventorySkipTotals.rejected += skips.rejected;
+    this.lastInventorySkipAt = this.now().toISOString();
+    // `rejected` (databasen sa nei til noe JS godtok = drift mellom regelsettene) er den alvorligste årsaken og gir koden.
+    console.warn(JSON.stringify({ msg: "vision_inventory_skipped", camera_id: camera.camera_id, code: skips.rejected > 0 ? "inventory_label_rejected" : "inventory_label_invalid", invalid: skips.invalid, rejected: skips.rejected }));
   }
 
   private outcome(partial: Partial<IngestOutcome> & Pick<IngestOutcome, "status" | "reason">): IngestOutcome {
@@ -262,6 +318,7 @@ export class VisionIngestPipeline {
     }
 
     const written: string[] = [];
+    const skips: InventorySkips = { invalid: 0, rejected: 0 };
     try {
       await withMemoryTransaction(this.options.pool, ctx.tenant_id, [ctx.memory_space], async (client) => {
         if (snapshot !== null && snapshotNeedsMark) {
@@ -299,7 +356,7 @@ export class VisionIngestPipeline {
             await this.options.embeddings.storeInTransaction(client, { observationId: result.observation.observation_id, tenantId: ctx.tenant_id, memorySpace: ctx.memory_space }, vector);
           }
           if (camera.room_id !== null && this.options.inventory !== undefined) {
-            await this.options.inventory.recordSightingInTransaction(client, {
+            await this.recordInventory(client, notes, skips, this.options.inventory, {
               tenantId: ctx.tenant_id, memorySpace: ctx.memory_space, personId: ctx.person_id, roomId: camera.room_id, objectLabel: label, confidence: detection.confidence,
               observedAt: spec.observed_at, observationId: result.observation.observation_id, sourceType: spec.source_type, sourceInstanceId: camera.camera_id,
               taskId: ctx.task_id, sessionId: ctx.session_id, retentionDays
@@ -314,6 +371,8 @@ export class VisionIngestPipeline {
       }
       throw err;
     }
+    // Committet: først nå telles og logges hoppede inventarskrivinger (en tilbakerullet hendelse har ingenting å melde).
+    this.reportInventorySkips(camera, skips);
     return this.outcome({
       status: "recorded",
       reason: decision.reason,
@@ -321,8 +380,39 @@ export class VisionIngestPipeline {
       ...(snapshot !== null && snapshotNeedsMark ? { snapshot_id: snapshot.snapshot_id } : {}),
       classification_status,
       detection_count: detections.length,
-      notes
+      notes,
+      ...(skips.invalid + skips.rejected > 0 ? { inventory_skipped: { ...skips } } : {})
     });
+  }
+
+  /**
+   * Inventar for ÉN observasjon - aldri på bekostning av hendelsen (review delta D1). Inventaret er en AVLEDET tilstand, hendelsene er sannheten; at en etikett ikke kan bli inventar skal derfor
+   * aldri rulle tilbake basishendelsen (HA ville ellers forsøkt den samme hendelsen på hver poll til den ble for gammel for bilde, og et iPhone-opptak ble avvist). To lag:
+   *   1. FORHÅNDSSJEKK (`isInventoryLabel`, speiler CHECK-en i 135): en etikett uten inventarform hoppes over uten å røre databasen (note `inventory_label_invalid`).
+   *   2. SAVEPOINT rundt selve skrivingen: avviser databasen etiketten likevel (CHECK-en er strammet inn i en senere migrasjon, eller JS-regelen har drevet fra SQL), rulles KUN inventarskrivingen
+   *      tilbake (note `inventory_label_rejected`), og hendelsene, vektoren og bildepekeren i samme transaksjon består. Enhver ANNEN feil (FK, RLS, tilkobling ...) kastes videre og ruller hele
+   *      hendelsen tilbake som før - savepointet er ikke et «svelg alt».
+   * Hoppet er SYNLIG (review delta2 A LOW-E3 + B LOW-E1): hvert hopp telles i `skips` (kun tall), og etter COMMIT går tallene til `outcome.inventory_skipped`, `PollSummary`, `stats()` (-> `/vision/status`) og
+   * én strukturert logglinje per hendelse (`vision_inventory_skipped`, kode og tall, aldri etikettinnhold). En systematisk drift mellom JS-regelen og CHECK-en skal aldri være usynlig.
+   */
+  private async recordInventory(client: pg.PoolClient, notes: string[], skips: InventorySkips, inventory: VisionInventoryService, input: SightingInput): Promise<void> {
+    if (!isInventoryLabel(input.objectLabel)) {
+      addNote(notes, "inventory_label_invalid");
+      skips.invalid += 1;
+      return;
+    }
+    await client.query(`SAVEPOINT ${INVENTORY_SAVEPOINT}`);
+    try {
+      await inventory.recordSightingInTransaction(client, input);
+    } catch (err) {
+      if (!isInventoryLabelViolation(err)) throw err;
+      await client.query(`ROLLBACK TO SAVEPOINT ${INVENTORY_SAVEPOINT}`);
+      await client.query(`RELEASE SAVEPOINT ${INVENTORY_SAVEPOINT}`);
+      addNote(notes, "inventory_label_rejected");
+      skips.rejected += 1;
+      return;
+    }
+    await client.query(`RELEASE SAVEPOINT ${INVENTORY_SAVEPOINT}`);
   }
 
   private async roomName(ctx: IngestContext, roomId: string): Promise<string | null> {
@@ -360,6 +450,10 @@ export class VisionIngestPipeline {
         source_type: event.source_type, source_event_id: event.source_event_id, base_event_type: event.event_type, observed_at: event.observed_at, age_ms: event.age_ms,
         getImage: () => source.fetchSnapshot(sourceCamera, this.maxImageBytes)
       });
+      if (outcome.inventory_skipped !== undefined) {
+        if (outcome.inventory_skipped.invalid > 0) summary.inventory_label_invalid = (summary.inventory_label_invalid ?? 0) + outcome.inventory_skipped.invalid;
+        if (outcome.inventory_skipped.rejected > 0) summary.inventory_label_rejected = (summary.inventory_label_rejected ?? 0) + outcome.inventory_skipped.rejected;
+      }
       if (outcome.status === "recorded") summary.recorded += 1;
       else if (outcome.status === "duplicate") summary.duplicates += 1;
       else if (outcome.status === "discarded") summary.discarded += 1;

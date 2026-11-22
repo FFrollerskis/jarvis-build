@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, resolve, sep } from "node:path";
+import type { Dirent } from "node:fs";
+import { lstat, mkdir, readdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
 
 /**
  * WP-G3 (D-465): `StorageAdapter` (CLAUDE.md regel 3) - lagring av øyeblikksbilder bak en adaptergrense.
@@ -23,7 +24,48 @@ export interface StorageAdapter {
   get(key: string, maxBytes?: number): Promise<Uint8Array | null>;
   delete(key: string): Promise<{ existed: boolean }>;
   exists(key: string): Promise<boolean>;
+  /**
+   * Valgfri (review delta B LOW-D4): fjerner halvferdige skriverester som verken en rad eller en gravstein peker på (adapteren vet selv hvordan slike ser ut), eldre enn `olderThanMs`. Et krasj
+   * midt i `put` (eller en full disk) etterlater slike rester; uten dette ligger de for alltid. En adapter uten slike rester utelater metoden. Kalles av det daglige vedlikeholdet (sweep.ts), aldri per tenant.
+   * `truncated: true` (kun satt når det skjedde) betyr at sveipet nådde sin øvre grense for antall oppføringer og IKKE fullførte (review delta2 B LOW-E3): resten ryddes ikke før en senere kjøring.
+   */
+  purgeStaleTemp?(olderThanMs: number, options?: PurgeStaleTempOptions): Promise<PurgeStaleTempResult>;
 }
+
+export interface PurgeStaleTempOptions {
+  /**
+   * Kun denne undermappen av roten ryddes (en nøkkelprefiks som `snapshots`, den eneste Jarvis skriver under). Uten prefiks går sveipet HELE roten - da gir en fremmed, uleselig mappe (typisk `lost+found` når lagringsmappen er
+   * roten til en dedikert disk) `failed` hver kjøring (review delta2 B LOW-E3). Produksjonskallet (`VisionSnapshotService.purgeStaleTempFiles`) oppgir alltid prefikset.
+   */
+  prefix?: string;
+  /** Øvre grense for antall oppføringer sveipet besøker (standard 200 000); nås den, avbrytes sveipet og resultatet har `truncated: true`. Heltall >= 1. */
+  maxEntries?: number;
+}
+
+export interface PurgeStaleTempResult {
+  removed: number;
+  failed: number;
+  /** Kun med verdien `true`, og kun når sveipet nådde `maxEntries` og ble avbrutt (ikke tilstede ellers). */
+  truncated?: true;
+}
+
+/**
+ * Filsystemoperasjonene adapteren bruker, injiserbare KUN for å kunne simulere kappløp og diskfeil deterministisk i tester (standard: node:fs/promises). Kun mutasjoner er injiserbare; lesing/oppslag
+ * (`lstat`, `realpath`, `readFile`) går alltid mot disken.
+ */
+export interface LocalFsOps {
+  unlink: typeof unlink;
+  rename: typeof rename;
+  writeFile: typeof writeFile;
+}
+
+/** Skriveresten `put` etterlater ved et krasj: `<nøkkel>.tmp-<uuid v4>` (se `put`). Kun filer med NØYAKTIG dette navnemønsteret ryddes av `purgeStaleTemp`. */
+const TEMP_FILE = /\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Dybdegrense og antall oppføringer `purgeStaleTemp` besøker (objektene ligger på `snapshots/<hash>/<id>`; en korrupt/enorm mappe skal ikke holde sveipet opptatt). */
+const MAX_PURGE_DEPTH = 6;
+const MAX_PURGE_ENTRIES = 200_000;
+/** En grense under ett minutt kunne slettet en skriving som pågår akkurat nå. */
+const MIN_PURGE_AGE_MS = 60_000;
 
 export class StorageKeyError extends Error {
   constructor(readonly reason: string) {
@@ -50,10 +92,12 @@ export function assertSafeStorageKey(key: unknown): string {
 export class LocalFsStorageAdapter implements StorageAdapter {
   readonly backend = "local_fs";
   private readonly root: string;
+  private readonly ops: LocalFsOps;
 
-  constructor(rootDir: string) {
+  constructor(rootDir: string, ops: Partial<LocalFsOps> = {}) {
     if (typeof rootDir !== "string" || rootDir.trim().length === 0) throw new Error("local_fs_storage_root_required");
     this.root = resolve(rootDir);
+    this.ops = { unlink, rename, writeFile, ...ops };
   }
 
   private async resolveKey(key: string, forWrite: boolean): Promise<string> {
@@ -74,13 +118,73 @@ export class LocalFsStorageAdapter implements StorageAdapter {
     const existing = await lstat(full).catch(() => null);
     if (existing !== null && !existing.isFile()) throw new StorageKeyError("not_a_regular_file");
     const temp = `${full}.tmp-${randomUUID()}`;
-    await writeFile(temp, bytes, { flag: "wx", mode: 0o600 });
     try {
-      await rename(temp, full);
+      await this.ops.writeFile(temp, bytes, { flag: "wx", mode: 0o600 });
+      await this.ops.rename(temp, full);
     } catch (err) {
-      await unlink(temp).catch(() => undefined);
+      // Review delta B LOW-D4: også en MISLYKKET skriving (full disk midt i writeFile) etterlater en halvskrevet temp-fil - ryddes her, ikke bare ved feil i rename. (Et krasj/kill midt i put kan ikke fanges her:
+      // det ryddes av `purgeStaleTemp`.) Feil ved selve ryddingen skjuler aldri den opprinnelige feilen.
+      await this.ops.unlink(temp).catch(() => undefined);
       throw err;
     }
+  }
+
+  /**
+   * Fjerner foreldreløse `<nøkkel>.tmp-<uuid>`-filer (skriverester) eldre enn `olderThanMs` (minst ett minutt, aldri en skriving som pågår). Rører KUN vanlige filer med akkurat dette navnemønsteret: aldri et ekte objekt,
+   * aldri en symbolsk lenke (følges ikke) og aldri en katalog. En fil som ikke lar seg slette telles som `failed` (kaster ikke; resten ryddes likevel). Rotmappen kan mangle (ingenting er lagret ennå) = ingenting å rydde.
+   * Review delta2 B LOW-E3: med `options.prefix` går sveipet KUN den forventede strukturen (`<rot>/snapshots/<tenant-hash>/<id>`), ikke hele roten - en fremmed mappe i roten (`lost+found` på en dedikert disk, en
+   * sikkerhetskopimappe) leses aldri og gir aldri `failed`. En prefiks-mappe som ikke finnes, eller som er en symbolsk lenke (følges ikke), betyr ingenting å rydde. Når `maxEntries` nås avbrytes sveipet og
+   * resultatet har `truncated: true` (aldri stille avkorting).
+   */
+  async purgeStaleTemp(olderThanMs: number, options: PurgeStaleTempOptions = {}): Promise<PurgeStaleTempResult> {
+    if (!Number.isFinite(olderThanMs) || olderThanMs < MIN_PURGE_AGE_MS) throw new Error("storage_purge_age_invalid");
+    const maxEntries = options.maxEntries ?? MAX_PURGE_ENTRIES;
+    if (!Number.isInteger(maxEntries) || maxEntries < 1) throw new Error("storage_purge_limit_invalid");
+    let start = this.root;
+    if (options.prefix !== undefined) {
+      start = join(this.root, assertSafeStorageKey(options.prefix));
+      const info = await lstat(start).catch((err: NodeJS.ErrnoException) => (err.code === "ENOENT" ? null : Promise.reject(err)));
+      if (info === null || !info.isDirectory()) return { removed: 0, failed: 0 }; // finnes ikke ennå, eller en symlenke/fil som aldri følges
+    }
+    const cutoff = Date.now() - olderThanMs;
+    let removed = 0;
+    let failed = 0;
+    let visited = 0;
+    let truncated = false;
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      let entries: Dirent[];
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+        failed += 1;
+        return;
+      }
+      for (const entry of entries) {
+        visited += 1;
+        if (visited > maxEntries) {
+          truncated = true; // grensen er passert og forblir passert: hver løkke over oss avbrytes ved sin neste oppføring
+          return;
+        }
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (depth < MAX_PURGE_DEPTH) await walk(path, depth + 1);
+          continue;
+        }
+        if (!entry.isFile() || !TEMP_FILE.test(entry.name)) continue; // symlenker (isFile() er usann for dem), fifoer og alt som ikke heter `*.tmp-<uuid>` står
+        try {
+          const info = await lstat(path);
+          if (!info.isFile() || info.mtimeMs > cutoff) continue;
+          await this.ops.unlink(path);
+          removed += 1;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") continue; // borte i mellomtiden (en annen sveiper) - ikke en feil
+          failed += 1;
+        }
+      }
+    };
+    await walk(start, 0);
+    return truncated ? { removed, failed, truncated: true } : { removed, failed };
   }
 
   async get(key: string, maxBytes = 20 * 1024 * 1024): Promise<Uint8Array | null> {
@@ -97,7 +201,14 @@ export class LocalFsStorageAdapter implements StorageAdapter {
     const info = await lstat(full).catch((err: NodeJS.ErrnoException) => (err.code === "ENOENT" ? null : Promise.reject(err)));
     if (info === null) return { existed: false };
     // En symbolsk lenke slettes som lenken selv (aldri målet) - unlink fjerner kun navnet.
-    await unlink(full);
+    try {
+      await this.ops.unlink(full);
+    } catch (err) {
+      // Review delta B LOW-D3: en annen reaper kan ha slettet filen mellom `lstat` og `unlink` (samtidige vedlikeholdskjøringer ga 114 falske `failed`). Borte er borte: det samme som `existed: false`.
+      // Enhver ANNEN feil (EPERM, EISDIR, EIO ...) kastes fortsatt, slik at reaperen beholder graven og prøver igjen.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return { existed: false };
+      throw err;
+    }
     return { existed: true };
   }
 

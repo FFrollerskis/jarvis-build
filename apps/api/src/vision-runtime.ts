@@ -6,13 +6,16 @@ import { envInt } from "@jarvis/contracts";
 import { MAX_MODEL_TIMEOUT_MS } from "@jarvis/model-gateway";
 import { LocalOpenAiCompatibleAdapter } from "@jarvis/provider-adapters";
 import { guardedFetch } from "@jarvis/tool-gateway";
-import type { EmbeddingProvider } from "@jarvis/memory";
+import { embeddingEndpointFromEnv, type EmbeddingProvider } from "@jarvis/memory";
 import {
   HomeAssistantVisionSource, LocalFsStorageAdapter, VisionCameraService, VisionCaptureService, VisionClassifier, VisionEmbeddingService, VisionIngestPipeline, VisionInventoryService,
   VisionLastSeenService, VisionPoller, VisionSnapshotService, runVisionMaintenanceSweepForAllTenants, startVisionPoller, type CaptureDeviceRegistry, type VisionHttpFetch,
   type VisionModelGateway, type VisionPollerGuard, type VisionPollerHandle, type VisionService
 } from "@jarvis/vision";
-import type { VisionApiDeps } from "./vision-routes.ts";
+import { RateLimiter } from "./http-guard.ts";
+import { assertDbLimits, limitedPool, runWithDbLimits, type DbLimits } from "./vision-db-limits.ts";
+import { flagOn, visionFlagsFromEnv, type VisionFlags } from "./vision-flags.ts";
+import type { VisionApiDeps, VisionMaintenanceStatus, VisionStatusReport } from "./vision-routes.ts";
 
 /**
  * WP-G3 (D-465): kobling av UA-9 (kamerabilder, lokal klassifisering, bilde-lagring, «sist sett», iPhone-opptak) til api-prosessen. ALT er AV som standard: uten `JARVIS_VISION_ENABLED=on` bygges ingenting,
@@ -22,6 +25,7 @@ import type { VisionApiDeps } from "./vision-routes.ts";
  *   JARVIS_VISION_ENABLED         hovedbryter: ruter (`/vision/*`), pipeline, vedlikeholdssveip.
  *   JARVIS_VISION_CLASSIFIER      lokal visjonsmodell (krever JARVIS_VISION_LOCAL_URL, som MÅ peke til en lokal/privat adresse - se `assertLocalVisionEndpoint`).
  *   JARVIS_VISION_LOCAL_URL / _MODEL   OpenAI-kompatibelt lokalt endepunkt (Ollama, llama.cpp ...) og modellnavn (standard `local-vision`).
+ *   JARVIS_VISION_ALLOW_TAILSCALE tillat Tailscale-adresser (CGNAT 100.64/10 og `*.ts.net`) for det lokale endepunktet og embedding-endepunktet (review A-L5). Uten flagget avvises de.
  *   JARVIS_VISION_MODEL_TIMEOUT_MS tidsavbrudd per modellkall (standard 90000; 5000-180000 = gatewayens harde tak, ellers kastes ved oppstart). Virker nå på selve kallet (review A-M2).
  *   JARVIS_VISION_STORE_SNAPSHOTS lagring av hendelsesbilder (krever JARVIS_VISION_STORAGE_DIR; kun kameraer med policy `store_snapshot` i hjemmesonen lagres). Flagget styrer KUN SKRIVING:
  *                                 så snart JARVIS_VISION_STORAGE_DIR er satt kjører vedlikeholdet (retensjon, erasure, kamera-fjerning, gravsteiner) mot mappen selv om flagget er av (review B-M1).
@@ -38,41 +42,68 @@ export class VisionConfigError extends Error {
   }
 }
 
-export interface VisionFlags {
-  enabled: boolean;
-  classifier: boolean;
-  storeSnapshots: boolean;
-  haPoll: boolean;
-  localUrl: string | undefined;
-  localModel: string;
-  storageDir: string | undefined;
-}
+// Flaggene bor i vision-flags.ts (en fil uten imports, slik at provider-pause.ts/workeren ikke laster hele kjøretiden - review delta A INFO-D9). Re-eksportert uendret.
+export { visionFlagsFromEnv, type VisionFlags } from "./vision-flags.ts";
 
-const on = (value: string | undefined): boolean => value === "on";
+/** Opplastinger per klient-IP per minutt (review B-L4). */
+export const VISION_UPLOADS_PER_IP_PER_MINUTE = 20;
 
-export function visionFlagsFromEnv(env: NodeJS.ProcessEnv): VisionFlags {
-  const enabled = on(env["JARVIS_VISION_ENABLED"]);
-  return {
-    enabled,
-    // Underflagg gjelder KUN under hovedbryteren (hovedbryter av = alt av, uansett underflagg).
-    classifier: enabled && on(env["JARVIS_VISION_CLASSIFIER"]),
-    storeSnapshots: enabled && on(env["JARVIS_VISION_STORE_SNAPSHOTS"]),
-    haPoll: enabled && on(env["JARVIS_VISION_HA_POLL"]),
-    localUrl: env["JARVIS_VISION_LOCAL_URL"]?.trim() || undefined,
-    localModel: env["JARVIS_VISION_LOCAL_MODEL"]?.trim() || "local-vision",
-    storageDir: env["JARVIS_VISION_STORAGE_DIR"]?.trim() || undefined
-  };
-}
+/**
+ * Vedlikeholdsvakter (review delta2 B LOW-E2). Poolen har ingen `statement_timeout`/`lock_timeout` (og den delte `createPool` røres ikke), så et vedlikeholdskall som aldri returnerer holdt tidligere ALT senere lett
+ * vedlikehold fast til prosessen ble startet på nytt. To lag, begge kun for vedlikehold:
+ *   1. DATABASEGRENSER (`vision-db-limits.ts`): hver vedlikeholdstransaksjon starter med `SET LOCAL statement_timeout/lock_timeout`. En forlatt lås gir `55P03` etter `MAINTENANCE_LOCK_TIMEOUT_MS` i stedet for en evig venting;
+ *      kjøringen feiler synlig (`vision_maintenance_failed`) og vakten slippes.
+ *   2. STARTTID-VAKT for det databasegrenser ikke rekker (en hengt fil-/nettverksoperasjon): en lett kjøring som har gått lenger enn `LIGHT_MAINTENANCE_MAX_RUN_MS` regnes som FORLATT (logget:
+ *      `vision_light_maintenance_overrun`), og en erstatning tillates - høyst `MAX_ABANDONED_LIGHT_RUNS` forlatte kjøringer om gangen (hver kan holde en forbindelse/trådpool-plass), deretter hoppes tikken over.
+ * Hoppede tikk er SYNLIGE: teller + `running_since` i `/vision/status` (`maintenance.light_run`) og en rate-begrenset logglinje (`vision_light_maintenance_skipped`, kode og tall, aldri innhold).
+ */
+export const LIGHT_MAINTENANCE_MAX_RUN_MS = 30 * 60_000;
+export const MAINTENANCE_STATEMENT_TIMEOUT_MS = 5 * 60_000;
+export const MAINTENANCE_LOCK_TIMEOUT_MS = 15_000;
+export const MAX_ABANDONED_LIGHT_RUNS = 2;
+export const SKIP_LOG_INTERVAL_MS = 10 * 60_000;
 
-const PRIVATE_V4 = [/^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./];
 const LOCAL_SUFFIXES = [".local", ".lan", ".internal", ".home.arpa", ".localdomain"];
 
 /**
- * Kamerabilder forlater ALDRI maskinen/det lokale nettverket. `local_vision`-identiteten er «lokal» ved KONFIGURASJON, så endepunktet valideres deterministisk ved oppstart: http(s), ingen brukerinfo,
- * og verten må være loopback, privat/link-lokal IP, `host.docker.internal`, et enkelt-label-navn (docker-compose-tjeneste), eller ende på .local/.lan/.internal/.home.arpa. Et offentlig vertsnavn/IP
- * avvises (`VisionConfigError`) - det finnes ingen overstyring. (DNS oppløses ikke her: et lokalt navn som peker utenfor er eierens nettverksoppsett; redirects følges uansett aldri, se adapteren.)
+ * Tailscale (CGNAT 100.64.0.0/10 og MagicDNS `*.ts.net`) er KUN tillatt med eierens eksplisitte `JARVIS_VISION_ALLOW_TAILSCALE=on` (review A-L5): et tailnet er eierens eget lukkede nett, så oppsettet «modellen kjører på
+ * PC-en min, nådd via Tailscale» må kunne brukes - men `100.x`/`.ts.net` er ellers ikke et privat nett, og uten flagget avvises begge.
  */
-export function assertLocalVisionEndpoint(raw: string): string {
+export function visionAllowTailscale(env: NodeJS.ProcessEnv): boolean {
+  return flagOn(env["JARVIS_VISION_ALLOW_TAILSCALE"]);
+}
+
+export interface LocalEndpointOptions {
+  allowTailscale?: boolean;
+}
+
+/**
+ * Er denne IP-adressen lokal? Loopback, RFC 1918 (10/8, 172.16/12, 192.168/16), IPv6 ULA (fc00::/7, som også dekker Tailscales fd7a:115c:a1e0::/48) og - kun med eier-flagget - CGNAT 100.64/10. Link-lokale adresser
+ * (169.254/16 - inkludert skymetadata-adressen 169.254.169.254 - og fe80::/10), 0.0.0.0 og alt offentlig er IKKE lokale (review A-L5). En IPv4-mappet IPv6 (`::ffff:10.0.0.1`, slik getaddrinfo kan gi) vurderes som sin IPv4.
+ */
+export function isLocalAddress(address: string, options: LocalEndpointOptions = {}): boolean {
+  let host = address.replace(/^\[|\]$/g, "").toLowerCase();
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(host);
+  if (mapped !== null) host = mapped[1] as string;
+  const kind = isIP(host);
+  if (kind === 4) {
+    const [a, b] = host.split(".").map(Number) as [number, number];
+    if (a === 127 || a === 10) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    return options.allowTailscale === true && a === 100 && b >= 64 && b <= 127;
+  }
+  if (kind === 6) return host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host);
+  return false;
+}
+
+/**
+ * Kamerabilder forlater ALDRI maskinen/det lokale nettverket. `local_vision`-identiteten er «lokal» ved KONFIGURASJON, så endepunktet valideres deterministisk ved oppstart: http(s), ingen brukerinfo,
+ * og verten må være loopback, privat IP (se `isLocalAddress`), `host.docker.internal`, et enkelt-label-navn (docker-compose-tjeneste), eller ende på .local/.lan/.internal/.home.arpa (og `.ts.net` med
+ * Tailscale-flagget). Et offentlig vertsnavn/IP avvises (`VisionConfigError`) - det finnes ingen overstyring. Dette er den SYNTAKTISKE sjekken; selve navneoppløsningen kontrolleres ved oppstart av
+ * `verifyVisionEndpoints` (review A-L5). Redirects følges uansett aldri, se adapteren.
+ */
+export function assertLocalVisionEndpoint(raw: string, options: LocalEndpointOptions = {}): string {
   let url: URL;
   try {
     url = new URL(raw);
@@ -82,13 +113,93 @@ export function assertLocalVisionEndpoint(raw: string): string {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new VisionConfigError("local_url_scheme");
   if (url.username !== "" || url.password !== "") throw new VisionConfigError("local_url_credentials");
   const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  const kind = isIP(host);
-  let local = false;
-  if (kind === 4) local = host === "0.0.0.0" ? false : PRIVATE_V4.some((p) => p.test(host));
-  else if (kind === 6) local = host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host);
-  else local = host === "localhost" || host === "host.docker.internal" || !host.includes(".") || LOCAL_SUFFIXES.some((s) => host.endsWith(s));
+  const local = isIP(host) !== 0
+    ? isLocalAddress(host, options)
+    : host === "localhost" || host === "host.docker.internal" || !host.includes(".") || LOCAL_SUFFIXES.some((s) => host.endsWith(s)) || (options.allowTailscale === true && host.endsWith(".ts.net"));
   if (!local) throw new VisionConfigError("local_url_not_local");
   return raw;
+}
+
+/** Navneoppslag (injisert; i drift `dns.lookup(host, { all: true })` fra main.ts - visjonsfilene importerer aldri node:dns, byggevakten feller det). */
+export type VisionDnsLookup = (hostname: string) => Promise<ReadonlyArray<{ address: string }>>;
+
+export interface VisionEndpointVerification {
+  /** Kode (`embedding_url_not_local` ...) når embedding-endepunktet ikke er lokalt: vision bruker da INGEN embedding (ingen objektvektorer), men API-et starter. `null` = greit eller ikke relevant. */
+  embeddingBlockedReason: string | null;
+}
+
+const DNS_TIMEOUT_MS = 5_000;
+
+async function lookupWithTimeout(lookup: VisionDnsLookup, host: string, timeoutMs: number): Promise<ReadonlyArray<{ address: string }>> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([lookup(host), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("dns_timeout")), timeoutMs); })]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** Løser verten i `rawUrl` og avviser alt som peker utenfor det lokale nettet. Gir `"unresolved"` (med en logglinje uten vertsnavn) når navnet ikke kan løses akkurat nå - se `verifyVisionEndpoints`. */
+async function assertResolvesLocal(rawUrl: string, label: string, deps: { lookup: VisionDnsLookup; timeoutMs: number }, options: LocalEndpointOptions): Promise<"checked" | "literal" | "unresolved"> {
+  const host = new URL(rawUrl).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (isIP(host) !== 0) return "literal"; // en IP-adresse er allerede vurdert syntaktisk
+  let addresses: ReadonlyArray<{ address: string }>;
+  try {
+    addresses = await lookupWithTimeout(deps.lookup, host, deps.timeoutMs);
+  } catch {
+    addresses = [];
+  }
+  if (addresses.length === 0) {
+    console.error(JSON.stringify({ msg: "vision_endpoint_unresolved", endpoint: label }));
+    return "unresolved";
+  }
+  if (addresses.some((entry) => !isLocalAddress(entry.address, options))) throw new VisionConfigError(`${label}_resolves_nonlocal`);
+  return "checked";
+}
+
+/**
+ * Review A-L5 og A-INFO-4: løser vertsnavnet i endepunktene ved OPPSTART og avviser offentlige adresser - den syntaktiske sjekken (`assertLocalVisionEndpoint`) slapp gjennom `evil.com.local`, et enkelt-label-navn som
+ * i praksis peker utenfor, og `metadata.google.internal` (som peker til skymetadata-adressen). Gjelder (1) den lokale visjonsmodellen (`JARVIS_VISION_LOCAL_URL`, kun med CLASSIFIER på) - en ikke-lokal oppløsning KASTER
+ * (`local_url_resolves_nonlocal`) - og (2) embedding-endepunktet minnet bruker (`JARVIS_EMBEDDING_URL` -> `JARVIS_OLLAMA_URL` -> `JARVIS_GEMMA_LOCAL_URL`, kun når provideren er Ollama): er det ikke lokalt, bruker vision
+ * INGEN embedding (gir koden `embedding_url_*` tilbake) i stedet for å stoppe hele API-et, siden endepunktet deles med vanlig minne.
+ * Et navn som IKKE kan løses akkurat nå (docker-tjeneste som ikke er oppe ennå) stopper ikke oppstarten: da kan heller ingen forbindelse opprettes, og hvert kall feiler lukket - men det logges. Dette er en
+ * oppstartssjekk, IKKE per-kall DNS-pinning: et navn som senere endrer svar (DNS rebinding) fanges ikke - eierens DNS er en del av tillitsgrunnlaget (DPIA §7). Uten JARVIS_VISION_ENABLED=on gjøres ingenting.
+ */
+export async function verifyVisionEndpoints(env: NodeJS.ProcessEnv, deps: { lookup: VisionDnsLookup; timeoutMs?: number }): Promise<VisionEndpointVerification> {
+  const flags = visionFlagsFromEnv(env);
+  if (!flags.enabled) return { embeddingBlockedReason: null };
+  const options: LocalEndpointOptions = { allowTailscale: visionAllowTailscale(env) };
+  const lookupDeps = { lookup: deps.lookup, timeoutMs: deps.timeoutMs ?? DNS_TIMEOUT_MS };
+  if (flags.classifier && flags.localUrl !== undefined) {
+    assertLocalVisionEndpoint(flags.localUrl, options);
+    await assertResolvesLocal(flags.localUrl, "local_url", lookupDeps, options);
+  }
+  const embeddingUrl = embeddingEndpointFromEnv(env);
+  if (embeddingUrl === null) return { embeddingBlockedReason: null };
+  try {
+    assertLocalVisionEndpoint(embeddingUrl, options);
+    await assertResolvesLocal(embeddingUrl, "embedding_url", lookupDeps, options);
+    return { embeddingBlockedReason: null };
+  } catch (err) {
+    if (err instanceof VisionConfigError) return { embeddingBlockedReason: embeddingReason(err.code) };
+    throw err;
+  }
+}
+
+/** `local_url_not_local` -> `embedding_url_not_local` (samme feilkoder, men for embedding-endepunktet). */
+const embeddingReason = (code: string): string => (code.startsWith("local_url_") ? `embedding_url_${code.slice("local_url_".length)}` : code);
+
+/** Den SYNTAKTISKE sjekken av embedding-endepunktet (kjørt av `buildVisionRuntime` selv, uten DNS): `null` = greit eller ikke Ollama. */
+function embeddingBlockReason(env: NodeJS.ProcessEnv): string | null {
+  const url = embeddingEndpointFromEnv(env);
+  if (url === null) return null;
+  try {
+    assertLocalVisionEndpoint(url, { allowTailscale: visionAllowTailscale(env) });
+    return null;
+  } catch (err) {
+    if (err instanceof VisionConfigError) return embeddingReason(err.code);
+    throw err;
+  }
 }
 
 /**
@@ -106,7 +217,7 @@ export function visionAdapterFromEnv(env: NodeJS.ProcessEnv): LocalOpenAiCompati
   const flags = visionFlagsFromEnv(env);
   if (!flags.classifier) return null;
   if (flags.localUrl === undefined) throw new VisionConfigError("local_url_missing");
-  const url = assertLocalVisionEndpoint(flags.localUrl);
+  const url = assertLocalVisionEndpoint(flags.localUrl, { allowTailscale: visionAllowTailscale(env) });
   return new LocalOpenAiCompatibleAdapter(url, flags.localModel, visionModelTimeoutMs(env), "local_vision", undefined, { vision: true });
 }
 
@@ -141,6 +252,13 @@ export interface VisionRuntimeDeps {
   ownerControls: VisionOwnerControls;
   /** Test-/drift-injeksjon (standard: `guardedFetch` fra tool-gateway). */
   fetchImpl?: VisionHttpFetch;
+  /** Resultatet av `verifyVisionEndpoints` (navneoppløsningen av embedding-endepunktet, kjørt av main.ts ved oppstart). Utelatt = kun den syntaktiske sjekken. */
+  embeddingBlockedReason?: string | null;
+  /**
+   * Test-injeksjon for vedlikeholdsvaktene (standard: konstantene `MAINTENANCE_*`/`LIGHT_MAINTENANCE_MAX_RUN_MS`/`SKIP_LOG_INTERVAL_MS`). `now` er en millisekundklokke; `sweep` erstatter selve vedlikeholdssveipet
+   * (slik at en test kan styre nøyaktig når en kjøring fullfører). Ugyldige grenser KASTER ved oppstart.
+   */
+  maintenance?: { maxRunMs?: number; statementTimeoutMs?: number; lockTimeoutMs?: number; skipLogIntervalMs?: number; now?: () => number; sweep?: typeof runVisionMaintenanceSweepForAllTenants };
 }
 
 export interface VisionRuntime {
@@ -151,8 +269,10 @@ export interface VisionRuntime {
   classifier: VisionClassifier | undefined;
   poller: VisionPoller | null;
   pollerHandle: VisionPollerHandle | null;
-  /** Hyppig vedlikehold (gravsteiner, pending-bilder, utløp av opptaksforespørsler) - kalles av en intervalltimer i main.ts. */
+  /** Hyppig vedlikehold (gravsteiner, pending-bilder, utløp av opptaksforespørsler) - kalles av en intervalltimer i main.ts. Kaster (`vision_maintenance_failed:<n>`) når noen space feilet eller en gravstein er «stuck» (review B-L8). */
   lightMaintenance(): Promise<void>;
+  /** Eierens helsebilde (samme som `/vision/status`). */
+  status(): VisionStatusReport;
   /** Daglig full vedlikeholdskjøring (bilde-retensjon, inventar, vektorer, gravsteiner) - kalles av en `DailyScheduler` i main.ts. */
   fullMaintenance(): Promise<{ failed: Array<{ tenant_id: string; memory_space_id: string; error: string }> }>;
   stop(): void;
@@ -164,7 +284,8 @@ export interface VisionRuntime {
  */
 export function assertStorageDirWritable(dir: string): void {
   try {
-    mkdirSync(dir, { recursive: true });
+    // Review delta B LOW-D4: en mappe vi oppretter selv er kun for tjenestebrukeren (0700), som mappene adapteren oppretter under den. En eksisterende mappe (bind-mount, volum) røres ikke - eieren eier rettighetene.
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const probe = join(dir, `.write-probe-${process.pid}-${Date.now()}`);
     writeFileSync(probe, "ok", { flag: "wx", mode: 0o600 });
     unlinkSync(probe);
@@ -178,30 +299,48 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   const flags = visionFlagsFromEnv(deps.env);
   if (!flags.enabled) return null;
   if (flags.classifier && flags.localUrl === undefined) throw new VisionConfigError("local_url_missing");
-  if (flags.classifier && flags.localUrl !== undefined) assertLocalVisionEndpoint(flags.localUrl);
+  if (flags.classifier && flags.localUrl !== undefined) assertLocalVisionEndpoint(flags.localUrl, { allowTailscale: visionAllowTailscale(deps.env) });
   if (flags.storeSnapshots && flags.storageDir === undefined) throw new VisionConfigError("storage_dir_missing");
   if (flags.storageDir !== undefined && !flags.storageDir.startsWith("/")) throw new VisionConfigError("storage_dir_not_absolute");
   if (flags.storeSnapshots && flags.storageDir !== undefined) assertStorageDirWritable(flags.storageDir);
 
-  const cameras = new VisionCameraService(deps.pool);
-  const inventory = new VisionInventoryService(deps.pool);
+  // Review delta2 B LOW-E2: ALLE visjonstjenestene bruker en pool som er gjennomsiktig utenfor `runWithDbLimits` og legger `statement_timeout`/`lock_timeout` på hver transaksjon INNE i vedlikeholdskjøringene (se
+  // `vision-db-limits.ts`). Den delte `createPool` og `deps.pool` er uendret. Ugyldige grenser kastes her, ved oppstart, ikke under en kjøring.
+  const maintenanceLimits: DbLimits = { statementTimeoutMs: deps.maintenance?.statementTimeoutMs ?? MAINTENANCE_STATEMENT_TIMEOUT_MS, lockTimeoutMs: deps.maintenance?.lockTimeoutMs ?? MAINTENANCE_LOCK_TIMEOUT_MS };
+  assertDbLimits(maintenanceLimits);
+  const maxRunMs = deps.maintenance?.maxRunMs ?? LIGHT_MAINTENANCE_MAX_RUN_MS;
+  const skipLogIntervalMs = deps.maintenance?.skipLogIntervalMs ?? SKIP_LOG_INTERVAL_MS;
+  if (!Number.isFinite(maxRunMs) || maxRunMs < 1 || !Number.isFinite(skipLogIntervalMs) || skipLogIntervalMs < 0) throw new Error("vision_maintenance_guard_invalid");
+  const clock = deps.maintenance?.now ?? Date.now;
+  const sweep = deps.maintenance?.sweep ?? runVisionMaintenanceSweepForAllTenants;
+  const pool = limitedPool(deps.pool);
+
+  const cameras = new VisionCameraService(pool);
+  const inventory = new VisionInventoryService(pool);
   // Review B-M1: lagringstjenesten bygges så snart STORAGE_DIR er satt - IKKE bare når STORE_SNAPSHOTS er på. Flagget styrer kun SKRIVING (se `storeSnapshots` på pipelinen under); sletting (retensjon, erasure,
   // kamera-fjerning, gravsteiner) MÅ fortsette selv om eieren har slått lagring av, ellers ligger bildefilene igjen for alltid mens radene er slettet.
   const snapshots = flags.storageDir !== undefined
-    ? new VisionSnapshotService(deps.pool, new LocalFsStorageAdapter(flags.storageDir), deps.vision, { maxStoredBytes: envInt("JARVIS_VISION_MAX_STORED_MB", 2048, { min: 16, max: 10_000_000 }, deps.env) * 1024 * 1024 })
+    ? new VisionSnapshotService(pool, new LocalFsStorageAdapter(flags.storageDir), deps.vision, { maxStoredBytes: envInt("JARVIS_VISION_MAX_STORED_MB", 2048, { min: 16, max: 10_000_000 }, deps.env) * 1024 * 1024 })
     : undefined;
   let embeddings: VisionEmbeddingService | undefined;
-  try {
-    embeddings = new VisionEmbeddingService(deps.pool, deps.memoryEmbedding);
-  } catch (err) {
-    // Kun lokal embedding (fail-closed): en sky-provider gir ingen objektvektorer - «sist sett» faller til eksakte treff.
-    console.error(JSON.stringify({ msg: "vision_embeddings_disabled", code: (err as Error).name }));
+  // Review A-INFO-4: embedding-endepunktet minnet bruker valideres som privat/lokalt (samme regel som den lokale modellen; navneoppløsningen er allerede kontrollert av `verifyVisionEndpoints` og gitt hit i
+  // `embeddingBlockedReason`). Er det ikke lokalt bruker vision INGEN embedding - kamera-avledet tekst (objektnavn) sendes aldri dit - men resten av API-et (og vanlig minne) er uberørt.
+  const embeddingBlocked = deps.embeddingBlockedReason ?? embeddingBlockReason(deps.env);
+  if (embeddingBlocked !== null) {
+    console.error(JSON.stringify({ msg: "vision_embeddings_disabled", code: embeddingBlocked }));
+  } else {
+    try {
+      embeddings = new VisionEmbeddingService(pool, deps.memoryEmbedding);
+    } catch (err) {
+      // Kun lokal embedding (fail-closed): en sky-provider gir ingen objektvektorer - «sist sett» faller til eksakte treff.
+      console.error(JSON.stringify({ msg: "vision_embeddings_disabled", code: (err as Error).name }));
+    }
   }
   // Review A-M2: tidsavbruddet fra JARVIS_VISION_MODEL_TIMEOUT_MS går inn i klassifisereren (per kall via gatewayen), ikke bare i adapterens konstruktør.
   const classifier = flags.classifier ? new VisionClassifier({ gateway: deps.gateway, timeoutMs: visionModelTimeoutMs(deps.env) }) : undefined;
-  const pipeline = new VisionIngestPipeline({ pool: deps.pool, vision: deps.vision, classifier, snapshots, embeddings, inventory, enabled: true, storeSnapshots: flags.storeSnapshots && snapshots !== undefined });
-  const capture = new VisionCaptureService(deps.pool, cameras, pipeline, deps.devices);
-  const lastSeen = new VisionLastSeenService(deps.pool, { ...(embeddings !== undefined ? { embeddings } : {}), inventory });
+  const pipeline = new VisionIngestPipeline({ pool, vision: deps.vision, classifier, snapshots, embeddings, inventory, enabled: true, storeSnapshots: flags.storeSnapshots && snapshots !== undefined });
+  const capture = new VisionCaptureService(pool, cameras, pipeline, deps.devices);
+  const lastSeen = new VisionLastSeenService(pool, { ...(embeddings !== undefined ? { embeddings } : {}), inventory });
 
   let poller: VisionPoller | null = null;
   let pollerHandle: VisionPollerHandle | null = null;
@@ -212,23 +351,82 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
       baseUrl: async () => (await deps.secrets.get("JARVIS_HA_BASE_URL")) ?? null,
       token: async () => (await deps.secrets.get("JARVIS_HA_TOKEN")) ?? null
     });
-    poller = new VisionPoller({ pool: deps.pool, cameras, pipeline, source, guard: createVisionPollerGuard(deps.ownerControls), tenantIds: [deps.ownerTenantId] });
+    poller = new VisionPoller({ pool, cameras, pipeline, source, guard: createVisionPollerGuard(deps.ownerControls), tenantIds: [deps.ownerTenantId] });
     pollerHandle = startVisionPoller(poller, envInt("JARVIS_VISION_POLL_INTERVAL_SECONDS", 20, { min: 5, max: 3600 }, deps.env) * 1000);
   }
 
   const maintenanceDeps = { snapshots, inventory, captures: capture, embeddings };
+  // Review B-L8: siste vedlikeholdsutfall og pollerens helse samles til eierens helsebilde (`/vision/status`).
+  const last: { light: VisionMaintenanceStatus | null; full: VisionMaintenanceStatus | null } = { light: null, full: null };
+  const toStatus = (summary: Awaited<ReturnType<typeof runVisionMaintenanceSweepForAllTenants>>): VisionMaintenanceStatus => ({
+    at: new Date().toISOString(), failed: summary.failed.length, tombstones_deleted: summary.tombstones_deleted, tombstones_failed: summary.tombstones_failed, tombstones_stuck: summary.tombstones_stuck,
+    temp_files_purged: summary.temp_files_purged, temp_files_truncated: summary.temp_files_truncated
+  });
+  // Review delta B LOW-D4: aldri to lette vedlikeholdskjøringer samtidig i denne prosessen. En kjøring som varer lenger enn intervallet (stor kø, tregt volum) ellers overlapper neste timer-tikk, og to reapere
+  // sletter da de samme filene (de falske `failed` fra kappløpet er også fjernet i lagringsadapteren, men to reapere gjør uansett dobbelt arbeid og dobbelt støy). Den overlappende tikken hoppes over.
+  // Review delta2 B LOW-E2: vakten er TIDSBEGRENSET og SYNLIG. `lightRun` husker når den pågående kjøringen startet; en kjøring over `maxRunMs` er forlatt (en erstatning tillates, høyst `MAX_ABANDONED_LIGHT_RUNS`
+  // forlatte om gangen), og hver hoppede tikk telles og logges (rate-begrenset). Hver kjøring har en id, slik at en forlatt kjøring som til slutt fullfører aldri slipper en nyere kjøring sin vakt eller overskriver dens utfall.
+  let lightRun: { id: number; startedAtMs: number } | null = null;
+  let lightRunSeq = 0;
+  let abandonedRuns = 0;
+  let skippedTicks = 0;
+  let lastSkipLogAtMs: number | null = null;
+  const skipTick = (reason: "previous_run_in_progress" | "previous_runs_stuck", runningMs: number, nowMs: number): void => {
+    skippedTicks += 1;
+    if (lastSkipLogAtMs === null || nowMs - lastSkipLogAtMs >= skipLogIntervalMs) {
+      lastSkipLogAtMs = nowMs;
+      console.warn(JSON.stringify({ msg: "vision_light_maintenance_skipped", reason, running_ms: runningMs, skipped_ticks: skippedTicks }));
+    }
+  };
+  const status = (): VisionStatusReport => ({
+    poller: pollerHandle === null ? { enabled: false } : { enabled: true, ...pollerHandle.status(), consecutive_failures: pollerHandle.health().consecutive_failures, next_delay_ms: pollerHandle.health().next_delay_ms },
+    maintenance: {
+      light: last.light, full: last.full,
+      light_run: { running_since: lightRun === null ? null : new Date(lightRun.startedAtMs).toISOString(), skipped_ticks: skippedTicks, abandoned_runs: abandonedRuns }
+    },
+    ingest: pipeline.stats(),
+    storage: { maintenance_enabled: snapshots !== undefined, writing_enabled: flags.storeSnapshots && snapshots !== undefined },
+    classifier: classifier !== undefined,
+    embeddings: embeddings !== undefined
+  });
   return {
     flags,
-    api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024 },
+    // Review B-L4: egen strenge per-IP-grense for opplastingsruten (kroppen er opptil ca. 7 MB og leses FØR grantet verifiseres): 20 opplastinger per minutt per IP er rause rom for én iPhone (ETT opptak per forespørsel).
+    api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024, uploadLimiter: new RateLimiter(VISION_UPLOADS_PER_IP_PER_MINUTE, 60_000), status },
     pipeline,
     classifier,
     poller,
     pollerHandle,
+    status,
     async lightMaintenance(): Promise<void> {
-      await runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps, { light: true });
+      const nowMs = clock();
+      if (lightRun !== null) {
+        const runningMs = nowMs - lightRun.startedAtMs;
+        if (runningMs < maxRunMs) return skipTick("previous_run_in_progress", runningMs, nowMs); // en forrige lett kjøring pågår fortsatt: hopp over denne tikken (synlig, se `skipTick`)
+        if (abandonedRuns >= MAX_ABANDONED_LIGHT_RUNS) return skipTick("previous_runs_stuck", runningMs, nowMs); // for mange hengte kjøringer: ikke stable flere
+        // Den pågående kjøringen har stått lenger enn grensen: regn den som forlatt (den kan fortsatt fullføre senere) og la denne tikken starte en ny.
+        abandonedRuns += 1;
+        console.error(JSON.stringify({ msg: "vision_light_maintenance_overrun", running_ms: runningMs, max_run_ms: maxRunMs, abandoned_runs: abandonedRuns }));
+        lightRun = null;
+      }
+      const run = { id: (lightRunSeq += 1), startedAtMs: nowMs };
+      lightRun = run;
+      lastSkipLogAtMs = null; // første hoppede tikk av HVER kjøring logges
+      try {
+        const summary = await runWithDbLimits(maintenanceLimits, () => sweep(pool, maintenanceDeps, { light: true }));
+        if (lightRun === run) last.light = toStatus(summary); // en forlatt kjøring overskriver aldri en nyere kjørings utfall
+        // Review B-L8: en feil (inkl. «stuck» gravsteiner) skal ikke forsvinne i en teller: den kastes, og main.ts-timeren logger den (`vision_light_maintenance_failed`) i stedet for å late som alt gikk bra.
+        if (summary.failed.length > 0) throw new Error(`vision_maintenance_failed:${summary.failed.length}`);
+      } finally {
+        // Også etter en feil (ellers ville én feilet kjøring stanse alt vedlikehold for alltid). En forlatt kjøring som til slutt er ferdig frigir sin plass, men rører ikke vakten til en nyere kjøring.
+        if (lightRun === run) lightRun = null;
+        else abandonedRuns = Math.max(0, abandonedRuns - 1);
+      }
     },
     async fullMaintenance() {
-      return runVisionMaintenanceSweepForAllTenants(deps.pool, maintenanceDeps);
+      const summary = await runWithDbLimits(maintenanceLimits, () => sweep(pool, maintenanceDeps));
+      last.full = toStatus(summary);
+      return summary;
     },
     stop(): void {
       pollerHandle?.stop();

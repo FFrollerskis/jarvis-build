@@ -6,7 +6,7 @@ import { afterAcceptedMutation, isIndeterminateTransportError, isOutcomeUnknownM
 import { ProviderRejectedError, type AdapterMap } from "./adapters.ts";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel, type CommsProvider } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
-import { PURPOSE_BASES, evaluateOutboundPolicy, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
+import { PURPOSE_BASES, evaluateOutboundPolicy, isRelationshipEvidence, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
 import type { Actor, AuthorizedAccount, BeginResult, Clock, CommsStore, JournalEntryInput, JournalSource } from "./store.ts";
 
 /**
@@ -233,8 +233,11 @@ export class OutboundFunnel {
     return { parsed, decision, account, provider, recipient_hash: hash, recipient_hint: hint, state, target_log_id: targetRow?.log_id ?? null };
   }
 
-  /** Mottakerens løste identitet (kun EKSAKT treff i Conversation Graph; ukjent forblir ukjent). Aldri en feil: en identitet er et bevis, ikke en forutsetning. */
-  private async resolveRecipientIdentity(ctx: FunnelContext, req: OutboundRequest): Promise<{ identity_id: string; confidence: number } | null> {
+  /**
+   * Mottakerens løste identitet (kun EKSAKT treff i Conversation Graph; ukjent forblir ukjent) med den BESTE lenken: en som teller som relasjonsbevis (`isRelationshipEvidence`) hvis en finnes, ellers den med høyest confidence.
+   * Aldri en feil: en identitet er et bevis, ikke en forutsetning. Om identiteten TELLER som bevis (A-M2) avgjør policyen.
+   */
+  private async resolveRecipientIdentity(ctx: FunnelContext, req: OutboundRequest): Promise<{ identity_id: string; confidence: number; match_method: string } | null> {
     const { graph } = this.deps;
     try {
       let identityId: string | null = null;
@@ -250,9 +253,10 @@ export class OutboundFunnel {
       }
       if (identityId === null) return null;
       const links = await graph.listChannelLinks(ctx.tenantId, ctx.space, identityId);
-      const matching = links.filter((l) => l.status === "active" && l.channel_identifier === identifier);
-      const confidence = matching.length === 0 ? 0 : Math.max(...matching.map((l) => l.confidence));
-      return { identity_id: identityId, confidence };
+      const matching = links.filter((l) => l.status === "active" && l.channel_identifier === identifier).map((l) => ({ confidence: Number(l.confidence), match_method: String(l.match_method) }));
+      const pool = matching.some(isRelationshipEvidence) ? matching.filter(isRelationshipEvidence) : matching;
+      const best = pool.reduce<{ confidence: number; match_method: string } | null>((acc, l) => (acc === null || l.confidence > acc.confidence ? l : acc), null);
+      return { identity_id: identityId, confidence: best?.confidence ?? 0, match_method: best?.match_method ?? "none" };
     } catch {
       return null;
     }
@@ -350,9 +354,10 @@ export class OutboundFunnel {
     }
     if (begin.kind === "replay") return this.replayResult(begin, req); // racevern: et samtidig forsøk med samme id rakk å skrive raden mellom den tidlige sjekken og her
     const target = { account_ref: req.account_ref, recipient: req.recipient };
+    // A-N3: leverandørens id, satt så snart leverandøren HAR akseptert (utenfor `try`, så et ukjent utfall ETTER aksept kan lagre den for avstemming).
+    let providerMessageId: string | undefined;
+    let threadRef: string | undefined;
     try {
-      let providerMessageId: string;
-      let threadRef: string | undefined;
       if (req.kind === "message") {
         const media = req.content.media === undefined ? null : { kind: req.content.media.kind, url: req.content.media.url };
         const result = await adapter.send({ ...target, text: ev.decision.final_text, template: req.content.template ?? null, media, thread_ref: req.thread_ref ?? null }, credential);
@@ -372,19 +377,24 @@ export class OutboundFunnel {
       }
       // A-M4: leverandøren HAR akseptert. Feiler journalføringen nå (DB-feil), er utfallet UKJENT - aldri en vanlig `failed` (som ville invitert til en ny nøkkel og en ny sending til samme mottaker). `afterAcceptedMutation` gjør feilen om til
       // `outcome_unknown:comms_journal_settle_failed`: ledger `unverified`, raden blir stående åpen (`requested`/`outcome_unknown` teller i takene) og eieren varsles om ukjent utfall.
+      const acceptedId = providerMessageId;
       await afterAcceptedMutation("comms_journal_settle_failed", () => store.settleAttempt(ctx.tenantId, ctx.space, begin.log_id, {
-        status: "sent", provider_message_id: providerMessageId, ...(threadRef !== undefined ? { thread_ref: threadRef } : {}),
+        status: "sent", provider_message_id: acceptedId, ...(threadRef !== undefined ? { thread_ref: threadRef } : {}),
         after_state: { provider_message_id_present: true }
       }));
       if (req.kind === "message") await this.recordTimeline(ctx, ev, begin.log_id);
       return {
-        external_id: providerMessageId,
+        external_id: acceptedId,
         data: { log_id: begin.log_id, status: "sent", channel: req.channel, kind: req.kind, content_sha256: ev.decision.content_sha256, ai_disclosure_applied: ev.decision.disclosure_applied, ...(threadRef !== undefined ? { thread_ref: threadRef } : {}) }
       };
     } catch (err) {
       const unknown = isOutcomeUnknownMessage(err instanceof Error ? err.message : "") || (!(err instanceof ProviderRejectedError) && isIndeterminateTransportError(err));
       // Vi VET ikke om sendingen gikk gjennom (ukjent) eller at den ikke gjorde det (avslag/feil før sending).
-      await store.settleAttempt(ctx.tenantId, ctx.space, begin.log_id, { status: unknown ? "outcome_unknown" : "failed", after_state: { error: safeError(err) } }).catch((e) => this.deps.warn?.({ msg: "comms_journal_settle_failed", error: safeError(e) }));
+      // A-N3: en kjent leverandør-id (leverandøren AKSEPTERTE, journalføringen feilet) lagres også ved ukjent utfall, så sendingen kan avstemmes mot leverandøren.
+      await store.settleAttempt(ctx.tenantId, ctx.space, begin.log_id, {
+        status: unknown ? "outcome_unknown" : "failed", after_state: { error: safeError(err) },
+        ...(providerMessageId !== undefined ? { provider_message_id: providerMessageId } : {}), ...(threadRef !== undefined ? { thread_ref: threadRef } : {})
+      }).catch((e) => this.deps.warn?.({ msg: "comms_journal_settle_failed", error: safeError(e) }));
       // Twilio 21610 = mottakeren har meldt STOPP hos operatør/Twilio: registrer det hos oss også (opt-out kan aldri «glemmes» av et vellykket nytt forsøk) - tenant-bredt (A-M3).
       if (err instanceof ProviderRejectedError && err.provider === "twilio" && err.code === "21610") {
         await store.recordOptOut(ctx.tenantId, ctx.space, {

@@ -10,7 +10,7 @@
 --   * en delegasjon («på vegne av») kan KUN gis av prinsipalen selv, har påkrevd utløp (maks 90 dager), og scope er en LUKKET liste uten penger, helse, kommunikasjon eller klasse D-handlinger.
 --   * en invitasjon er bundet til EN bestemt person som allerede er innrullert i sirkel-tenanten, og kan KUN aksepteres av den personen selv (`decided_by_person_id = invitee_person_id`).
 --   * medlemmets EGEN datatenant (`data_tenant_id`, der helse/lokasjon bor) velges av personen selv og verifiseres i tjenesten (medlem av tenanten, ved skriving og ved hver lesing) - IKKE med FK (tenant-kryssende FK er forbudt, JARVIS-076).
--- Alt er `shared`-rommet (CHECK) med tenant + RESTRICTIVE memory-space-RLS (samme mønster som resten). Hver rad er MERKET (regel 4): tenant, space, aktør, kilde, tidspunkt. Ingen hemmeligheter lagres.
+-- Alt er `shared`-rommet (CHECK) med tenant + RESTRICTIVE memory-space-RLS (samme mønster som resten). Hver rad er MERKET med tenant, space, aktør og tidspunkt (regel 4); kanal og sesjon (kilden) står i revisjonsraden (`audit_events`, `family.*`), ikke som egne kolonner på radene (review B INFO-4). Ingen hemmeligheter lagres.
 
 CREATE TABLE family_members (
   tenant_id            text NOT NULL REFERENCES tenants (tenant_id),

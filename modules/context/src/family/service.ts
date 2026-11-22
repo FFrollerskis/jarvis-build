@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import { withTenantTransaction, writeAudit } from "@jarvis/core";
+import { DeviceService, SessionGrantService, withTenantTransaction, writeAudit } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { familyCan, roleMayActFor, roleMayViewCategory, scopeAction, type FamilyAction } from "./permissions.ts";
 import {
@@ -22,7 +22,8 @@ import {
  *  3. «På vegne av» krever en aktiv, ikke-utløpt delegasjon som prinsipalen selv har gitt, i et lukket scope uten penger/helse/kommunikasjon/klasse D, og agentens rolle må selv ha lov til handlingen.
  *  4. Medlemskap: kun den suverene eieren inviterer og fjerner; kun den inviterte selv kan akseptere (egen autoritet); en rolle endres aldri på et aktivt medlem; ikke-eier-medlemmer kan KUN legges til i en dedikert sirkel-tenant
  *     (kun `shared`-rommet) - ellers ville tenant-medlemskapet gitt dem tilgang til eierens øvrige rom (`circle_not_dedicated`).
- *  5. Fjerning/forlating tilbakekaller ALLE delinger og delegasjoner som involverer personen i samme transaksjon.
+ *  5. Fjerning/forlating tilbakekaller ALLE delinger og delegasjoner som involverer personen i samme transaksjon, OG personens enheter i sirkel-tenanten (nøkkelen tilbakekalles permanent, utestående grants med den) - ellers ville
+ *     identitetsnivået (medlemskap + innrullert enhet, Q-15) fortsatt gitt tilgang til sirkelens `shared`-rom (review B LOW-5). `person_tenants`-raden blir stående (historikk-FK-er), men er ubrukelig uten en gyldig enhet.
  * Tekst i lister/hendelser er ubetrodd data. Hver endring revideres (`audit_events`), og avslag på deling revideres også.
  */
 export interface FamilyServiceOptions {
@@ -78,10 +79,15 @@ const isDenied = (v: unknown): v is Denied => typeof v === "object" && v !== nul
 export class FamilyService {
   private readonly now: () => Date;
   private readonly readers: SharedDataReaders | undefined;
+  /** Kanoniske tilbakekallingsprimitiver (samme som eierkontrollenes `revokeDevice`): kun `...On(client, ...)`-formene brukes, på familietjenestens egen transaksjon. */
+  private readonly devices: DeviceService;
+  private readonly grants: SessionGrantService;
 
   constructor(private readonly pool: pg.Pool, options: FamilyServiceOptions = {}) {
     this.now = options.now ?? (() => new Date());
     this.readers = options.readers;
+    this.devices = new DeviceService(pool);
+    this.grants = new SessionGrantService(pool);
   }
 
   private async tx<T>(actor: FamilyActor, fn: (client: Client) => Promise<T>): Promise<T> {
@@ -301,13 +307,38 @@ export class FamilyService {
     });
   }
 
-  private async endMembership(client: Client, actor: FamilyActor, personId: string, status: "left" | "removed"): Promise<void> {
+  private async endMembership(client: Client, actor: FamilyActor, personId: string, status: "left" | "removed"): Promise<{ devices_revoked: number; grants_revoked: number; tickets_consumed: number }> {
     const now = this.now().toISOString();
     const { rowCount } = await client.query(`UPDATE family_members SET status = $3, ended_at = $4, updated_at = $4 WHERE tenant_id = $1 AND person_id = $2 AND status = 'active'`, [actor.tenant_id, personId, status, now]);
     if (rowCount !== 1) throw new FamilyError("not_found");
     // ALLE delinger og delegasjoner som involverer personen tilbakekalles i samme transaksjon (aldri en dinglende tilgang til et tidligere medlem).
     await client.query(`UPDATE family_shares SET revoked_at = $3, revoked_by_person_id = $4 WHERE tenant_id = $1 AND revoked_at IS NULL AND (subject_person_id = $2 OR viewer_person_id = $2)`, [actor.tenant_id, personId, now, actor.person_id]);
     await client.query(`UPDATE family_delegations SET revoked_at = $3, revoked_by_person_id = $4 WHERE tenant_id = $1 AND revoked_at IS NULL AND (principal_person_id = $2 OR agent_person_id = $2)`, [actor.tenant_id, personId, now, actor.person_id]);
+    // UTESTÅENDE innrullingsbilletter (`device_enrollment_tickets`) for personen i sirkel-tenanten forbrukes i samme transaksjon (delta-review B): en billett utstedt FØR fjerningen ville ellers latt det tidligere medlemmet rulle inn en NY enhet
+    // med en ny nøkkel og få sirkelen tilbake uten at noen har invitert på nytt. Samme engangs-semantikk som en innrullering (`consumed_at`), men `consumed_device_id` står NULL: ingen enhet ble innrullert. Alle ubrukte billetter lukkes (også en som
+    // nettopp har utløpt): et utløpsfilter ville gjort stengingen avhengig av klokkeforskjell mellom tjenesten og databasen. Billetter i personens ANDRE tenanter røres ikke (RLS + tenant_id).
+    // REKKEFØLGEN er sikkerhetskritisk (delta-review B NY2-1): billettene FØRST, siden en innrullering konsumerer billetten FØR den skriver enheten. Tok fjerningen enhetene først (og billetten sist), kunne (R-A) en billett-innrullering som committet
+    // mellom enhetslistingen og billett-UPDATE etterlate en NY, AKTIV enhet hos et fjernet medlem, og (R-B) innrullering av en eksisterende enhet gi deadlock (40P01: motsatt låsrekkefølge) som rullet fjerningen tilbake slik at medlemmet sto `active`. Med billetten først
+    // venter fjerningen på en innrullering som er i gang (og en som kommer etter får ingen gyldig billett: raden er konsumert), og låsrekkefølgen er den samme som innrulleringens (billett, så enhet).
+    const tickets = await client.query(`UPDATE device_enrollment_tickets SET consumed_at = $3 WHERE tenant_id = $1 AND person_id = $2 AND consumed_at IS NULL`, [actor.tenant_id, personId, now]);
+    // IDENTITETSNIVÅ (review B LOW-5): familieautoriteten alene stenger ikke et medlem ute - identitetsmodellen gir enhver person med medlemskap OG en innrullert enhet tilgang til HVERT rom i tenanten (Q-15), og sirkelen er en
+    // dedikert tenant (kun `shared`). Personens enheter i DENNE tenanten tilbakekalles derfor permanent (samme primitiv som eierens `revokeDevice`: nøkkelen kan ikke autorisere på nytt eller rulles inn igjen her) og utestående
+    // grants med dem. Enheter i personens ANDRE tenanter (egne data) røres ikke: RLS avgrenser `devices` til sirkel-tenanten. Å ta et tidligere medlem inn igjen krever en ny innrulling med en NY enhetsnøkkel.
+    // LØKKE til ingen aktive enheter står igjen (delta-review B NY2-1, R-C): en `device_proof`-innrullering holder den autoriserende enhetens radlås (`FOR UPDATE`) mens den setter inn en NY enhet; fjerningen venter på den låsen, og enheten som innrulleringen så committer
+    // fantes ikke i første listing. Listingen gjentas derfor etter hver runde (en ny setning får et nytt øyeblikksbilde i READ COMMITTED) til den er tom. Løkken terminerer: billettene er konsumert, og en enhet kan bare autorisere en ny innrullering så lenge nøkkelen er aktiv - den er låst og
+    // tilbakekalt av oss, så bare innrulleringer som allerede hadde låst en autoriserende enhet FØR vi nådde den kan legge til én til (hver er én kort transaksjon).
+    let devicesRevoked = 0;
+    let grantsRevoked = 0;
+    for (;;) {
+      const owned = await client.query(`SELECT device_id FROM devices WHERE tenant_id = $1 AND person_id = $2 AND revoked_at IS NULL ORDER BY device_id`, [actor.tenant_id, personId]);
+      if (owned.rows.length === 0) break;
+      for (const row of owned.rows as Array<{ device_id: string }>) {
+        await this.devices.revokeDeviceKeyOn(client, { tenant_id: actor.tenant_id, device_id: row.device_id }, `family_member_${status}`);
+        grantsRevoked += await this.grants.revokeForDeviceOn(client, actor.tenant_id, row.device_id, this.now().getTime());
+      }
+      devicesRevoked += owned.rows.length;
+    }
+    return { devices_revoked: devicesRevoked, grants_revoked: grantsRevoked, tickets_consumed: tickets.rowCount ?? 0 };
   }
 
   async removeMember(actor: FamilyActor, personId: string): Promise<void> {
@@ -317,8 +348,8 @@ export class FamilyService {
       const target = await this.activeMember(client, actor.tenant_id, personId);
       if (!target) throw new FamilyError("not_found");
       if (target.role === "owner") throw new FamilyError("cannot_remove_owner");
-      await this.endMembership(client, actor, personId, "removed");
-      await this.audit(client, actor, "family.member_removed", { person_id: personId });
+      const cut = await this.endMembership(client, actor, personId, "removed");
+      await this.audit(client, actor, "family.member_removed", { person_id: personId, ...cut });
     });
   }
 
@@ -326,8 +357,8 @@ export class FamilyService {
     return this.tx(actor, async (client) => {
       const me = await this.requireMember(client, actor);
       if (me.role === "owner") throw new FamilyError("owner_cannot_leave");
-      await this.endMembership(client, actor, actor.person_id, "left");
-      await this.audit(client, actor, "family.member_left", { person_id: actor.person_id });
+      const cut = await this.endMembership(client, actor, actor.person_id, "left");
+      await this.audit(client, actor, "family.member_left", { person_id: actor.person_id, ...cut });
     });
   }
 
@@ -370,10 +401,18 @@ export class FamilyService {
         // En utløpt, ikke-tilbakekalt deling erstattes: den gamle lukkes (samtykket er ikke lenger gyldig) og en ny rad opprettes under.
         await client.query(`UPDATE family_shares SET revoked_at = $2, revoked_by_person_id = $3 WHERE share_id = $1`, [row.share_id, now.toISOString(), actor.person_id]);
       }
+      // `ON CONFLICT DO NOTHING` (delvis unik indeks: ÉN aktiv deling per subjekt/seer/kategori): to samtidige kall med samme innhold ga før en rå pg-feil (23505 -> 500) hos taperen i stedet for en idempotent retur (review B LOW-6).
       const { rows } = await client.query(
-        `INSERT INTO family_shares (share_id, tenant_id, subject_person_id, viewer_person_id, category, granted_by_person_id, granted_at, expires_at) VALUES ($1, $2, $3, $4, $5, $3, $6, $7) RETURNING *`,
+        `INSERT INTO family_shares (share_id, tenant_id, subject_person_id, viewer_person_id, category, granted_by_person_id, granted_at, expires_at) VALUES ($1, $2, $3, $4, $5, $3, $6, $7)
+         ON CONFLICT (tenant_id, subject_person_id, viewer_person_id, category) WHERE revoked_at IS NULL DO NOTHING RETURNING *`,
         [`fam-shr-${randomUUID()}`, actor.tenant_id, actor.person_id, input.viewer_person_id, input.category, now.toISOString(), ttlDays === undefined ? null : new Date(now.getTime() + ttlDays * DAY).toISOString()]
       );
+      if (!rows[0]) {
+        // Vinneren av kappløpet har allerede committet (ON CONFLICT ventet på den): returner dens aktive rad uendret og IKKE skriv en ny revisjonsrad (vinneren reviderte).
+        const winner = await client.query(`SELECT * FROM family_shares WHERE tenant_id = $1 AND subject_person_id = $2 AND viewer_person_id = $3 AND category = $4 AND revoked_at IS NULL`, [actor.tenant_id, actor.person_id, input.viewer_person_id, input.category]);
+        if (!winner.rows[0]) throw new Error("family_share_conflict_unresolved"); // aldri i praksis: vinneren ble tilbakekalt mellom to setninger
+        return share(winner.rows[0] as Record<string, unknown>);
+      }
       await this.audit(client, actor, "family.share_granted", { viewer_person_id: input.viewer_person_id, category: input.category, expires: ttlDays ?? null });
       return share(rows[0] as Record<string, unknown>);
     });
@@ -424,6 +463,8 @@ export class FamilyService {
       if (!target) return refuse("subject_not_member");
       if (subjectPersonId === actor.person_id) return target; // eget medlem: alltid lov
       if (!roleMayViewCategory(viewer.role, category)) return refuse("role_may_not_view");
+      // Forsvar i dybden (review B INFO-1): et barns/gjests helse deles aldri (se `grantShare`). En slik delingsrad kan kun finnes hvis den ble satt inn UTENOM tjenesten (DB-CHECK-en sikrer bare at subjektet er giveren) - og leveres likevel aldri.
+      if (category === "health_summary" && !familyCan(target.role, "share:grant_health")) return refuse("subject_role_may_not_share");
       const now = this.now();
       const { rows } = await client.query(
         `SELECT share_id FROM family_shares WHERE tenant_id = $1 AND subject_person_id = $2 AND viewer_person_id = $3 AND category = $4 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $5)`,
@@ -470,10 +511,17 @@ export class FamilyService {
         if (Date.parse(row.expires_at) > now.getTime()) return row;
         await client.query(`UPDATE family_delegations SET revoked_at = $2, revoked_by_person_id = $3 WHERE delegation_id = $1`, [row.delegation_id, now.toISOString(), actor.person_id]);
       }
+      // Samme kappløpsvern som `grantShare` (delvis unik indeks: ÉN aktiv delegasjon per prinsipal/agent/scope).
       const { rows } = await client.query(
-        `INSERT INTO family_delegations (delegation_id, tenant_id, principal_person_id, agent_person_id, scope, granted_by_person_id, granted_at, expires_at) VALUES ($1, $2, $3, $4, $5, $3, $6, $7) RETURNING *`,
+        `INSERT INTO family_delegations (delegation_id, tenant_id, principal_person_id, agent_person_id, scope, granted_by_person_id, granted_at, expires_at) VALUES ($1, $2, $3, $4, $5, $3, $6, $7)
+         ON CONFLICT (tenant_id, principal_person_id, agent_person_id, scope) WHERE revoked_at IS NULL DO NOTHING RETURNING *`,
         [`fam-del-${randomUUID()}`, actor.tenant_id, actor.person_id, input.agent_person_id, input.scope, now.toISOString(), new Date(now.getTime() + ttlDays * DAY).toISOString()]
       );
+      if (!rows[0]) {
+        const winner = await client.query(`SELECT * FROM family_delegations WHERE tenant_id = $1 AND principal_person_id = $2 AND agent_person_id = $3 AND scope = $4 AND revoked_at IS NULL`, [actor.tenant_id, actor.person_id, input.agent_person_id, input.scope]);
+        if (!winner.rows[0]) throw new Error("family_delegation_conflict_unresolved");
+        return delegation(winner.rows[0] as Record<string, unknown>);
+      }
       await this.audit(client, actor, "family.delegation_granted", { agent_person_id: input.agent_person_id, scope: input.scope, ttl_days: ttlDays });
       return delegation(rows[0] as Record<string, unknown>);
     });
@@ -592,6 +640,8 @@ export class FamilyService {
         [actor.tenant_id, itemId, done, done ? now : null, done ? actor.person_id : null]
       );
       if (!rows[0]) throw new FamilyError("not_found");
+      // «Hver endring revideres» (review B LOW-7): en avhuking/gjenåpning ble før endret uten revisjonsrad. Aldri innholdet (teksten) - kun id og tilstand.
+      await this.audit(client, actor, "family.list_item_done_set", { item_id: itemId, done });
       return this.itemRow(rows[0] as Record<string, unknown>);
     });
   }

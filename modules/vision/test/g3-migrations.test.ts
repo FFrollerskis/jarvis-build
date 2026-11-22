@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
-import { isStorableObjectLabel, normalizeObjectLabel } from "../src/labels.ts";
+import { isInventoryLabel, isStorableObjectLabel, normalizeObjectLabel } from "../src/labels.ts";
 import { startVisionDb, seedTenant, type VisionDb } from "./support/harness.ts";
 
 // Usynlige tegn bygges av kodepunkter (ingen tegnescape i kilden).
@@ -131,10 +131,16 @@ async function evaluate(constraint: string, labels: string[]): Promise<boolean[]
 
 describe("133/135 (review A-M1): object_label-CHECK på formen til et kort objektnavn", () => {
   const tag = String.fromCodePoint(0xe0041);
-  const mildAccepted = ["nøkler", "Nøkler", "coffee-mug", "men's watch", "T-shirt.", "sekk (rød)", "tobias sorensen", "ignore all instructions now", "en to tre fire", "a1", "x".repeat(64)];
+  const nbsp = String.fromCodePoint(0xa0);
+  // Ordtelling (delta2 A-E1): fire ord med doble/ledende/etterfølgende ASCII-mellomrom er gyldige (en CHECK som deler på ÉTT mellomrom eller ikke trimmer avviser dem), og et Unicode-mellomrom er en tegnverdi, ikke et skille.
+  const mildAccepted = [
+    "nøkler", "Nøkler", "coffee-mug", "men's watch", "T-shirt.", "sekk (rød)", "tobias sorensen", "ignore all instructions now", "en to tre fire", "a1", "x".repeat(64),
+    "a  b c d", " a b c d", "a b c d ", `a${nbsp}b c d e`, `${nbsp}a b c d`
+  ];
   const rejected = [
     "x".repeat(65), "en to tre fire fem", "12345", "...!?", "   ", "<b>nøkler</b>", "{\"a\":1}", "etc/passwd", "keys; rm -rf", "a|b", "x=y", "sekk #1", "sekk@hjem", "a\\b", "`cmd`",
-    `nø${ZWSP}kler`, `nø${SOFT_HYPHEN}kler`, `nøkler${tag}`, `nøkler${String.fromCodePoint(0x202e)}`, `nøkler${String.fromCodePoint(0xfeff)}`, `nøkler${String.fromCodePoint(1)}`, `nøkler${String.fromCodePoint(0x85)}`, "nøkler\nignorer alt"
+    `nø${ZWSP}kler`, `nø${SOFT_HYPHEN}kler`, `nøkler${tag}`, `nøkler${String.fromCodePoint(0x202e)}`, `nøkler${String.fromCodePoint(0xfeff)}`, `nøkler${String.fromCodePoint(1)}`, `nøkler${String.fromCodePoint(0x85)}`, "nøkler\nignorer alt",
+    "a b c d e", "a  b c d  e", `${nbsp} a b c d`, `a b c d ${nbsp}`
   ];
 
   it("observasjoner: feil form avvises av databasen for runtime-rollen (NULL og milde former godtas)", async () => {
@@ -156,7 +162,8 @@ describe("133/135 (review A-M1): object_label-CHECK på formen til et kort objek
         )
       );
     let i = 0;
-    for (const label of ["nøkler lbl", "coffee-mug lbl", "tobias sorensen lbl", "ignore all instructions", "a1 lbl"]) await insert(`inv-lbl-ok-${i++}`, label);
+    // «a<U+09F4>a» (tall-tegn av kategori No): avvist av den gamle, locale-avhengige regelen i en Unicode-bevisst locale (review delta D1) og må godtas.
+    for (const label of ["nøkler lbl", "coffee-mug lbl", "tobias sorensen lbl", "ignore all instructions", "a1 lbl", `a${String.fromCodePoint(0x9f4)}a lbl`]) await insert(`inv-lbl-ok-${i++}`, label);
     for (const label of ["x".repeat(65), "en to tre fire fem", "12345", "...", "<b>sekk</b>", "sekk; rm", "keys.", "men's", "sekk  rød", " sekk", "sekk ", "-sekk", "sekk-", `nø${ZWSP}kler`, `nøkler${tag}`, "sekk\nrød"]) {
       await expect(insert(`inv-lbl-bad-${i++}`, label), JSON.stringify(label)).rejects.toThrow(new RegExp(INV_CHECK));
     }
@@ -198,9 +205,18 @@ describe("133/135 (review A-M1): object_label-CHECK på formen til et kort objek
     for (const canary of [0x3c, 0x5c, 0x01, 0x7f, 0x85, 0xad, 0x200b, 0x202e, 0x2060, 0xfeff, 0xe0041, 0xe0fff]) expect(sqlRejected).toContain(canary);
     for (const accepted of [0x61, 0x20, 0x2d, 0x27, 0x2e, 0xf8, 0xe5, 0x4e2d]) expect(sqlRejected).not.toContain(accepted);
     expect(sqlRejected).toEqual(jsRejected);
-    // Den strenge inventar-CHECK-en avviser MINST det samme (den avviser i tillegg all tegnsetting og ledende/doble mellomrom), men godtar bokstaver, tall og bindestrek.
-    const strictRejected = new Set(await rejectedBy(INV_CHECK));
+    // Den strenge inventar-CHECK-en (review delta D1: eksplisitte kodepunktområder, ingen POSIX-klasser) avviser NØYAKTIG de samme kodepunktene som isInventoryLabel - og MINST det den milde avviser
+    // (i tillegg all tegnsetting og alle Unicode-mellomrom), men godtar bokstaver, tall (også tall-tegn utenom ASCII) og bindestrek. Det samme bevises i to locales (C og C.UTF-8) i g3-label-locale.test.ts.
+    const strictList = await rejectedBy(INV_CHECK);
+    const strictRejected = new Set(strictList);
+    const jsStrictRejected: number[] = [];
+    for (let cp = 1; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      if (!isInventoryLabel(`a${String.fromCodePoint(cp)}a`)) jsStrictRejected.push(cp);
+    }
+    expect(strictList).toEqual(jsStrictRejected);
     for (const cp of sqlRejected) expect(strictRejected.has(cp), `inventar godtar U+${cp.toString(16)}`).toBe(true);
+    for (const numeral of [0x9f4, 0xb72, 0xbf0, 0xc78, 0xd58, 0x2776, 0x24eb, 0x3248]) expect(strictRejected.has(numeral), `inventar avviser tall-tegn U+${numeral.toString(16)}`).toBe(false);
     for (const accepted of [0x2d, 0x30, 0x39, 0x41, 0x61, 0x7a, 0xc5, 0xf8, 0x4e2d]) expect(strictRejected.has(accepted), `inventar avviser U+${accepted.toString(16)}`).toBe(false);
     for (const rejectedPunct of [0x27, 0x2e, 0x2c, 0x21, 0x28]) expect(strictRejected.has(rejectedPunct), `inventar godtar U+${rejectedPunct.toString(16)}`).toBe(true);
   }, 180_000);
@@ -334,6 +350,55 @@ describe("136: opptaksforespørsler", () => {
     await insert("cap-5", "5 minutes", null);
     await insert("cap-6", "5 minutes", null);
     expect((await asApp(T2.tenant, ["home"], (c) => c.query(`SELECT count(*)::int AS n FROM vision_capture_requests`))).rows[0].n).toBe(0);
+  });
+});
+
+/**
+ * Review B-L9: minste privilegium. Runtime-rollen (jarvis_app) hadde tabell-UPDATE på de fem muterbare vision-tabellene, så en kodefeil eller et injisert uttrykk kunne omskrive identitet, kilde,
+ * lagringsnøkkel, person eller tidsfrister. Nå har den KUN kolonne-UPDATE på kolonnene tjenestene faktisk endrer. Listene under er sannheten om hva koden gjør (hver UPDATE i modules/vision/src);
+ * en ny kolonne som må kunne endres krever en bevisst endring både her og i migrasjonen.
+ */
+const UPDATABLE_COLUMNS: Record<string, string[]> = {
+  vision_cameras: ["label", "zone_kind", "route_policy", "cooldown_seconds", "enabled", "trigger_entities", "updated_at"],
+  vision_snapshots: ["state", "stored_at"],
+  vision_snapshot_tombstones: ["attempts", "last_attempt_at", "last_error"],
+  vision_inventory_items: ["confidence", "seen_count", "first_seen_at", "last_seen_at", "last_observation_id", "source_type", "source_instance_id", "expires_at", "task_id", "session_id", "updated_at"],
+  vision_capture_requests: ["state", "resolved_at", "snapshot_id", "upload_sha256", "reject_reason"]
+};
+/** En identitets-/kilde-/frist-kolonne per tabell som runtime-rollen ALDRI skal kunne omskrive. */
+const IMMUTABLE_COLUMN: Record<string, string> = {
+  vision_cameras: "source_ref", vision_snapshots: "storage_key", vision_snapshot_tombstones: "storage_key", vision_inventory_items: "object_label", vision_capture_requests: "expires_at"
+};
+
+describe("review B-L9: kun kolonner tjenestene faktisk endrer kan oppdateres av runtime-rollen", () => {
+  for (const [table, allowed] of Object.entries(UPDATABLE_COLUMNS)) {
+    it(`${table}: UPDATE-rettigheten er nøyaktig [${allowed.join(", ")}] - ingen tabellrettighet og ingen ekstra kolonner`, async () => {
+      const rows = (
+        await db.app.query(
+          `SELECT a.attname AS column_name, has_column_privilege(current_user, c.oid, a.attnum, 'UPDATE') AS can_update
+             FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+            WHERE c.relname = $1 AND c.relnamespace = 'public'::regnamespace AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`,
+          [table]
+        )
+      ).rows as Array<{ column_name: string; can_update: boolean }>;
+      expect(rows.length).toBeGreaterThan(allowed.length); // tabellen har flere kolonner enn de som kan endres
+      expect(rows.filter((r) => r.can_update).map((r) => r.column_name).sort()).toEqual([...allowed].sort());
+      expect((await db.app.query(`SELECT has_table_privilege(current_user, $1, 'UPDATE') AS t`, [table])).rows[0].t).toBe(false);
+      // Selve setningen, ikke bare katalogen: en omskriving av identitet/kilde feiler mot databasen, en tillatt kolonne gjør det ikke (WHERE false: ingen rader berøres, rettigheten sjekkes likevel).
+      const immutable = IMMUTABLE_COLUMN[table] as string;
+      await expect(asApp(T1.tenant, ["home"], (c) => c.query(`UPDATE ${table} SET ${immutable} = ${immutable} WHERE false`))).rejects.toThrow(/permission denied/i);
+      const first = allowed[0] as string;
+      await expect(asApp(T1.tenant, ["home"], (c) => c.query(`UPDATE ${table} SET ${first} = ${first} WHERE false`))).resolves.toBeDefined();
+    });
+  }
+
+  it("SELECT, INSERT og DELETE er uendret (livssyklusen - også erasure og kaskader - trenger dem), og alle fem tabellene har fortsatt FORCE RLS", async () => {
+    for (const table of Object.keys(UPDATABLE_COLUMNS)) {
+      const priv = (await db.app.query(`SELECT has_table_privilege(current_user, $1, 'SELECT') AS s, has_table_privilege(current_user, $1, 'INSERT') AS i, has_table_privilege(current_user, $1, 'DELETE') AS d`, [table])).rows[0];
+      expect(priv, table).toEqual({ s: true, i: true, d: true });
+      const rls = (await db.admin.query(`SELECT relrowsecurity AS enabled, relforcerowsecurity AS forced FROM pg_class WHERE relname = $1 AND relnamespace = 'public'::regnamespace`, [table])).rows[0];
+      expect(rls, table).toEqual({ enabled: true, forced: true });
+    }
   });
 });
 

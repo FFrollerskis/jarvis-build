@@ -241,6 +241,39 @@ describe("J: critic arver låsen for kamerabilder (review A-L1)", () => {
     expect(meta(result)["critic"]).toBeUndefined();
   });
 
+  it("HVER critic-kandidat sjekkes, ikke bare den første: en LOKAL kandidat først og en SKY-kandidat som backup stenger også (review delta A LOW-D4)", async () => {
+    // Criticplanen er rangert etter kvalitet (QUALITY): en lokal critic-modell med kvalitet 5/rask rangeres FØR anthropic (kvalitet 5/medium). Planen er da [local_llm, anthropic, ...]: skyen ligger bak som
+    // fallback og ville blitt kalt med et svar avledet av kamerabildet hvis bare første kandidat ble sjekket (og den lokale critic-modellen feilet). local_llm har en eksplisitt pris (gatewayen krever det for alle
+    // registrerte leverandører); profilen overstyres her kun for å få den øverst i rangeringen.
+    const standardLocalLlm = DEFAULT_PROFILES.find((p) => p.provider === "local_llm");
+    if (standardLocalLlm === undefined) throw new Error("local_llm_profile_missing");
+    const criticLocalProfile = { ...standardLocalLlm, locality: "local" as const, quality_class: 5 as const, latency_class: "fast" as const, capabilities: ["text" as const, "reasoning" as const] };
+    const cloud = fake("anthropic");
+    const criticLocal = fake("local_llm");
+    const local = fake("local_vision");
+    const gateway = new ModelGateway({
+      pool: fakePool(), trace: new MemoryTraceSink(), providers: [cloud, criticLocal, local], registry: new CapabilityRegistry([...PROFILES_WITH_LOCAL_VISION, criticLocalProfile])
+    });
+    (gateway as unknown as { lockRestrictedMedia: (input: CompleteInput) => CompleteInput }).lockRestrictedMedia = (input) => input;
+    const result = await gateway.complete(base({ providerPreference: ["local_vision"], required_capabilities: ["vision"], critic: true }));
+    expect(result.provider).toBe("local_vision");
+    expect(meta(result)["critic_error"]).toBe("critic_restricted_media_nonlocal");
+    expect(meta(result)["critic"]).toBeUndefined();
+    expect(cloud.calls).toHaveLength(0);
+    expect(criticLocal.calls).toHaveLength(0); // stengt FØR noen critic-kandidat kalles (også den lokale)
+    // Kontroll: kun lokale critic-kandidater (ingen sky i puljen) gir en vanlig critic-kjøring - den lokale critic-modellen kalles, og får ikke bildet.
+    const onlyLocal = fake("local_llm");
+    const local2 = fake("local_vision");
+    const localGateway = new ModelGateway({
+      pool: fakePool(), trace: new MemoryTraceSink(), providers: [onlyLocal, local2], registry: new CapabilityRegistry([...PROFILES_WITH_LOCAL_VISION, criticLocalProfile])
+    });
+    (localGateway as unknown as { lockRestrictedMedia: (input: CompleteInput) => CompleteInput }).lockRestrictedMedia = (input) => input;
+    const ok = await localGateway.complete(base({ providerPreference: ["local_vision"], required_capabilities: ["vision"], critic: true }));
+    expect(meta(ok)["critic_error"]).toBeUndefined();
+    expect(onlyLocal.calls).toHaveLength(1);
+    expect(JSON.stringify(onlyLocal.calls[0])).not.toContain("aGVsbG8="); // criticen får kun tekst (primærsvaret), aldri bildedataene
+  });
+
   it("non-vakuitet: uten restricted-del beholder criticen sin vanlige skyvei (identisk oppførsel for alle eksisterende kall)", async () => {
     const cloud = fake("anthropic");
     const second = fake("openai");

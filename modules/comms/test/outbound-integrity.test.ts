@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ProviderRejectedError, parseSendParams, recipientHash, requestFingerprint } from "../src/index.ts";
+import { ProviderRejectedError, parseSendParams, recipientHash, requestFingerprint, scopedIdempotencyKey } from "../src/index.ts";
 import { TENANT_A } from "./support/harness.ts";
 import { authorizeAll, startChain, type Chain } from "./support/chain.ts";
 
@@ -12,8 +12,10 @@ let chain: Chain;
 const BASIS = { purpose_basis: "existing_customer_relationship" } as const;
 const smsP = (recipient: string, over: Record<string, string> = {}) => ({ channel: "sms", account_ref: "+4791000000", recipient, purpose: "transactional", text: "Hei, timen din er bekreftet.", ...BASIS, ...over });
 const slackP = (over: Record<string, string> = {}) => ({ channel: "slack", account_ref: "T0AAAAAAAA", recipient: "C0AAAAAAAA", purpose: "transactional", text: "Hei", ...BASIS, ...over });
-const ledgerStatus = async (k: string) => ((await chain.db.admin.query("SELECT status FROM tool_executions WHERE idempotency_key = $1", [k])).rows[0] as { status: string } | undefined)?.status;
-const journalStatus = async (k: string) => ((await chain.db.admin.query("SELECT status FROM comms_outbound_log WHERE request_id = $1 AND status <> 'denied'", [k])).rows[0] as { status: string } | undefined)?.status;
+/** A-N2: ledgeren og journalen ser den SKOPEDE nøkkelen (handling + tenant-merke + brukerens nøkkel). */
+const sk = (action: string, k: string) => scopedIdempotencyKey(TENANT_A, action, k);
+const ledgerStatus = async (k: string, action = "send") => ((await chain.db.admin.query("SELECT status FROM tool_executions WHERE idempotency_key = $1", [sk(action, k)])).rows[0] as { status: string } | undefined)?.status;
+const journalStatus = async (k: string, action = "send") => ((await chain.db.admin.query("SELECT status FROM comms_outbound_log WHERE request_id = $1 AND status <> 'denied'", [sk(action, k)])).rows[0] as { status: string } | undefined)?.status;
 const sends = () => chain.twilio.calls.filter((c) => c.op === "send");
 
 beforeAll(async () => {
@@ -45,6 +47,9 @@ describe("A-M4: feil ETTER at leverandøren har akseptert er ukjent utfall - ald
       expect(JSON.stringify(first)).toContain("outcome_unknown");
       expect(await ledgerStatus(k)).toBe("unverified");
       expect(await journalStatus(k)).toBe("outcome_unknown");
+      // A-N3: leverandøren AKSEPTERTE sendingen, så id-en lagres også ved ukjent utfall (ellers kan den ikke avstemmes mot leverandøren)
+      const stored = (await chain.db.admin.query("SELECT provider_message_id FROM comms_outbound_log WHERE request_id = $1 AND status <> 'denied'", [sk("send", k)])).rows[0] as { provider_message_id: string | null };
+      expect(stored.provider_message_id).toMatch(/^msg-\d+$/);
       expect(chain.notifications.some((n) => n.action === "send" && n.outcome !== "executed")).toBe(true);
       // gjenspilling med samme nøkkel sender ALDRI en gang til (ledger unverified blokkerer)
       const replay = await chain.act("send", smsP(recipient), k);
@@ -105,30 +110,33 @@ describe("A-M5: idempotensnøkkelen er bundet til forespørselen", () => {
     expect(sends()).toHaveLength(1);
   });
 
-  it("`delete_message` med nøkkelen til en tidligere sending avvises som kollisjon (meldingen slettes ikke, og ingenting meldes som gjort); `start_call` likeså", async () => {
+  it("samme nøkkel til en ANNEN handling er en uavhengig forespørsel (A-N2): `delete_message` og `start_call` med nøkkelen til en sending UTFØRES på ekte (aldri `ok + deduplicated` uten effekt); samme handling med annen forespørsel er fortsatt kollisjon", async () => {
     chain.slack.calls.length = 0;
     const k = chain.key("kdel");
     const sent = await chain.act("send", slackP({ recipient: "C0DDDDDDDD" }), k);
     expect(sent.ok).toBe(true);
-    const del = await chain.act("delete_message", { channel: "slack", account_ref: "T0AAAAAAAA", recipient: "C0DDDDDDDD", target_message_id: sent.ok ? String(sent.external_id) : "x" }, k);
-    expect(del).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_collision" });
-    expect(chain.slack.calls.some((c) => c.op === "delete")).toBe(false);
-    const call = await chain.act("start_call", { channel: "phone", account_ref: "+4791000000", recipient: chain.phone(), purpose: "transactional", text: "Hei, jeg ringer om timen.", ...BASIS }, k);
-    expect(call).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_collision" });
-    // en NY nøkkel til sletting virker som før (readback: meldingen er borte etter slettingen)
     const origDelete = chain.slack.delete!.bind(chain.slack);
     const origExists = chain.slack.messageExists!.bind(chain.slack);
     let gone = false;
     chain.slack.delete = async (req, cred) => { await origDelete(req, cred); gone = true; };
     chain.slack.messageExists = async (req, cred) => (gone ? false : origExists(req, cred));
     try {
-      const del2 = await chain.act("delete_message", { channel: "slack", account_ref: "T0AAAAAAAA", recipient: "C0DDDDDDDD", target_message_id: sent.ok ? String(sent.external_id) : "x" }, chain.key("kdel2"));
-      expect(del2.ok).toBe(true);
-      expect(chain.slack.calls.filter((c) => c.op === "delete")).toHaveLength(1);
+      const del = await chain.act("delete_message", { channel: "slack", account_ref: "T0AAAAAAAA", recipient: "C0DDDDDDDD", target_message_id: sent.ok ? String(sent.external_id) : "x" }, k);
+      expect(del, JSON.stringify(del)).toMatchObject({ ok: true, deduplicated: false });
+      expect(chain.slack.calls.filter((c) => c.op === "delete")).toHaveLength(1); // meldingen ble faktisk slettet
     } finally {
       chain.slack.delete = origDelete;
       chain.slack.messageExists = origExists;
     }
+    chain.twilio.calls.length = 0;
+    const call = await chain.act("start_call", { channel: "phone", account_ref: "+4791000000", recipient: chain.phone(), purpose: "transactional", text: "Hei, jeg ringer om timen.", ...BASIS }, k);
+    expect(call, JSON.stringify(call)).toMatchObject({ ok: true, deduplicated: false });
+    expect(chain.twilio.calls.filter((c) => c.op === "call")).toHaveLength(1);
+    // ... mens SAMME handling med en ANNEN forespørsel på samme nøkkel fortsatt er en kollisjon (A-M5)
+    const again = await chain.act("send", slackP({ recipient: "C0DDDDDDDD", text: "Noe helt annet" }), k);
+    expect(again).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_collision" });
+    expect(await ledgerStatus(k, "delete_message")).toBe("succeeded");
+    expect(await ledgerStatus(k, "start_call")).toBe("succeeded");
   });
 
   it("et AVSLÅTT forsøk brenner ikke nøkkelen: samme nøkkel med rettede parametre (grunnlag oppgitt) sendes normalt, og er ingen kollisjon", async () => {
@@ -169,7 +177,7 @@ describe("A-M5: idempotensnøkkelen er bundet til forespørselen", () => {
 });
 
 describe("A-M6: edit_message har levende preflight/før-tilstand og markedsføringssjekk", () => {
-  const beforeState = async (k: string) => ((await chain.db.admin.query("SELECT before_state FROM tool_executions WHERE idempotency_key = $1", [k])).rows[0] as { before_state: Record<string, unknown> | null } | undefined)?.before_state ?? null;
+  const beforeState = async (k: string) => ((await chain.db.admin.query("SELECT before_state FROM tool_executions WHERE idempotency_key = $1", [sk("edit_message", k)])).rows[0] as { before_state: Record<string, unknown> | null } | undefined)?.before_state ?? null;
   const editP = (target: string, text: string, recipient = "C0EEEEEEEE") => ({ channel: "slack", account_ref: "T0AAAAAAAA", recipient, target_message_id: target, text });
 
   it("preflighten leser målet ferskt hos leverandøren FØR redigeringen: ledgerens før-tilstand er ikke tom (policy + `exists`), og en vanlig redigering virker", async () => {
@@ -193,7 +201,7 @@ describe("A-M6: edit_message har levende preflight/før-tilstand og markedsføri
     expect(promo.ok).toBe(false);
     expect(chain.slack.calls.some((c) => c.op === "edit")).toBe(false);
     expect(await beforeState(k)).toMatchObject({ kind: "edit", allowed: false, denial_codes: expect.arrayContaining(["content_looks_like_marketing"]) });
-    const denied = (await chain.db.admin.query("SELECT status, denial_codes FROM comms_outbound_log WHERE request_id = $1", [k])).rows;
+    const denied = (await chain.db.admin.query("SELECT status, denial_codes FROM comms_outbound_log WHERE request_id = $1", [sk("edit_message", k)])).rows;
     expect(denied).toEqual([{ status: "denied", denial_codes: expect.arrayContaining(["content_looks_like_marketing"]) }]);
     const calm = await chain.act("edit_message", editP(target, "Timen din er flyttet til 14:00.", "C0FFFFFFFF"), chain.key("em3"));
     expect(calm, JSON.stringify(calm)).toMatchObject({ ok: true });

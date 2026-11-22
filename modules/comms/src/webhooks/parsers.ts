@@ -1,5 +1,5 @@
 import { normalizeChannelIdentifier, normalizeE164 } from "@jarvis/conversation-graph";
-import type { CommsChannel } from "../channels.ts";
+import { sha256Hex, type CommsChannel } from "../channels.ts";
 
 /**
  * WP-G1 (D-463, P1d): REN tolkning av en (allerede signaturverifisert) webhook-kropp til normaliserte hendelser. Alt som kommer inn er UBETRODD DATA: parserne leser kun kjente felt av forventet type, aldri en modellstyrt
@@ -39,6 +39,18 @@ export interface ParseOutcome {
 
 export const MAX_EVENTS_PER_REQUEST = 100;
 const SAFE_KEY = /^[A-Za-z0-9._:@=+/-]{1,300}$/;
+/** Største leverandør-id vi leser (selve id-en lagres aldri - kun dedupe-nøkkelen). */
+const MAX_PROVIDER_ID = 1000;
+
+/**
+ * B-NY (delta-review B): dedupe-nøkkelen for en hendelse. En leverandørs meldings-id er IKKE garantert innenfor vårt trygge tegnsett (`~ % * $` og mellomrom) eller lengdegrensen på 300 - og en hendelse med slik id ble tidligere DROPPET
+ * stille (`finish()` filtrerte på tegnsettet, og id-en ble avvist over 200 tegn). For en STOP er det rettighetsbærende: mottakerens avmelding forsvant uten spor. Nå brukes den rene nøkkelen når den er trygg (uendret for vanlige id-er),
+ * ellers en stabil hash (`<prefiks>:sha256:<hex>`; samme id gir alltid samme nøkkel, så dedupe virker). Ingen hendelse forkastes på grunn av id-en.
+ */
+function eventKey(prefix: string, ...ids: readonly string[]): string {
+  const direct = [prefix, ...ids].join(":");
+  return SAFE_KEY.test(direct) ? direct : `${prefix}:sha256:${sha256Hex(ids.join("\n"))}`;
+}
 
 function obj(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -91,7 +103,7 @@ export function parseSlackBody(body: unknown): SlackParse {
   const sender = normalized("slack", `${teamId}:${user}`);
   if (sender === null) return { events: [], ignored: 1 };
   return finish([{
-    provider: "slack", channel: "slack", account_ref: teamId, event_key: `slack:${eventId}`, kind: "message", sender, reply_to: channel.toUpperCase(),
+    provider: "slack", channel: "slack", account_ref: teamId, event_key: eventKey("slack", eventId), kind: "message", sender, reply_to: channel.toUpperCase(),
     thread_ref: str(ev["thread_ts"], 30) ?? ts, text: typeof ev["text"] === "string" ? (ev["text"] as string) : null, provider_ts: isoFromSeconds(num(ts))
   }], 0);
 }
@@ -129,23 +141,23 @@ export function parseMetaBody(body: unknown): ParseOutcome {
         if (value === null || phoneNumberId === null) { ignored++; continue; }
         for (const mRaw of arr(value["messages"])) {
           const m = obj(mRaw);
-          const id = str(m?.["id"], 200);
+          const id = str(m?.["id"], MAX_PROVIDER_ID);
           const from = str(m?.["from"], 30);
           const sender = from === null ? null : normalized("whatsapp", from);
           if (m === null || id === null || sender === null) { ignored++; continue; }
           events.push({
-            provider: "meta", channel: "whatsapp", account_ref: phoneNumberId, event_key: `wa:msg:${id}`, kind: "message", sender, reply_to: sender, thread_ref: null,
+            provider: "meta", channel: "whatsapp", account_ref: phoneNumberId, event_key: eventKey("wa:msg", id), kind: "message", sender, reply_to: sender, thread_ref: null,
             text: whatsappText(m), provider_ts: isoFromSeconds(num(m["timestamp"]))
           });
         }
         for (const sRaw of arr(value["statuses"])) {
           const s = obj(sRaw);
-          const id = str(s?.["id"], 200);
+          const id = str(s?.["id"], MAX_PROVIDER_ID);
           const status = str(s?.["status"], 30);
           if (s === null || id === null || status === null) { ignored++; continue; }
           const recipient = str(s["recipient_id"], 30);
           events.push({
-            provider: "meta", channel: "whatsapp", account_ref: phoneNumberId, event_key: `wa:status:${id}:${status}`, kind: "status",
+            provider: "meta", channel: "whatsapp", account_ref: phoneNumberId, event_key: eventKey("wa:status", id, status), kind: "status",
             sender: recipient === null ? null : normalized("whatsapp", recipient), reply_to: null, thread_ref: null, text: null, provider_ts: isoFromSeconds(num(s["timestamp"]))
           });
         }
@@ -157,13 +169,13 @@ export function parseMetaBody(body: unknown): ParseOutcome {
         const message = obj(m?.["message"]);
         const accountRef = str(obj(m?.["recipient"])?.["id"], 30) ?? str(entry["id"], 30);
         const senderId = str(obj(m?.["sender"])?.["id"], 30);
-        const mid = str(message?.["mid"], 300);
+        const mid = str(message?.["mid"], MAX_PROVIDER_ID);
         // `is_echo` = vår egen utgående melding speilet tilbake: aldri en innkommende hendelse.
         if (m === null || message === null || accountRef === null || senderId === null || mid === null || message["is_echo"] === true) { ignored++; continue; }
         const sender = normalized(channel, `${accountRef}:${senderId}`);
         if (sender === null) { ignored++; continue; }
         events.push({
-          provider: "meta", channel, account_ref: accountRef, event_key: `${object === "page" ? "msgr" : "ig"}:${mid}`, kind: "message", sender, reply_to: senderId, thread_ref: null,
+          provider: "meta", channel, account_ref: accountRef, event_key: eventKey(object === "page" ? "msgr" : "ig", mid), kind: "message", sender, reply_to: senderId, thread_ref: null,
           text: str(message["text"], 10_000), provider_ts: isoFromSeconds(num(m["timestamp"]) === null ? null : (num(m["timestamp"]) as number) / 1000)
         });
       }
@@ -186,18 +198,18 @@ export function parseTwilioParams(params: ReadonlyMap<string, readonly string[]>
   const status = one("MessageStatus", 30) ?? one("SmsStatus", 30);
   const body = params.get("Body")?.[0];
   if (body === undefined && status !== null) {
-    return finish([{ provider: "twilio", channel: "sms", account_ref: toNumber, event_key: `twilio:status:${sid}:${status}`, kind: "status", sender: null, reply_to: null, thread_ref: null, text: null, provider_ts: null }], 0);
+    return finish([{ provider: "twilio", channel: "sms", account_ref: toNumber, event_key: eventKey("twilio:status", sid, status), kind: "status", sender: null, reply_to: null, thread_ref: null, text: null, provider_ts: null }], 0);
   }
   const sender = from === null ? null : normalizeE164(from);
   if (sender === null || body === undefined) return { events: [], ignored: 1 }; // inkl. `whatsapp:+47…` over Twilio (ikke støttet)
-  return finish([{ provider: "twilio", channel: "sms", account_ref: toNumber, event_key: `twilio:msg:${sid}`, kind: "message", sender, reply_to: sender, thread_ref: null, text: body.slice(0, 10_000), provider_ts: null }], 0);
+  return finish([{ provider: "twilio", channel: "sms", account_ref: toNumber, event_key: eventKey("twilio:msg", sid), kind: "message", sender, reply_to: sender, thread_ref: null, text: body.slice(0, 10_000), provider_ts: null }], 0);
 }
 
 // ------------------------------------------------------------------------------------------------ Telnyx
 export function parseTelnyxBody(body: unknown): ParseOutcome {
   const data = obj(obj(body)?.["data"]);
   const type = str(data?.["event_type"], 80);
-  const id = str(data?.["id"], 200);
+  const id = str(data?.["id"], MAX_PROVIDER_ID);
   const payload = obj(data?.["payload"]);
   if (data === null || type === null || id === null || payload === null) return { events: [], ignored: 1 };
   const occurred = str(data["occurred_at"], 40);
@@ -209,10 +221,10 @@ export function parseTelnyxBody(body: unknown): ParseOutcome {
     const fromRaw = str(obj(payload["from"])?.["phone_number"], 40);
     const sender = fromRaw === null ? null : normalizeE164(fromRaw);
     if (sender === null) return { events: [], ignored: 1 };
-    return finish([{ provider: "telnyx", channel: "sms", account_ref: toNumber, event_key: `telnyx:${id}`, kind: "message", sender, reply_to: sender, thread_ref: null, text: typeof payload["text"] === "string" ? (payload["text"] as string).slice(0, 10_000) : null, provider_ts: ts }], 0);
+    return finish([{ provider: "telnyx", channel: "sms", account_ref: toNumber, event_key: eventKey("telnyx", id), kind: "message", sender, reply_to: sender, thread_ref: null, text: typeof payload["text"] === "string" ? (payload["text"] as string).slice(0, 10_000) : null, provider_ts: ts }], 0);
   }
   if (type.startsWith("message.") && payload["direction"] === "outbound") {
-    return finish([{ provider: "telnyx", channel: "sms", account_ref: str(obj(payload["from"])?.["phone_number"], 40) ?? toNumber, event_key: `telnyx:status:${str(payload["id"], 200) ?? id}:${type}`, kind: "status", sender: null, reply_to: null, thread_ref: null, text: null, provider_ts: ts }], 0);
+    return finish([{ provider: "telnyx", channel: "sms", account_ref: str(obj(payload["from"])?.["phone_number"], 40) ?? toNumber, event_key: eventKey("telnyx:status", str(payload["id"], MAX_PROVIDER_ID) ?? id, type), kind: "status", sender: null, reply_to: null, thread_ref: null, text: null, provider_ts: ts }], 0);
   }
   return { events: [], ignored: 1 };
 }

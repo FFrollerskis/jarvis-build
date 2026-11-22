@@ -20,6 +20,12 @@
 --
 -- Biometrisk identifikasjon er UTENFOR masterplanen (UA-9): ingen kolonne i 133-136 representerer en identitet, et ansikt eller en
 -- biometrisk mal. En vakttest (modules/vision/test/g3-guards.test.ts) feller bygget hvis det innføres.
+--
+-- ENDRET PÅ STEDET FØR FØRSTE UTGIVELSE (review B MEDIUM-D2): 133-136 er redigert direkte (flere ganger, i review-rundene) i stedet for å få nye
+-- migrasjoner. Ingen utrullet database har kjørt en tidligere variant, og testklyngene er flyktige. En SANDKASSE-DB som kjørte en tidligere variant
+-- av denne filen må GJENSKAPES (drop + migrer på nytt): runMigrations feiler høyt med `migration_checksum_mismatch` (D-395) i stedet for å
+-- anvende den endrede filen, og planMigrations() melder den under `checksum_mismatches`. Fra første utgivelse gjelder vanlig regel: en anvendt
+-- migrasjon endres aldri, det lages en NY. Se docs/runbooks/WPG3_VISION.md (avsnitt «Utrulling og oppgradering»).
 
 CREATE TABLE vision_cameras (
   camera_id        text PRIMARY KEY,
@@ -56,7 +62,9 @@ ALTER TABLE vision_cameras ADD CONSTRAINT vision_cameras_scope_key UNIQUE (tenan
 ALTER TABLE vision_cameras ADD CONSTRAINT vision_cameras_room_fkey
   FOREIGN KEY (tenant_id, memory_space_id, person_id, room_id) REFERENCES vision_rooms (tenant_id, memory_space_id, person_id, room_id);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON vision_cameras TO jarvis_app;
+-- Minste privilegium (review B-L9): kun kolonnene `VisionCameraService.updateCamera` faktisk endrer kan oppdateres. Identitet, kilde, person, tenant, space og spor kan aldri omskrives av runtime-rollen.
+GRANT SELECT, INSERT, DELETE ON vision_cameras TO jarvis_app;
+GRANT UPDATE (label, zone_kind, route_policy, cooldown_seconds, enabled, trigger_entities, updated_at) ON vision_cameras TO jarvis_app;
 ALTER TABLE vision_cameras ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vision_cameras FORCE ROW LEVEL SECURITY;
 CREATE POLICY vision_cameras_tenant ON vision_cameras
@@ -86,16 +94,19 @@ ALTER TABLE vision_event_observations
 -- Lagringsregel for objektnavn (review A-M1). Et objektnavn kommer fra en UBETRODD lokal modell (modules/vision/src/labels.ts): normaliseringen i appen er ETT choke point, så databasen får et
 -- nett under den - lengde, tegnklasse og ordtall. IKKE et navne-/instruksjonsfilter (åpent ordforråd er fortsatt ubetrodd data, se labels.ts): kun 1-64 tegn, høyst 4 ord, ingen strukturtegn
 -- (<>{}[]\/|;:"`=#@$%^&*~+), ingen kontrolltegn (U+0001-001F, U+007F-009F) eller usynlige/formaterende tegn (soft hyphen, fyllere, null-bredde, bidi, usynlige operatorer, variasjonsvelgere, BOM,
--- tag-tegn U+E0000-E0FFF), og minst ett tegn som ikke er siffer/mellomrom/tegnsetting. Tegnklassen er skrevet med eksplisitte kodepunkt-områder (ikke [:cntrl:]), slik at den er lik i alle
--- locales. Mild (krever ikke små bokstaver): en P0-kilde kan levere «Nøkler». Speilet i JS (`isStorableObjectLabel`, labels.ts); paritet bevist i g3-migrations.test.ts (sveip over alle kodepunkt).
+-- tag-tegn U+E0000-E0FFF), og minst ett tegn som ikke er siffer/mellomrom/tegnsetting. Review delta D1 (mini-fiks-runden): HELE regelen er skrevet uten POSIX-klasser (`[:punct:]`/`[:space:]`/`[:digit:]`/
+-- `[:cntrl:]` er LOCALE-AVHENGIGE: i en glibc-UTF-8-locale regnes bl.a. tall-tegn av kategori No som tegnsetting, se 135). Tegnklassen er eksplisitte kodepunktområder, bokstavkravet er «noe annet enn ASCII-sifre,
+-- ASCII-mellomrom og ASCII-tegnsetting» (alle ikke-ASCII-tegn som ikke er forbudt teller som bokstavlike - databasen er et NETT som aldri er strengere enn normaliseringen; JS-regelen er strammere for etiketter
+-- av KUN ikke-ASCII tegnsetting), og ordene telles på ASCII-mellomrom. Resultatet er lik i alle locales. Mild (krever ikke små bokstaver): en P0-kilde kan levere «Nøkler». Speilet i JS (`isStorableObjectLabel`,
+-- labels.ts); paritet og locale-uavhengighet bevist i g3-migrations.test.ts og g3-label-locale.test.ts (sveip over alle kodepunkt, i klynger med locale C og C.UTF-8).
 -- NOT VALID først (055-tabellen kan ha rader fra P0 som bryter regelen), og VALIDATE forsøkes straks: består alle eksisterende rader blir den fullt gyldig; ellers forblir den NOT VALID
 -- (håndheves for alle nye/endrede rader) og eieren validerer manuelt etter å ha vurdert de gamle radene.
 ALTER TABLE vision_event_observations ADD CONSTRAINT vision_event_observations_object_label_check CHECK (
   object_label IS NULL OR (
     char_length(object_label) BETWEEN 1 AND 64
     AND object_label !~ '[<>{}\[\]\\/|;:"`=#@$%^&*~+\x01-\x1f\x7f-\x9f\xad\x34f\x61c\x115f-\x1160\x17b4-\x17b5\x180b-\x180f\x200b-\x200f\x202a-\x202e\x2060-\x206f\x3164\xfe00-\xfe0f\xfeff\xffa0\xfff0-\xfffb\xe0000-\xe0fff]'
-    AND object_label ~ '[^[:digit:][:space:][:punct:]]'
-    AND array_length(regexp_split_to_array(btrim(object_label), '[[:space:]]+'), 1) <= 4
+    AND object_label ~ '[^0-9\x09-\x0d\x20-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]'
+    AND array_length(regexp_split_to_array(btrim(object_label), '[\x09-\x0d\x20]+'), 1) <= 4
   )
 ) NOT VALID;
 DO $$

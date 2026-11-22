@@ -92,12 +92,14 @@ describe("A-M3: STOP gjelder mottakeren, ikke én avsenderkonto/ett rom/én kana
     expect(listed.ok && (listed.data as unknown[]).length).toBeGreaterThanOrEqual(2);
   });
 
-  it("samme mottaker meldt av to ganger (SMS og så WhatsApp) gir ÉN aktiv avmelding (ingen duplikat)", async () => {
+  it("samme STOP en gang til (samme kanal og kilde, også fra et annet rom) gir ÉN aktiv avmelding; en STOP på en annen KANAL får sin egen rad (N1: aldri absorbert)", async () => {
     const num = chain.phone();
     const hash = optOutHash(TENANT_A, "sms", num);
     expect((await chain.store.recordOptOut(TENANT_A, "business", { channel: "sms", recipient_hash: hash, recipient_hint: "+47•••000", source: "inbound_stop_keyword", recorded_by: "system" })).created).toBe(true);
-    expect((await chain.store.recordOptOut(TENANT_A, "project", { channel: "whatsapp", recipient_hash: optOutHash(TENANT_A, "whatsapp", num), recipient_hint: "+47•••000", source: "inbound_stop_keyword", recorded_by: "system" })).created).toBe(false);
+    expect((await chain.store.recordOptOut(TENANT_A, "project", { channel: "sms", recipient_hash: hash, recipient_hint: "+47•••000", source: "inbound_stop_keyword", recorded_by: "system" })).created).toBe(false);
     expect(await optRows(hash)).toHaveLength(1);
+    expect((await chain.store.recordOptOut(TENANT_A, "project", { channel: "whatsapp", recipient_hash: optOutHash(TENANT_A, "whatsapp", num), recipient_hint: "+47•••000", source: "inbound_stop_keyword", recorded_by: "system" })).created).toBe(true);
+    expect((await optRows(hash)).map((r) => r.channel).sort()).toEqual(["sms", "whatsapp"]);
     // samtidige registreringer fra to rom gir fortsatt én rad
     const num2 = chain.phone();
     const h2 = optOutHash(TENANT_A, "sms", num2);
@@ -130,7 +132,7 @@ describe("A-M3: STOP gjelder mottakeren, ikke én avsenderkonto/ett rom/én kana
       chain.twilio.send = saved;
     }
     expect(await denies(sendOf({ recipient: num, account_ref: "+4792000000" }))).toContain("recipient_opted_out");
-    expect((await optRows(optOutHash(TENANT_A, "sms", num)))[0]).toMatchObject({ source: "provider_error", account_ref: "*" });
+    expect((await optRows(optOutHash(TENANT_A, "sms", num)))[0]).toMatchObject({ source: "provider_error", account_ref: "*provider" });
   });
 });
 

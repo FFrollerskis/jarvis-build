@@ -106,6 +106,10 @@ describe("B: enhetssignert inntak - porter, rekkefølge og feil", () => {
       await handlePersonalRoute(h.ctx);
       expect(h.responses).toEqual([{ status, body: { error: "health_intake_rejected", reason: code, request_id: "req-1" } }]);
     }
+    // review B MEDIUM-2: ugyldige tidsstempel avviser batchen med 400 og INDEKSENE (aldri verdiene)
+    const stamps = harness({ fail: new HealthIntakeError("invalid_timestamps", [1, 4]) });
+    await handlePersonalRoute(stamps.ctx);
+    expect(stamps.responses).toEqual([{ status: 400, body: { error: "health_intake_rejected", reason: "invalid_timestamps", indexes: [1, 4], request_id: "req-1" } }]);
     const noPolicy = harness({ fail: new HealthRetentionPolicyRequiredError() });
     await handlePersonalRoute(noPolicy.ctx);
     expect(noPolicy.responses).toEqual([{ status: 409, body: { error: "health_retention_policy_required", request_id: "req-1" } }]);

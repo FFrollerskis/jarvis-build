@@ -158,6 +158,90 @@ describe("LocalOpenAiCompatibleAdapter - { vision: true } (local_vision)", () =>
   });
 });
 
+describe("LocalOpenAiCompatibleAdapter - bytetak på svaret for visjonsidentiteten (review A-L6)", () => {
+  const vision = () => new LocalOpenAiCompatibleAdapter("http://127.0.0.1:11434/v1", "vl-model", 5_000, "local_vision", "default", { vision: true });
+  const plain = () => new LocalOpenAiCompatibleAdapter("http://127.0.0.1:11434/v1", "m", 5_000, "local_llm");
+  const hugeAnswer = (chars: number) => ({ choices: [{ message: { content: "x".repeat(chars) }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+
+  it("et 3 MiB svar avvises som invalid_response (local_vision_response_too_large), mens et vanlig svar og en annen identitet med samme store svar er uendret", async () => {
+    global.fetch = (async () => jsonResponse(200, hugeAnswer(3 * 1024 * 1024))) as unknown as typeof fetch;
+    await expect(vision().complete({ messages: [message(TEXT, RESTRICTED_IMAGE)] })).rejects.toMatchObject({ kind: "invalid_response", message: "local_vision_response_too_large" });
+    const unchanged = await plain().complete({ messages: [message(TEXT)] });
+    expect(unchanged.text).toHaveLength(3 * 1024 * 1024); // øvrige identiteter leser som før (flagg-AV-identitet)
+    global.fetch = (async () => jsonResponse(200, hugeAnswer(2_000))) as unknown as typeof fetch;
+    expect((await vision().complete({ messages: [message(TEXT, RESTRICTED_IMAGE)] })).text).toHaveLength(2_000);
+  });
+
+  it("en deklarert content-length over taket avvises uten å lese kroppen; ugyldig JSON og manglende choices er fortsatt invalid_response (uten too_large)", async () => {
+    let cancelled = false;
+    let pulled = 0;
+    const MAX_PULLS = 16 * 1024; // 16 MiB totalt (1 KiB per pull): strømmen er ALDRI uendelig - en mutant uten tak leser 16 MiB og feiler på assertionene i stedet for å velte testprosessen (OOM)
+    // highWaterMark 0: kroppen leses kun på etterspørsel (en klient som ikke leser, trekker ingenting), og `pulled` teller hva klienten faktisk leste.
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          if (pulled >= MAX_PULLS) {
+            controller.close();
+            return;
+          }
+          pulled += 1;
+          controller.enqueue(new Uint8Array(1024));
+        },
+        cancel() {
+          cancelled = true;
+        }
+      },
+      { highWaterMark: 0 }
+    );
+    global.fetch = (async () => new Response(body, { status: 200, headers: { "content-length": String(50 * 1024 * 1024), "content-type": "application/json" } })) as unknown as typeof fetch;
+    await expect(vision().complete({ messages: [message(TEXT)] })).rejects.toMatchObject({ kind: "invalid_response", message: "local_vision_response_too_large" });
+    expect(cancelled).toBe(true);
+    expect(pulled).toBe(0); // den deklarerte lengden avvises UTEN at en eneste byte av kroppen leses
+    global.fetch = (async () => new Response("ikke json", { status: 200 })) as unknown as typeof fetch;
+    await expect(vision().complete({ messages: [message(TEXT)] })).rejects.toMatchObject({ kind: "invalid_response", message: "local_vision_invalid_response" });
+    global.fetch = (async () => jsonResponse(200, { feil: true })) as unknown as typeof fetch;
+    await expect(vision().complete({ messages: [message(TEXT)] })).rejects.toMatchObject({ message: "local_vision_invalid_response" });
+  });
+
+  it("en svært stor kropp fra en ekte lokal server stoppes ved taket: klienten avbryter og serveren skriver ikke videre", async () => {
+    global.fetch = originalFetch;
+    const { createServer } = await import("node:http");
+    let sent = 0;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write("{\"choices\":[{\"message\":{\"content\":\"");
+      const chunk = "a".repeat(64 * 1024);
+      timer = setInterval(() => {
+        // Serveren avslutter selv gyldig JSON ved 32 MiB: uten taket i adapteren ville klienten lest ALT og godtatt svaret (testen feiler da på assertionen, uten å tømme minnet).
+        if (sent >= 32 * 1024 * 1024) {
+          clearInterval(timer);
+          res.end("\"}}]}");
+          return;
+        }
+        sent += chunk.length;
+        res.write(chunk);
+      }, 1);
+      res.on("close", () => clearInterval(timer));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const adapter = new LocalOpenAiCompatibleAdapter(`http://127.0.0.1:${port}`, "vl", 20_000, "local_vision", "default", { vision: true });
+      await expect(adapter.complete({ messages: [message(TEXT, RESTRICTED_IMAGE)] })).rejects.toMatchObject({ kind: "invalid_response", message: "local_vision_response_too_large" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const afterAbort = sent;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(sent).toBe(afterAbort); // serveren ser at forbindelsen er lukket og slutter å skrive
+      expect(sent).toBeLessThan(32 * 1024 * 1024); // klienten avbrøt langt før serveren var ferdig
+    } finally {
+      if (timer !== undefined) clearInterval(timer);
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
 describe("skyadaptere med bildestøtte nekter BEGRENSEDE kamerabilder (forsvar i dybden)", () => {
   it("AnthropicAdapter kaster bad_request og sender ingenting for et restricted bilde; et vanlig bilde fungerer som før", async () => {
     const adapter = new AnthropicAdapter("fake-key-for-test", "test-model", "http://mock");

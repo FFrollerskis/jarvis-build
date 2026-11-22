@@ -5,6 +5,7 @@ import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute } from ".
 import { parseChatCandidates, unknownChainMembers } from "./chat-candidates.ts";
 import { parseCouncilProposals } from "./council-proposals.ts";
 import { fileURLToPath } from "node:url";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
@@ -105,7 +106,7 @@ import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import { LocationService, runLocationRetentionSweepForAllTenants } from "@jarvis/location";
 import { HealthService, runHealthRetentionSweepForAllTenants } from "@jarvis/health";
 import { VisionService, runVisionRetentionSweepForAllTenants } from "@jarvis/vision";
-import { buildVisionRuntime, visionAdapterFromEnv } from "./vision-runtime.ts";
+import { buildVisionRuntime, verifyVisionEndpoints, visionAdapterFromEnv } from "./vision-runtime.ts";
 import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
@@ -332,6 +333,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace, actor_person_id: owner.owner_person_id, owner_tenant_id: owner.tenant_id });
   // WP-G3 (D-465): `local_vision` (lokal bildeklassifisering av kamerabilder) registreres KUN når JARVIS_VISION_ENABLED=on og JARVIS_VISION_CLASSIFIER=on - ellers `null` (ingenting registreres, identisk med main).
   // En ikke-lokal/manglende JARVIS_VISION_LOCAL_URL KASTER her og stopper oppstarten (kamerabilder forlater aldri maskinen).
+  // Review A-L5/A-INFO-4: vertsnavnene i endepunktene løses ved oppstart og må peke til det lokale nettet (offentlig oppløsning KASTER); embedding-endepunktet som ikke er lokalt gir kun «ingen vision-embedding».
+  const visionEndpoints = await verifyVisionEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
   const visionAdapter = visionAdapterFromEnv(process.env);
   const gateway = new ModelGateway({
     pool,
@@ -833,7 +836,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   });
   // WP-G2 (D-464, UA-8 Personal Twin): kritiske hjem-/bilhandlinger, familie, helse-inntak, Apple CalDAV/CardDAV, personlig økonomi-lesing og kontekstmotor. ALT er AV som standard: uten `JARVIS_PERSONAL_*`-flagg er
   // `personal.tools` tom, `filterTools` identiteten og `personal.deps` `undefined` (verktøylister, utvalg, rate-grenser og ruter er identiske med main, ingen ekstra loggline). Kun API-prosessen kobler det inn.
-  const personal = createPersonalWiring({ env: process.env, pool, gateway: toolGateway, readSecret: (ref) => readSecretProvider.get(ref), ownerPersonId: owner.owner_person_id });
+  const personal = createPersonalWiring({ env: process.env, pool, gateway: toolGateway, readSecret: (ref) => readSecretProvider.get(ref), ownerPersonId: owner.owner_person_id, controls: { killSwitch, ownerControls } });
   const personalLog = personal.describe();
   if (personalLog) console.log(JSON.stringify(personalLog));
   // WP-G4 (D-466, UA-10): samlet hendelsesabonnement (abonnementsregister, inntaksbuss, hendelsesløper, kildeporter). ALT er AV som standard: uten `JARVIS_SITUATION_SIGNALS=on` er `tools` tom, `runner` null og ingenting logges
@@ -1500,7 +1503,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-G3 (D-465): UA-9-kjøretiden (pipeline, HA-poller, `/vision/*`-rutene, vedlikehold). `null` (ingenting bygget) uten JARVIS_VISION_ENABLED=on. Se vision-runtime.ts for flaggene.
   const visionRuntime = buildVisionRuntime({
     pool, env: process.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, ownerTenantId: owner.tenant_id, secrets: readSecretProvider,
-    ownerControls: { killSwitch, controls: ownerControls }
+    ownerControls: { killSwitch, controls: ownerControls }, embeddingBlockedReason: visionEndpoints.embeddingBlockedReason
   });
   const deps: ApiDeps = {
     // D-393 (JARVIS-026): `/health` svarer 503 når databasen ikke svarer (tidligere konstant «ok»).

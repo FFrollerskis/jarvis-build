@@ -4,7 +4,7 @@ import { DEFAULT_PROFILES, LOCAL_VISION_PROFILE, type ProviderPauseSource } from
 import { OwnerControlsService, type OwnerControlsDeviceRevocationDeps } from "@jarvis/owner-controls";
 import { KillSwitch, OwnerControls } from "@jarvis/policy";
 import { CONNECTOR_REGISTRY, type ConnectorDefinition } from "@jarvis/tool-gateway";
-import { visionFlagsFromEnv } from "./vision-runtime.ts";
+import { visionFlagsFromEnv } from "./vision-flags.ts";
 
 /**
  * WP-H0 / JARVIS-087 (UA-11): eierens pause og tilbakekall av en MODELLLEVERANDØR - uten ny skrivevei og uten ny tabell.

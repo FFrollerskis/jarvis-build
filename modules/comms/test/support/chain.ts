@@ -39,6 +39,8 @@ export interface Chain {
 export interface ChainOptions {
   readonly marketing?: MarketingBasisPort;
   readonly rateLimitPerMinute?: number;
+  /** Løfter gatewayens per-verktøy-grense (autorisering/avmelding har 10-20/min) for tester som kjører mange handlinger raskt etter hverandre. */
+  readonly lenientToolLimits?: boolean;
   readonly deps?: { contacts?: boolean; meetings?: boolean };
 }
 
@@ -68,7 +70,7 @@ export async function startChain(prefix: string, env: Record<string, string> = {
     classDPipeline: { enforce: true, notifier: { ready: () => true, notify: async (x) => { notifications.push(x); } } },
     credentialBinding: { owner_person_id: OWNER, owner_tenants: [TENANT_A], internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
   });
-  for (const d of commsToolDefinitions({ transport: new CommsTransport({ funnel, store }), store, rateLimitPerMinute: options.rateLimitPerMinute ?? 1000, calls: config.calls, vendorReads: config.vendor_reads })) gateway.register(d);
+  for (const d of commsToolDefinitions({ transport: new CommsTransport({ funnel, store }), store, rateLimitPerMinute: options.rateLimitPerMinute ?? 1000, calls: config.calls, vendorReads: config.vendor_reads })) gateway.register(options.lenientToolLimits === true ? { ...d, rate_limit_per_minute: 1_000_000 } : d);
   const owner: IdentityContext = { person_id: OWNER, tenant_id: TENANT_A, memory_space_id: "business", session_id: "sess-chain", device_id: "dev-chain", channel: "api", auth_strength: "signed" };
   const ownerGate = (identity: IdentityContext): boolean => identity.person_id === OWNER && identity.tenant_id === TENANT_A;
   let n = 0;

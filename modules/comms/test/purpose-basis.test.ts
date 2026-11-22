@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  COMMS_CHANNELS, PURPOSE_BASES, evaluateOutboundPolicy, parseCommsConfig, parseCallParams, parseSendParams, recipientHash, type OutboundPolicyState, type OutboundRequest
+  COMMS_CHANNELS, PURPOSE_BASES, evaluateOutboundPolicy, parseCommsConfig, parseCallParams, parseSendParams, recipientHash, scopedIdempotencyKey, type OutboundPolicyState, type OutboundRequest
 } from "../src/index.ts";
 import { startChain, authorizeAll, type Chain } from "./support/chain.ts";
 
@@ -15,7 +15,7 @@ const cold = (over: Partial<OutboundPolicyState> = {}): OutboundPolicyState => (
   account_authorized: true, recipient_opted_out: false, sends_last_24h_to_recipient: 0, calls_last_24h_to_recipient: 0, sends_last_hour_from_account: 0, last_inbound_at: null,
   recipient_identity: null, target: null, marketing: { prior_consent: false, reservation_register: "unverified" }, ...over
 });
-const warm = cold({ recipient_identity: { identity_id: "id-1", confidence: 1 } });
+const warm = cold({ recipient_identity: { identity_id: "id-1", confidence: 1, match_method: "exact_phone_e164" } });
 const sms = (over: Partial<OutboundRequest> = {}): OutboundRequest => ({
   kind: "message", channel: "sms", account_ref: "+4791000000", recipient: "+4790000000", purpose: "transactional", content: { text: "Hei, timen din er bekreftet." }, ...over
 });
@@ -109,10 +109,11 @@ describe("A-M2 (full kjede): eierruten avslår uten grunnlag, journalfører grun
     const ok = await chain.act("send", { ...base, purpose_basis: "existing_customer_relationship", purpose_basis_note: "Kunde siden 2023, kjøpte i butikk" }, idem);
     expect(ok.ok).toBe(true);
     expect(chain.twilio.calls.filter((c) => c.op === "send")).toHaveLength(1);
-    const journal = (await chain.db.admin.query("SELECT status, recipient_proof FROM comms_outbound_log WHERE request_id = $1", [idem])).rows[0] as { status: string; recipient_proof: Record<string, unknown> };
+    const scoped = scopedIdempotencyKey("tenant-g1-a", "send", idem);
+    const journal = (await chain.db.admin.query("SELECT status, recipient_proof FROM comms_outbound_log WHERE request_id = $1", [scoped])).rows[0] as { status: string; recipient_proof: Record<string, unknown> };
     expect(journal.status).toBe("sent");
     expect(journal.recipient_proof).toMatchObject({ method: "explicit_param", purpose_basis: "existing_customer_relationship", purpose_basis_note: "Kunde siden 2023, kjøpte i butikk" });
-    const ledger = (await chain.db.admin.query("SELECT before_state FROM tool_executions WHERE idempotency_key = $1", [idem])).rows[0] as { before_state: Record<string, unknown> };
+    const ledger = (await chain.db.admin.query("SELECT before_state FROM tool_executions WHERE idempotency_key = $1", [scoped])).rows[0] as { before_state: Record<string, unknown> };
     expect(ledger.before_state).toMatchObject({ allowed: true, purpose_basis: "existing_customer_relationship" });
     expect(JSON.stringify(ledger)).not.toContain("Kunde siden 2023"); // notatet er i journalen, ikke i verktøy-ledgeren
     expect(JSON.stringify(ledger)).not.toContain("nye produkter");

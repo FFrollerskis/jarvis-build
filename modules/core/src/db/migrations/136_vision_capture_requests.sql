@@ -9,6 +9,12 @@
 -- Forespørselen er ENGANGS: pending -> fulfilled|expired|cancelled|rejected skjer med en betinget UPDATE (compare-and-set på state
 -- og utløp), så en gjentatt eller reprodusert opplasting kan aldri behandles to ganger. Det finnes INGEN kontinuerlig strøm,
 -- ingen bakgrunnsopptak og ingen automatisk forespørsel: kun eieren (eier-rute, signert enhetsøkt) kan opprette en forespørsel.
+--
+-- ENDRET PÅ STEDET FØR FØRSTE UTGIVELSE (review B MEDIUM-D2): 133-136 er redigert direkte (flere ganger, i review-rundene) i stedet for å få nye
+-- migrasjoner. Ingen utrullet database har kjørt en tidligere variant, og testklyngene er flyktige. En SANDKASSE-DB som kjørte en tidligere variant
+-- av denne filen må GJENSKAPES (drop + migrer på nytt): runMigrations feiler høyt med `migration_checksum_mismatch` (D-395) i stedet for å
+-- anvende den endrede filen, og planMigrations() melder den under `checksum_mismatches`. Fra første utgivelse gjelder vanlig regel: en anvendt
+-- migrasjon endres aldri, det lages en NY. Se docs/runbooks/WPG3_VISION.md (avsnitt «Utrulling og oppgradering»).
 
 CREATE TABLE vision_capture_requests (
   request_id      text PRIMARY KEY,
@@ -48,7 +54,9 @@ ALTER TABLE vision_capture_requests ADD CONSTRAINT vision_capture_requests_snaps
 ALTER TABLE vision_capture_requests ADD CONSTRAINT vision_capture_requests_idempotency_key
   UNIQUE (tenant_id, memory_space_id, person_id, idempotency_key);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON vision_capture_requests TO jarvis_app;
+-- Minste privilegium (review B-L9): kun livssyklus-kolonnene (forbruk/utløp/avvisning og peker til bildet) kan oppdateres - aldri enhet, kamera, person, levetid eller idempotensnøkkel.
+GRANT SELECT, INSERT, DELETE ON vision_capture_requests TO jarvis_app;
+GRANT UPDATE (state, resolved_at, snapshot_id, upload_sha256, reject_reason) ON vision_capture_requests TO jarvis_app;
 ALTER TABLE vision_capture_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vision_capture_requests FORCE ROW LEVEL SECURITY;
 CREATE POLICY vision_capture_requests_tenant ON vision_capture_requests

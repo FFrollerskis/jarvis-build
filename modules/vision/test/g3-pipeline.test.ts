@@ -16,6 +16,7 @@ import { LocalFsStorageAdapter, type StorageAdapter } from "../src/storage.ts";
 import type { VisionEventType } from "../src/types.ts";
 import { decayedConfidence } from "../src/labels.ts";
 import { detectionsJson, makeJpeg, NOT_AN_IMAGE, ScriptedGateway, ScriptedSource, seedTenant, startVisionDb, type VisionDb } from "./support/harness.ts";
+import { jpegBytes } from "./support/images.ts";
 
 /**
  * WP-G3 (D-465), P1a/P1b/P1c/P2e: hele kildepipelinen mot ekte Postgres (RLS som runtime-rolle), ekte lokal lagring (temp-mappe) og en scriptet LOKAL modellgateway.
@@ -280,7 +281,10 @@ describe("ubetrodd modellutdata og bilder", () => {
     const cases: Array<[() => { bytes: Uint8Array; declared_type?: string }, RegExp]> = [
       [() => ({ bytes: NOT_AN_IMAGE, declared_type: "image/jpeg" }), /^image_vision_image_invalid$/],
       [() => ({ bytes: makeJpeg(), declared_type: "image/png" }), /^image_vision_image_invalid$/],
-      [() => ({ bytes: makeJpeg(5_000), declared_type: "image/jpeg" }), /^image_vision_image_invalid$/]
+      [() => ({ bytes: makeJpeg(5_000), declared_type: "image/jpeg" }), /^image_vision_image_invalid$/],
+      // review A-L6: en LITEN fil som deklarerer enorme mål (pikselbombe) når aldri modellen; samme for et hode uten lesbare mål
+      [() => ({ bytes: jpegBytes({ width: 65_535, height: 65_535 }), declared_type: "image/jpeg" }), /^image_vision_image_invalid$/],
+      [() => ({ bytes: Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 2, 3, 4]), declared_type: "image/jpeg" }), /^image_vision_image_invalid$/]
     ];
     for (const [image, note] of cases) {
       const p = makePipeline({ maxImageBytes: 1_000 });
@@ -297,6 +301,25 @@ describe("ubetrodd modellutdata og bilder", () => {
     const out = await pipeline.processCaptured(ctx, camStore, spec({ image: () => { throw new Error("home_assistant_error_500"); } }));
     expect(out.status).toBe("recorded");
     expect(out.notes).toContain("image_home_assistant_error_500");
+  });
+
+  it("feilkoder i notatene er stabile og riktig klassifisert (review delta B, kosmetikk): SQLSTATE (alltid et siffer) -> db_<kode>, Node-feilnummer (EPERM, EPIPE ...) -> os_<kode> (ikke db_eperm), ellers pipeline_error - aldri meldingstekst", async () => {
+    const cases: Array<[Error, string]> = [
+      [Object.assign(new Error("sti /x/y"), { code: "EPERM" }), "image_os_eperm"],
+      [Object.assign(new Error("x"), { code: "EPIPE" }), "image_os_epipe"],
+      [Object.assign(new Error("x"), { code: "ECONNRESET" }), "image_os_econnreset"],
+      [Object.assign(new Error("x"), { code: "23505" }), "image_db_23505"],
+      [Object.assign(new Error("x"), { code: "42P01" }), "image_db_42p01"],
+      [Object.assign(new Error("x"), { code: "XX000" }), "image_db_xx000"],
+      [new Error("Sti /hemmelig/fil feilet"), "image_pipeline_error"]
+    ];
+    for (const [err, note] of cases) {
+      const out = await pipeline.processCaptured(ctx, camStore, spec({ image: () => { throw err; } }));
+      expect(out.status, note).toBe("recorded");
+      expect(out.notes, note).toContain(note);
+      expect(JSON.stringify(out.notes), note).not.toMatch(/hemmelig|\/x\/y/);
+      clock = new Date(clock.getTime() + 3_600_000); // flomvernet (30 s per kamera og hendelsestype) skal ikke avvise neste kall
+    }
   });
 });
 

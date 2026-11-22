@@ -87,7 +87,8 @@ describe("B: normalisering - fersk tilstand er en egenskap, ikke en påstand", (
 
 describe("C: validatorer, etterbetingelser og risikoretning", () => {
   const op = (action: string) => CAR_CRITICAL_OPS.find((o) => o.action === action)!;
-  const st = (over: Record<string, JsonValue> = {}): Record<string, JsonValue> => ({ vehicle_id: "bil", reachable: true, lock: "locked", climate: "off", charging: "stopped", charge_percent: 50, fresh: true, observed_at: null, ...over });
+  // `observed_after_command` er satt av transporten (observasjonen er ikke eldre enn den aksepterte kommandoen minus skjevheten, review A MEDIUM-2); en etter-tilstand uten den bekrefter aldri noe.
+  const st = (over: Record<string, JsonValue> = {}): Record<string, JsonValue> => ({ vehicle_id: "bil", reachable: true, lock: "locked", climate: "off", charging: "stopped", charge_percent: 50, fresh: true, observed_at: null, observed_after_command: true, ...over });
 
   it("lås/lås opp: kun fersk, kjent før-tilstand; forutsetningen (expected_lock) må stemme; etterbetingelsen krever `fresh` OG riktig sluttilstand", () => {
     for (const action of ["lock", "unlock"]) {
@@ -100,6 +101,9 @@ describe("C: validatorer, etterbetingelser og risikoretning", () => {
     expect(op("lock").post(st({ lock: "locked" }), {})).toBe(true);
     expect(op("lock").post(st({ lock: "unlocked" }), {})).toBe(false);
     expect(op("lock").post(st({ lock: "locked", fresh: false }), {})).toBe(false); // en bufret «låst» verifiserer aldri
+    expect(op("lock").post(st({ lock: "locked", observed_after_command: false }), {})).toBe(false); // en observasjon ELDRE enn kommandoen verifiserer aldri (review A MEDIUM-2)
+    expect(op("unlock").post(st({ lock: "unlocked", observed_after_command: false }), {})).toBe(false);
+    expect(op("lock").post({ lock: "locked", fresh: true } as Record<string, JsonValue>, {})).toBe(false); // uten transportens ferskhetsmerke bekreftes ingenting
     expect(op("unlock").post(st({ lock: "unlocked" }), {})).toBe(true);
     expect(op("unlock").post(st({ lock: "locked" }), {})).toBe(false);
   });
@@ -114,6 +118,8 @@ describe("C: validatorer, etterbetingelser og risikoretning", () => {
     expect(op("charge_set").validate(st({ charging: "unknown" }), { charging: true })).toBe("vehicle_charge_unknown");
     expect(op("charge_set").post(st({ charging: "charging" }), { charging: true })).toBe(true);
     expect(op("charge_set").post(st({ charging: "complete" }), { charging: false })).toBe(false);
+    expect(op("climate_set").post(st({ climate: "on", observed_after_command: false }), { on: true })).toBe(false);
+    expect(op("charge_set").post(st({ charging: "charging", observed_after_command: false }), { charging: true })).toBe(false);
   });
 
   it("risikoretning og kommando-mapping: lås = reduserer, lås opp = øker, klima på = øker, lading = nøytral; ukjent handling gir null", () => {
@@ -181,7 +187,7 @@ describe("E: transporten mot den falske adapteren", () => {
   it("lesing: normalisert tilstand uten ekstra felt; ukjent bil gir null; adapterfeil gir en fast kode (aldri leverandørens tekst)", async () => {
     fake.set("bil", { lock: "locked", climate: "off", charging: "stopped", charge_percent: 70 });
     const read = await run(transport(), CAR_READ_ACTION, { vehicle_id: "bil" });
-    expect(Object.keys(read.data as object).sort()).toEqual(["charge_percent", "charging", "climate", "fresh", "lock", "observed_at", "reachable", "vehicle_id"]);
+    expect(Object.keys(read.data as object).sort()).toEqual(["charge_percent", "charging", "climate", "fresh", "lock", "observed_after_command", "observed_at", "reachable", "vehicle_id"]);
     expect((await run(transport(), CAR_READ_ACTION, { vehicle_id: "finnes-ikke" })).data).toBeNull();
     fake.nextReadError = new CarAdapterError("car_unauthorized", true);
     await expect(run(transport(), CAR_READ_ACTION, { vehicle_id: "bil" })).rejects.toThrow("car_unauthorized");

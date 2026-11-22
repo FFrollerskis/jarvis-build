@@ -7,6 +7,7 @@ import { VISION_SYSTEM_PROMPT, parseModelClassification } from "../src/classifie
 import { HomeAssistantVisionSource } from "../src/ha-source.ts";
 import { inspectImage, sniffMediaType } from "../src/image.ts";
 import { VisionEventTypeSchema } from "../src/types.ts";
+import { jpegBytes, pngBytes, webpBytes } from "./support/images.ts";
 
 /**
  * WP-G3 (D-465), P3f: BYGGEVAKTER (ikke atferdstester av en funksjon, men låser som feller bygget hvis noen senere går utenfor UA-9-rammen):
@@ -434,9 +435,9 @@ describe("ingen kontinuerlig rå video: kun hendelses-øyeblikksbilder", () => {
   });
 
   it("de tre tillatte stillbildeformatene (jpeg/png/webp) godtas - og ingen annen media type finnes", () => {
-    expect(inspectImage(header(0xff, 0xd8, 0xff, 0xe0)).media_type).toBe("image/jpeg");
-    expect(inspectImage(header(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)).media_type).toBe("image/png");
-    expect(inspectImage(header(...ascii("RIFF"), 0, 0, 0, 0, ...ascii("WEBP"))).media_type).toBe("image/webp");
+    expect(inspectImage(jpegBytes()).media_type).toBe("image/jpeg");
+    expect(inspectImage(pngBytes()).media_type).toBe("image/png");
+    expect(inspectImage(webpBytes()).media_type).toBe("image/webp");
   });
 
   it("databasen tillater kun stillbilder og én liten rad per hendelse: media_type = 3 bildeformater, byte_length <= 20 MiB, route_policy har ingen strøm-/sky-verdi", () => {
@@ -445,6 +446,24 @@ describe("ingen kontinuerlig rå video: kun hendelses-øyeblikksbilder", () => {
     expect(/byte_length\s+integer NOT NULL CHECK \(byte_length BETWEEN 1 AND 20971520\)/.test(sql)).toBe(true);
     const cameras = readFileSync(join(ROOT, "modules/core/src/db/migrations/133_vision_cameras.sql"), "utf8");
     expect(/route_policy\s+text NOT NULL CHECK \(route_policy IN \('discard','local_only','store_snapshot'\)\)/.test(cameras)).toBe(true);
+  });
+
+  it("migrasjon 133/135: etikett-CHECK-ene bruker eksplisitte kodepunktområder, ingen locale-avhengige POSIX-klasser (review delta D1; selve databasebeviset ligger i g3-label-locale.test.ts)", () => {
+    const inventory = readFileSync(join(ROOT, "modules/core/src/db/migrations/135_vision_embeddings_inventory.sql"), "utf8");
+    const invStart = inventory.indexOf("object_label        text NOT NULL CHECK (");
+    expect(invStart, "inventar-CHECK-en finnes").toBeGreaterThan(0);
+    const inventoryCheck = inventory.slice(invStart, inventory.indexOf("\n  ),", invStart));
+    expect(inventoryCheck.length, "hele inventar-CHECK-en er med").toBeGreaterThan(300);
+    expect(inventoryCheck).toMatch(/object_label !~ '\[\\x01-\\x1f/); // forbudt-klassen er eksplisitte områder
+    expect(inventoryCheck).not.toMatch(/translate\(/);
+    const cameras = readFileSync(join(ROOT, "modules/core/src/db/migrations/133_vision_cameras.sql"), "utf8");
+    const obsStart = cameras.indexOf("ADD CONSTRAINT vision_event_observations_object_label_check CHECK (");
+    expect(obsStart, "den milde CHECK-en finnes").toBeGreaterThan(0);
+    const mildCheck = cameras.slice(obsStart, cameras.indexOf(") NOT VALID;", obsStart));
+    expect(mildCheck.length, "hele den milde CHECK-en er med").toBeGreaterThan(300);
+    for (const [name, check] of [["135", inventoryCheck], ["133", mildCheck]] as const) {
+      expect(check, `${name}: POSIX-klasser som [:punct:] er locale-avhengige og avviste tall-tegn (kategori No) i glibc-UTF-8`).not.toMatch(/\[:[a-z]+:\]/);
+    }
   });
 
   it("NON-VAKUITET: vakten feller syntetiske brudd, ikke kommentarer", () => {

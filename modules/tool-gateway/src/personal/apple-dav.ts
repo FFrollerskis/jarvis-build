@@ -20,7 +20,11 @@ export interface DavCollection { name: string; kind: DavKind; /** Slutter alltid
 
 export type DavErrorCode =
   | "collection_not_allowed" | "invalid_input" | "invalid_text" | "invalid_uid" | "invalid_etag" | "unsupported_change" | "not_found" | "etag_mismatch" | "dav_credentials_unavailable" | "dav_unreachable"
-  | "dav_redirect_refused" | "dav_response_too_large" | "dav_auth_rejected" | "dav_malformed_response" | "dav_rejected" | "url_not_allowed";
+  | "dav_redirect_refused" | "dav_response_too_large" | "dav_auth_rejected" | "dav_malformed_response" | "dav_rejected" | "url_not_allowed"
+  // Stoppvakten (kill switch / tilbakekalt credential) FØR hver utsendelse - se `DavSendGuard`.
+  | "dav_kill_switch_active" | "dav_credential_revoked" | "dav_guard_unavailable"
+  // En hendelse MED deltakere: endring/sletting kan sende e-post til andre (iTIP) og krever eksplisitt eier-bekreftelse.
+  | "attendees_confirmation_required";
 export class DavError extends Error {
   constructor(readonly code: DavErrorCode, detail?: string) {
     super(detail === undefined ? code : `${code}:${detail}`);
@@ -38,13 +42,26 @@ export interface DavTransport { request(request: DavRequest): Promise<DavRespons
 const ENTRY = /^(calendar|reminders|contacts):([a-z0-9][a-z0-9_-]{0,39})=(https:\/\/\S+)$/;
 const PATH = /^\/[A-Za-z0-9._~%/@:+=-]*$/;
 
-/** Gyldig https-URL til en samling: DNS-navn med punktum (ikke IP/localhost), standardport, ingen brukerinfo/spørring/fragment, trygg sti. `null` = avvist. */
+const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+/** Jokertegn-DNS-tjenester som løser `<ip>.<tjeneste>` til IP-en: en vanlig tastefeil-/omvei-vei til localhost og interne adresser. */
+const WILDCARD_DNS = /(?:^|\.)(?:nip\.io|sslip\.io|xip\.io|traefik\.me|localtest\.me|lvh\.me|vcap\.me)$/;
+/** En IPv4 skjult i vertsnavnet (`127.0.0.1.nip.io`, `169-254-169-254.sslip.io`, `app.10.0.0.5.example.com`): fire oktetter 0-255 adskilt av `.`/`-`. */
+const embedsIpv4 = (host: string): boolean => {
+  const m = /(?:^|[.-])(\d{1,3})[.-](\d{1,3})[.-](\d{1,3})[.-](\d{1,3})(?:$|[.-])/.exec(host);
+  return m !== null && m.slice(1, 5).every((o) => Number(o) <= 255);
+};
+
+/**
+ * Gyldig https-URL til en samling: DNS-navn med punktum (ikke IP/localhost), standardport, ingen brukerinfo/spørring/fragment, trygg sti. `null` = avvist. Et TASTEFEIL-vern for eierens EGEN konfig (review B LOW-8), IKKE en
+ * SSRF-garanti: `localhost.` (sluttpunktum normaliseres bort), `*.localhost`, `*.internal`, jokertegn-DNS og en innebygd IPv4 avvises; `*.local` (mDNS; selv-hostet NAS) godtas bevisst. Selve utsendelsen går uansett via `guardedFetch` (D-436).
+ */
 export function normalizeCollectionUrl(raw: string): string | null {
   let url: URL;
   try { url = new URL(raw); } catch { return null; }
   if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.port !== "" || url.search !== "" || url.hash !== "") return null;
-  const host = url.hostname.toLowerCase();
-  if (!host.includes(".") || host.includes(":") || host === "localhost" || /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || !/^[a-z0-9.-]+$/.test(host)) return null;
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (host.length > 253 || !host.includes(".") || !host.split(".").every((label) => HOST_LABEL.test(label))) return null;
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal") || WILDCARD_DNS.test(host) || embedsIpv4(host)) return null;
   const path = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
   if (!PATH.test(path) || path.includes("..")) return null;
   return `https://${host}${path}`;
@@ -101,7 +118,8 @@ export function unfold(text: string): string[] {
   return lines.filter((l) => l.length > 0);
 }
 
-export interface Prop { name: string; params: Record<string, string>; value: string }
+/** `group`: vCard-gruppen (`item1.EMAIL` -> gruppe `ITEM1`, navn `EMAIL`; RFC 6350 §3.3). Apple bruker den for primære e-poster/telefoner og etiketter (`item1.X-ABLabel`). */
+export interface Prop { name: string; params: Record<string, string>; value: string; group?: string }
 export function parseProp(line: string): Prop | null {
   let inQuote = false;
   let cut = -1;
@@ -114,7 +132,8 @@ export function parseProp(line: string): Prop | null {
   const [name, ...rawParams] = line.slice(0, cut).split(";");
   const params: Record<string, string> = {};
   for (const p of rawParams) { const eq = p.indexOf("="); if (eq > 0) params[p.slice(0, eq).toUpperCase()] = p.slice(eq + 1).replace(/^"|"$/g, ""); }
-  return { name: (name as string).toUpperCase(), params, value: line.slice(cut + 1) };
+  const grouped = /^([A-Za-z0-9-]+)\.([A-Za-z0-9-]+)$/.exec(name as string);
+  return grouped ? { name: (grouped[2] as string).toUpperCase(), group: (grouped[1] as string).toUpperCase(), params, value: line.slice(cut + 1) } : { name: (name as string).toUpperCase(), params, value: line.slice(cut + 1) };
 }
 
 /** Finner den første komponenten med navnet (`BEGIN:NAME` ... tilhørende `END:NAME`, nesting telt) og gir indeksene samt egenskapene på DENS nivå (ikke i underkomponenter som VALARM). */
@@ -133,13 +152,26 @@ export function findComponent(lines: readonly string[], name: string): { start: 
   return null;
 }
 
+/** Apples etikett på en gruppert egenskap (`item1.X-ABLabel:Jobb`); (store bokstaver, slik `parseProp` normaliserer navnet). */
+const GROUP_LABEL = "X-ABLABEL";
+
 /** Erstatter/fjerner egenskaper på komponentens eget nivå; ALT annet (underkomponenter, ukjente egenskaper) står urørt. `null`/tom liste = fjern. Nye linjer settes inn rett før `END:`. */
 export function patchComponent(raw: string, component: string, changes: Record<string, string[] | null>): string {
   const lines = unfold(raw);
   const found = findComponent(lines, component);
   if (!found) throw new DavError("dav_malformed_response", `no_${component}`);
   const names = new Set(Object.keys(changes));
-  const drop = new Set(found.props.filter((p) => names.has(p.prop.name)).map((p) => p.index));
+  const hit = found.props.filter((p) => names.has(p.prop.name));
+  // En erstattet egenskap i en vCard-GRUPPE (`item1.EMAIL`) tar KUN gruppens etikett (`item1.X-ABLabel`) med seg, og bare når ingen annen egenskap står igjen i gruppen - ellers står en foreldreløs etikett igjen. En gruppe som blander egenskaper
+  // (`item1.EMAIL` + `item1.TEL`, eller en ukjent `item1.X-...`) beholder de andre egenskapene og etiketten (ingen datatap; delta-review B NY-3). Andre grupper rører vi ikke.
+  const hitIndexes = new Set(hit.map((p) => p.index));
+  const groups = new Set(hit.flatMap((p) => (p.prop.group === undefined ? [] : [p.prop.group])));
+  const orphanLabels = [...groups].flatMap((group) => {
+    const members = found.props.filter((p) => p.prop.group === group);
+    const survivors = members.filter((p) => !hitIndexes.has(p.index) && p.prop.name !== GROUP_LABEL);
+    return survivors.length === 0 ? members.filter((p) => p.prop.name === GROUP_LABEL) : [];
+  });
+  const drop = new Set([...hit, ...orphanLabels].map((p) => p.index));
   const added = Object.values(changes).flatMap((v) => v ?? []);
   const out: string[] = [];
   lines.forEach((line, i) => {
@@ -153,7 +185,13 @@ export function patchComponent(raw: string, component: string, changes: Record<s
 const pad = (n: number, w = 2): string => String(n).padStart(w, "0");
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
-/** `YYYY-MM-DD` (heldag) eller et ISO-tidspunkt (UTC) -> iCalendar-verdi og parametere. */
+/** Tidspunkt MED sone (`Z` eller ±hh:mm) - aldri uten (tolkes da som serverens lokale tid), aldri tekst rundt. Sekunder er valgfrie (brøkdel avkortes). */
+const DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+/**
+ * `YYYY-MM-DD` (heldag) eller et ISO-tidspunkt MED sone -> iCalendar-verdi (UTC) og parametere. STRENG (fiks-runde review B LOW-2): ugyldig dato (`2026-02-30`, kl 25) avvises i stedet for å skifte stille til 2. mars,
+ * og et tidspunkt uten sone avvises (ville blitt tolket som serverens lokale tid).
+ */
 export function toIcsDate(input: unknown, field: string): { value: string; allDay: boolean } {
   if (typeof input !== "string") throw new DavError("invalid_input", field);
   if (DATE_ONLY.test(input)) {
@@ -161,10 +199,23 @@ export function toIcsDate(input: unknown, field: string): { value: string; allDa
     if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== input) throw new DavError("invalid_input", field);
     return { value: input.replaceAll("-", ""), allDay: true };
   }
-  const t = Date.parse(input);
-  if (!Number.isFinite(t) || !/^\d{4}-\d{2}-\d{2}T/.test(input)) throw new DavError("invalid_input", field);
-  const d = new Date(t);
+  const m = DATETIME.exec(input);
+  if (!m) throw new DavError("invalid_input", field);
+  const [y, mo, day, h, mi, s] = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0)];
+  const wall = new Date(Date.UTC(y, mo - 1, day, h, mi, s));
+  if (wall.getUTCFullYear() !== y || wall.getUTCMonth() !== mo - 1 || wall.getUTCDate() !== day || h > 23 || mi > 59 || s > 59) throw new DavError("invalid_input", field);
+  const zone = m[7] as string;
+  const offsetMin = zone === "Z" ? 0 : (zone.startsWith("-") ? -1 : 1) * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(-2)));
+  if (Math.abs(offsetMin) > 14 * 60) throw new DavError("invalid_input", field);
+  const d = new Date(wall.getTime() - offsetMin * 60_000);
   return { value: `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`, allDay: false };
+}
+
+/** `null` = gyldig par. Begge må være samme type (heldag eller tidspunkt), og `end` kan ikke ligge før `start` (en blandet/omvendt hendelse er ugyldig iCalendar og ble tidligere overlatt til serveren). */
+export function eventRangeError(start: { value: string; allDay: boolean } | null, end: { value: string; allDay: boolean } | null): string | null {
+  if (start === null || end === null) return null;
+  if (start.allDay !== end.allDay) return "mixed_date_types";
+  return end.value < start.value ? "end_before_start" : null;
 }
 const stamp = (d: Date): string => toIcsDate(d.toISOString(), "stamp").value;
 const dateLine = (name: string, v: { value: string; allDay: boolean }): string => (v.allDay ? `${name};VALUE=DATE:${v.value}` : `${name}:${v.value}`);
@@ -229,6 +280,13 @@ export function propertyChanges(kind: DavKind, fields: unknown, now: Date): Reco
     text("SUMMARY", "summary", 200); text("LOCATION", "location", 200); text("DESCRIPTION", "description", 2000);
     if (f["status"] !== undefined) { if (typeof f["status"] !== "string" || !EVENT_STATUS.includes(f["status"])) throw new DavError("invalid_input", "status"); out["STATUS"] = [`STATUS:${f["status"]}`]; }
     for (const [key, name] of [["start", "DTSTART"], ["end", "DTEND"]] as const) if (f[key] !== undefined) out[name] = [dateLine(name, toIcsDate(f[key], key))];
+    // Begge i samme kall: samme type (heldag/tidspunkt) og `end` ikke før `start`. (Ved endring av KUN den ene sjekker klienten mot den eksisterende verdien.)
+    if (f["start"] !== undefined && f["end"] !== undefined) {
+      const bad = eventRangeError(toIcsDate(f["start"], "start"), toIcsDate(f["end"], "end"));
+      if (bad !== null) throw new DavError("invalid_input", bad);
+    }
+    // DURATION og DTEND utelukker hverandre i en VEVENT (RFC 5545 §3.6.1): en ny `end` fjerner en eksisterende DURATION.
+    if (f["end"] !== undefined) out["DURATION"] = null;
   } else if (kind === "reminders") {
     text("SUMMARY", "summary", 200); text("DESCRIPTION", "description", 2000);
     if (f["due"] !== undefined) out["DUE"] = f["due"] === null ? null : [dateLine("DUE", toIcsDate(f["due"], "due"))];
@@ -264,7 +322,8 @@ const extOf = (kind: DavKind): string => (kind === "contacts" ? ".vcf" : ".ics")
 const short = (v: string | undefined, max: number): string | undefined => (v === undefined ? undefined : v.slice(0, max));
 
 export interface DavItem {
-  kind: DavKind; uid: string; href: string; etag: string | null; recurring?: boolean;
+  /** `has_attendees` (hendelser og oppgaver): endring/sletting kan da sende e-post til deltakerne (iTIP, uverifisert mot iCloud) og krever eksplisitt eier-bekreftelse. */
+  kind: DavKind; uid: string; href: string; etag: string | null; recurring?: boolean; has_attendees?: boolean;
   summary?: string; start?: string; end?: string; all_day?: boolean; location?: string; description?: string; status?: string;
   due?: string; completed?: boolean; full_name?: string; emails?: string[]; phones?: string[]; org?: string; note?: string;
 }
@@ -283,10 +342,12 @@ export function itemFromResource(kind: DavKind, raw: string, href: string, etag:
     const s = fromIcsDate(by("DTSTART")[0]); const e = fromIcsDate(by("DTEND")[0]);
     set("summary", text("SUMMARY")); set("start", s?.iso); set("end", e?.iso); set("all_day", s?.allDay); set("location", text("LOCATION")); set("description", text("DESCRIPTION", 500)); set("status", text("STATUS"));
     item.recurring = by("RRULE").length > 0 || by("RECURRENCE-ID").length > 0 || by("RDATE").length > 0;
+    item.has_attendees = by("ATTENDEE").length > 0;
   } else if (kind === "reminders") {
     set("summary", text("SUMMARY")); set("due", fromIcsDate(by("DUE")[0])?.iso); set("description", text("DESCRIPTION", 500)); set("status", text("STATUS"));
     item.completed = by("STATUS")[0]?.value.trim().toUpperCase() === "COMPLETED" || by("COMPLETED").length > 0;
     item.recurring = by("RRULE").length > 0;
+    item.has_attendees = by("ATTENDEE").length > 0;
   } else {
     set("full_name", text("FN")); set("org", text("ORG")); set("note", text("NOTE", 500));
     item.emails = by("EMAIL").slice(0, LIST_MAX).map((p) => unescapeText(p.value).slice(0, 200));
@@ -299,7 +360,30 @@ export function itemFromResource(kind: DavKind, raw: string, href: string, etag:
 // WebDAV: forespørsler og multistatus
 // ---------------------------------------------------------------------------------------------------------------------
 const xmlEscape = (v: string): string => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-const xmlDecode = (v: string): string => v.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#13;/g, "\r").replace(/&#10;/g, "\n").replace(/&amp;/g, "&");
+/** Gyldig tegn fra en numerisk tegnreferanse (ikke surrogat, ikke utenfor Unicode); ellers tomt (aldri en kastet feil på fiendtlig input). */
+const charRef = (cp: number): string => (Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : "");
+/**
+ * Pakker ut `<![CDATA[...]]>`-seksjoner (første `]]>` etter åpningen avslutter; en ulukket åpning beholdes som den er). `indexOf`-løkke, LINJÆR: den gamle `/<!\[CDATA\[([\s\S]*?)\]\]>/g` lette etter `]]>` til slutten av teksten fra HVER ulukkede åpning,
+ * så `<![CDATA[` gjentatt uten lukking var kvadratisk (11,6 s på 1 MiB, delta-review B NY-1). Uten en lukking etter den første åpningen finnes ingen etter en senere heller, så løkken kan stoppe der.
+ */
+function stripCdata(v: string): string {
+  const OPEN = "<![CDATA[";
+  const CLOSE = "]]>";
+  let out = "";
+  let pos = 0;
+  for (;;) {
+    const open = v.indexOf(OPEN, pos);
+    if (open < 0) break;
+    const close = v.indexOf(CLOSE, open + OPEN.length);
+    if (close < 0) break;
+    out += v.slice(pos, open) + v.slice(open + OPEN.length, close);
+    pos = close + CLOSE.length;
+  }
+  return pos === 0 ? v : out + v.slice(pos);
+}
+/** `&amp;` sist (ellers dekodes `&amp;#xD;` dobbelt). Numeriske tegnreferanser (`&#xD;`, `&#13;`) dekodes - en server som sender `&#xD;&#10;` mellom linjene skal ikke gi `&#xD;`-haler (review B LOW-3). */
+const xmlDecode = (v: string): string => stripCdata(v).replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+  .replace(/&#x([0-9a-fA-F]{1,6});/g, (_m, hex: string) => charRef(Number.parseInt(hex, 16))).replace(/&#(\d{1,7});/g, (_m, dec: string) => charRef(Number(dec))).replace(/&amp;/g, "&");
 
 export function reportBody(kind: DavKind, query: { from?: string; to?: string; text?: string; includeCompleted?: boolean }): string {
   if (kind === "contacts") {
@@ -312,17 +396,46 @@ export function reportBody(kind: DavKind, query: { from?: string; to?: string; t
 }
 
 export interface MultistatusEntry { href: string; etag: string | null; data: string | null; status: number }
-/** Minimal og defensiv: ingen XML-parser (ingen DTD/entiteter prosesseres); responser med DOCTYPE/ENTITY avvises. */
+/**
+ * Linje-token: ett tagg-token (`<tag ...>`, `</tag>`). `[^<>]*` krysser aldri en `<`, så hvert forsøk er begrenset til neste `<` (den gamle `[\s\S]*?`-regexen var kvadratisk: 12,8 s på 1 MiB uten lukking, review B LOW-3). `(?![A-Za-z0-9-])` etter navnet
+ * hindrer at navnet gir fra seg tegn ett og ett: uten den prøvde motoren HVER kortere navnelengde, og `[^<>]*` skannet resten på nytt for hver (`<` + `a` x N uten `>` var fortsatt kvadratisk: 7,7 s på 128 KiB, minutter på 1 MiB, delta-review B NY-1).
+ * Treffene er identiske: det som følger et kortere navn er ellers `[^<>]*>`, som også følger det fulle navnet.
+ */
+const TAG_TOKEN = /<(\/?)(?:[A-Za-z0-9]+:)?([A-Za-z0-9-]+)(?![A-Za-z0-9-])[^<>]*>/g;
+
+/** Teksten i det FØRSTE elementet med dette lokale navnet (uten navnerom-prefiks), dekodet; `null` hvis det mangler eller ikke er lukket. Lineær i blokkens størrelse. */
+function elementText(block: string, name: string): string | null {
+  let contentStart = -1;
+  for (const m of block.matchAll(TAG_TOKEN)) {
+    if ((m[2] as string).toLowerCase() !== name) continue;
+    if (m[1] === "") {
+      if (m[0].endsWith("/>")) continue; // tomt element (`<D:getetag/>`)
+      if (contentStart < 0) contentStart = (m.index as number) + m[0].length;
+    } else if (contentStart >= 0) return xmlDecode(block.slice(contentStart, m.index).trim());
+  }
+  return null;
+}
+
+/** Minimal og defensiv: ingen XML-parser (ingen DTD/entiteter prosesseres); responser med DOCTYPE/ENTITY avvises. LINJÆR (ingen kvadratisk regex). */
 export function parseMultistatus(xml: string): MultistatusEntry[] {
   if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new DavError("dav_malformed_response", "doctype");
   const out: MultistatusEntry[] = [];
-  const tag = (block: string, name: string): string | null => { const m = new RegExp(`<(?:[A-Za-z0-9]+:)?${name}[^>]*>([\\s\\S]*?)</(?:[A-Za-z0-9]+:)?${name}>`, "i").exec(block); return m ? xmlDecode((m[1] as string).trim()) : null; };
-  for (const m of xml.matchAll(/<(?:[A-Za-z0-9]+:)?response[ >][\s\S]*?<\/(?:[A-Za-z0-9]+:)?response>/gi)) {
-    const block = m[0];
-    const href = tag(block, "href");
+  let start = -1;
+  for (const m of xml.matchAll(TAG_TOKEN)) {
+    if ((m[2] as string).toLowerCase() !== "response") continue;
+    const at = m.index as number;
+    if (m[1] === "") {
+      if (start < 0 && !m[0].endsWith("/>")) start = at;
+      continue;
+    }
+    if (start < 0) continue;
+    const block = xml.slice(start, at + m[0].length);
+    start = -1;
+    const href = elementText(block, "href");
     if (href === null) continue;
-    const status = /HTTP\/1\.[01]\s+(\d{3})/.exec(block);
-    out.push({ href, etag: tag(block, "getetag"), data: tag(block, "calendar-data") ?? tag(block, "address-data"), status: status ? Number(status[1]) : 200 });
+    // Statuskoden fra STATUS-ELEMENTET (ikke et tilfeldig `HTTP/1.1 404` i hendelsens tekst).
+    const status = /HTTP\/1\.[01]\s+(\d{3})/.exec(elementText(block, "status") ?? "");
+    out.push({ href, etag: elementText(block, "getetag"), data: elementText(block, "calendar-data") ?? elementText(block, "address-data"), status: status ? Number(status[1]) : 200 });
   }
   return out;
 }
@@ -339,10 +452,18 @@ export function uidFromKey(collection: string, idempotencyKey: string): string {
 }
 
 /** Feil som BEVISER at forespørselen ikke ble utført (avvist før sending eller av serveren). Alt annet etter en mutasjon (tidsavbrudd, nullstilt tilkobling, for stort svar) er et UAVKLART utfall. */
-const DEFINITELY_NOT_APPLIED: ReadonlySet<string> = new Set(["url_not_allowed", "dav_credentials_unavailable", "dav_auth_rejected", "dav_redirect_refused"]);
+const DEFINITELY_NOT_APPLIED: ReadonlySet<string> = new Set([
+  "url_not_allowed", "dav_credentials_unavailable", "dav_auth_rejected", "dav_redirect_refused", "dav_kill_switch_active", "dav_credential_revoked", "dav_guard_unavailable"
+]);
 const definitelyNotApplied = (err: unknown): boolean => err instanceof DavError && DEFINITELY_NOT_APPLIED.has(err.code);
 
 export interface AppleDavClientOptions { transport: DavTransport; collections: readonly DavCollection[]; now?: () => Date }
+
+/**
+ * `allowAttendeeNotification`: eieren bekrefter at endring/sletting av en hendelse MED deltakere er ønsket selv om serveren kan sende e-post til dem (server-side scheduling/iTIP, RFC 6638 - IKKE verifisert mot iCloud; en sendt e-post kan
+ * ikke trekkes tilbake). Uten den nektes endring/sletting av en slik hendelse (`attendees_confirmation_required`, ingenting sendt).
+ */
+export interface DavMutationOptions { allowAttendeeNotification?: boolean }
 
 export class AppleDavClient {
   private readonly transport: DavTransport;
@@ -428,8 +549,10 @@ export class AppleDavClient {
     const c = this.collection(name);
     if (typeof idempotencyKey !== "string" || idempotencyKey.length < 8 || idempotencyKey.length > 128) throw new DavError("invalid_input", "idempotency_key");
     const changes = propertyChanges(c.kind, fields, this.now());
-    if (c.kind === "calendar" && (changes["SUMMARY"] === undefined || changes["DTSTART"] === undefined)) throw new DavError("invalid_input", "summary_and_start_required");
-    if (c.kind === "reminders" && changes["SUMMARY"] === undefined) throw new DavError("invalid_input", "summary_required");
+    // En tom/null/blank tittel er «mangler» (`summary: ""` ble tidligere `null` = ingen SUMMARY, men passerte «kreves»-sjekken; review B LOW-2).
+    const blank = (v: string[] | null | undefined): boolean => v === undefined || v === null || /^[A-Z-]+:\s*$/.test(v[0] ?? "");
+    if (c.kind === "calendar" && (blank(changes["SUMMARY"]) || changes["DTSTART"] === undefined)) throw new DavError("invalid_input", "summary_and_start_required");
+    if (c.kind === "reminders" && blank(changes["SUMMARY"])) throw new DavError("invalid_input", "summary_required");
     if (c.kind === "contacts" && changes["FN"] === undefined) throw new DavError("invalid_input", "full_name_required");
     const uid = uidFromKey(c.name, idempotencyKey);
     let response: DavResponse;
@@ -447,7 +570,7 @@ export class AppleDavClient {
     throw new DavError("dav_rejected", String(response.status));
   }
 
-  async update(name: unknown, uid: unknown, expectedEtag: unknown, fields: unknown): Promise<DavMutationResult> {
+  async update(name: unknown, uid: unknown, expectedEtag: unknown, fields: unknown, options: DavMutationOptions = {}): Promise<DavMutationResult> {
     const c = this.collection(name);
     const id = assertUid(uid);
     const etag = assertEtag(expectedEtag);
@@ -457,7 +580,20 @@ export class AppleDavClient {
     if (current === null) throw new DavError("not_found");
     if (current.etag !== etag) throw new DavError("etag_mismatch");
     const existing = itemFromResource(c.kind, current.body, this.hrefFor(c, id), current.etag);
+    // Deltakere: serveren kan sende e-post til dem ved endring (iTIP). Uten eierens eksplisitte bekreftelse sendes INGENTING (review B LOW-7).
+    if (existing?.has_attendees === true && options.allowAttendeeNotification !== true) throw new DavError("attendees_confirmation_required");
     if (existing?.recurring === true && (changes["DTSTART"] !== undefined || changes["DTEND"] !== undefined || changes["DUE"] !== undefined)) throw new DavError("unsupported_change", "recurring_time_change");
+    // Ved endring av KUN start eller end måles den nye verdien mot den eksisterende: samme type (heldag/tidspunkt) og `end` ikke før `start` (review B LOW-2).
+    if (c.kind === "calendar" && (changes["DTSTART"] !== undefined || changes["DTEND"] !== undefined)) {
+      const side = (key: "start" | "end"): { value: string; allDay: boolean } | null => {
+        const given = (fields as Record<string, unknown>)[key];
+        const source = given !== undefined ? given : existing?.[key];
+        if (source === undefined) return null;
+        try { return toIcsDate(source, key); } catch { return null; } // en eksisterende verdi vi ikke forstår hindrer ikke endringen
+      };
+      const bad = eventRangeError(side("start"), side("end"));
+      if (bad !== null) throw new DavError("invalid_input", bad);
+    }
     const component = componentOf(c.kind);
     const seq = c.kind === "contacts" ? 0 : Number(findComponent(unfold(current.body), component)?.props.find((p) => p.prop.name === "SEQUENCE")?.prop.value ?? 0);
     const patched = patchComponent(current.body, component, {
@@ -478,10 +614,18 @@ export class AppleDavClient {
     throw new DavError("dav_rejected", String(response.status));
   }
 
-  async remove(name: unknown, uid: unknown, expectedEtag: unknown): Promise<DavMutationResult> {
+  async remove(name: unknown, uid: unknown, expectedEtag: unknown, options: DavMutationOptions = {}): Promise<DavMutationResult> {
     const c = this.collection(name);
     const id = assertUid(uid);
     const etag = assertEtag(expectedEtag);
+    // Hendelser/oppgaver MED deltakere: sletting kan sende avlysning på e-post til andre (iTIP). Forhåndslesing (kun lesing, ingenting endret) avgjør; `If-Match` på DELETE sørger for at det vi leste er det som slettes.
+    if (c.kind !== "contacts") {
+      const current = await this.raw(c, id);
+      if (current !== null) {
+        if (current.etag !== etag) throw new DavError("etag_mismatch");
+        if (itemFromResource(c.kind, current.body, this.hrefFor(c, id), current.etag)?.has_attendees === true && options.allowAttendeeNotification !== true) throw new DavError("attendees_confirmation_required");
+      }
+    }
     let response: DavResponse;
     try {
       response = await this.send({ method: "DELETE", url: this.hrefFor(c, id), headers: { "If-Match": etag } });
@@ -526,8 +670,20 @@ function expectedMatches(item: DavItem, expected: Record<string, string[] | null
 /** All utgående leverandørtrafikk i `tool-gateway/src` går via `guardedFetch` (D-436: rå-URL-sjekk, ingen redirect, tidsgrense); aldri rå `fetch`. */
 export type DavFetch = typeof guardedFetch;
 
+/**
+ * Stoppvakt som kjøres FØR HVER utsendelse (også lesing; en operasjon som `update` sender flere forespørsler, og en kill switch midt i skal stoppe den neste): `null` = fortsett, ellers hvorfor det stoppes. Gatewayen
+ * hørte kill switch og credential-revokering for alle verktøykall; DAV-rutene går utenom gatewayen (ruter, ikke verktøy), så uten denne vakten stoppet verken `kill switch` eller `revokeCredential` utgående skriving mot iCloud
+ * (fiks-runde review B, MEDIUM-1). Kaster vakten, er svaret fail-closed (`dav_guard_unavailable`).
+ */
+export type DavSendGuard = () => Promise<"kill_switch_active" | "credential_revoked" | null>;
+
 export interface FetchDavTransportOptions {
   collections: readonly DavCollection[];
+  /**
+   * Stoppvakten (kill switch + tilbakekalte credentials) FØR hver utsendelse. PÅKREVD (fiks-runde 2, delta-review B NY-4): en ny wiring som glemte den ville sendt alt uten at eieren kunne stoppet det, og et valgfritt felt kompilerer
+   * stille. Tester og frakoblet bruk sier det eksplisitt med `async () => null` («ingen stopp»). En kaller uten typesjekk (cast/JS) uten vakt får en kastet feil allerede ved konstruksjon.
+   */
+  guard: DavSendGuard;
   /** Hentes per forespørsel fra vaulten; `null` = ikke konfigurert (fail closed). Verdiene logges aldri. */
   credentials: () => Promise<{ user: string; password: string } | null>;
   /** Standard `guardedFetch`; tester injiserer en fake (ingen nettkall). */
@@ -566,6 +722,8 @@ async function readCapped(response: Response, maxBytes: number): Promise<string>
 export class FetchDavTransport implements DavTransport {
   private readonly fetchFn: DavFetch;
   constructor(private readonly options: FetchDavTransportOptions) {
+    // Påkrevd i typen; her også i kjøretid for en kaller som omgår typene: en transport uten stoppvakt skal ikke kunne bygges (fail closed).
+    if (typeof options.guard !== "function") throw new Error("dav_guard_required");
     this.fetchFn = options.fetchFn ?? guardedFetch;
   }
 
@@ -573,6 +731,10 @@ export class FetchDavTransport implements DavTransport {
     const url = (() => { try { return new URL(request.url); } catch { return null; } })();
     const allowed = url !== null && url.protocol === "https:" && url.port === "" && this.options.collections.some((c) => `https://${url.hostname.toLowerCase()}${url.pathname}`.startsWith(c.url));
     if (!allowed) throw new DavError("url_not_allowed");
+    // Stoppvakten FØR credentials leses og FØR noe sendes (kill switch / tilbakekalt credential = ingenting forlater huset).
+    let denial: Awaited<ReturnType<DavSendGuard>>;
+    try { denial = await this.options.guard(); } catch { throw new DavError("dav_guard_unavailable"); }
+    if (denial !== null) throw new DavError(denial === "credential_revoked" ? "dav_credential_revoked" : "dav_kill_switch_active");
     const credentials = await this.options.credentials();
     if (!credentials || credentials.user.length === 0 || credentials.password.length === 0) throw new DavError("dav_credentials_unavailable");
     // Eget tak (standard 20 s) SAMMENSATT med et evt. forespørsels-/kallsignal (aldri bare eget signal, D-471); et allerede avbrutt kall sender ingenting.

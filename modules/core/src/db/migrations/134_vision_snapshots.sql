@@ -20,6 +20,12 @@
 --
 -- Biometri: tabellen har ingen kolonne for ansikt/identitet/mal. Bildet er et vanlig øyeblikksbilde fra én hendelse - aldri en
 -- kontinuerlig strøm (CHECK på byte_length, én rad per kilde-hendelse via unik nøkkel).
+--
+-- ENDRET PÅ STEDET FØR FØRSTE UTGIVELSE (review B MEDIUM-D2): 133-136 er redigert direkte (flere ganger, i review-rundene) i stedet for å få nye
+-- migrasjoner. Ingen utrullet database har kjørt en tidligere variant, og testklyngene er flyktige. En SANDKASSE-DB som kjørte en tidligere variant
+-- av denne filen må GJENSKAPES (drop + migrer på nytt): runMigrations feiler høyt med `migration_checksum_mismatch` (D-395) i stedet for å
+-- anvende den endrede filen, og planMigrations() melder den under `checksum_mismatches`. Fra første utgivelse gjelder vanlig regel: en anvendt
+-- migrasjon endres aldri, det lages en NY. Se docs/runbooks/WPG3_VISION.md (avsnitt «Utrulling og oppgradering»).
 
 CREATE TABLE vision_snapshots (
   snapshot_id          text PRIMARY KEY,
@@ -60,7 +66,9 @@ ALTER TABLE vision_snapshots ADD CONSTRAINT vision_snapshots_source_event_key
   UNIQUE (tenant_id, memory_space_id, person_id, source_type, source_instance_id, source_event_id);
 ALTER TABLE vision_snapshots ADD CONSTRAINT vision_snapshots_storage_key_key UNIQUE (tenant_id, storage_backend, storage_key);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON vision_snapshots TO jarvis_app;
+-- Minste privilegium (review B-L9): kun tilstandsovergangen pending -> stored (`markStoredInTransaction`) kan oppdateres; lagringsnøkkel, hash, lengde, person og kilde kan aldri omskrives av runtime-rollen.
+GRANT SELECT, INSERT, DELETE ON vision_snapshots TO jarvis_app;
+GRANT UPDATE (state, stored_at) ON vision_snapshots TO jarvis_app;
 ALTER TABLE vision_snapshots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vision_snapshots FORCE ROW LEVEL SECURITY;
 CREATE POLICY vision_snapshots_tenant ON vision_snapshots
@@ -87,7 +95,9 @@ CREATE TABLE vision_snapshot_tombstones (
   UNIQUE (tenant_id, storage_backend, storage_key)
 );
 CREATE INDEX vision_snapshot_tombstones_work_idx ON vision_snapshot_tombstones (tenant_id, memory_space_id, created_at);
-GRANT SELECT, INSERT, UPDATE, DELETE ON vision_snapshot_tombstones TO jarvis_app;
+-- Minste privilegium (review B-L9): reaperen oppdaterer kun forsøkstelling og feilkode; lagringsnøkkelen kan aldri omskrives.
+GRANT SELECT, INSERT, DELETE ON vision_snapshot_tombstones TO jarvis_app;
+GRANT UPDATE (attempts, last_attempt_at, last_error) ON vision_snapshot_tombstones TO jarvis_app;
 ALTER TABLE vision_snapshot_tombstones ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vision_snapshot_tombstones FORCE ROW LEVEL SECURITY;
 CREATE POLICY vision_snapshot_tombstones_tenant ON vision_snapshot_tombstones

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import { VisionCameraService, type VisionCamera } from "../src/cameras.ts";
-import { captureSigningBytes, CAPTURE_MAX_PENDING_PER_CAMERA, VisionCaptureError, VisionCaptureService, type CaptureContext, type CaptureRequest } from "../src/capture.ts";
+import { captureSigningBytes, CAPTURE_MAX_PENDING_PER_CAMERA, VisionCaptureError, VisionCaptureService, type CaptureContext, type CaptureDeviceRegistry, type CaptureRequest } from "../src/capture.ts";
 import { VisionClassifier } from "../src/classifier.ts";
 import { VisionEmbeddingService } from "../src/embeddings.ts";
 import { VisionInventoryService } from "../src/inventory.ts";
@@ -11,6 +11,7 @@ import { VisionSnapshotService } from "../src/snapshots.ts";
 import { LocalFsStorageAdapter } from "../src/storage.ts";
 import { FakeDevice, TestDeviceRegistry } from "./support/fake-device.ts";
 import { detectionsJson, makeJpeg, NOT_AN_IMAGE, ScriptedGateway, seedTenant, startVisionDb, type VisionDb } from "./support/harness.ts";
+import { jpegBytes } from "./support/images.ts";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,12 +42,12 @@ const expectCode = async (promise: Promise<unknown>, code: string): Promise<void
   await expect(promise).rejects.toMatchObject({ name: "VisionCaptureError", code });
 };
 
-function makeService(over: { pipelineVision?: VisionService } = {}): VisionCaptureService {
+function makeService(over: { pipelineVision?: VisionService; devices?: CaptureDeviceRegistry } = {}): VisionCaptureService {
   const pipeline = new VisionIngestPipeline({
     pool: db.app, vision: over.pipelineVision ?? vision, classifier: new VisionClassifier({ gateway }), snapshots, embeddings: new VisionEmbeddingService(db.app, new LocalHashEmbedding()),
     inventory: new VisionInventoryService(db.app), enabled: true, storeSnapshots: true
   });
-  return new VisionCaptureService(db.app, cameras, pipeline, registry, { now: () => new Date(clock) });
+  return new VisionCaptureService(db.app, cameras, pipeline, over.devices ?? registry, { now: () => new Date(clock) });
 }
 
 beforeAll(async () => {
@@ -135,6 +136,30 @@ describe("engangsbruk og binding", () => {
     expect(gateway.calls).toHaveLength(1);
   });
 
+  it("DETERMINISTISK barriere (review B-L6): alle tre opplastinger har passert state-sjekken FØR noen forbruker - nøyaktig én vinner, én modellkjøring (en claim uten state = 'pending' gir tre)", async () => {
+    const requested = await request();
+    const bytes = makeJpeg();
+    const upload = phone.upload(requested, bytes);
+    // Enhetsoppslaget skjer ETTER at forespørselen er lest som `pending` og FØR den forbrukes: en lås som slipper dem først når alle tre har kommet hit, gjør kappløpet deterministisk (ingen sleep).
+    let arrived = 0;
+    const release: Array<() => void> = [];
+    const latch: CaptureDeviceRegistry = {
+      async approverFor(deviceId, tenantId) {
+        arrived += 1;
+        if (arrived >= 3) for (const r of release) r();
+        else await new Promise<void>((resolve) => { release.push(resolve); setTimeout(resolve, 10_000).unref(); });
+        return registry.approverFor(deviceId, tenantId);
+      }
+    };
+    const racing = makeService({ devices: latch });
+    const results = await Promise.allSettled([1, 2, 3].map(() => racing.submitUpload({ tenant_id: T.tenant, memory_space: "home", task_id: "t" }, upload, bytes)));
+    expect(arrived).toBe(3); // alle tre nådde låsen (altså: alle leste `pending`)
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    for (const failed of results.filter((r) => r.status === "rejected")) expect((failed as PromiseRejectedResult).reason).toMatchObject({ code: "request_not_pending" });
+    expect(gateway.calls).toHaveLength(1);
+    expect(await count(`SELECT count(*)::int AS n FROM vision_event_observations WHERE source_event_id LIKE $1`, [`${requested.request_id}%`])).toBe(1);
+  });
+
   it("signaturen er bundet til forespørselen: en signatur for forespørsel A kan ikke brukes mot forespørsel B", async () => {
     const a = await request();
     const b = await request();
@@ -149,7 +174,9 @@ describe("engangsbruk og binding", () => {
     const bytes = makeJpeg();
     const upload = phone.upload(requested, bytes);
     const tampered = Uint8Array.from(bytes);
-    tampered[20] = (tampered[20] as number) ^ 0xff;
+    // en byte i innholdet (ikke i bildehodet: et ødelagt hode avvises av bildekontrollen først, se A-L6-testene)
+    const last = tampered.length - 1;
+    tampered[last] = (tampered[last] as number) ^ 0xff;
     await expectCode(service.submitUpload({ tenant_id: T.tenant, memory_space: "home", task_id: "t" }, upload, tampered), "hash_mismatch");
     const recomputed = phone.upload(requested, tampered);
     await expect(service.submitUpload({ tenant_id: T.tenant, memory_space: "home", task_id: "t" }, { ...recomputed, sha256: upload.sha256 }, tampered)).rejects.toMatchObject({ code: "invalid_signature" });
@@ -209,6 +236,11 @@ describe("engangsbruk og binding", () => {
     const big = new Uint8Array(6 * 1024 * 1024);
     await expectCode(service.submitUpload(ctxUpload, phone.upload(requested, big), big), "upload_size_mismatch");
     await expectCode(service.submitUpload(ctxUpload, phone.upload(requested, NOT_AN_IMAGE), NOT_AN_IMAGE), "image_unsupported_format");
+    // review A-L6: pikselbombe (liten fil, enorme mål) og et hode uten lesbare mål avvises FØR forbruk og før modellen
+    const bomb = jpegBytes({ width: 60_000, height: 60_000 });
+    await expectCode(service.submitUpload(ctxUpload, phone.upload(requested, bomb), bomb), "image_dimensions_too_large");
+    const headerOnly = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 2, 3, 4]);
+    await expectCode(service.submitUpload(ctxUpload, phone.upload(requested, headerOnly), headerOnly), "image_dimensions_unreadable");
     await expectCode(service.submitUpload(ctxUpload, phone.upload(requested, bytes, { media_type: "image/png" }), bytes), "image_content_type_mismatch");
     await expectCode(service.submitUpload(ctxUpload, { ...phone.upload(requested, bytes), media_type: "video/mp4" }, bytes), "upload_malformed");
     expect((await db.admin.query(`SELECT state FROM vision_capture_requests WHERE request_id = $1`, [requested.request_id])).rows[0].state).toBe("pending");
