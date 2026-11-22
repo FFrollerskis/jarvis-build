@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // WP-N1 (K7e): MUTANTSETTET. Hver mutant er én tekstendring i produksjonskoden som SKAL få minst én N1-test til å feile («drept»).
-// Kjør fra repo-roten (DB-testene kan ikke kjøre som root: `N1_RUN_AS=postgres node apps/api/test/support/wpn1-mutants.mjs [id ...]`).
+// Kjør fra repo-roten (DB-testene kan ikke kjøre som root: `N1_RUN_AS=postgres node apps/api/test/support/wpn1-mutants.mjs [id ...]`). Antall vitest-arbeidere: `N1_WORKERS` (standard 2).
 // Filen gjenopprettes ALLTID etter hver mutant (også ved feil). `--list` skriver kun settet. Et mønster som ikke lenger finnes nøyaktig én gang gir INVALID
 // (kildekoden har endret seg - oppdater mutanten, ikke testen). Overlevende mutanter må enten drepes av en ny test eller begrunnes som ekvivalente (se `equivalent`).
 import { spawnSync } from "node:child_process";
@@ -18,6 +18,9 @@ const STORE_TESTS = ["modules/core/test/wpn1-messages-restricted.test.ts"];
 const NEST = ["apps/api/test/wpn1-nested-finance-lock.test.ts"];
 const PRED = ["apps/api/test/wpn1-lock-predicate.test.ts", "apps/api/test/wpn1-nested-finance-lock.test.ts"];
 const DELIV = ["apps/api/test/wpn1-job-delivery.test.ts"];
+const JOBSTATUS = ["apps/api/test/wpn1-job-status.test.ts"];
+const CONF = ["apps/api/test/wpn1-confirmation-path.test.ts"];
+const GUARDENV = ["apps/api/test/wpn1-guard-env.test.ts"];
 const FAST = ["apps/api/test/wpn1-council-fast.test.ts"];
 const EXEC_SVC = "modules/executive/src/service.ts";
 const EXEC_TR = "modules/executive/src/transport.ts";
@@ -27,6 +30,8 @@ const MAIN = "apps/api/src/main.ts";
 const TTR = "apps/api/src/tool-turn-route.ts";
 const CONV = "apps/api/src/conversation.ts";
 const GUARD = "apps/api/src/restricted-context-guard.ts";
+const SERVER = "apps/api/src/server.ts";
+const CSTORE = "modules/core/src/services/confirmation-store.ts";
 const SENS = "modules/model-gateway/src/content-sensitivity.ts";
 const GW = "modules/tool-gateway/src/gateway.ts";
 const MAN = "modules/tool-gateway/src/tool-manifest.ts";
@@ -113,6 +118,35 @@ export const MUTANTS = [
   ["M88", "F-A5: history:restricted-merknaden lover usann varighet («til emnet er borte»)", TTR, '? " Samtalen holdes lokal så lenge en begrenset melding er blant de siste meldingene."', '? " Dette varer til emnet ikke lenger er blant de siste meldingene."', FAST],
   ["M89", "F-A2: restricted levering lagres uten merke (tre argumenter)", CJ, 'await this.options.saveMessage({ ...base, session_id: sessionId }, "assistant", text, { restricted: true });', 'await this.options.saveMessage({ ...base, session_id: sessionId }, "assistant", text);', DELIV],
   ["M90", "F-A5/X01: turer låst KUN av et arvet merke (history:restricted) merkes ikke (alternativ (b) lekker)", CONV, 'if (marker && primaryView.sensitivityDecision.sensitivity === "SECRET_RESTRICTED") await marker.lock(primaryView.sensitivityDecision.reasons);', 'if (marker && primaryView.sensitivityDecision.sensitivity === "SECRET_RESTRICTED" && primaryView.sensitivityDecision.reasons.some((r) => r !== "history:restricted")) await marker.lock(primaryView.sensitivityDecision.reasons);', ENGINE],
+  // ---- Fiks-runde 2 (F2-B1, F2-B2, F2-A1, F2-A3): mutanter for tilbakehold av jobbresultater, hurtigbanens jobbstatus, bekreftelsesbanen og executive-prediktatet ----
+  ["M92", "F2-B1: ChatJobs.get velger ikke restricted_origin (tilbakehold kan aldri utløses ved id)", CJ, "contract->'input'->'data'->>'restricted_origin' AS restricted_origin\n           FROM tasks WHERE task_id = $1 AND owner_person_id = $2 AND ${DELEGATED}", "NULL::text AS restricted_origin\n           FROM tasks WHERE task_id = $1 AND owner_person_id = $2 AND ${DELEGATED}", JOBSTATUS],
+  ["M93", "F2-B1: ChatJobs.list velger ikke restricted_origin (tilbakehold kan aldri utløses i listen)", CJ, "contract->'input'->'data'->>'restricted_origin' AS restricted_origin\n           FROM tasks\n          WHERE owner_person_id = $1", "NULL::text AS restricted_origin\n           FROM tasks\n          WHERE owner_person_id = $1", JOBSTATUS],
+  ["M94", "F2-B1: tilbakeholds-prediktatet invertert (lokal holdes tilbake, sky slipper)", GUARD, "  return !financeLockServedLocally(model);\n}", "  return financeLockServedLocally(model);\n}", [...PRED, ...JOBSTATUS]],
+  ["M95", "F2-B1: fail-open ved tom/blank leverandør i tilbakeholds-prediktatet", GUARD, "model.provider.trim() === \"\") return true;\n  return !financeLockServedLocally(model);", "model.provider.trim() === \"\") return false;\n  return !financeLockServedLocally(model);", [...PRED, ...JOBSTATUS]],
+  ["M96", "F2-B1: det begrensede viewet viser fortsatt tittelen (forespørselens første tegn)", CJ, "    title: WITHHELD_JOB_TITLE,\n    status: r.status,", "    title: r.goal,\n    status: r.status,", JOBSTATUS],
+  ["M97", "F2-B1: `withheld`-feltet legges til i det vanlige viewet også (flagg AV: nytt felt)", CJ, "    delivered: r.delivered_at !== null\n  };\n}", "    delivered: r.delivered_at !== null,\n    withheld: false as never\n  };\n}", JOBSTATUS],
+  ["M98", "F2-B1: transporten holder alltid tilbake (predikatet ignoreres, flagg AV og lokal modell mister viewet)", CJ, "const withhold = this.withholdRestrictedFromCloud?.(context?.servingModel) === true;", "const withhold = true;", JOBSTATUS],
+  ["M99", "F2-B1: listen glemmer tilbakeholdet (list-kallet sender ikke valget)", CJ, "const jobs = withhold ? await this.jobs.list(identity, 8, opts) : await this.jobs.list(identity, 8);", "const jobs = await this.jobs.list(identity, 8);", JOBSTATUS],
+  ["M100", "F2-B1: id-oppslaget glemmer tilbakeholdet (get-kallet sender ikke valget)", CJ, "const job = withhold ? await this.jobs.get(identity, id, opts) : await this.jobs.get(identity, id);", "const job = await this.jobs.get(identity, id);", JOBSTATUS],
+  ["M101", "F2-B1: main.ts gir transporten predikatet ubetinget (flagg AV holder også tilbake)", MAIN, "restrictedContextGuard.enabled ? new TasksDelegateTransport(taskService, chatJobs, withholdsRestrictedJobFromCloud) : new TasksDelegateTransport(taskService, chatJobs)", "new TasksDelegateTransport(taskService, chatJobs, withholdsRestrictedJobFromCloud)", JOBSTATUS],
+  ["M102", "F2-B1: hurtigbanens jobbstatus låser aldri turen (rader lagres umerket)", CONV, "if (restrictedJob) await marker.lock([\"fast_intent:task_status\"]);", "if (false && restrictedJob) await marker.lock([\"fast_intent:task_status\"]);", JOBSTATUS],
+  ["M103", "F2-B1: fail-open når jobbens opprinnelse ikke kan avgjøres (oppslagsfeil gir ikke lås)", CONV, ".isRestricted(identity, intent.task_id).catch(() => true);", ".isRestricted(identity, intent.task_id).catch(() => false);", JOBSTATUS],
+  ["M104", "F2-B1: main.ts kobler `jobOrigin` ubetinget (flagg AV slår opp jobbens opprinnelse)", MAIN, "...(restrictedContextGuard.enabled ? { jobOrigin: { isRestricted: (identity: Parameters<ChatJobs[\"isRestrictedOrigin\"]>[0], taskId: string) => chatJobs.isRestrictedOrigin(identity, taskId) } } : {}),", "jobOrigin: { isRestricted: (identity: Parameters<ChatJobs[\"isRestrictedOrigin\"]>[0], taskId: string) => chatJobs.isRestrictedOrigin(identity, taskId) },", JOBSTATUS],
+  ["M105", "F2-B1: isRestrictedOrigin regner enhver ikke-tom nøkkel som låst (false/«false» også)", CJ, "= 'true' AS restricted FROM tasks WHERE task_id = $1", "IS NOT NULL AS restricted FROM tasks WHERE task_id = $1", JOBSTATUS],
+  ["M106", "F2-B1: det begrensede viewet viser fortsatt resultatteksten", CJ, "    result_text: null,\n    error: null,\n    created_at: iso(r.created_at),", "    result_text: typeof r.result?.text === \"string\" ? r.result.text : null,\n    error: null,\n    created_at: iso(r.created_at),", JOBSTATUS],
+  ["M107", "F2-B1: det begrensede viewet viser fortsatt feilteksten", CJ, "    result_text: null,\n    error: null,\n    created_at: iso(r.created_at),", "    result_text: null,\n    error: r.last_error,\n    created_at: iso(r.created_at),", JOBSTATUS],
+  ["M108", "F2-B1: merknaden bærer et tall (jobbtelling) - den skal være uten sifre", CJ, "Si det kort til Tobias, uten å gjette på innholdet.", "Si det kort til Tobias (se jobb 3), uten å gjette på innholdet.", JOBSTATUS],
+  ["M109", "F2-B2: sveipet merker kun FULLFØRTE jobber (feilede/avbrutte leveres umerket)", CJ, "if (row.restricted_origin === \"true\") await this.options.saveMessage(", "if (row.restricted_origin === \"true\" && view.status === \"completed\") await this.options.saveMessage(", DELIV],
+  ["M110", "F2-A1: kortet får ikke grunnen `restricted_turn` fra en låst tur", MESH, ", ...(turn?.restricted === true ? [RESTRICTED_TURN_REASON] : [])", "", CONF],
+  ["M111", "F2-A1: approveAndTake returnerer ikke kortets taint_reasons", CSTORE, "taint_reasons: Array.isArray(row.taint_reasons) ? row.taint_reasons : [] };", "taint_reasons: [] };", CONF],
+  ["M112", "F2-A1: /confirmations sender ikke restrictedOrigin (kontrakten mister restricted_origin)", SERVER, "        ...(confirmationRestrictsOrigin(taken) ? { restrictedOrigin: true as const } : {})\n", "", CONF],
+  ["M113", "F2-A1: restrictedOrigin sendes for FEIL verktøy (enhver handling med grunnen)", GUARD, "return taken.tool_id === \"tasks\" && taken.action === \"delegate_background_task\" && (taken.taint_reasons ?? []).includes(RESTRICTED_TURN_REASON);", "return (taken.taint_reasons ?? []).includes(RESTRICTED_TURN_REASON);", CONF],
+  ["M114", "F2-A1: restrictedOrigin sendes for enhver delegering (uten grunnen i kortet)", GUARD, "return taken.tool_id === \"tasks\" && taken.action === \"delegate_background_task\" && (taken.taint_reasons ?? []).includes(RESTRICTED_TURN_REASON);", "return taken.tool_id === \"tasks\" && taken.action === \"delegate_background_task\";", CONF],
+  ["M115", "F2-A1: grunnen legges på kortet ubetinget (også uten låst tur - flagg AV endrer kortet)", MESH, "...(turn?.restricted === true ? [RESTRICTED_TURN_REASON] : [])", "...[RESTRICTED_TURN_REASON]", CONF],
+  ["M116", "F2-A1: godkjenningsruten setter restrictedOrigin ubetinget (alle godkjenninger, også med vakten AV)", SERVER, "...(confirmationRestrictsOrigin(taken) ? { restrictedOrigin: true as const } : {})", "restrictedOrigin: true as const", CONF],
+  ["M117", "F2-A1: et FJERDE sted setter `restrictedOrigin: true` (setter-vakten skal slå ut)", CJ, "const useTools = parameters[\"use_tools\"] !== false;", "const useTools = parameters[\"use_tools\"] !== false; void { restrictedOrigin: true };", DELIV],
+  ["M118", "F2-A3 (E07n): executive-tjenestens servedLocally er ubetinget lokal (`() => true`)", MAIN, "servedLocally: financeLockServedLocally,", "servedLocally: () => true,", GUARDENV],
+  ["M119", "F2-A3: executive-tjenestens servedLocally er en avvikende inline-kopi", MAIN, "servedLocally: financeLockServedLocally,", "servedLocally: (model) => model.provider.startsWith(\"gemma\"),", GUARDENV],
   // Ekvivalent (dybdeforsvar): `withholdSensitiveMessages` tar allerede ALLE merkede rader, så belt-og-seler-sjekken i `cloudVariantFor` kan ikke observeres utenfra.
   ["M48", "[ekvivalent] cloudVariantFor uten belt-og-seler-sjekken", CONV, "if (this.deps.restrictedContextGuard === true && cleanHistory.some((m) => m.restricted === true)) return undefined;", "", ENGINE, true]
 ];
@@ -138,7 +172,7 @@ for (const [id, description, file, oldText, newText, tests, equivalent] of MUTAN
   let status = "ERROR";
   try {
     writeFileSync(path, original.replace(oldText, () => newText));
-    const vitest = `pnpm exec vitest run --maxWorkers=2 --bail=1 ${tests.join(" ")}`;
+    const vitest = `pnpm exec vitest run --maxWorkers=${process.env["N1_WORKERS"] ?? "2"} --bail=1 ${tests.join(" ")}`;
     const env = { ...process.env, NODE_OPTIONS: "--max-old-space-size=2048", npm_config_manage_package_manager_versions: "false" };
     const proc = runAs
       ? spawnSync("su", [runAs, "-s", "/bin/bash", "-c", `export HOME=/tmp/pg-home npm_config_manage_package_manager_versions=false PATH=${process.env["PATH"]} NODE_OPTIONS=--max-old-space-size=2048; cd ${ROOT} && timeout -k 5 600 ${vitest}`], { encoding: "utf8" })
