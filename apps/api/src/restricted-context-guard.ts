@@ -77,6 +77,7 @@ export const FAST_INTENT_RESTRICTED: Readonly<Record<FastIntent["kind"], boolean
 export class RestrictedTurnMarker {
   private isLocked = false;
   private userMarked = false;
+  private turn: { restricted?: true } | undefined;
 
   constructor(
     private readonly store: Pick<MessageStore, "markRestricted">,
@@ -88,10 +89,20 @@ export class RestrictedTurnMarker {
     return this.isLocked;
   }
 
+  /**
+   * Fiks-runde 1 (F-A2): turbildet (`TurnContext`) får `restricted: true` når turen låses (og med en gang, hvis den allerede er låst), slik at `MeshToolExecutor` kan sende `restrictedOrigin` videre til verktøykall (en bakgrunnsjobb delegert i en
+   * LÅST tur får leveringen sin lagret begrenset). Turbildet er trusted-lag-tilstand eid av samtalemotoren (aldri modellen); uten markør (vakten AV) settes det aldri.
+   */
+  attachTurn(turn: { restricted?: true }): void {
+    this.turn = turn;
+    if (this.isLocked) turn.restricted = true;
+  }
+
   /** `reasons` = fast ordforråd fra rutingen (`text:finance`, `tool_selection:SECRET_RESTRICTED`, `history:restricted`, `fast_intent:cost_report` ...) - logges ÉN gang ved låsingen, aldri innhold. */
   async lock(reasons: readonly string[] = []): Promise<void> {
     if (!this.isLocked) console.log(JSON.stringify({ msg: "n1_restricted_turn_locked", reasons }));
     this.isLocked = true;
+    if (this.turn) this.turn.restricted = true;
     if (this.userMarked) return;
     if (typeof this.userMessageId !== "string" || this.userMessageId === "") throw new Error("restricted_marking_no_message_id");
     const marked = await this.store.markRestricted(this.identity, this.userMessageId);

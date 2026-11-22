@@ -407,6 +407,7 @@ export class ConversationEngine {
     // godkjenning finnes (chat-id alene er ikke nok autoritet for skriving) - derfor ingen minneskriving fra Telegram.
     const surface = surfaceForChannel(identity.channel);
     const turn = createTurnContext(surface, text);
+    marker?.attachTurn(turn); // WP-N1 (F-A2): en turbilde-markering `restricted` følger låsen (kun med vakten på)
     // Del 3: ingen minneskriving av en melding som inneholdt en hemmelighet; lange/innlimte tekster (e-post, dokumenter) regnes ikke
     // som eierens egne ord (JARVIS-013) og går via karantene i stedet for å bli aktivt, betrodd minne.
     const intent = fastRoute(text);
@@ -700,8 +701,8 @@ export class ConversationEngine {
       let withheldKnowledgeFromCloud = 0; // WP-D1: kunnskapstreff har egen merknad (egen prefiks i SYSTEM_NOTE_PREFIXES)
       const screenedExecutor = (): ToolExecutor =>
         cloudScreenedExecutor(
-          // WP-N1 (F-A2): en LÅST tur (kun med vakten på) gir executoren et turbilde med `restricted: true` (samme `taint`/`calls`-objekter), så delegerte bakgrunnsjobber får `restricted_origin`. Vakten AV: `turn` uendret.
-          this.deps.tools!.executorFor(identity, marker?.locked === true ? { ...turn, restricted: true as const } : turn),
+          // WP-N1 (F-A2): en LÅST tur (kun med vakten på) har `turn.restricted === true` (satt av markøren når turen låses, se `RestrictedTurnMarker.attachTurn`), så delegerte bakgrunnsjobber får `restricted_origin`. Vakten AV: `turn` uendret.
+          this.deps.tools!.executorFor(identity, turn),
           ({ tool, withheld }) => {
             if (tool.startsWith("knowledge.")) withheldKnowledgeFromCloud += withheld;
             else withheldFromCloud += withheld;
