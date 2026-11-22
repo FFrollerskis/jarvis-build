@@ -319,6 +319,16 @@ describe("E: kropp, feil og legacy-flater (JARVIS-063/064)", () => {
     expect(plain.status).toBe(400);
     expect(plain.body["reason"]).not.toBe("reserved_input_key");
   });
+  it("WP-B4 (M2): /tasks/submit avviser også markøren `delegated_from_chat` FØR submit (den styrer levering til eierens chat og prioriteten på Claude-kreditten - en innsendt kontrakt kan ikke selv gjøre en jobb til «bestilt av eier»)", async () => {
+    const grant = await mintGrant(baseUrl, SUBJECT_A, keys["cp-dev-a"]!);
+    for (const value of [true, false, "true"]) {
+      const flagged = await post("/tasks/submit", { grant_token: grant, contract: { goal: "x", input: { data: { prompt: "x", delegated_from_chat: value } } } });
+      expect(flagged.status, String(value)).toBe(400);
+      expect(flagged.body["error"]).toBe("task_rejected");
+      expect(flagged.body["reason"]).toBe("reserved_input_key");
+      expect(flagged.body["key"]).toBe("delegated_from_chat");
+    }
+  });
   it("dev-/demo-rutene er av: /worker/tick og /tools/critical-demo gir 404 (uautentisert kødrenering/klasse D-stub finnes ikke)", async () => {
     for (const path of ["/worker/tick", "/tools/critical-demo"]) {
       const res = await fetch(`${baseUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });

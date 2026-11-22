@@ -144,6 +144,9 @@ b7d403a9ab1b979dfd72cf882f65df28399f60a4:.gitleaksignore:generic-api-key:131
 # endres ikke, og commit-en er allerede publisert (aldri force push).
 c98488190cb505052121112a15568171a873a1ef:docs/evidence/2026-10-10-hf-0-gate.md:generic-api-key:22
 
+# WP-D3 (D-459): test fixture idempotency_key in the route-boundary test (a literal probe value for a 404 check, not a credential). Replaced by a neutral value in the
+# following commit; this entry covers the historical commit only.
+3bd13fb82290eb2813aa638deb7e0b8fe074e373:apps/api/test/wpd3-growth-routes.test.ts:generic-api-key:38
 # WP-G1 (D-463): fem VERIFISERTE falske positiver i testfiksturer. Verifisert manuelt: ingen nøkkel, token eller passord noe sted her.
 #  - `discord-client-id`: en 18-sifret Discord-«snowflake» (offentlig ID-format, brukt som falsk mottaker-/kontoid i normaliserings- og policytester) ved siden av ordet «discord».
 #  - `generic-api-key`: et falskt Twilio-meldings-SID (`SM` + 32 heksadesimale tegn, ren testverdi) ved siden av testvariabelen FAKE_TOKEN.

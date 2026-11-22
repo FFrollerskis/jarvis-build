@@ -1,12 +1,17 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type { IdentityContext } from "@jarvis/contracts";
 import { scanForSecrets } from "@jarvis/core";
-import { ControlCenterRegistry, type GoldenSuiteControl, type InfraStatusReport, type ValueReport } from "@jarvis/executive";
+import { ControlCenterRegistry, type ControlRiskClass, type GoldenSuiteControl, type InfraStatusReport, type ValueReport } from "@jarvis/executive";
+import { claudeBudgetConfigFromEnv, type ClaudeBudgetConfig } from "@jarvis/model-gateway";
 import { resolveAuthorityMode, type AuthorityConfig } from "@jarvis/policy";
+import type { ReadinessVerdict } from "@jarvis/self-modification";
 import type { BackupStatusRead } from "../backup-status.ts";
+import type { Ev0BootStatus } from "../ev0-boot.ts";
+import { actionRequiresStepUp } from "../step-up.ts";
 import { createAgentCenter } from "./agent.ts";
 import { createAiCenter, type AiCenterDeps } from "./ai.ts";
 import { createAuthorityCenter, type AuthorityCenterDeps } from "./authority.ts";
+import { createEvolutionCenter, type EvolutionReportRead } from "./evolution.ts";
 import { createFinanceCenter } from "./finance.ts";
 import { createIntegrationCenter, type IntegrationCenterDeps } from "./integration.ts";
 import { createMemoryCenter } from "./memory.ts";
@@ -97,8 +102,13 @@ export interface ControlCenterWiring {
   /** AI Center: run-rate (D-421), AI-rådets begrenser, evolusjonsrapporten (EV-12) og taket for samtidige bakgrunnsjobber. Utelatt = den delen står som ukjent. */
   runRate?: AiCenterDeps["runRate"];
   councilLimiter?: AiCenterDeps["councilLimiter"];
-  evolutionReport?: AiCenterDeps["evolutionReport"];
+  /** Evolusjonsrapporten (D-452). Brukes av AI-senteret (EV-12) og, fra WP-B3 (D-475), av Evolusjon-senteret (portstatus). */
+  evolutionReport?: EvolutionReportRead;
   maxActiveJobs?: AiCenterDeps["maxActiveJobs"];
+  /** WP-B3 (D-475) Evolusjon-senteret: strukturerte beredskapsvurderinger for de sovende delene (`createEvolutionReadinessProvider`), EV-0-oppstartsresultatet og tenanten rapportleverandøren er bundet til (eierens). Utelatt = den delen er UKJENT. */
+  evolutionReadiness?: () => Promise<readonly ReadinessVerdict[]>;
+  ev0Status?: () => Ev0BootStatus | null;
+  evolutionTenantId?: string;
   /** WP-H2 Value Center: `ExecutiveService.getValueReport` (lat - tjenesten bygges etter sentrene). Uten den registreres ikke Verdi-senteret. */
   valueReport?: (tenantId: string) => Promise<ValueReport>;
   /** WP-H2 Operations Center: `ExecutiveService.getInfraStatus` (lat). Uten den registreres ikke Drift-senteret. */
@@ -111,8 +121,32 @@ export interface ControlCenterWiring {
   goldenSuite?: GoldenSuiteControl;
 }
 
+/** Lat oppslag av klassen til en registrert executive-handling: `undefined` når verktøyet ikke (ennå/lenger) er registrert i gatewayen - aldri en gjettet klasse. Kaster aldri. */
+function riskClassOf(gateway: { get(toolId: string, action: string): { capability_class: ControlRiskClass } | undefined }, action: string): () => ControlRiskClass | undefined {
+  return () => {
+    try {
+      return gateway.get("executive", action)?.capability_class;
+    } catch {
+      return undefined;
+    }
+  };
+}
+
+/**
+ * WP-B4 (D-476): Claude-kreditten fra miljøet, eller `undefined` når flagget (`JARVIS_CLAUDE_BUDGET_USD`) er AV. En UGYLDIG verdi stopper oppstarten i `main.ts` (samme parser, før gatewayen bygges) - kommer vi hit med en,
+ * viser senteret heller ingenting enn å kaste (kontrollsentrene er kun lesing og skal aldri kunne velte byggingen av en side).
+ */
+export function claudeBudgetFromEnv(env: Readonly<Record<string, string | undefined>>): ClaudeBudgetConfig | undefined {
+  try {
+    return claudeBudgetConfigFromEnv(env) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function registerControlCenters(registry: ControlCenterRegistry, wiring: ControlCenterWiring): void {
   // Sentrene registreres her, ett per linje, etterhvert som de bygges. Et senter uten sine avhengigheter registreres IKKE (ærlig «ikke koblet inn», aldri en tom OK).
+  const claudeBudget = claudeBudgetFromEnv(wiring.env);
   if (wiring.toolGateway && wiring.ownerControls) {
     registry.register(createIntegrationCenter({
       pool: wiring.pool, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls,
@@ -125,7 +159,8 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
       ...(wiring.runRate ? { runRate: wiring.runRate } : {}),
       ...(wiring.councilLimiter ? { councilLimiter: wiring.councilLimiter } : {}),
       ...(wiring.evolutionReport ? { evolutionReport: wiring.evolutionReport } : {}),
-      ...(wiring.maxActiveJobs !== undefined ? { maxActiveJobs: wiring.maxActiveJobs } : {})
+      ...(wiring.maxActiveJobs !== undefined ? { maxActiveJobs: wiring.maxActiveJobs } : {}),
+      ...(claudeBudget !== undefined ? { claudeBudget } : {})
     }));
   }
   if (wiring.toolGateway && wiring.ownerControls && wiring.killSwitch) {
@@ -157,6 +192,21 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
     registry.register(createSecurityCenter({
       pool: wiring.pool, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls, killSwitch: wiring.killSwitch,
       ...(flagOn(wiring.env, CONTROL_FEATURE_FLAGS.goldenSuite) && wiring.goldenSuite ? { goldenSuite: wiring.goldenSuite } : {})
+    }));
+  }
+  // WP-B3 (D-475, EV-22): Evolusjon (tilleggssenter utenfor de ti) bak eget flagg (AV som standard). Uten evolusjonsrapporten (portstatus) registreres det IKKE (ærlig «ikke koblet inn»); kun lesing av eksisterende kilder.
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.evolution) && wiring.evolutionReport) {
+    registry.register(createEvolutionCenter({
+      pool: wiring.pool, env: wiring.env, evolutionReport: wiring.evolutionReport,
+      ...(wiring.evolutionReadiness ? { readiness: wiring.evolutionReadiness } : {}),
+      ...(wiring.ev0Status ? { ev0Status: wiring.ev0Status } : {}),
+      ...(wiring.runRate ? { runRate: wiring.runRate } : {}),
+      ...(wiring.evolutionTenantId !== undefined ? { reportTenantId: wiring.evolutionTenantId } : {}),
+      // WP-B3 (EV-23): «Registrer avgjørelse»-knappene per forslag - kun med JARVIS_CONTROL_EVOLUTION_APPROVAL=on (og kun når verktøyet faktisk er registrert i gatewayen, sjekkes ved bygging). Uten flagg er senteret uendret fra EV-22.
+      // Risikoklassen slås opp LATT (verktøyene registreres i gatewayen etter sentrene i `main.ts`); step-up-kravet utledes av den ene `STEP_UP_EXEMPT_ACTIONS`-mengden, aldri av en kopi.
+      ...(flagOn(wiring.env, CONTROL_FEATURE_FLAGS.evolutionApproval) && wiring.toolGateway
+        ? { approval: { risk_class: riskClassOf(wiring.toolGateway, "record_evolution_decision"), requires_step_up: actionRequiresStepUp("record_evolution_decision") } }
+        : {})
     }));
   }
 }

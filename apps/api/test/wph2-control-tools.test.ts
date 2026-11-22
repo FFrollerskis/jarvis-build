@@ -49,7 +49,8 @@ function productionDefinitions(options: Parameters<typeof executiveToolDefinitio
   });
 }
 const defsOff = productionDefinitions();
-const defsOn = productionDefinitions({ goldenSuite: true, autonomyRevoke: true });
+// WP-B3 (D-475, EV-23): `evolutionApproval` er den tredje flaggstyrte executive-handlingen (egen testfil: wpb3-evolution-approval-tools.test.ts); her slås den på så mutasjonslisten (13 + 3) kan låses i sin helhet.
+const defsOn = productionDefinitions({ goldenSuite: true, autonomyRevoke: true, evolutionApproval: true });
 const find = (list: ToolDefinition[], action: string): ToolDefinition | undefined => list.find((d) => d.tool_id === "executive" && d.action === action);
 
 /** `registry: null` = ingen register i tjenesten (fail-closed-sjekken); utelatt = eier-registeret. (`undefined` ville falt tilbake til standardverdien.) */
@@ -60,15 +61,18 @@ function withRegistry(options: Parameters<typeof executiveToolDefinitions>[1] = 
 
 describe("tabellen: syv verktøy, de fire nye bakerst", () => {
   it("rekkefølge og navn er stabile (legg til, aldri omdøp), og hvert verktøy er knyttet til sitt eget senter", () => {
-    expect(CONTROL_CENTER_READ_TOOLS.map((t) => t.action)).toEqual(["get_finance_center", "get_memory_center", "get_agent_center", ...H2_ACTIONS]);
-    expect(CONTROL_CENTER_READ_TOOLS.slice(3).map((t) => t.center)).toEqual(["operations", "value", "privacy", "security"]);
+    // WP-B3 (D-475) la til `get_evolution_center` (tilleggssenter) sist; de syv første er uendret.
+    expect(CONTROL_CENTER_READ_TOOLS.map((t) => t.action)).toEqual(["get_finance_center", "get_memory_center", "get_agent_center", ...H2_ACTIONS, "get_evolution_center"]);
+    expect(CONTROL_CENTER_READ_TOOLS.slice(3, 7).map((t) => t.center)).toEqual(["operations", "value", "privacy", "security"]);
     for (const a of H2_ACTIONS) expect(controlCenterForReadAction(a)).toBe(a.replace(/^get_/, "").replace(/_center$/, ""));
-    expect(CONTROL_CENTER_READ_ACTIONS.size).toBe(7);
+    expect(controlCenterForReadAction("get_evolution_center")).toBe("evolution");
+    expect(CONTROL_CENTER_READ_ACTIONS.size).toBe(8);
   });
 
   it("alle ti sentre er nå dekket: H0-sentrene (integration, authority, ai) har ikke et eget verktøy, de syv andre har", () => {
     const covered = new Set<ControlCenterId>(CONTROL_CENTER_READ_TOOLS.map((t) => t.center));
-    expect([...covered].sort()).toEqual(["agent", "finance", "memory", "operations", "privacy", "security", "value"]);
+    // + tilleggssenteret Evolusjon (D-475), som ikke teller blant masterplanens ti
+    expect([...covered].sort()).toEqual(["agent", "evolution", "finance", "memory", "operations", "privacy", "security", "value"]);
   });
 
   it("beskrivelsene for de nye sier kun lesing, eier + signert enhet, ukjent er ukjent - og nevner det de ikke måler", () => {
@@ -228,9 +232,9 @@ describe("de to flaggstyrte executive-handlingene: finnes kun med flagg", () => 
 });
 
 describe("kontrakten: ruten, allowlisten og step-up", () => {
-  it("de to nye handlingene står i den FLAGGSTYRTE listen (ikke i main sin allowliste på 13), og kontraktens allowlist speiler rutens kjente navn NØYAKTIG (13 + 2 = 15)", () => {
+  it("de flaggstyrte handlingene står i den FLAGGSTYRTE listen (ikke i main sin allowliste på 13), og kontraktens allowlist speiler rutens kjente navn NØYAKTIG (13 + 3 = 16; WP-B3 la til `record_evolution_decision`)", () => {
     expect(EXECUTIVE_MUTATE_ACTIONS).toHaveLength(13);
-    expect([...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort()).toEqual(["revoke_autonomy_binding", "run_golden_suite"]);
+    expect([...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort()).toEqual(["record_evolution_decision", "revoke_autonomy_binding", "run_golden_suite"]);
     expect([...EXECUTIVE_MUTATE_ACTIONS, ...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort()).toEqual([...(CONTROL_ACTION_ALLOWED["/executive/mutate"] ?? [])].sort());
     for (const a of EXECUTIVE_MUTATE_FLAGGED_ACTIONS) expect(EXECUTIVE_MUTATE_ACTIONS as readonly string[]).not.toContain(a);
   });

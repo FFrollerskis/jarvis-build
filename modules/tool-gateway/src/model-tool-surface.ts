@@ -57,6 +57,15 @@ export const FORBIDDEN_MODEL_TOOL_IDS: ReadonlyArray<string> = [
   "incidents",
   "governance",
   "situations",
+  // WP-D3 (UA-4 Growth, D-459): skrivehandlinger mot annonse-/analyseplattformer (penger, publisering, offentlig synlighet) - aldri på en modellflate.
+  "growth_googleads",
+  "growth_metaads",
+  "growth_ga4",
+  "growth_searchconsole",
+  "growth_gbp",
+  "growth_linkedin",
+  "growth_youtube",
+  "growth_tiktok",
   // WP-G1 (UA-7, D-463): utgående kommunikasjon (send/rediger/slett/reager, konto-allowlist, avmelding) - aldri på en modellflate. Modellen kan foreslå og utkaste; utsendelse går via eierens rute.
   "comms"
 ];

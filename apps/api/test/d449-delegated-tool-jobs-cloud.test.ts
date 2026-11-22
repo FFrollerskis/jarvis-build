@@ -474,7 +474,9 @@ describe("D-449: forfalskning og merknader", () => {
   it("en innsendt kontrakt som bærer `cloud_tool_turns_allowed` kan oppdages (brukes av POST /tasks/submit); vanlige kontrakter og ugyldige former gir null", () => {
     const withFlag = (value: unknown) => ({ input: { data: { prompt: "x", cloud_tool_turns_allowed: value } } });
     for (const value of [true, false, "true", 1, null]) expect(submittedContractHasReservedKey(withFlag(value)), String(value)).toBe("cloud_tool_turns_allowed");
-    expect(submittedContractHasReservedKey({ input: { data: { prompt: "x", delegated_from_chat: true } } })).toBeNull();
+    // WP-B4 (M2): `delegated_from_chat` er nå også reservert (styrer levering til eierens chat og prioriteten på Claude-kreditten) - en innsendt kontrakt kan ikke bære den. Vanlige kontrakter gir fortsatt null.
+    expect(submittedContractHasReservedKey({ input: { data: { prompt: "x", delegated_from_chat: true } } })).toBe("delegated_from_chat");
+    expect(submittedContractHasReservedKey({ input: { data: { prompt: "x", purpose: "BACKGROUND", sensitivity: "PRIVATE", tools: true } } })).toBeNull();
     for (const bad of [null, undefined, "x", 5, [], {}, { input: null }, { input: { data: null } }, { input: { data: "x" } }]) expect(submittedContractHasReservedKey(bad)).toBeNull();
   });
 

@@ -1,3 +1,6 @@
+import { CLAUDE_BUDGET_NOTE_PREFIX, claudeBudgetNoteNo } from "@jarvis/model-gateway";
+import { servedByCloudModel } from "./cloud-tool-screen.ts";
+
 /**
  * D-431: hvor verktøyturer i chatten sendes. Ren prat går til den lokale modellen (gratis); når et ekte verktøy er valgt for turen går den til en
  * skymodell, fordi en liten lokal modell bruker verktøy upålitelig. Styres av `JARVIS_TOOL_TURN_MODEL` = `provider:model`
@@ -172,6 +175,22 @@ export function reserveModelNote(failed: readonly string[], served: string, clou
 }
 
 /**
+ * WP-B4 (D-476): merknaden bak et svar (eller i en jobbs svar) som kom fra en lokal modell fordi Claude-kreditten styrte bort fra Anthropic (hard stopp, utsettelse eller reserve for essensielle behov) - samme prinsipp
+ * som D-447: aldri en usynlig nedgradering. Leser KUN kategoriene gatewayen la i `result.metadata.claude_budget` (finnes bare med Claude-kreditten på, og bare når kallet var stengt for Anthropic), aldri beløp.
+ * `served` = leverandøren som faktisk svarte (adapter-stemplet `result.provider`): teksten sier «den lokale modellen» kun når den er lokal. Tom streng ellers (flagg AV, nedgradert til billigere modell, tillatt, eller ukjent form) - så svar uten kreditten er byte-identiske. Teksten har ingen parenteser inni (se `stripSystemNotes`) og starter med
+ * `CLAUDE_BUDGET_NOTE_PREFIX`, som står i `SYSTEM_NOTE_PREFIXES` så den fjernes fra historikken før klassifisering.
+ */
+export function claudeBudgetRouteNote(metadata: Readonly<Record<string, unknown>> | undefined, what: "svaret" | "jobben" = "svaret", served?: { provider: string }): string {
+  const meta = metadata?.["claude_budget"];
+  if (typeof meta !== "object" || meta === null) return "";
+  const { action, reason, constraint, window_end_ms } = meta as Record<string, unknown>;
+  if (constraint !== "closed" || (action !== "deny" && action !== "defer") || typeof reason !== "string" || typeof window_end_ms !== "number" || !Number.isFinite(window_end_ms)) return "";
+  // L1: «lokale modellen» KUN når leverandøren som svarte er registrert som lokal (ukjent leverandør eller ingen oppgitt = ikke lokal: fail-closed, teksten sier da bare at svaret ikke kom fra Claude).
+  const text = claudeBudgetNoteNo(action, reason, window_end_ms, what, served !== undefined && !servedByCloudModel(served) ? "local" : "other");
+  return what === "svaret" ? `\n\n(${text})` : `(${text})`;
+}
+
+/**
  * Starten på hver rutemerknad Jarvis selv legger bak et svar (chatten: `localOnlyNote`, dagstaket, `cloudHistoryNote`, skjermet minnesøk; hurtigbanen: `jobLocalOnlyNote`). Listen og `stripSystemNotes` hører sammen og er låst av en test
  * mot hver funksjon som lager en merknad.
  */
@@ -185,7 +204,17 @@ const SYSTEM_NOTE_PREFIXES: readonly string[] = [
   "Reservemodell brukt:"
 ];
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const TRAILING_SYSTEM_NOTE = new RegExp(`(?:\\n\\n|^)\\((?:${SYSTEM_NOTE_PREFIXES.map(escapeRegExp).join("|")})[^()]*\\)\\s*$`);
+const trailingNote = (prefixes: readonly string[]): RegExp => new RegExp(`(?:\\n\\n|^)\\((?:${prefixes.map(escapeRegExp).join("|")})[^()]*\\)\\s*$`);
+const TRAILING_SYSTEM_NOTE = trailingNote(SYSTEM_NOTE_PREFIXES);
+/**
+ * WP-B4 (D-476): Claude-kreditten styrte svaret bort fra Anthropic (se `claudeBudgetRouteNote`). Prefikset står KUN i listen når kreditten er på: uten `JARVIS_CLAUDE_BUDGET_USD` er historikken byte-identisk med main
+ * (en avsluttende «(Claude-kreditten: ...)» som assistenten selv skrev, fjernes da ikke). Regelen samsvarer med `claudeBudgetConfigFromEnv`: tom/usatt/`off` = av, alt annet = på (en ugyldig verdi stopper oppstarten uansett).
+ */
+const TRAILING_SYSTEM_NOTE_WITH_CLAUDE_BUDGET = trailingNote([...SYSTEM_NOTE_PREFIXES, CLAUDE_BUDGET_NOTE_PREFIX]);
+function claudeBudgetNotesActive(): boolean {
+  const raw = (process.env["JARVIS_CLAUDE_BUDGET_USD"] ?? "").trim();
+  return raw !== "" && !/^off$/i.test(raw);
+}
 
 /**
  * Fjerner avsluttende rutemerknader fra et assistent-svar slik det ligger i samtalehistorikken. Merknadene er til EIEREN (hvorfor svaret kom fra en bestemt modell); de er ikke en del av samtalen modellen skal se, og de skal
@@ -206,8 +235,9 @@ export function stripSourceMarkerIds(memoryText: string): string {
 
 export function stripSystemNotes(content: string): string {
   let out = content;
+  const pattern = claudeBudgetNotesActive() ? TRAILING_SYSTEM_NOTE_WITH_CLAUDE_BUDGET : TRAILING_SYSTEM_NOTE;
   for (let round = 0; round < 4; round += 1) {
-    const next = out.replace(TRAILING_SYSTEM_NOTE, "");
+    const next = out.replace(pattern, "");
     if (next === out) break;
     out = next;
   }

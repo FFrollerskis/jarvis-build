@@ -6,3 +6,6 @@ export * from "./google-ads-transport.ts";
 export * from "./meta-ads-transport.ts";
 export * from "./action-recommendation-sweep.ts";
 export * from "./business-os-integration.ts";
+// WP-D3 (D-459): eksperimentregister v2, kreativ-intelligens (rene funksjoner) og skrive-flaten mot annonse-/analyseplattformene.
+export * from "./experiments/index.ts";
+export * from "./write/index.ts";

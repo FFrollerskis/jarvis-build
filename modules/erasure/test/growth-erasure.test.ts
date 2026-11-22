@@ -16,6 +16,8 @@ import { ErasureService } from "../src/erasure-service.ts";
 // pakkeavhengighet kun for en testfil) - samme presedens som
 // contracts-erasure.test.ts sin import av AgreementsService.
 import { GrowthService } from "../../growth/src/service.ts";
+import { ExperimentRegistryService } from "../../growth/src/experiments/registry-service.ts";
+import { GrowthWriteJournal } from "../../growth/src/write/journal.ts";
 
 /**
  * UA-4 Native Jarvis Growth Core (D-74) Q-20/Q-27: erasure av en kampanje
@@ -101,6 +103,9 @@ describe("A: schema-drevet FK-audit - business_open_loops er DET ENESTE eksterne
       "business_open_loops", "marketing_spend_events", "marketing_attributions", "marketing_experiments",
       "marketing_campaign_events", "marketing_campaign_tracking_tags", "marketing_campaign_action_recommendations",
       "marketing_campaign_execution_commands", "marketing_campaign_observations",
+      // WP-D3 (D-459, migrasjon 112/113): eksperimentvariantene har en NULLABLE komposittnøkkel til kampanjen, og plattform-skrivejournalen har en nullable
+      // komposittnøkkel til kampanjen den endret. Begge er REGISTRERT i erasure-planen (plan.ts) FØR `marketing_campaigns` slettes (journalen etter kommandoene som peker på den).
+      "marketing_experiment_variants", "growth_write_journal",
       // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2,
       // 039_finance_spend_integrity.sql): `finance_spend_records.campaign_id`
       // er en BEVISST, valgfri kampanje-kobling for kildefamilien 'marketing'
@@ -333,5 +338,54 @@ describe("H: idempotens - samme request_id kjørt to ganger paa et growth-scoped
     expect(second.status).toBe("completed");
     expect(second.idempotent_replay).toBe(true);
     expect(second.record_counts).toEqual(first.record_counts);
+  });
+});
+
+describe("WP-D3 (D-459): erasure med eksperimentregister, skrivejournal og EXECUTED-kommando - ingen FK-brudd, databasevaktene blokkerer ikke sletting", () => {
+  it("plan/varianter/observasjon/utfall/journal/executed-kommando forsvinner sammen med kampanjen (kommando -> journal -> kampanje i riktig rekkefølge)", async () => {
+    const registry = new ExperimentRegistryService(appPool);
+    const journal = new GrowthWriteJournal(appPool);
+    const campaign = await growth.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "D3 erasure" });
+    const experiment = await growth.createExperiment(TENANT_A, "business", { name: "D3 erasure experiment", campaign_id: campaign.campaign_id });
+    const prov = { source: "owner" as const, actor_person_id: "person-tobias", task_id: "task-d3-erase", session_id: "sess-d3-erase" };
+    await registry.setPlan(TENANT_A, "business", experiment.experiment_id, { primary_metric: "ctr", window_start: "2026-10-01", window_end: "2026-10-14" }, prov);
+    const variant = await registry.addVariant(TENANT_A, "business", experiment.experiment_id, { variant_key: "control", label: "Kontroll", variant_kind: "creative", is_control: true }, prov);
+    await adminPool.query(
+      `INSERT INTO marketing_experiment_observations (observation_id, tenant_id, memory_space_id, experiment_id, variant_id, observed_on, impressions, clicks, conversions, spend_ore, revenue_ore, source_type, source, actor_person_id)
+       VALUES ('obs-d3-erase','${TENANT_A}','business','${experiment.experiment_id}','${variant.variant_id}','2026-10-02',1000,50,5,1000,0,'manual','owner','person-tobias')`
+    );
+    await adminPool.query(
+      `INSERT INTO marketing_experiment_outcomes (outcome_id, tenant_id, memory_space_id, experiment_id, verdict, primary_metric, evidence, evaluation_digest, decided_by, source, actor_person_id)
+       VALUES ('out-d3-erase','${TENANT_A}','business','${experiment.experiment_id}','inconclusive','ctr','{}'::jsonb,'${"a".repeat(64)}','owner','owner','person-tobias')`
+    );
+    const begun = await journal.begin(TENANT_A, "business", {
+      provider: "google_ads", action: "set_campaign_budget", risk_class: "D", spend_effect: "unknown", target_ref: "googleads:1234567890:campaign:101:budget", campaign_id: campaign.campaign_id,
+      idempotency_key: `erase-key-${randomUUID()}`, request_digest: "b".repeat(64), actor_person_id: "person-tobias", source: "owner_route", session_id: "sess-d3-erase",
+      command_id: "cmd-d3-erase" // review L5: journalraden må være utstedt FOR kommandoen den beviser (migrasjon 114)
+    });
+    await journal.complete(TENANT_A, "business", begun.row.write_id, { status: "applied", before_state: { budget_amount_micros: 500_000_000 }, after_state: { budget_amount_micros: 400_000_000 } });
+    await adminPool.query(
+      `INSERT INTO marketing_campaign_action_recommendations (recommendation_id, tenant_id, memory_space_id, campaign_id, recommendation_type, status, rationale, evidence, detection_key)
+       VALUES ('rec-d3-erase','${TENANT_A}','business','${campaign.campaign_id}','reduce_budget','accepted','test','{}'::jsonb,'det-d3-erase')`
+    );
+    await adminPool.query(
+      `INSERT INTO marketing_campaign_execution_commands (command_id, tenant_id, memory_space_id, campaign_id, recommendation_id, command_type, current_budget_ore, proposed_budget_ore, reduction_fraction, currency)
+       VALUES ('cmd-d3-erase','${TENANT_A}','business','${campaign.campaign_id}','rec-d3-erase','reduce_budget',50000,40000,0.2,'NOK')`
+    );
+    await adminPool.query(`UPDATE marketing_campaign_execution_commands SET status = 'executed', executed_at = now(), execution_write_id = '${begun.row.write_id}' WHERE command_id = 'cmd-d3-erase'`);
+
+    const service = new ErasureService(appPool, sovereignPolicy, embedding);
+    const result = await service.executeErasure({
+      scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "business" }, requestId: `req-d3-erase-${randomUUID()}`, identity: identityFor(TENANT_A)
+    });
+    expect(result.status).toBe("completed");
+    for (const [table, column, value] of [
+      ["marketing_experiment_outcomes", "outcome_id", "out-d3-erase"], ["marketing_experiment_observations", "observation_id", "obs-d3-erase"], ["marketing_experiment_variants", "variant_id", variant.variant_id],
+      ["marketing_experiment_plans", "experiment_id", experiment.experiment_id], ["marketing_experiments", "experiment_id", experiment.experiment_id], ["growth_write_journal", "write_id", begun.row.write_id],
+      ["marketing_campaign_execution_commands", "command_id", "cmd-d3-erase"], ["marketing_campaigns", "campaign_id", campaign.campaign_id]
+    ] as const) {
+      const left = await adminPool.query(`SELECT 1 FROM ${table} WHERE ${column} = $1`, [value]);
+      expect(left.rowCount, table).toBe(0);
+    }
   });
 });
