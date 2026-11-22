@@ -26,7 +26,7 @@ import { createDeliverySaver } from "../src/restricted-context-guard.ts";
  *  A. ekte Postgres: hele kjeden (motor -> ekte ToolGateway -> ekte `TasksDelegateTransport` -> ekte jobbkø/kontraktsskjema -> ekte sveip -> ekte `MessageStore`), låst start vs. kontroll vs. flagg AV.
  *  B. modelldrevet delegering gjennom den EKTE `MeshToolExecutor` (turbilde med `restricted`).
  *  C. flagg AV: kontrakten og lagringskallet er identiske med main (TRE argumenter).
- *  D. kildevakt: hvem som setter `restrictedOrigin` (nøyaktig to steder).
+ *  D. kildevakt: hvem som setter `restrictedOrigin` (nøyaktig tre steder: hurtigbanen, MeshToolExecutor og `/confirmations` etter F2-A1).
  */
 let stop: (() => Promise<void>) | undefined;
 let admin: pg.Pool;
@@ -284,17 +284,19 @@ describe("D: kildevakt - hvem setter `restrictedOrigin` (kun trusted kode)", () 
     readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.name === "node_modules" || e.name === "test" || e.name === "dist" ? [] : e.isDirectory() ? walk(`${dir}/${e.name}`) : e.name.endsWith(".ts") ? [`${dir}/${e.name}`] : []));
   const files = ["apps", "modules", "packages"].flatMap((top) => readdirSync(`${root}${top}`, { withFileTypes: true }).filter((e) => e.isDirectory()).flatMap((e) => { try { return walk(`${root}${top}/${e.name}/src`); } catch { return []; } }));
 
-  it("`restrictedOrigin: true` SETTES på nøyaktig to steder: hurtigbanen i main.ts og MeshToolExecutor (videreformidler turbildet); gatewayen deklarerer/videreformidler; chat-jobs leser det", () => {
+  it("`restrictedOrigin: true` SETTES på nøyaktig tre steder: hurtigbanen i main.ts, MeshToolExecutor (videreformidler turbildet) og `/confirmations` i server.ts (kun fra kortets `restricted_turn`, F2-A1); gatewayen deklarerer/videreformidler; chat-jobs leser det", () => {
     expect(files.length).toBeGreaterThan(100);
     const setters = Object.fromEntries(files.flatMap((f) => { const n = (code(readFileSync(f, "utf8")).match(/restrictedOrigin:\s*true/g) ?? []).length; return n > 0 ? [[f.slice(root.length), n]] : []; }));
-    expect(setters).toEqual({ "apps/api/src/main.ts": 1, "modules/tool-gateway/src/gateway.ts": 1, "modules/tool-gateway/src/mesh-bridge.ts": 1 }); // gateway.ts: videreformidlingen `request.restrictedOrigin === true ? { restrictedOrigin: true }`
+    expect(setters).toEqual({ "apps/api/src/main.ts": 1, "apps/api/src/server.ts": 1, "modules/tool-gateway/src/gateway.ts": 1, "modules/tool-gateway/src/mesh-bridge.ts": 1 }); // gateway.ts: videreformidlingen `request.restrictedOrigin === true ? { restrictedOrigin: true }`; server.ts: godkjenningsruten (F2-A1)
     const tokens = Object.fromEntries(files.flatMap((f) => { const n = (code(readFileSync(f, "utf8")).match(/\brestrictedOrigin\b/g) ?? []).length; return n > 0 ? [[f.slice(root.length), n]] : []; }));
-    // gateway.ts: to deklarasjoner (kontekst + kall) og videreformidlingen (les + sett); chat-jobs.ts leser konteksten (én); main.ts og mesh-bridge.ts setter (én hver). Et nytt sted bryter tallene og må vurderes.
-    expect(tokens).toEqual({ "apps/api/src/chat-jobs.ts": 1, "apps/api/src/main.ts": 1, "modules/tool-gateway/src/gateway.ts": 4, "modules/tool-gateway/src/mesh-bridge.ts": 1 });
+    // gateway.ts: to deklarasjoner (kontekst + kall) og videreformidlingen (les + sett); chat-jobs.ts leser konteksten (én); main.ts, server.ts og mesh-bridge.ts setter (én hver). Et nytt sted bryter tallene og må vurderes.
+    expect(tokens).toEqual({ "apps/api/src/chat-jobs.ts": 1, "apps/api/src/main.ts": 1, "apps/api/src/server.ts": 1, "modules/tool-gateway/src/gateway.ts": 4, "modules/tool-gateway/src/mesh-bridge.ts": 1 });
     const main = readFileSync(fileURLToPath(new URL("../src/main.ts", import.meta.url)), "utf8");
     expect(main).toMatch(/\.\.\.\(options\?\.restricted === true \? \{ restrictedOrigin: true as const \} : \{\}\)/);
     const mesh = readFileSync(`${root}modules/tool-gateway/src/mesh-bridge.ts`, "utf8");
     expect(mesh).toMatch(/\.\.\.\(this\.turn\?\.restricted === true \? \{ restrictedOrigin: true as const \} : \{\}\)/);
+    const server = readFileSync(fileURLToPath(new URL("../src/server.ts", import.meta.url)), "utf8");
+    expect(server).toContain("...(confirmationRestrictsOrigin(taken) ? { restrictedOrigin: true as const } : {})");
   });
 
   it("`restricted_origin` skrives kun av TasksDelegateTransport (fra konteksten, aldri fra parametere) og leses kun i ChatJobs (sveipet, tilbakehold i list/get, isRestrictedOrigin) med eksakt true", () => {
