@@ -18,6 +18,7 @@ import {
   type FinanceExecutionLock, type ToolDefinition, type ToolGatewayOptions, type ToolInvocationContext, type ToolTransport
 } from "@jarvis/tool-gateway";
 import { servedByCloudModel } from "../src/cloud-tool-screen.ts";
+import { FINANCE_EXECUTION_LOCK } from "../src/restricted-context-guard.ts";
 
 /**
  * WP-N1 (fiks-runde 1, F-B1 HIGH): utførelseslåsen for `finance*` omgås av NØSTEDE kall. `executive.get_control_surface_status` og `executive.get_delegation_board` (begge på web_chat) henter `finance.get_kill_switch` via et
@@ -62,8 +63,8 @@ afterAll(async () => {
   await stop?.();
 }, 120_000);
 
-/** NØYAKTIG main.ts-oppkoblingen av lokalitetsprediktatet (kilden til sannhet er `restricted-context-guard.ts`, se `wpn1-lock-predicate.test.ts`). */
-const LOCK: FinanceExecutionLock = { servedLocally: (m) => !servedByCloudModel({ provider: m.provider }) };
+/** NØYAKTIG det `main.ts` gir gatewayen (flagg PÅ): produksjonsobjektet, ikke en kopi (se også `wpn1-lock-predicate.test.ts`). */
+const LOCK: FinanceExecutionLock = FINANCE_EXECUTION_LOCK;
 const KILL_REASON = "N1NEST-KILLSWITCH-REASON-mistenkelig-trekk-på-kortet";
 const CLOUD = { provider: "anthropic", model: "claude-sonnet-5-5" };
 const LOCAL = { provider: "gemma_local", model: "gemma3:4b" };
@@ -103,7 +104,7 @@ function rig(opts: { lock?: FinanceExecutionLock; withholdFinanceFromCloud?: boo
   gateway.register(fakeDef("owner_controls", "get_control_state", { kill_switch: false, frozen_connectors: [], revoked_credentials: [] }));
   gateway.register(fakeDef("situations", "get_pause_state", { paused: [] }));
   gateway.register(fakeDef("situations", "list_autonomy_policies", []));
-  const service = new ExecutiveService(gateway, { servedLocally: (m) => !servedByCloudModel({ provider: m.provider }), ...(opts.withholdFinanceFromCloud ? { withholdFinanceFromCloud: true } : {}) } as never);
+  const service = new ExecutiveService(gateway, { servedLocally: (m: { provider: string }) => !servedByCloudModel({ provider: m.provider }), ...(opts.withholdFinanceFromCloud ? { withholdFinanceFromCloud: true } : {}) } as never);
   for (const tool of executiveToolDefinitions(new ExecutiveTransport(service))) gateway.register(tool);
   return { gateway, calls, financeCalls: () => calls.filter((c) => c.tool.startsWith("finance")), definitions: [...definitions] };
 }

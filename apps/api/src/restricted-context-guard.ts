@@ -1,5 +1,7 @@
 import type { IdentityContext } from "@jarvis/contracts";
 import type { FastIntent, MessageStore } from "@jarvis/core";
+import type { FinanceExecutionLock } from "@jarvis/tool-gateway";
+import { servedByCloudModel } from "./cloud-tool-screen.ts";
 
 /**
  * WP-N1 (Q-66/JARVIS-101 + Q-64 pkt 3): «begrenset»-merking av samtalehistorikken og utførelseslås for `finance`/`finance_*` mot skymodeller.
@@ -17,6 +19,18 @@ export interface RestrictedContextGuardConfig {
 export function parseRestrictedContextGuard(env: Readonly<Record<string, string | undefined>> = process.env): RestrictedContextGuardConfig {
   return { enabled: env[RESTRICTED_CONTEXT_GUARD_FLAG] === "on" };
 }
+
+/**
+ * WP-N1 (fiks-runde 1, F-A1/F-B2): lokalitetsprediktatet til utførelseslåsen for `finance`/`finance_*` (`ToolGateway`, K6) - flyttet hit fra `main.ts` så det kan KJØRES av en test mot det ekte leverandørregisteret
+ * (`wpn1-lock-predicate.test.ts`: en invertert/alltid-lokal/alltid-sky versjon overlevde alle N1-tester da det sto inline). `true` KUN for leverandører som står i modellregisteret med `locality: "local"`
+ * (`servedByCloudModel`, SAMME kilde som chattens verktøyskjerm og Finans-senteret); alt annet - sky, hostet gratis-tier, tom/blank/feilstavet/STORE-BOKSTAVER-leverandør - er sky og får aldri finansdata (fail-closed).
+ */
+export function financeLockServedLocally(model: { provider: string; model: string }): boolean {
+  return !servedByCloudModel({ provider: model.provider });
+}
+
+/** Valget `main.ts` gir `ToolGateway` (`financeExecutionLock`) - KUN når flagget er på. */
+export const FINANCE_EXECUTION_LOCK: FinanceExecutionLock = { servedLocally: financeLockServedLocally };
 
 /**
  * Hurtigbane-intensjonene (`fastRoute`) hvis SVAR bærer finansavledet innhold, og som derfor merkes begrenset når flagget er på (K3: «rask bane som svarer fra finans-/helseverktøy»). Objektet er `Record` over ALLE

@@ -85,7 +85,9 @@ describe("ingen direkte flaggavlesing utenfor parseren", () => {
     expect(main).not.toMatch(/process\.env\[\s*["']JARVIS_RESTRICTED/);
     expect(main).not.toContain(FLAG);
     expect(main).toContain("parseRestrictedContextGuard(process.env)");
-    expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ financeExecutionLock: \{ servedLocally: /);
+    expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ financeExecutionLock: FINANCE_EXECUTION_LOCK \} : \{\}\)/); // prediktatet bor i restricted-context-guard.ts (F-A1/F-B2)
+    expect(main.match(/financeExecutionLock/g)).toHaveLength(1);
+    expect(main).not.toMatch(/servedLocally: \(model: \{ provider: string; model: string \}\) => !servedByCloudModel/); // ingen inline-kopi av prediktatet
     expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ restrictedContextGuard: true \} : \{\}\)/); // og til samtalemotoren
   });
 
