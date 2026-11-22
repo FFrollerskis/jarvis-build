@@ -13,7 +13,7 @@ export interface StoredMessage {
   created_at: string;
   /**
    * WP-N1 (Q-66, JARVIS-101): meldingen hører til en tur som var låst til SECRET_RESTRICTED (helse/finans, D-378) og skal behandles som SECRET_RESTRICTED uansett tekst.
-   * Settes kun av samtalemotoren med `JARVIS_RESTRICTED_CONTEXT_GUARD=on`; eldre rader og alle rader med flagget AV er `false`. Kolonnen er enveis (migrasjon 140).
+   * Settes kun av samtalemotoren når begrenset-vakten (WP-N1-flagget, se `apps/api/src/restricted-context-guard.ts`) er på; eldre rader og alle rader med flagget AV er `false`. Kolonnen er enveis (migrasjon 140).
    */
   restricted: boolean;
 }
