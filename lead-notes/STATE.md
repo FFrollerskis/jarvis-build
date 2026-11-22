@@ -96,3 +96,43 @@ D-470 byggepause opphevet; rekkefølge K+H1/H2 -> I+B3 -> D3+G1 -> G2+G3 -> G4. 
 - (16:43Z, 2026-11-20) KJEDE-TEST 6/6: 10-g3-vision (G3 oppå G2-tilstanden, tre 2f88c60e): static exit 0; full suite 948 filer/16 286 tester: 5 røde = kjente sandkasse-feil -> GRØNN (~33 min). Alle seks mellomtilstander (04-h2, 06, 07, 08, 09b, 10) er GRØNNE; R_05 == B3-tipp-tre og R_12 == integ2-tre er allerede testet. Starter i tillegg 11b-g4-test-adapt (G4 + 87b49a65; det G4-PR-ens CI vil se).
 - (17:10Z, 2026-11-20) Timeskontroll: ingen agenter; push-dry-run 503 (uendret); kjede-test 7/7 (11b-g4-test-adapt, tre 5301c1d0) i suite-fasen (static exit 0), sporet oppgave bulogkwgs. Neste kontroll ~18:09Z.
 - (17:36Z, 2026-11-20) KJEDE-TEST FERDIG (7/7 + endepunktene): 11b-g4-test-adapt (G4 + 87b49a65, tre 5301c1d0): static exit 0; full suite 975 filer/16 654 tester: kun de 5 kjente røde -> GRØNN. ALLE mellomtilstander i PR-rekkefølgen er grønne (bortsett fra de fem kjente sandkasse-feilene). NØDVENDIGHET BEVIST: uten ca13dace feiler wpg1-comms-routes (1 test) i G2-tilstanden; uten 87b49a65 feiler wpg2-autonomy-step-up (2 av 5) i G4-tilstanden; med dem består begge. Resultattabell: drafts/README.md §8. Worktree .claude/worktrees/rh står igjen (kan fjernes). Neste: kun time-sjekken (push) til GitHub virker.
+- (18:10Z, 2026-11-20) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~19:09Z.
+- (19:10Z, 2026-11-20) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~20:09Z.
+- (20:11Z, 2026-11-20) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~21:09Z.
+- (21:10Z, 2026-11-20) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~22:09Z.
+- (22:10Z, 2026-11-20) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~23:09Z.
+- (23:10Z, 2026-11-20) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~00:09Z.
+- (00:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~01:09Z.
+- (01:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~02:09Z.
+- (02:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~03:09Z.
+- (03:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~04:09Z.
+- (04:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~05:09Z.
+- (05:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~06:09Z.
+- (06:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~07:09Z.
+- (07:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~08:09Z.
+- (08:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~09:09Z.
+- (09:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~10:09Z.
+- (10:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~11:09Z.
+- (11:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~12:09Z.
+- (12:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~13:09Z.
+- (13:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~14:09Z.
+- (14:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~15:09Z.
+- (15:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~16:09Z.
+- (16:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~17:09Z.
+- (17:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~18:09Z.
+- (18:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~19:09Z.
+- (19:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~20:09Z.
+- (20:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~21:09Z.
+- (21:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~22:09Z.
+- (22:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~23:09Z.
+- (23:10Z, 2026-11-21) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~00:09Z.
+- (00:10Z, 2026-11-22) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~01:09Z.
+- (01:10Z, 2026-11-22) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~02:09Z.
+- (02:10Z, 2026-11-22) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~03:09Z.
+- (03:10Z, 2026-11-22) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~04:09Z.
+- (04:10Z, 2026-11-22) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~05:09Z.
+- (05:10Z, 2026-11-22) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~06:09Z.
+- (06:10Z, 2026-11-22) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~07:09Z.
+- (07:10Z, 2026-11-22) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~08:09Z.
+- (08:10Z, 2026-11-22) Timeskontroll: ingen agenter; alt ferdig lokalt og kjede-testet; push-dry-run 503 (uendret). Neste kontroll ~09:09Z.
+- (08:16Z, 2026-11-22) EIERENS «Kjør på videre» (~08:10Z) mottatt; GitHub fortsatt 503. STARTET WP-N1 (JARVIS-101/N1, Q-66 alternativ A + Q-64 pkt 3; anbefalt alternativ, flagg AV, ingen sikkerhetsregel svekkes): begrenset-merking av samtalehistorikk (migrasjon 140 `messages.restricted`, MessageStore, conversation.ts-merking, partition-/withhold-funksjoner leser merket) + utførelseslås for finance/finance_* ved skyserverte turer; flagg JARVIS_RESTRICTED_CONTEXT_GUARD (AV = byte-identisk med main). Gren claude/wp-n1-restricted-history (worktree .claude/worktrees/n1, fra refs/rehearsal/12-docs; blir PR #13 etter kjeden: cherry-pick egne commits på oppdatert main ved PR-dag). BYGGER: agent a60eacc2b3fba2a82 (brief /tmp/lead/briefs/N1-build.md; rapport kommer som siste melding -> lagre med /tmp/lead/last_msg.py til /tmp/lead/N1-report.md). Pipeline videre: to uavhengige reviewere (A: motor/klassifisering/flagg-AV-identitet; B: DB/migrasjon/utførelseslås/mutanter) -> fiks -> delta-re-review -> docs (D-477, Q-76, JARVIS-101 -> delvis lukket, matrise, status). Husk: sporede bakgrunnsoppgaver (run_in_background) for lange kjøringer; containeren kan restartes ved inaktivitet (agenter dør da, gjenoppta med SendMessage).
