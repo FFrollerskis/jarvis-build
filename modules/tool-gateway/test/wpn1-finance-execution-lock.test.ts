@@ -175,6 +175,48 @@ describe("flagg PÅ: skymodell og ukjent modell nektes for HVER finans-handling 
   });
 });
 
+describe("fiks-runde 1 (F-B3 L2): ingen unntak fra låsen - en delegert jobbkontrakt og en medfulgt godkjenning løfter den ikke, og årsakskoden er pinnet", () => {
+  const contract = (allowed: string[]) => ({
+    task_id: "task-1", owner_person_id: identity.person_id, tenant_id: identity.tenant_id, goal: "g", acceptance_criteria: ["x"],
+    input: { data: {}, trust_level: "internal", provenance: "chat:s" }, allowed_tools: allowed, allowed_memory_spaces: ["personal"], allowed_network_targets: [],
+    agent_profile: "executive", model_budget_ore: 0, retry_policy: { max_attempts: 1, backoff_seconds: 0 }, max_steps: 1
+  });
+  const withExtras = (gateway: ToolGateway, extra: Record<string, unknown>, servingModel?: { provider: string; model: string }) =>
+    gateway.execute({ identity, tool_id: "finance_stripe", action: "get_balance", parameters: { tenant_id: identity.tenant_id }, idempotency_key: `k-${randomUUID()}`, ...(servingModel ? { servingModel } : {}), ...extra } as never);
+
+  it("R31: en skymodell nektes også når kallet bærer en GYLDIG jobbkontrakt som tillater finansverktøyet; en lokal modell med samme kontrakt får resultatet", async () => {
+    for (const allowed of [["finance_stripe"], ["finance_stripe.get_balance"], ["finance_stripe", "github"]]) {
+      const { gateway, calls } = rig({ servedLocally });
+      expect(await withExtras(gateway, { jobContract: contract(allowed) }, CLOUD), allowed.join(",")).toEqual({ ok: false, reason: FINANCE_WITHHELD_REASON });
+      expect(calls, allowed.join(",")).toEqual([]);
+      expect((await withExtras(gateway, { jobContract: contract(allowed) }, LOCAL_MODEL)).ok, allowed.join(",")).toBe(true);
+    }
+  });
+
+  it("R31 (rekkefølge): kontraktens egne avslag kommer FØR låsen (verktøy ikke i kontrakten / feil identitet gir sin egen årsak), og låsen kommer før parametervalidering", async () => {
+    const { gateway } = rig({ servedLocally });
+    expect(await withExtras(gateway, { jobContract: contract(["github"]) }, CLOUD)).toEqual({ ok: false, reason: "tool_not_in_job_contract" });
+    expect(await withExtras(gateway, { jobContract: { ...contract(["finance_stripe"]), owner_person_id: "noen-andre" } }, CLOUD)).toEqual({ ok: false, reason: "job_identity_mismatch" });
+    expect(await gateway.execute({ identity, tool_id: "finance_stripe", action: "get_balance", parameters: { garbage: 1 } as never, idempotency_key: `k-${randomUUID()}`, servingModel: CLOUD })).toEqual({ ok: false, reason: FINANCE_WITHHELD_REASON });
+  });
+
+  it("R32: en medfulgt godkjenning (`approval`, uansett innhold) løfter ikke låsen for en skymodell - ingen policy-evaluering, ingen transport", async () => {
+    const { gateway, calls } = rig({ servedLocally });
+    for (const approval of [{ signed: true }, { approval_id: "a-1", nonce: "n", signature: "s" }, "godkjent", 1, true]) {
+      expect(await withExtras(gateway, { approval }, CLOUD), JSON.stringify(approval)).toEqual({ ok: false, reason: FINANCE_WITHHELD_REASON });
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("R35: årsakskoden er NØYAKTIG `finance_withheld_from_cloud_model` (runbookens NAS-SQL søker på den), og audit-raden bruker den bokstavelig", async () => {
+    expect(FINANCE_WITHHELD_REASON).toBe("finance_withheld_from_cloud_model");
+    const { gateway } = rig({ servedLocally });
+    const before = (await deniedRows("finance_withheld_from_cloud_model")).length;
+    expect(await run(gateway, "finance_stripe", "get_balance", { tenant_id: identity.tenant_id }, CLOUD)).toEqual({ ok: false, reason: "finance_withheld_from_cloud_model" });
+    expect((await deniedRows("finance_withheld_from_cloud_model")).length).toBe(before + 1);
+  });
+});
+
 describe("flagg PÅ: det som SKAL slippe gjennom, gjør det", () => {
   it("en LOKAL modell får hele resultatet for hvert finansnavnerom (D-378 pkt 2), og transporten ser servingModel", async () => {
     const { gateway, calls } = rig({ servedLocally });

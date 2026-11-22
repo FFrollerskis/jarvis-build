@@ -23,13 +23,15 @@ export class MessageStore {
   constructor(private readonly pool: pg.Pool) {}
 
   /**
-   * `opts.restricted === true` (WP-N1) lagrer meldingen som begrenset fra første stund (assistentsvar fra en låst tur). Uten valget er SQL-en og revisjonsraden NØYAKTIG som før N1 - kolonnen settes aldri
+   * `opts.restricted` (WP-N1; alt unntatt `undefined`/`false` regnes som begrenset, fail-closed) lagrer meldingen som begrenset fra første stund (assistentsvar fra en låst tur). Uten valget er SQL-en og revisjonsraden NØYAKTIG som før N1 - kolonnen settes aldri
    * (standard `false`). Revisjonen bærer aldri innhold; en begrenset lagring har i tillegg `restricted: true` i nyttelasten.
    */
   async save(identity: IdentityContext, role: MessageRole, content: string, opts: { restricted?: boolean } = {}): Promise<string> {
+    // Fiks-runde 1 (F-B4/I2): FAIL-CLOSED normalisering for JS-kallere uten TS-typer - ALT som ikke er `undefined`/`false` lagres begrenset (`"true"`, `1`, `null`, `{}` ...). Kun et eksplisitt valg om å IKKE begrense gir en vanlig rad.
+    const restricted = opts?.restricted !== undefined && opts.restricted !== false;
     return withTenantTransaction(this.pool, identity.tenant_id, async (client) => {
       const messageId = `msg-${randomUUID()}`;
-      if (opts.restricted === true) {
+      if (restricted) {
         await client.query(
           `INSERT INTO messages (message_id, tenant_id, session_id, role, content, restricted)
            VALUES ($1, $2, $3, $4, $5, true)`,

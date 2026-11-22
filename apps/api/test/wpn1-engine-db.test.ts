@@ -39,8 +39,10 @@ beforeAll(async () => {
     INSERT INTO people (person_id, display_name) VALUES ('p-1','Én');
     INSERT INTO person_tenants (person_id, tenant_id) VALUES ('p-1','t-n1');
     INSERT INTO sessions (session_id, tenant_id, person_id, status, last_channel, last_device_id) VALUES
-      ('s-on','t-n1','p-1','closed','web','d-1'), ('s-off','t-n1','p-1','active','web','d-1');`);
-  app = new pg.Pool({ ...base, user: "jarvis_n1db", password: "pw2" });
+      ('s-on','t-n1','p-1','closed','web','d-1'), ('s-off','t-n1','p-1','active','web','d-1'),
+      ${Array.from({ length: 6 }, (_, i) => `('c-${i}','t-n1','p-1','closed','web','d-1')`).join(",")},
+      ('f-throw','t-n1','p-1','closed','web','d-1'), ('f-false','t-n1','p-1','closed','web','d-1');`);
+  app = new pg.Pool({ ...base, user: "jarvis_n1db", password: "pw2", max: 12 });
   app.on("error", () => undefined);
 }, 240_000);
 
@@ -136,6 +138,119 @@ describe("flagg AV mot ekte Postgres (kontrolltest: feilen finnes uten vakten)",
       expect(calls[1]!.request.messages.map((m) => m.content)).toContain("svar uten stikkord"); // det lokale svaret ligger i skyhistorikken (JARVIS-101)
       const marks = (await admin.query("SELECT count(*)::int AS n FROM audit_events WHERE session_id = 's-off' AND type = 'message.restricted_marked'")).rows[0].n as number;
       expect(marks).toBe(0);
+    } finally {
+      log.restore();
+    }
+  });
+});
+
+/**
+ * Fiks-runde 1 (F-A3/L4, reviewer A sin db-probe): SAMTIDIGE turer i samme sesjon og feilinjeksjon på `markRestricted` mot ekte Postgres.
+ * Invariant (samtidighet): per tur er brukerraden og svarraden begrenset hvis og bare hvis et av turens modellkall var SECRET_RESTRICTED; revisjonen `message.restricted_marked` = antall låste turer.
+ * Verste utfall ved feilet merking (L4, dokumentert i runbooken): turen kaster FØR modellkallet, men brukerraden står igjen UMERKET uten svar, og neste skytur sender spørsmålsteksten (aldri et svar) til skyen.
+ */
+type CallRec = { tag: string; sensitivity: string | undefined; pref: string | undefined; messages: string[] };
+
+function engineWithTags(calls: CallRec[], opts: { store?: MessageStore; tag?: string; guard?: boolean } = {}): ConversationEngine {
+  const def = (name: string) => ({ name, description: name, input_schema: { type: "object", properties: {} } });
+  const finance = def("finance_neonomics__list_balances");
+  const github = def("github__list_pull_requests");
+  const serve = async (input: CompleteInput) => {
+    const last = input.request.messages.at(-1);
+    const tag = opts.tag ?? String(last && typeof last.content === "string" ? last.content : "").match(/#\d+/)?.[0] ?? "#?";
+    calls.push({ tag, sensitivity: input.sensitivity, pref: (input.providerPreference as string[] | undefined)?.[0], messages: input.request.messages.map((m) => String(m.content)) });
+    await new Promise((r) => setTimeout(r, Math.floor(Math.random() * 25)));
+    const provider = (input.providerPreference as string[] | undefined)?.[0] ?? "gemma_local";
+    return { text: `RE:${tag}`, usage: { input_tokens: 1, output_tokens: 1 }, provider, model: "m" };
+  };
+  return new ConversationEngine({
+    messages: opts.store ?? new MessageStore(app), context: new ContextBuilder(app), gateway: { complete: serve, stream: serve, completeWithTools: serve } as unknown as ModelGateway,
+    tasks: {} as unknown as TaskService, worker: {} as unknown as InProcessWorker, trace: new MemoryTraceSink(), toolTurnRoute: { provider: "anthropic", model: "claude-sonnet-5-5" },
+    tools: {
+      definitions: [finance, github] as never, executorFor: () => ({ execute: async () => { throw new Error("ikke brukt"); } }) as unknown as ToolExecutor, catalog: () => "katalog",
+      select: ({ surface, text }) => {
+        const locked = /konto/i.test(text);
+        const pr = /\bPR\b/i.test(text);
+        return { definitions: [...(locked ? [finance] : []), ...(pr ? [github] : [])] as never, limits: SURFACE_LIMITS[surface], tool_ids: [...(locked ? ["finance_neonomics"] : []), ...(pr ? ["github"] : [])], ...(locked ? { min_sensitivity: "SECRET_RESTRICTED" as const } : {}) };
+      }
+    },
+    ...(opts.guard === false ? {} : { restrictedContextGuard: true })
+  });
+}
+
+describe("samtidige turer i samme sesjon mot ekte Postgres (flagg PÅ)", () => {
+  it("per tur: brukerrad og svarrad er begrenset <=> turens modellkall var låst; ingen kryss-merking; revisjon = antall låste turer (6 runder x 8 samtidige turer)", async () => {
+    const log = silence();
+    try {
+      let lockedTotal = 0;
+      let turns = 0;
+      const violations: string[] = [];
+      for (let round = 0; round < 6; round += 1) {
+        const session = `c-${round}`;
+        const calls: CallRec[] = [];
+        const asks = Array.from({ length: 8 }, (_, i) => `${i % 3 === 0 ? "hvordan går det med kontoen min?" : i % 3 === 1 ? "list åpne PR-er på github" : "hva synes du om været"} #${round * 10 + i}`);
+        const settled = await Promise.allSettled(asks.map((a) => engineWithTags(calls, { tag: a.match(/#\d+/)![0] }).handle(identity(session), a)));
+        settled.forEach((r, i) => { if (r.status === "rejected") violations.push(`AVVIST ${asks[i]}: ${(r.reason as Error).message}`); });
+        const sessionRows = await rows(session);
+        const restrictedAudits = Number((await admin.query("SELECT count(*)::int AS n FROM audit_events WHERE session_id = $1 AND type = 'message.restricted_marked'", [session])).rows[0].n);
+        let lockedThisRound = 0;
+        for (const a of asks) {
+          const tag = a.match(/#\d+/)![0];
+          turns += 1;
+          const locked = calls.some((c) => c.tag === tag && c.sensitivity === "SECRET_RESTRICTED");
+          if (locked) lockedThisRound += 1;
+          const user = sessionRows.find((r) => r.role === "user" && r.content === a);
+          const answer = sessionRows.find((r) => r.role === "assistant" && r.content.startsWith(`RE:${tag}`));
+          if (!user || !answer) { violations.push(`${a}: rad mangler (user=${!!user}, answer=${!!answer})`); continue; }
+          if (user.restricted !== locked) violations.push(`${a}: brukerrad restricted=${user.restricted}, låst=${locked}`);
+          if (answer.restricted !== locked) violations.push(`${a}: svarrad restricted=${answer.restricted}, låst=${locked}`);
+        }
+        lockedTotal += lockedThisRound;
+        if (restrictedAudits !== lockedThisRound) violations.push(`runde ${round}: revisjon ${restrictedAudits} != låste turer ${lockedThisRound}`);
+        // aldri et ikke-låst modellkall som bærer en annen turs MERKEDE svar:
+        for (const c of calls) if (c.sensitivity !== "SECRET_RESTRICTED") for (const m of c.messages) if (/^RE:#\d+/.test(m)) {
+          const otherRow = sessionRows.find((r) => r.role === "assistant" && r.content.startsWith(`RE:${m.match(/#\d+/)![0]}`));
+          if (otherRow?.restricted) violations.push(`${c.tag}: skykall (${c.pref}) bar svaret til en merket tur`);
+        }
+      }
+      expect(turns).toBe(48);
+      expect(lockedTotal).toBeGreaterThan(10); // testen er ikke tom: mange turer ble faktisk låst
+      expect(violations.slice(0, 8)).toEqual([]);
+    } finally {
+      log.restore();
+    }
+  });
+});
+
+describe("feilinjeksjon på markRestricted mot ekte Postgres (verste utfall, L4)", () => {
+  it("markRestricted kaster (databasefeil): turen kaster, INGEN modellkall, ingen assistentrad; brukerraden står igjen umerket - og neste skytur sender KUN den spørsmålsteksten (aldri et svar)", async () => {
+    const log = silence();
+    try {
+      const calls: CallRec[] = [];
+      const real = new MessageStore(app);
+      const failing = Object.assign(Object.create(real), { markRestricted: async () => { throw new Error("db nede"); }, save: real.save.bind(real), history: real.history.bind(real) }) as MessageStore;
+      await expect(engineWithTags(calls, { store: failing }).handle(identity("f-throw"), "hvordan går det med kontoen min? #901")).rejects.toThrow("db nede");
+      expect(calls).toEqual([]);
+      expect((await rows("f-throw")).map((r) => [r.role, r.restricted])).toEqual([["user", false]]);
+      // neste tur (nå uten feil) mot SKY: den dinglende, umerkede brukerraden er det eneste som kan følge med - kun spørsmålsteksten
+      await engineWithTags(calls).handle(identity("f-throw"), "list åpne PR-er på github #902");
+      const cloud = calls.find((c) => c.tag === "#902")!;
+      expect(cloud.pref).toBe("anthropic");
+      expect(cloud.messages.filter((m) => m.startsWith("RE:"))).toEqual([]); // ingen assistentsvar (det lokale svaret ble aldri laget)
+    } finally {
+      log.restore();
+    }
+  });
+
+  it("markRestricted gir false (rad ikke funnet): restricted_marking_failed, ingen modellkall, ingen assistentrad", async () => {
+    const log = silence();
+    try {
+      const calls: CallRec[] = [];
+      const real = new MessageStore(app);
+      const failing = Object.assign(Object.create(real), { markRestricted: async () => false, save: real.save.bind(real), history: real.history.bind(real) }) as MessageStore;
+      await expect(engineWithTags(calls, { store: failing }).handle(identity("f-false"), "hvordan går det med kontoen min? #903")).rejects.toThrow("restricted_marking_failed");
+      expect(calls).toEqual([]);
+      expect((await rows("f-false")).map((r) => r.role)).toEqual(["user"]);
     } finally {
       log.restore();
     }

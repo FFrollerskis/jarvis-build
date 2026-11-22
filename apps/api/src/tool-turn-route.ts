@@ -77,7 +77,11 @@ export function localOnlyNote(reasons: readonly string[]): string {
   const restrictedHistory = reasons.includes("history:restricted");
   if (restrictedHistory) parts.push("de siste meldingene hørte til en tur som ble holdt lokalt");
   const why = parts.length > 0 ? parts.join(", og ") : "innholdet er klassifisert som følsomt";
-  const hint = fromText.length > 0 || restrictedHistory ? " Dette varer til emnet ikke lenger er blant de siste meldingene." : "";
+  // F-A5 (fiks-runde 1): «til emnet ikke lenger er blant de siste meldingene» er usant for en begrenset historikk - en låst tur merker selv sine rader og fornyer dermed kjeden (smitte). Teksten sier det som faktisk gjelder, og lover ingen
+  // «ny samtale»: en sesjon er eierens kontinuerlige samtale på tvers av kanaler, og en ny økt nullstiller ikke. Uten den nye årsaken (flagg AV) er teksten uendret fra før N1.
+  const hint = restrictedHistory
+    ? " Samtalen holdes lokal så lenge en begrenset melding er blant de siste meldingene."
+    : fromText.length > 0 ? " Dette varer til emnet ikke lenger er blant de siste meldingene." : "";
   return `\n\n(Svart på den lokale modellen: ${why}, og slikt sendes aldri til skyen.${hint})`;
 }
 

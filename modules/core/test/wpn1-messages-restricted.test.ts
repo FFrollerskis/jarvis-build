@@ -88,6 +88,20 @@ describe("A: migrasjon 140 - skjema, rettigheter og vakter", () => {
     expect((await rowOf("m-legacy"))?.content).toBe("gammel rad");
   });
 
+  it("R08: INGEN annen rolle (heller ikke PUBLIC) har UPDATE-rett på messages: kolonne-ACL-ene og tabell-ACL-en listet direkte fra katalogen - kun jarvis_app på kolonnen restricted (+ eieren)", async () => {
+    const writes = (acl: string[] | null): string[] => (acl ?? []).filter((item) => /^[^=]*=[a-zA-Z*]*w[a-zA-Z*]*\//.test(item)); // UPDATE = «w»; tom grantee = PUBLIC
+    const cols = (await admin.query(`SELECT attname, attacl::text[] AS acl FROM pg_attribute WHERE attrelid = 'public.messages'::regclass AND attnum > 0 AND NOT attisdropped`)).rows as Array<{ attname: string; acl: string[] | null }>;
+    expect(cols.map((c) => c.attname)).toContain("restricted");
+    for (const c of cols) {
+      const granted = writes(c.acl);
+      if (c.attname === "restricted") expect(granted.map((g) => g.split("=")[0]).sort(), "restricted").toEqual(["jarvis_app"]);
+      else expect(granted, c.attname).toEqual([]);
+    }
+    const tableAcl = (await admin.query(`SELECT relacl::text[] AS acl FROM pg_class WHERE oid = 'public.messages'::regclass`)).rows[0].acl as string[] | null;
+    for (const item of writes(tableAcl)) expect(item.split("=")[0], `tabell-ACL: ${item}`).toBe("postgres"); // kun eieren
+    expect((tableAcl ?? []).some((item) => item.startsWith("="))).toBe(false); // ingen PUBLIC-tildeling på tabellen
+  });
+
   it("merket er ENVEIS: ikke engang en superbruker kan gjøre en begrenset melding ubegrenset (trigger), og app-rollen heller ikke", async () => {
     const id = await store.save(idA1, "assistant", "begrenset svar", { restricted: true });
     await expect(admin.query("UPDATE messages SET restricted = false WHERE message_id = $1", [id])).rejects.toThrow(/messages_restricted_monotonic/);
@@ -117,6 +131,19 @@ describe("A: migrasjon 140 - skjema, rettigheter og vakter", () => {
 });
 
 describe("B: save - uendret uten valget, begrenset med valget, aldri innhold i revisjonen", () => {
+  it("I2 (fail-closed): alt som ikke er `undefined`/`false` lagres begrenset - `\"true\"`, 1, null, 0, tom streng, {} og [] også; kun undefined og false gir en vanlig rad", async () => {
+    for (const value of [true, "true", "false", "t", 1, 0, "", null, {}, []]) {
+      const id = await store.save(idA1, "assistant", `rå verdi ${JSON.stringify(value)}`, { restricted: value as never });
+      expect((await rowOf(id))?.restricted, JSON.stringify(value)).toBe(true);
+    }
+    for (const value of [undefined, false]) {
+      const id = await store.save(idA1, "assistant", `rå verdi ${String(value)}`, { restricted: value as never });
+      expect((await rowOf(id))?.restricted, String(value)).toBe(false);
+    }
+    const noOpts = await store.save(idA1, "assistant", "uten valg", undefined);
+    expect((await rowOf(noOpts))?.restricted).toBe(false);
+  });
+
   it("uten valg (og med restricted:false): kolonnen settes aldri (standard false), revisjonsraden er nøyaktig {role} som før N1", async () => {
     const before = (await auditOf("message.saved")).length;
     const a = await store.save(idA1, "user", "hemmelig-innhold-1");
