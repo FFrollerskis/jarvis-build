@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { fastRoute } from "@jarvis/core";
 import { classifyContentSensitivity } from "@jarvis/model-gateway";
-import { runScenario, type ChannelName, type Observation, type Row, type Scenario } from "./support/n1-engine-harness.ts";
+import { runScenario, type ChannelName, type Observation, type Row, type RunOptions, type Scenario } from "./support/n1-engine-harness.ts";
 import { ASKS, HISTORIES, SCENARIOS } from "./support/n1-scenarios.ts";
 import { FAST_INTENT_RESTRICTED } from "../src/restricted-context-guard.ts";
 import { localOnlyNote, stripSystemNotes } from "../src/tool-turn-route.ts";
@@ -17,7 +17,7 @@ import { localOnlyNote, stripSystemNotes } from "../src/tool-turn-route.ts";
  *  D. fail-closed: kan brukermeldingen ikke merkes, feiler turen FØR modellen kalles
  *  E. smitten er målt og dokumentert (kjent begrensning), og strukturvakter mot nye lagringssteder
  */
-const run = (scenario: Omit<Scenario, "id">, channel: ChannelName = "web", options: { markResult?: boolean; markThrows?: boolean } = {}): Promise<Observation> =>
+const run = (scenario: Omit<Scenario, "id">, channel: ChannelName = "web", options: Pick<RunOptions, "markResult" | "markThrows" | "jobOrigin"> = {}): Promise<Observation> =>
   runScenario({ id: "t", ...scenario }, channel, { guard: true, ...options });
 const off = (scenario: Omit<Scenario, "id">, channel: ChannelName = "web"): Promise<Observation> => runScenario({ id: "t", ...scenario }, channel, {});
 const text = (o: Observation, call = 0): string => o.gateway[call]!.messages.join("\n");
@@ -251,6 +251,22 @@ describe("B: hvert lagringssted merkes riktig", () => {
     expect(Object.entries(FAST_INTENT_RESTRICTED).filter(([, v]) => v).map(([k]) => k).sort()).toEqual(["cost_report", "self_diagnosis", "slo_report", "system_status", "value_report"]);
     const cost = await run({ text: "hva koster du", prior: HISTORIES["clean"]! });
     expect(cost.events).toEqual(["save:user", "mark", "save:assistant:restricted"]); // låst FØR svaret lagres; ingen modell
+  });
+
+  it("R3-2: hurtigbanens `jobbstatus` er BETINGET låst (ikke av intensjonen): en jobb fra en låst tur og en feilkoblet motor uten `jobOrigin` (vakten på) låses FØR svaret lagres - en vanlig jobb og vakten AV er uendret", async () => {
+    const phrase = "jobbstatus task-7";
+    const ordinary = await run({ text: phrase, prior: HISTORIES["clean"]! }); // `jobOrigin` som i drift (main.ts kobler den med vakten på): jobben er ikke fra en låst tur
+    expect(ordinary.marks).toBe(0);
+    expect(savedAssistant(ordinary)[0]!.restricted).toBe(false);
+    const fromLocked = await run({ text: phrase, prior: HISTORIES["clean"]! }, "web", { jobOrigin: "restricted" });
+    expect(fromLocked.marks).toBe(1);
+    expect(fromLocked.events).toEqual(["save:user", "mark", "save:assistant:restricted"]);
+    const miswired = await run({ text: phrase, prior: HISTORIES["clean"]! }, "web", { jobOrigin: "omit" });
+    expect(miswired.marks).toBe(1); // fail-closed: kan opprinnelsen ikke avgjøres, regnes jobben som begrenset
+    expect(miswired.events).toEqual(["save:user", "mark", "save:assistant:restricted"]);
+    const flagOff = await off({ text: phrase, prior: HISTORIES["clean"]! }); // vakten AV: ingen markør, ingen `jobOrigin`, tre-argument lagring (= main)
+    expect(flagOff.marks).toBe(0);
+    expect(flagOff.saved.every((x) => !x.restricted && x.argc === 3)).toBe(true);
   });
 
   it("hurtigbanens bakgrunnsjobb: låst ruteavgjørelse (finansord) merkes; en jobb chatten ville latt gå til skyen (eventuelt via skyvarianten) merkes ikke; eierens egen modellvalg-instruks er ikke en lås", async () => {

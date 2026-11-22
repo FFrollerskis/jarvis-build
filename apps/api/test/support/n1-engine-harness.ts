@@ -150,6 +150,11 @@ export interface RunOptions {
   markResult?: boolean;
   /** `markRestricted` kaster. */
   markThrows?: boolean;
+  /**
+   * WP-N1 (R3-2): `jobOrigin` for hurtigbanens `jobbstatus <id>` - KUN med vakten PÅ (`main.ts` kobler den alltid da; flagg AV har aldri `jobOrigin`). `unrestricted` (standard) = jobben er ikke fra en låst tur, `restricted` = den er det,
+   * `omit` = feilkoblet motor uten `jobOrigin` (fail-closed: turen låses).
+   */
+  jobOrigin?: "unrestricted" | "restricted" | "omit";
 }
 
 /** Kjører ÉN tur og returnerer alt som kan observeres utenfra. Samme kode kjøres mot main (baseline) og mot dette treet. */
@@ -270,6 +275,8 @@ export async function runScenario(scenario: Scenario, channel: ChannelName, opti
   const spyLog = vi.spyOn(console, "log").mockImplementation((line?: unknown) => { pushLog(logs, line); });
   const spyErr = vi.spyOn(console, "error").mockImplementation((line?: unknown) => { pushLog(logs, line); });
   const guardOptions = options.guard === true ? { restrictedContextGuard: true } : options.guard === "explicit-false" ? { restrictedContextGuard: false } : {};
+  // Som `main.ts`: `jobOrigin` finnes kun med vakten på (flagg AV: aldri, så motoren er lik main).
+  const jobOriginOptions = options.guard === true && options.jobOrigin !== "omit" ? { jobOrigin: { isRestricted: async () => options.jobOrigin === "restricted" } } : {};
   const engine = new ConversationEngine({
     messages, context, gateway: gatewayFake,
     tasks: {
@@ -300,7 +307,8 @@ export async function runScenario(scenario: Scenario, channel: ChannelName, opti
       catalog: () => "katalog",
       select: toolsDeps.select
     },
-    ...guardOptions
+    ...guardOptions,
+    ...jobOriginOptions
   } as unknown as ConstructorParameters<typeof ConversationEngine>[0]);
 
   let tokens = "";

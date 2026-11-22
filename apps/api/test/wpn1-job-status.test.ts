@@ -13,10 +13,10 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { MemoryTraceSink, classifyContentSensitivity, type CompleteInput, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { PgTaskQueue, type InProcessWorker, type TaskService } from "@jarvis/tasks";
-import { MeshToolExecutor, SURFACE_LIMITS, ToolGateway, allMeshTools } from "@jarvis/tool-gateway";
+import { MeshToolExecutor, SURFACE_LIMITS, ToolGateway, allMeshTools, resolveModelToolSurface } from "@jarvis/tool-gateway";
 import { ChatJobs, TasksDelegateTransport, WITHHELD_JOB_NOTE_NO, WITHHELD_JOB_TITLE, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
 import { ConversationEngine } from "../src/conversation.ts";
-import { withholdsRestrictedJobFromCloud } from "../src/restricted-context-guard.ts";
+import { toolOutputBearsRestrictedJob, withholdsRestrictedJobFromCloud } from "../src/restricted-context-guard.ts";
 
 /**
  * WP-N1 (fiks-runde 2, F2-B1 / reviewer B NF-1): RESULTATET av en bakgrunnsjobb startet fra en LÅST tur nådde fortsatt skymodeller. Leveringsmeldingen ble merket (F-A2), men
@@ -25,6 +25,9 @@ import { withholdsRestrictedJobFromCloud } from "../src/restricted-context-guard
  * Fiks: (a) med vakten PÅ holdes tittel/resultat/feil tilbake VED UTFØRELSE for sky/ukjent modell (`withheld: true` + kort norsk merknad; lokal modell og eierens ruter uendret) - samme mønster som
  * `withholdFinanceFromCloud`; (b) `jobbstatus` for en jobb med `restricted_origin` låser turen FØR svaret lagres (bruker- og assistentrad begrenset). Vakten AV: uendret view, uendret kallform, ingen oppslag.
  * Alt mot ekte Postgres (ekte kø, ekte kontraktsskjema, ekte MessageStore/ContextBuilder) og den ekte ToolGateway/MeshToolExecutor.
+ *
+ * Fiks-runde 3 (siste): R3-1 (reviewer B NF-3) - en LOKAL modell i en ULÅST verktøytur (dagstak/fallback) fikk det rå viewet, og svaret ble lagret umerket (seksjon E: den trusted booleanen `restricted` + lås i `trackedExecutor`),
+ * R3-2 - `jobbstatus` er fail-closed når `jobOrigin` mangler med vakten på, og R3-3 (reviewer A K29/K30) - `jobbstatus` låser uavhengig av jobbens status (seksjon B).
  */
 let stop: (() => Promise<void>) | undefined;
 let admin: pg.Pool;
@@ -32,7 +35,7 @@ let app: pg.Pool;
 let queue: PgTaskQueue;
 const T = "t-n1st";
 const identity = (session: string): IdentityContext => ({ person_id: "p-1", tenant_id: T, memory_space_id: "personal", session_id: session, device_id: "d-1", channel: "web", auth_strength: "active" });
-const SESSIONS = ["s-tool", "s-fast-lock", "s-fast-plain", "s-fast-off", "s-fast-err", "s-fast-next"];
+const SESSIONS = ["s-tool", "s-fast-lock", "s-fast-plain", "s-fast-off", "s-fast-err", "s-fast-next", "s-fast-states", "s-fast-omit", "s-fast-omit-off", "s-loc-get", "s-loc-list", "s-loc-plain", "s-loc-off", "s-loc-cloud", "s-loc-trunc", "s-loc-cloudtrunc", "s-loc-fail", "s-loc-spoof"];
 const CLOUD = { provider: "anthropic", model: "claude-sonnet-5-5" };
 const LOCAL = { provider: "gemma_local", model: "gemma3:4b" };
 const SECRET_TEXT = "N1ST-HEMMELIG-RESULTAT saldoen etter utbetalingen er 45 000";
@@ -137,7 +140,7 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
     } finally { restore(); }
   });
 
-  it("LOKAL modell og eierens ruter (ingen servingModel) får hele viewet uendret - lik viewet uten vakt - og aldri `withheld`", async () => {
+  it("LOKAL modell får hele viewet pluss den trusted booleanen `restricted: true` (R3-1); eierens ruter (ingen servingModel) får NØYAKTIG det gamle viewet - lik viewet uten vakt - uten `restricted`; ingen av dem får `withheld`", async () => {
     const restore = silence();
     try {
       const guarded = chain(true);
@@ -147,12 +150,13 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
       const reference = jobOf(await status(plain.gateway, { task_id: taskId }, CLOUD)); // vakten AV: det rå viewet
       expect(reference).toMatchObject({ title: SECRET_TITLE, result_text: SECRET_TEXT });
       for (const model of [LOCAL, { provider: "ollama", model: "x" }, { provider: "local_llm", model: "x" }, { provider: "scripted", model: "x" }, undefined]) {
+        const expected = model === undefined ? reference : { ...reference, restricted: true }; // R3-1: kun et modellvendt lokalt kall bærer den trusted booleanen
         const job = jobOf(await status(guarded.gateway, { task_id: taskId }, model));
-        expect(job, String(model?.provider)).toEqual(reference);
+        expect(job, String(model?.provider)).toEqual(expected);
         expect(Object.keys(job)).not.toContain("withheld");
         expect(Object.keys(job)).not.toContain("note_no");
         const listed = jobsOf(await status(guarded.gateway, {}, model)).find((j) => j["task_id"] === taskId)!;
-        expect(listed, String(model?.provider)).toEqual(reference);
+        expect(listed, String(model?.provider)).toEqual(expected);
       }
     } finally { restore(); }
   });
@@ -202,14 +206,15 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
       expect(getSpy.mock.calls[0]!.length).toBe(2);
       expect(listSpy.mock.calls[0]!.length).toBe(2);
       expect(listSpy.mock.calls[0]![1]).toBe(8);
-      // også med vakten PÅ kalles ChatJobs uten tredje argument når kallet ikke skal holdes tilbake (lokal og eier-rute)
+      // med vakten PÅ: eierens rute (ingen servingModel) kalles fortsatt uten tredje argument; en lokal modell får `markRestricted` (R3-1) og en skymodell `withholdRestricted` (F2-B1)
       const guarded = chain(true);
       const g = vi.spyOn(guarded.jobs, "get");
       const id2 = await start(guarded.gateway, guarded.submitted, { restricted: true });
       await status(guarded.gateway, { task_id: id2 }, LOCAL);
       await status(guarded.gateway, { task_id: id2 });
       await status(guarded.gateway, { task_id: id2 }, CLOUD);
-      expect(g.mock.calls.map((c) => c.length)).toEqual([2, 2, 3]);
+      expect(g.mock.calls.map((c) => c.length)).toEqual([3, 2, 3]);
+      expect(g.mock.calls[0]![2]).toEqual({ markRestricted: true });
       expect(g.mock.calls[2]![2]).toEqual({ withholdRestricted: true });
     } finally { restore(); }
   });
@@ -226,7 +231,7 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
 });
 
 describe("B: hurtigbanens `jobbstatus <id>` for en LÅST jobb merker begge radene og holdes utenfor skyvarianten", () => {
-  function engine(session: string, opts: { guard: boolean; origin?: "real" | "throws"; calls?: Array<{ pref: string | undefined; messages: string[] }>; store?: MessageStore }) {
+  function engine(session: string, opts: { guard: boolean; origin?: "real" | "throws" | "omit"; calls?: Array<{ pref: string | undefined; messages: string[] }>; store?: MessageStore }) {
     const jobs = new ChatJobs(app, { saveMessage: async () => undefined });
     const isRestricted = vi.fn((i: IdentityContext, id: string) => (opts.origin === "throws" ? Promise.reject(new Error("db nede")) : jobs.isRestrictedOrigin(i, id)));
     const def = (name: string) => ({ name, description: name, input_schema: { type: "object", properties: {} } });
@@ -243,7 +248,7 @@ describe("B: hurtigbanens `jobbstatus <id>` for en LÅST jobb merker begge raden
         definitions: [github] as never, executorFor: () => ({ execute: async () => { throw new Error("x"); } }) as unknown as ToolExecutor, catalog: () => "k",
         select: ({ surface, text }: { surface: keyof typeof SURFACE_LIMITS; text: string }) => ({ definitions: (/\bPR\b/i.test(text) ? [github] : []) as never, limits: SURFACE_LIMITS[surface], tool_ids: /\bPR\b/i.test(text) ? ["github"] : [] })
       },
-      ...(opts.guard ? { restrictedContextGuard: true, jobOrigin: { isRestricted } } : {})
+      ...(opts.guard ? { restrictedContextGuard: true, ...(opts.origin === "omit" ? {} : { jobOrigin: { isRestricted } }) } : {})
     } as never);
     return { e, isRestricted, id: identity(session) };
   }
@@ -315,6 +320,50 @@ describe("B: hurtigbanens `jobbstatus <id>` for en LÅST jobb merker begge raden
       expect((await rows("s-fast-next")).map((r) => r.restricted)).toEqual([false, false]);
     } finally { restore(); }
   });
+
+  it("R3-3 (reviewer A C4, K29/K30): `jobbstatus` låser UAVHENGIG av jobbens status - en kjørende, feilet og avbrutt LÅST jobb gir rader [true,true] (ikke bare ferdige eller de med resultat); en ikke-låst jobb [false,false]", async () => {
+    const restore = silence();
+    try {
+      const { gateway, submitted } = chain(true);
+      const running = await start(gateway, submitted, { restricted: true });
+      expect((await queue.claimNext("w-1", 30, ["executive"]))?.task_id).toBe(running); // kjørende: hentet av en worker, ikke ferdig
+      const failed = await start(gateway, submitted, { restricted: true });
+      await fail(failed, SECRET_ERROR);
+      const cancelled = await start(gateway, submitted, { restricted: true });
+      expect(await queue.requestCancel(T, cancelled)).toBe("cancelled");
+      const plain = await start(gateway, submitted, { restricted: false, title: "Vanlig jobb om PR-er" });
+      const { e, id } = engine("s-fast-states", { guard: true });
+      const states: Record<string, string> = {};
+      for (const [label, taskId, expected] of [["running", running, [true, true]], ["failed", failed, [true, true]], ["cancelled", cancelled, [true, true]], ["plain", plain, [false, false]]] as const) {
+        const before = (await rows("s-fast-states")).length;
+        const reply = await e.handle(id, `jobbstatus ${taskId}`);
+        const added = (await rows("s-fast-states")).slice(before);
+        states[label] = reply.reply;
+        expect(added.map((r) => r.restricted), label).toEqual(expected);
+      }
+      expect(states["running"]).toContain("running");
+      expect(states["failed"]).toContain("failed");
+      expect(states["cancelled"]).toContain("cancelled");
+      expect(states["plain"]).toContain("created");
+    } finally { restore(); }
+  });
+
+  it("R3-2: med vakten PÅ og UTEN `jobOrigin` (feilkoblet motor) låses `jobbstatus` fail-closed - også for en ikke-låst jobb; vakten AV (ingen markør, ingen oppslag): uendret", async () => {
+    const restore = silence();
+    try {
+      const { gateway, submitted } = chain(true);
+      const plain = await start(gateway, submitted, { restricted: false, title: "Vanlig jobb om PR-er" });
+      const wired = engine("s-fast-omit", { guard: true, origin: "omit" });
+      expect(wired.isRestricted).not.toHaveBeenCalled();
+      await wired.e.handle(wired.id, `jobbstatus ${plain}`);
+      expect((await rows("s-fast-omit")).map((r) => r.restricted)).toEqual([true, true]); // fail-closed: opprinnelsen kan ikke avgjøres
+      expect(wired.isRestricted).not.toHaveBeenCalled(); // det finnes ikke noe oppslag å kalle
+      const off = engine("s-fast-omit-off", { guard: false });
+      await off.e.handle(off.id, `jobbstatus ${plain}`);
+      expect((await rows("s-fast-omit-off")).map((r) => r.restricted)).toEqual([false, false]); // flagg AV = main
+      expect(off.isRestricted).not.toHaveBeenCalled();
+    } finally { restore(); }
+  });
 });
 
 describe("C: ChatJobs.isRestrictedOrigin (oppslaget hurtigbanen bruker)", () => {
@@ -346,8 +395,232 @@ describe("C: ChatJobs.isRestrictedOrigin (oppslaget hurtigbanen bruker)", () => 
   });
 });
 
+describe("E: R3-1 (reviewer B NF-3) - en LOKAL modell i en ULÅST verktøytur får det fulle jobbviewet; en restricted-origin-jobb bærer den trusted booleanen `restricted` og turen LÅSES", () => {
+  const BENIGN = "N1R3-BENIGN rapporten er klar og har tolv sider"; // med vilje uten stikkord: merket finnes for det klassifisereren ikke fanger
+  type Call = { pref: string | undefined; messages: string[] };
+  const rowsOf = async (s: string) => (await admin.query("SELECT role, content, restricted FROM messages WHERE session_id = $1 ORDER BY created_at, message_id", [s])).rows as Array<{ role: string; content: string; restricted: boolean }>;
+  const marks = async (s: string) => Number((await admin.query("SELECT count(*)::int AS n FROM audit_events WHERE session_id = $1 AND type = 'message.restricted_marked'", [s])).rows[0].n);
+
+  /**
+   * Motor med EKTE ToolGateway/MeshToolExecutor (bygget av `chain(guard)`). `servedBy` = leverandøren adapteren stempler på verktøykallet; `dayCap` = dagstaket for sky er nådd (D-432), så verktøyturen går til den LOKALE modellen -
+   * reviewer B sin probe. Den falske `completeWithTools` utfører ETT `tasks.get_task_status`-kall når teksten nevner «jobben», og svarer med resultatteksten modellen fikk (som en lokal modell ville gjort).
+   */
+  function toolEngine(session: string, o: { chain: ReturnType<typeof chain>; guard: boolean; servedBy: string; dayCap: boolean; args?: Record<string, unknown>; maxOutput?: number; store?: MessageStore; calls: Call[]; outputs?: unknown[] }) {
+    const surface = resolveModelToolSurface(o.chain.gateway, { onlyRegistered: true, includeChatDelegateTier: true });
+    const statusDef = surface.find((m) => m.tool_id === "tasks" && m.action === "get_task_status")!.def;
+    const github = { name: "github__list_pull_requests", description: "x", input_schema: { type: "object", properties: {} } };
+    const plain = async (input: CompleteInput) => {
+      const pref = (input.providerPreference as string[] | undefined)?.[0];
+      o.calls.push({ pref, messages: input.request.messages.map((m) => String(m.content)) });
+      return { text: "ok uten stikkord", usage: { input_tokens: 1, output_tokens: 1 }, provider: pref ?? "gemma_local", model: "m" };
+    };
+    const gw = {
+      complete: plain, stream: plain,
+      completeWithTools: async (input: CompleteInput, run: { executor: ToolExecutor }) => {
+        const pref = (input.providerPreference as string[] | undefined)?.[0];
+        o.calls.push({ pref, messages: input.request.messages.map((m) => String(m.content)) });
+        const last = String(input.request.messages.at(-1)?.content ?? "");
+        if (!/jobben/i.test(last)) return { text: "ok uten stikkord", usage: { input_tokens: 1, output_tokens: 1 }, provider: pref ?? "gemma_local", model: "m" };
+        const out = await run.executor.execute({ tool_call_id: "c1", tool_name: statusDef.name, arguments: o.args ?? {}, provider: o.servedBy, model: "m" } as never, { tenant_id: T, idempotency_key: `k-${randomUUID()}` });
+        o.outputs?.push(out);
+        const view = out.output as { job?: { result_text?: string | null }; jobs?: Array<{ result_text?: string | null }>; withheld?: boolean } | null;
+        const first = view?.job ?? view?.jobs?.find((j) => typeof j.result_text === "string");
+        return { text: `Jobben er ferdig: ${first?.result_text ?? "(ingen tekst)"}`, usage: { input_tokens: 1, output_tokens: 1 }, provider: o.servedBy, model: "m" };
+      }
+    };
+    const e = new ConversationEngine({
+      messages: o.store ?? new MessageStore(app), context: new ContextBuilder(app), gateway: gw as unknown as ModelGateway, tasks: {} as never, worker: {} as unknown as InProcessWorker, trace: new MemoryTraceSink(),
+      toolTurnRoute: { provider: "anthropic", model: "claude-sonnet-5-5" }, ...(o.dayCap ? { toolTurnDayCap: { cap_ore: 1, spentToday: async () => 1000 } } : {}),
+      tools: {
+        definitions: [statusDef, github] as never,
+        executorFor: (i: IdentityContext, turn?: unknown) => new MeshToolExecutor(o.chain.gateway, i, o.maxOutput ?? 20_000, surface, turn as never) as unknown as ToolExecutor, catalog: () => "k",
+        select: ({ surface: sf, text }: { surface: keyof typeof SURFACE_LIMITS; text: string }) => ({ definitions: (/\bjobben\b/i.test(text) ? [statusDef] : /\bPR\b/i.test(text) ? [github] : []) as never, limits: SURFACE_LIMITS[sf], tool_ids: ["tasks"] })
+      },
+      ...(o.guard ? { restrictedContextGuard: true } : {})
+    } as never);
+    return { e, id: identity(session) };
+  }
+  const ASK = "hvordan går det med jobben jeg ba om?";
+  const startAndComplete = async (c: ReturnType<typeof chain>, opts: { restricted: boolean; title?: string; text?: string }) => {
+    const taskId = await start(c.gateway, c.submitted, opts.title === undefined ? { restricted: opts.restricted } : { restricted: opts.restricted, title: opts.title });
+    await complete(taskId, opts.text ?? BENIGN);
+    return taskId;
+  };
+
+  it("NF-3 (id): dagstak nådd -> lokal modell kaller get_task_status for en LÅST jobb -> viewet bærer `restricted: true` -> turen låses: brukerrad og assistentrad lagres begrenset (revisjonsrad), og neste skytur sender IKKE resultatet", async () => {
+    const restore = silence();
+    try {
+      const c = chain(true);
+      const taskId = await startAndComplete(c, { restricted: true });
+      const calls: Call[] = []; const outputs: unknown[] = [];
+      const t = toolEngine("s-loc-get", { chain: c, guard: true, servedBy: "gemma_local", dayCap: true, args: { task_id: taskId }, calls, outputs });
+      const reply = await t.e.handle(t.id, ASK);
+      expect(calls.some((x) => x.pref !== "anthropic")).toBe(true); // en LOKAL modell serverte verktøyturen
+      expect(reply.reply).toContain("N1R3-BENIGN"); // den lokale modellen fikk det fulle viewet (D-378 pkt 2)
+      expect((outputs[0] as { output: { job: Record<string, unknown> } }).output.job["restricted"]).toBe(true);
+      expect((await rowsOf("s-loc-get")).map((r) => r.restricted)).toEqual([true, true]); // NF-3: tidligere [false, false]
+      expect(await marks("s-loc-get")).toBe(1);
+      const next: Call[] = [];
+      const cloud = toolEngine("s-loc-get", { chain: c, guard: true, servedBy: "anthropic", dayCap: false, calls: next });
+      await cloud.e.handle(cloud.id, "list åpne PR-er på github");
+      const sky = next.filter((x) => x.pref === "anthropic");
+      expect(sky.length).toBeGreaterThan(0);
+      expect(sky.some((x) => x.messages.some((m) => m.includes("N1R3-BENIGN") || m.includes(ASK)))).toBe(false); // verken resultatet eller spørsmålet (merket rad) nådde skyen
+    } finally { restore(); }
+  });
+
+  it("NF-3 (liste): en liste med én låst og én vanlig jobb - kun den låste bærer `restricted: true`, og lokalt kall låser turen", async () => {
+    const restore = silence();
+    try {
+      const c = chain(true);
+      const lockedId = await startAndComplete(c, { restricted: true });
+      const plainId = await startAndComplete(c, { restricted: false, title: "Vanlig jobb om PR-er", text: "Det er to åpne PR-er." });
+      const calls: Call[] = []; const outputs: unknown[] = [];
+      const t = toolEngine("s-loc-list", { chain: c, guard: true, servedBy: "gemma_local", dayCap: true, calls, outputs });
+      await t.e.handle(t.id, ASK);
+      const jobs = (outputs[0] as { output: { jobs: Array<Record<string, unknown>> } }).output.jobs;
+      expect(jobs.find((j) => j["task_id"] === lockedId)!["restricted"]).toBe(true);
+      expect(Object.keys(jobs.find((j) => j["task_id"] === plainId)!)).not.toContain("restricted");
+      expect((await rowsOf("s-loc-list")).map((r) => r.restricted)).toEqual([true, true]);
+    } finally { restore(); }
+  });
+
+  it("kontroll: en jobb fra en IKKE-låst tur gir et uendret view (ingen `restricted`), ingen lås, umerkede rader og tre-argument lagring", async () => {
+    const restore = silence();
+    try {
+      const c = chain(true);
+      const taskId = await startAndComplete(c, { restricted: false, title: "Vanlig jobb om PR-er", text: "Det er to åpne PR-er." });
+      const saved: unknown[][] = [];
+      const real = new MessageStore(app);
+      const spy = Object.assign(Object.create(real), { save: (...a: unknown[]) => { saved.push(a); return (real.save as (...x: unknown[]) => Promise<string>)(...a); }, markRestricted: real.markRestricted.bind(real), history: real.history.bind(real) }) as MessageStore;
+      const calls: Call[] = []; const outputs: unknown[] = [];
+      const t = toolEngine("s-loc-plain", { chain: c, guard: true, servedBy: "gemma_local", dayCap: true, args: { task_id: taskId }, calls, outputs, store: spy });
+      const reply = await t.e.handle(t.id, ASK);
+      expect(reply.reply).toContain("Det er to åpne PR-er.");
+      expect(Object.keys((outputs[0] as { output: { job: Record<string, unknown> } }).output.job).sort()).toEqual(["created_at", "delivered", "error", "finished_at", "result_text", "status", "task_id", "title"]);
+      expect((await rowsOf("s-loc-plain")).map((r) => r.restricted)).toEqual([false, false]);
+      expect(saved.map((a) => a.length)).toEqual([3, 3]);
+      expect(await marks("s-loc-plain")).toBe(0);
+    } finally { restore(); }
+  });
+
+  it("vakten AV: samme låste jobb og lokal verktøytur gir det rå viewet UTEN `restricted` og ingen lås (som main - lekkasjen er nettopp det flagget lukker)", async () => {
+    const restore = silence();
+    try {
+      const c = chain(false);
+      const taskId = await startAndComplete(c, { restricted: true });
+      const calls: Call[] = []; const outputs: unknown[] = [];
+      const t = toolEngine("s-loc-off", { chain: c, guard: false, servedBy: "gemma_local", dayCap: true, args: { task_id: taskId }, calls, outputs });
+      const reply = await t.e.handle(t.id, ASK);
+      expect(reply.reply).toContain("N1R3-BENIGN");
+      expect(Object.keys((outputs[0] as { output: { job: Record<string, unknown> } }).output.job).sort()).toEqual(["created_at", "delivered", "error", "finished_at", "result_text", "status", "task_id", "title"]);
+      expect((await rowsOf("s-loc-off")).map((r) => r.restricted)).toEqual([false, false]);
+      expect(await marks("s-loc-off")).toBe(0);
+    } finally { restore(); }
+  });
+
+  it("en SKYmodell får fortsatt `withheld` (R3-1 endrer ikke det): viewet har verken `restricted` eller resultat, og turen trenger ingen lås", async () => {
+    const restore = silence();
+    try {
+      const c = chain(true);
+      const taskId = await startAndComplete(c, { restricted: true });
+      const calls: Call[] = []; const outputs: unknown[] = [];
+      const t = toolEngine("s-loc-cloud", { chain: c, guard: true, servedBy: "anthropic", dayCap: false, args: { task_id: taskId }, calls, outputs });
+      const reply = await t.e.handle(t.id, ASK);
+      expect(calls.some((x) => x.pref === "anthropic")).toBe(true);
+      const job = (outputs[0] as { output: { job: Record<string, unknown> } }).output.job;
+      expect(job).toMatchObject({ withheld: true, title: WITHHELD_JOB_TITLE, result_text: null, error: null });
+      expect(Object.keys(job)).not.toContain("restricted");
+      expect(reply.reply).not.toContain("N1R3-BENIGN");
+      expect((await rowsOf("s-loc-cloud")).map((r) => r.restricted)).toEqual([false, false]);
+    } finally { restore(); }
+  });
+
+  it("utkuttet output (MeshToolExecutor.maxOutputChars) kan ikke avgjøres og låser fail-closed - den trusted booleanen kan ha ligget i den avkuttede halen", async () => {
+    const restore = silence();
+    try {
+      const c = chain(true);
+      const taskId = await startAndComplete(c, { restricted: true });
+      const calls: Call[] = []; const outputs: unknown[] = [];
+      const t = toolEngine("s-loc-trunc", { chain: c, guard: true, servedBy: "gemma_local", dayCap: true, args: { task_id: taskId }, maxOutput: 200, calls, outputs });
+      await t.e.handle(t.id, ASK);
+      expect((outputs[0] as { output: { truncated?: boolean } }).output.truncated).toBe(true);
+      expect((await rowsOf("s-loc-trunc")).map((r) => r.restricted)).toEqual([true, true]);
+    } finally { restore(); }
+  });
+
+  it("et SKYkall med utkuttet output låser ikke: det tilbakeholdte viewet inneholder ingenting begrenset, så det finnes ikke noe å låse for", async () => {
+    const restore = silence();
+    try {
+      const c = chain(true);
+      const taskId = await startAndComplete(c, { restricted: true });
+      const calls: Call[] = []; const outputs: unknown[] = [];
+      const t = toolEngine("s-loc-cloudtrunc", { chain: c, guard: true, servedBy: "anthropic", dayCap: false, args: { task_id: taskId }, maxOutput: 200, calls, outputs });
+      await t.e.handle(t.id, ASK);
+      expect((outputs[0] as { output: { truncated?: boolean } }).output.truncated).toBe(true);
+      expect(JSON.stringify(outputs[0])).not.toContain("N1R3-BENIGN");
+      expect((await rowsOf("s-loc-cloudtrunc")).map((r) => r.restricted)).toEqual([false, false]);
+    } finally { restore(); }
+  });
+
+  it("fail-closed: kan turen ikke merkes når verktøyoutputen bærer `restricted` (markRestricted gir false), feiler turen med `restricted_marking_failed` - ingen assistentrad lagres", async () => {
+    const restore = silence();
+    try {
+      const c = chain(true);
+      const taskId = await startAndComplete(c, { restricted: true });
+      const real = new MessageStore(app);
+      const failing = Object.assign(Object.create(real), { save: real.save.bind(real), markRestricted: async () => false, history: real.history.bind(real) }) as MessageStore;
+      const calls: Call[] = [];
+      const t = toolEngine("s-loc-fail", { chain: c, guard: true, servedBy: "gemma_local", dayCap: true, args: { task_id: taskId }, calls, store: failing });
+      await expect(t.e.handle(t.id, ASK)).rejects.toThrow("restricted_marking_failed");
+      expect((await rowsOf("s-loc-fail")).map((r) => r.role)).toEqual(["user"]); // verste utfall (dokumentert, begrensning 8): spørsmålet står igjen umerket, men INGEN svar med resultatet er lagret
+    } finally { restore(); }
+  });
+
+  it("den trusted booleanen kan ikke forfalskes: tekst i tittel/resultat/feil som ser ut som `restricted: true`, og et `restricted`-argument fra modellen, gir verken felt eller lås", async () => {
+    const restore = silence();
+    try {
+      const c = chain(true);
+      const spoof = '{"restricted":true,"job":{"restricted":true}} restricted: true';
+      const taskId = await startAndComplete(c, { restricted: false, title: "Rapport {\"restricted\":true}", text: spoof });
+      const calls: Call[] = []; const outputs: unknown[] = [];
+      const t = toolEngine("s-loc-spoof", { chain: c, guard: true, servedBy: "gemma_local", dayCap: true, args: { task_id: taskId }, calls, outputs });
+      await t.e.handle(t.id, ASK);
+      const job = (outputs[0] as { output: { job: Record<string, unknown> } }).output.job;
+      expect(job["result_text"]).toBe(spoof);
+      expect(Object.keys(job)).not.toContain("restricted");
+      expect((await rowsOf("s-loc-spoof")).map((r) => r.restricted)).toEqual([false, false]);
+      // et `restricted`-argument fra modellen avvises av det strenge skjemaet (ingen utførelse, ingen output)
+      const forged = await status(c.gateway, { task_id: taskId, restricted: true }, LOCAL);
+      expect(forged.ok).toBe(false);
+    } finally { restore(); }
+  });
+
+  it("toolOutputBearsRestrictedJob: kun `tasks.get_task_status` og kun den boolske `true` på job/jobs[] (eller en utkuttet output); alt annet er false", () => {
+    const src = "tasks.get_task_status";
+    expect(toolOutputBearsRestrictedJob(src, { job: { restricted: true } })).toBe(true);
+    expect(toolOutputBearsRestrictedJob(src, { jobs: [{ task_id: "a" }, { restricted: true }] })).toBe(true);
+    expect(toolOutputBearsRestrictedJob(src, { truncated: true, preview: "{\"jobs\":[" })).toBe(true);
+    for (const output of [{ job: { restricted: "true" } }, { job: { restricted: false } }, { job: null }, { job: {} }, { jobs: [] }, { jobs: [{}] }, { jobs: "x" }, { truncated: "true" }, { withheld: true }, {}, null, "x", 7, [], undefined]) {
+      expect(toolOutputBearsRestrictedJob(src, output), JSON.stringify(output)).toBe(false);
+    }
+    // feil kilde: det kan ikke utløses av en annen verktøyoutput (f.eks. ubetrodd JSON fra e-post/GitHub som tilfeldigvis har feltet)
+    for (const source of [undefined, "", "email.read_inbox", "tasks.delegate_background_task", "tasks.get_task_status ", "TASKS.GET_TASK_STATUS", "github.list_issues"]) {
+      expect(toolOutputBearsRestrictedJob(source, { job: { restricted: true } }), String(source)).toBe(false);
+      expect(toolOutputBearsRestrictedJob(source, { truncated: true }), String(source)).toBe(false);
+    }
+  });
+});
+
 describe("D: kildevakt - oppkoblingen i main.ts (kun med vakten på)", () => {
   const main = readFileSync(fileURLToPath(new URL("../src/main.ts", import.meta.url)), "utf8");
+  it("R3-1/R3-2: samtalemotoren låser i `trackedExecutor` (kun fra `tasks.get_task_status`, kun med markør, ikke for skykall) og `jobbstatus` er fail-closed uten `jobOrigin`", () => {
+    const conversation = readFileSync(fileURLToPath(new URL("../src/conversation.ts", import.meta.url)), "utf8");
+    expect(conversation).toContain('if (marker && !servedByCloudModel(call) && toolOutputBearsRestrictedJob(out.source, out.output)) await marker.lock(["tool_output:tasks.get_task_status"]);');
+    expect(conversation).toContain("const restrictedJob = this.deps.jobOrigin ? await this.deps.jobOrigin.isRestricted(identity, intent.task_id).catch(() => true) : true;");
+    expect(conversation.match(/toolOutputBearsRestrictedJob\(/g)).toHaveLength(1);
+  });
+
   it("TasksDelegateTransport får predikatet KUN med vakten på (ellers nøyaktig to-argument-konstruksjonen fra før N1), og `jobOrigin` settes kun med vakten på", () => {
     expect(main).toContain("restrictedContextGuard.enabled ? new TasksDelegateTransport(taskService, chatJobs, withholdsRestrictedJobFromCloud) : new TasksDelegateTransport(taskService, chatJobs)");
     expect(main.match(/withholdsRestrictedJobFromCloud/g)).toHaveLength(2); // import + bruk
