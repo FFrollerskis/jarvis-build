@@ -10,7 +10,7 @@ STATUS = """## Status (ærlig)
 - `BUILT`, `DORMANT`/AV bak egne flagg og `NOT VERIFIED`: ingenting er `VERIFIED` før det finnes en kjøring på NAS (se runbook for delen).
 - Alle gjennomganger er gjort av SEPARATE Claude-agenter som var uavhengige av byggeren; de er IKKE den eksterne arkitektens review. **Arkitektens uavhengige review (mot faktisk diff, tester, CI og sikkerhet) gjenstår før merge**, og denne PR-en er derfor draft.
 - Lokal integrasjonsverifisering (`integration/post-merge-test-2` = alle ni deler + docs, ikke pushet): `typecheck`, `lint`, `check:containment` og gitleaks (330 commits) exit 0; én samlet full suite: 16 649 av 16 654 tester grønne (975 filer). De fem røde er kjente sandkasse-feil (wpc3-review1-hardening F10a/b/c, break-glass-guard, nas-ua0-gate «friskt system»), ikke knyttet til denne delen.
-- Per-gren CI på GitHub er ikke kjørt (GitHub har vært utilgjengelig fra sesjonen siden 2026-11-15).
+- Per-gren CI på GitHub er ikke kjørt ennå: delene ble bygget mens GitHub var utilgjengelig fra sesjonen (2026-11-15 til 2026-11-22), og arbeidet ligger nå i den nye forken `FFrollerskis/jarvis-build` (kontobytte, eierens ordre 2026-11-22; Actions må slås på i forken). Sandkassekjøringene (embedded Postgres, falske kilder) står over.
 """
 
 PRS = [
@@ -214,7 +214,7 @@ PRS = [
    "NY `remediation/WPS1_STEPUP_KANALBINDING_FORSLAG.md`: FORSLAG (ingen kode) om server-side kanalbinding for step-up (lukket enhetstype → tillatte kanaler, observe→enforce, alternativer A–D, beslutninger du må ta). WP-S1 starter først etter en navngitt D-beslutning.",
   ],
   open=[
-   "D-470-commiten (`776f0ae8`) ligger også på `origin/claude/d470-byggepause-opphevet` (PR #336 – ikke verifisert, GitHub utilgjengelig); merge den først, eller la denne PR-en erstatte den.",
+   "D-470-commiten (`776f0ae8`) følger med denne grenen. Den lå på den gamle kontoen som PR #336 (`claude/d470-byggepause-opphevet`), som ikke finnes i forken; denne PR-en erstatter den.",
   ],
   review="Docs-vakter (lukkingsmatrisen, D-420, connector-sdk m.fl.): 18 filer/292 tester grønne på `integration/post-merge-test-2` @95380285.",
   stack="Docs-PR: merges sist (etter at delenes PR-er er inne), eller tidligere hvis arkitekten ønsker beslutningsloggen først.",
