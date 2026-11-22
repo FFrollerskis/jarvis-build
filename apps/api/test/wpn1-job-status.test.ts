@@ -38,9 +38,9 @@ const identity = (session: string): IdentityContext => ({ person_id: "p-1", tena
 const SESSIONS = ["s-tool", "s-fast-lock", "s-fast-plain", "s-fast-off", "s-fast-err", "s-fast-next", "s-fast-states", "s-fast-omit", "s-fast-omit-off", "s-loc-get", "s-loc-list", "s-loc-plain", "s-loc-off", "s-loc-cloud", "s-loc-trunc", "s-loc-cloudtrunc", "s-loc-fail", "s-loc-spoof"];
 const CLOUD = { provider: "anthropic", model: "claude-sonnet-5-5" };
 const LOCAL = { provider: "gemma_local", model: "gemma3:4b" };
-const SECRET_TEXT = "N1ST-HEMMELIG-RESULTAT saldoen etter utbetalingen er 45 000";
-const SECRET_ERROR = "N1ST-HEMMELIG-FEIL kunne ikke lese kontoen til lønnen";
-const SECRET_TITLE = "N1ST-HEMMELIG-TITTEL lønn og saldo";
+const LOCKED_RESULT = "N1ST-HEMMELIG-RESULTAT saldoen etter utbetalingen er 45 000";
+const LOCKED_ERROR = "N1ST-HEMMELIG-FEIL kunne ikke lese kontoen til lønnen";
+const LOCKED_TITLE = "N1ST-HEMMELIG-TITTEL lønn og saldo";
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-n1st-"));
@@ -85,7 +85,7 @@ function chain(guard: boolean) {
 const start = async (gateway: ToolGateway, submitted: JobContract[], opts: { restricted: boolean; title?: string }): Promise<string> => {
   const r = await gateway.execute({
     identity: identity("s-tool"), tool_id: "tasks", action: "delegate_background_task",
-    parameters: { title: opts.title ?? SECRET_TITLE, prompt: "Hent saldoen og lag en oppsummering av utbetalingen", use_tools: true } as never, idempotency_key: `k-${randomUUID()}`, servingModel: LOCAL,
+    parameters: { title: opts.title ?? LOCKED_TITLE, prompt: "Hent saldoen og lag en oppsummering av utbetalingen", use_tools: true } as never, idempotency_key: `k-${randomUUID()}`, servingModel: LOCAL,
     ...(opts.restricted ? { restrictedOrigin: true as const } : {})
   });
   expect(r.ok).toBe(true);
@@ -107,7 +107,7 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
       const { gateway, submitted } = chain(true);
       const taskId = await start(gateway, submitted, { restricted: true });
       expect((submitted.at(-1)!.input.data as Record<string, unknown>)["restricted_origin"]).toBe(true);
-      await complete(taskId, SECRET_TEXT);
+      await complete(taskId, LOCKED_RESULT);
       for (const model of [CLOUD, { provider: "openai", model: "x" }, { provider: "ukjent", model: "x" }, { provider: "", model: "x" }, { provider: "  ", model: "x" }, { provider: "GEMMA_LOCAL", model: "x" }, { provider: "gemma_local ", model: "x" }, { provider: 7, model: "x" } as never]) {
         const byId = await status(gateway, { task_id: taskId }, model);
         const job = jobOf(byId);
@@ -128,7 +128,7 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
     try {
       const { gateway, submitted } = chain(true);
       const failedId = await start(gateway, submitted, { restricted: true });
-      await fail(failedId, SECRET_ERROR);
+      await fail(failedId, LOCKED_ERROR);
       const runningId = await start(gateway, submitted, { restricted: true });
       const failed = jobOf(await status(gateway, { task_id: failedId }, CLOUD));
       expect(failed).toMatchObject({ status: "failed", error: null, result_text: null, title: WITHHELD_JOB_TITLE, withheld: true });
@@ -146,9 +146,9 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
       const guarded = chain(true);
       const plain = chain(false);
       const taskId = await start(guarded.gateway, guarded.submitted, { restricted: true });
-      await complete(taskId, SECRET_TEXT);
+      await complete(taskId, LOCKED_RESULT);
       const reference = jobOf(await status(plain.gateway, { task_id: taskId }, CLOUD)); // vakten AV: det rå viewet
-      expect(reference).toMatchObject({ title: SECRET_TITLE, result_text: SECRET_TEXT });
+      expect(reference).toMatchObject({ title: LOCKED_TITLE, result_text: LOCKED_RESULT });
       for (const model of [LOCAL, { provider: "ollama", model: "x" }, { provider: "local_llm", model: "x" }, { provider: "scripted", model: "x" }, undefined]) {
         const expected = model === undefined ? reference : { ...reference, restricted: true }; // R3-1: kun et modellvendt lokalt kall bærer den trusted booleanen
         const job = jobOf(await status(guarded.gateway, { task_id: taskId }, model));
@@ -166,11 +166,11 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
     try {
       const { gateway, submitted } = chain(true);
       const taskId = await start(gateway, submitted, { restricted: true });
-      await complete(taskId, SECRET_TEXT);
+      await complete(taskId, LOCKED_RESULT);
       const owner = new ChatJobs(app, { saveMessage: async () => undefined });
       const job = await owner.get(identity("s-tool"), taskId);
       expect(Object.keys(job!).sort()).toEqual(["created_at", "delivered", "error", "finished_at", "result_text", "status", "task_id", "title"]);
-      expect(job).toMatchObject({ title: SECRET_TITLE, result_text: SECRET_TEXT });
+      expect(job).toMatchObject({ title: LOCKED_TITLE, result_text: LOCKED_RESULT });
       const listed = (await owner.list(identity("s-tool"), 10)).find((j) => j.task_id === taskId)!;
       expect(listed).toEqual(job);
     } finally { restore(); }
@@ -194,7 +194,7 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
     try {
       const { gateway, submitted } = chain(true);
       const taskId = await start(gateway, submitted, { restricted: true });
-      await complete(taskId, SECRET_TEXT);
+      await complete(taskId, LOCKED_RESULT);
       const executor = new MeshToolExecutor(gateway, identity("s-tool"), 20_000, allMeshTools(gateway));
       const call = (provider: string, model: string) => ({ tool_call_id: `c-${randomUUID()}`, tool_name: "tasks__get_task_status", arguments: { task_id: taskId }, provider, model });
       const cloud = await executor.execute(call("anthropic", "claude-sonnet-5-5"), { tenant_id: T, idempotency_key: `k-${randomUUID()}` });
@@ -213,9 +213,9 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
       const getSpy = vi.spyOn(jobs, "get");
       const listSpy = vi.spyOn(jobs, "list");
       const taskId = await start(gateway, submitted, { restricted: true });
-      await complete(taskId, SECRET_TEXT);
+      await complete(taskId, LOCKED_RESULT);
       const job = jobOf(await status(gateway, { task_id: taskId }, CLOUD));
-      expect(job).toMatchObject({ title: SECRET_TITLE, result_text: SECRET_TEXT });
+      expect(job).toMatchObject({ title: LOCKED_TITLE, result_text: LOCKED_RESULT });
       expect(Object.keys(job).sort()).toEqual(["created_at", "delivered", "error", "finished_at", "result_text", "status", "task_id", "title"]);
       await status(gateway, {}, CLOUD);
       expect(getSpy.mock.calls[0]!.length).toBe(2);
@@ -268,7 +268,7 @@ describe("B: hurtigbanens `jobbstatus <id>` for en LÅST jobb merker begge raden
     return { e, isRestricted, id: identity(session) };
   }
   const rows = async (s: string) => (await admin.query("SELECT role, content, restricted FROM messages WHERE session_id = $1 ORDER BY created_at, message_id", [s])).rows as Array<{ role: string; content: string; restricted: boolean }>;
-  const lockedJob = async (): Promise<string> => { const { gateway, submitted } = chain(true); const id = await start(gateway, submitted, { restricted: true }); await complete(id, SECRET_TEXT); return id; };
+  const lockedJob = async (): Promise<string> => { const { gateway, submitted } = chain(true); const id = await start(gateway, submitted, { restricted: true }); await complete(id, LOCKED_RESULT); return id; };
 
   it("låst jobb: svaret gjengir resultatet til eieren, bruker- og assistentraden lagres begrenset (D4 snudd), en revisjonsrad for merkingen - og to skyturer senere sendes IKKE statusraden til Anthropic", async () => {
     const restore = silence();
@@ -343,7 +343,7 @@ describe("B: hurtigbanens `jobbstatus <id>` for en LÅST jobb merker begge raden
       const running = await start(gateway, submitted, { restricted: true });
       expect((await queue.claimNext("w-1", 30, ["executive"]))?.task_id).toBe(running); // kjørende: hentet av en worker, ikke ferdig
       const failed = await start(gateway, submitted, { restricted: true });
-      await fail(failed, SECRET_ERROR);
+      await fail(failed, LOCKED_ERROR);
       const cancelled = await start(gateway, submitted, { restricted: true });
       expect(await queue.requestCancel(T, cancelled)).toBe("cancelled");
       const plain = await start(gateway, submitted, { restricted: false, title: "Vanlig jobb om PR-er" });
