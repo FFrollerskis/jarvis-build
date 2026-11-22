@@ -403,6 +403,8 @@ const MEMORY_PROPOSAL_ACTIONS = ["list_proposals", "approve_proposal", "reject_p
  *
  * WP-H0 (JARVIS-087): den 13. handlingen, `cancel_task`, er kontrollsenterets avbryt-handling for en bakgrunnsjobb/agent. Den er et gjennomslag til den EKSISTERENDE kanselleringsveien (`TaskService.cancel`, samme som
  * chatens «avbryt jobb <id>»), eier-kun (verktøydefinisjonens parameterAuthorizer), klasse B og en stopp-handling uten step-up (se `STEP_UP_EXEMPT_ACTIONS`). Allowlisten er ellers uendret.
+ *
+ * WP-H2 (gjennomgang M1): de to FLAGGSTYRTE handlingene står IKKE i denne listen (den er NØYAKTIG main sin, 13 handlinger) men i `EXECUTIVE_MUTATE_FLAGGED_ACTIONS` under.
  */
 export const EXECUTIVE_MUTATE_ACTIONS = [
   "pause_domain", "resume_domain", "resolve_situation",
@@ -412,6 +414,24 @@ export const EXECUTIVE_MUTATE_ACTIONS = [
   "enable_finance_kill_switch", "disable_finance_kill_switch",
   "cancel_task"
 ] as const;
+
+/**
+ * WP-H2: to tilføyelser til `/executive/mutate` - hver bak sitt EGET flagg (AV som standard) og BARE akseptert når verktøyet faktisk er REGISTRERT i gatewayen (`deps.executive.gateway.get("executive", navn)`):
+ *  - `revoke_autonomy_binding` (14.): tilbakekall av eierens autonomi-binding for ett domene (klasse C, gjennomslag til `situations.clear_autonomy_policy`, eier-kun, KREVER step-up: ikke unntatt i `STEP_UP_EXEMPT_ACTIONS`,
+ *    og gatewayen krever den også selv: `step_up_required`).
+ *  - `run_golden_suite` (15.): golden-suite-knappen. BEVISST den ENESTE lesende handlingen i disse listene: den er en deterministisk selvtest uten sideeffekter (klasse A), men plassert her fordi knappen skal gå
+ *    gjennom SAMME grant-, step-up- (signert enhet) og revisjonsvei som alle andre kontrollsenter-knapper - ikke en ny rute, og ikke `/executive/query` (som ikke har step-up). Tool-porten krever i tillegg eier + signert økt.
+ * Gjennomgang M1: med flaggene AV er navnene IKKE kjent for ruten og svarer NØYAKTIG som main svarer på et ukjent navn (400 `action_not_allowed` FØR grantet løses, ingen `tool.denied`-revisjonsrad) - bevist mot en opptaket
+ * baseline fra ren main i `wph2-flag-off-main-parity.test.ts`. Kun CONTROL_ACTION_ALLOWED (knappenes tillatelsestabell) kjenner alle 15 navnene.
+ */
+export const EXECUTIVE_MUTATE_FLAGGED_ACTIONS = ["revoke_autonomy_binding", "run_golden_suite"] as const;
+
+/** Er handlingen kjent for `/executive/mutate`? Main sin 13, pluss de flaggstyrte kun når verktøyet er registrert. En gateway uten `get` (testdobler) registrerer ingen av de flaggstyrte (fail-closed). */
+function executiveMutateActionKnown(action: string, gateway: Pick<ToolGateway, "get">): boolean {
+  if ((EXECUTIVE_MUTATE_ACTIONS as readonly string[]).includes(action)) return true;
+  if (!(EXECUTIVE_MUTATE_FLAGGED_ACTIONS as readonly string[]).includes(action)) return false;
+  return typeof gateway.get === "function" && gateway.get("executive", action) !== undefined;
+}
 
 /**
  * Fail-closed parsing, speilbildet av `.strict()`: et forsøk på å sende f.eks.
@@ -1454,7 +1474,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
     }
     const action = parsedBody["action"];
-    if (!(EXECUTIVE_MUTATE_ACTIONS as readonly string[]).includes(action)) {
+    if (!executiveMutateActionKnown(action, deps.executive.gateway)) {
       return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
     }
     const parameters =

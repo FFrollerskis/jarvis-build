@@ -9,7 +9,7 @@ import {
   type HealthEvidence
 } from "../src/control-center/integration.ts";
 import { registerControlCenters } from "../src/control-center/register.ts";
-import { EXECUTIVE_MUTATE_ACTIONS, OWNER_CONTROLS_CONNECTOR_ACTIONS } from "../src/server.ts";
+import { EXECUTIVE_MUTATE_ACTIONS, EXECUTIVE_MUTATE_FLAGGED_ACTIONS, OWNER_CONTROLS_CONNECTOR_ACTIONS } from "../src/server.ts";
 import { actionRequiresStepUp, stepUpDenial } from "../src/step-up.ts";
 import { productionToolDefinitions } from "./support/production-tools.ts";
 import { ScriptedPool, type ScriptedRule } from "./support/scripted-pool.ts";
@@ -722,7 +722,8 @@ describe("drift: det senteret påstår må stå i koden", () => {
   });
 
   it("kontraktens handlings-allowlister er IDENTISKE med rutenes (en knapp peker aldri på noe ruten ville avvist), unntatt hemmelighets-skriving", () => {
-    expect([...(CONTROL_ACTION_ALLOWED["/executive/mutate"] ?? [])].sort()).toEqual([...EXECUTIVE_MUTATE_ACTIONS].sort());
+    // WP-H2 (M1): tillatelsestabellen for knapper kjenner også de to flaggstyrte navnene (knappene til dem finnes kun med flagg på); ruten kjenner dem kun når verktøyet er registrert.
+    expect([...(CONTROL_ACTION_ALLOWED["/executive/mutate"] ?? [])].sort()).toEqual([...EXECUTIVE_MUTATE_ACTIONS, ...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort());
     expect([...(CONTROL_ACTION_ALLOWED["/owner-controls/connector-credentials"] ?? [])].sort()).toEqual(OWNER_CONTROLS_CONNECTOR_ACTIONS.filter((a) => a !== "set_connector_credential").sort());
     for (const list of Object.values(CONTROL_ACTION_ALLOWED)) expect(list ?? []).not.toContain("set_connector_credential");
   });

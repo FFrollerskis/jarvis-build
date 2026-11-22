@@ -40,10 +40,12 @@ export class ExecutiveTransport implements ToolTransport {
    * i løkka) får hele rapporten. Håndhevingen skjer HER, ved utførelse, uavhengig av hvilke verktøy utvalget valgte for turen.
    */
   private async centerResponse(identity: Parameters<ExecutiveService["getControlCenterReport"]>[0], center: string, servingModel: ToolInvocationContext["servingModel"]): Promise<{ data: JsonValue }> {
-    if (isCloudWithheldCenter(center) && this.service.isCloudServed(servingModel) && this.service.hasControlCenter(center)) {
+    const cloud = this.service.isCloudServed(servingModel);
+    if (isCloudWithheldCenter(center) && cloud && this.service.hasControlCenter(center)) {
       return { data: withheldCenterData(center as ControlCenterId, CONTROL_CENTER_TITLES_NO[center as ControlCenterId]) as unknown as JsonValue };
     }
-    const result = await this.service.getControlCenterReport(identity, center);
+    // M2 (H2): for en SKYmodell bygges de øvrige sentrene uten finansavledet tilstand (`restrictFinance`, f.eks. finans-nødbryteren i Sikkerhet og finansjobbene i Drift); lokal modell og siden får alt.
+    const result = await this.service.getControlCenterReport(identity, center, cloud ? { restrictFinance: true } : {});
     if (result === null) {
       return { data: { found: false, center, summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." } as unknown as JsonValue };
     }
@@ -131,7 +133,7 @@ export class ExecutiveTransport implements ToolTransport {
         // IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
         const center = parameters["center"];
         if (center === undefined) {
-          const overview = await this.service.getControlCenterOverview(identity, this.service.isCloudServed(context?.servingModel) ? { withhold: CLOUD_WITHHELD_CENTERS } : {});
+          const overview = await this.service.getControlCenterOverview(identity, this.service.isCloudServed(context?.servingModel) ? { withhold: CLOUD_WITHHELD_CENTERS, restrictFinance: true } : {});
           const { summary_no, ...rest } = overview;
           return { data: { summary_no, ...rest } as unknown as JsonValue }; // `summary_no` først (se under)
         }
@@ -139,10 +141,27 @@ export class ExecutiveTransport implements ToolTransport {
       }
       case "get_finance_center":
       case "get_memory_center":
-      case "get_agent_center": {
+      case "get_agent_center":
+      case "get_operations_center":
+      case "get_value_center":
+      case "get_privacy_center":
+      case "get_security_center": {
         // WP-H1/H2: samme respons og samme register som `get_control_center {center}` - kun et smalere verktøynavn for chatten (egen port: eier + signert økt, fail-closed).
         const center = controlCenterForReadAction(action) as ControlCenterId;
         return this.centerResponse(identity, center, context?.servingModel);
+      }
+      case "run_golden_suite": {
+        // WP-H2: golden-suite-knappen. Lesende og deterministisk (ingen modell, ingen database, ingen skriving); eier + signert enhetsøkt håndheves FØR dette kalles (`parameterAuthorizer`).
+        const result = await this.service.runGoldenSuite();
+        return { data: { summary_no: `Golden-suite: ${result.passed} av ${result.ran} kjørte oppgaver bestått${result.failed.length > 0 ? `, ${result.failed.length} IKKE bestått` : ""}${result.skipped.length > 0 ? `, ${result.skipped.length} hoppet over (ikke målt)` : ""}. Ingen modellkall.`, result } as unknown as JsonValue };
+      }
+      case "revoke_autonomy_binding": {
+        // WP-H2: tilbakekall av eierens autonomi-binding for ÉTT domene (gjennomslag til situations.clear_autonomy_policy i kallerens eget minnerom). Eier-kun FØR dette kalles (`parameterAuthorizer`).
+        const domain = requireString(parameters, "domain");
+        const result = await this.service.revokeAutonomyBinding(identity, domain);
+        if (!result.ok) throw new Error(result.reason ?? "situations_call_denied");
+        const removed = (result.data as { removed?: unknown } | undefined)?.removed === true;
+        return { external_id: `${identity.tenant_id}:${identity.memory_space_id}:${domain}`, data: { removed, domain, memory_space: identity.memory_space_id } as unknown as JsonValue };
       }
       case "get_value_report": {
         // WP-C4: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
@@ -240,10 +259,14 @@ const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as 
 
 export interface ExecutiveToolOptions {
   /**
-   * WP-H1/H2 (gjennomgang M1): sentrene hvis per-senter lese-verktøy (`get_<senter>_center`) registreres - KUN de hvis flagg er PÅ (`enabledControlCenters(env)` i apps/api). Utelatt/tom = ingen av dem finnes
+   * WP-H1/H2 (gjennomgang M1): sentrene hvis per-senter lese-verktøy (`get_<senter>_center`) registreres - KUN de hvis flagg er PÅ og som er registrert (`controlCentersWithTools(env, registry)` i apps/api). Utelatt/tom = ingen av dem finnes
    * (identisk med main): verktøyet kan da hverken velges av utvalget, kalles av en modell eller listes som tilgjengelig. Rate-grensen på `get_control_center` heves først når minst ett senter er på.
    */
   controlCenters?: ReadonlyArray<ControlCenterId>;
+  /** WP-H2: registrer `run_golden_suite` (golden-suite-knappen). AV som standard - uten flagget finnes verktøyet ikke. */
+  goldenSuite?: boolean;
+  /** WP-H2: registrer `revoke_autonomy_binding` (tilbakekall av eierens autonomi-binding fra kontrollsenteret). AV som standard - uten flagget finnes verktøyet ikke. */
+  autonomyRevoke?: boolean;
 }
 
 /**
@@ -375,6 +398,27 @@ export function executiveToolDefinitions(transport: ExecutiveTransport, options:
       rollback_procedure: "en avbrutt jobb kan ikke gjenopptas - send den inn på nytt", idempotent_external: true, ...common,
       parameterAuthorizer: (_parameters, identity) => transport.authorizeOwnerControl(identity)
     },
+    // WP-H2: golden-suite-knappen. Klasse A / lesing (deterministisk selvtest: ingen modell, ingen database, ingen skriving) - men BARE for eieren fra en signert enhetsøkt (samme port som kontrollsentrene), og
+    // aldri på en modellflate. Registreres kun med JARVIS_CONTROL_GOLDEN_SUITE=on. Maks 6 kjøringer i minuttet (én kjøring om gangen i kjøreren).
+    ...(options.goldenSuite === true
+      ? [{
+        ...read("run_golden_suite", "Kjør den deterministiske golden-suiten (regresjonsvern for Jarvis' egne regler) og returner antall bestått, ikke-bestått og digester. Ingen modell kalles, ingenting skrives. Kun eieren fra en signert enhetsøkt - kun fra kontrollsenteret."),
+        rate_limit_per_minute: 6,
+        parameterAuthorizer: (_parameters: Record<string, JsonValue>, identity: Parameters<ExecutiveTransport["authorizeControlCenterRead"]>[0]) => transport.authorizeControlCenterRead(identity)
+      } satisfies ToolDefinition]
+      : []),
+    // WP-H2: tilbakekall av eierens autonomi-binding (`situation_autonomy_policies`, D-160) for ÉTT domene i kallerens eget minnerom: gjennomslag til `situations.clear_autonomy_policy` (samme verktøy, samme sovereign-eier-port,
+    // samme revisjon). Fravær av binding = ingen auto-ACT (fail-closed), så domenet går tilbake til det strengeste nivået. Klasse C; eier-kun FØR noe kalles; ruten krever step-up (signert enhet). Kan ikke angres automatisk:
+    // parametrene til den slettede bindingen lagres i revisjonsraden `autonomy_binding.revoke_requested` (før-bildet, skrevet og committet FØR slettingen; se `ExecutiveService.revokeAutonomyBinding`). Registreres kun med JARVIS_CONTROL_AUTONOMY_REVOKE=on.
+    ...(options.autonomyRevoke === true
+      ? [{
+        ...control("revoke_autonomy_binding", "Tilbakekall eierens autonomi-binding (auto-ACT) for ÉTT situasjonsdomene i kallerens eget minnerom (gjennomslag til situations.clear_autonomy_policy); domenet går tilbake til ingen auto-ACT", { domain: z.string().min(1).max(100) }, "set_autonomy_policy med verdiene i før-bildet i revisjonsraden `autonomy_binding.revoke_requested` (domene, tool_id, action, enabled, parameters)"),
+        reversible: false,
+        // Gjennomgang L1: uopprettelig sletting = step-up på GATEWAY-nivå (signert enhetsøkt fra en eier-kanal, WP-F1-mekanismen), ikke bare i ruten - hver vei til verktøyet krever den (avslag: `step_up_required:<årsak>`).
+        step_up_required: true,
+        parameterAuthorizer: (_parameters: Record<string, JsonValue>, identity: Parameters<ExecutiveTransport["authorizeOwnerControl"]>[0]) => transport.authorizeOwnerControl(identity)
+      } satisfies ToolDefinition]
+      : []),
     critical("activate_kill_switch", "Stans HELE systemet umiddelbart (gjennomslag til owner_controls.activate_kill_switch)", { reason: z.string() }, "deactivate_kill_switch"),
     critical("deactivate_kill_switch", "Opphev kill switch og gjenoppta normal drift (gjennomslag til owner_controls.deactivate_kill_switch)", {}, "activate_kill_switch"),
     control("freeze_connector", "Frys ÉN navngitt connector/tool_id umiddelbart (gjennomslag til owner_controls.freeze_connector)", { connector_id: z.string(), reason: z.string() }, "unfreeze_connector"),

@@ -70,9 +70,10 @@ describe("invariant: restricted + modellflate => låst i utvalget OG (håndhevet
   const manifest = productionManifest();
   const restricted = [...manifest.values()].filter((e) => e.sensitivity === "restricted" && e.surfaces.length > 0);
 
-  it("testen er ikke tom: produksjonsmanifestet har restricted verktøy på modellflater (finance_* og Finans-senteret)", () => {
+  it("testen er ikke tom: produksjonsmanifestet har restricted verktøy på modellflater (finance_*, Finans-senteret og - fra WP-H2, gjennomgang M2 - Verdi-senteret)", () => {
     const keys = restricted.map(keyOf);
     expect(keys).toContain("executive.get_finance_center");
+    expect(keys).toContain("executive.get_value_center");
     expect(keys.filter((k) => ACCEPTED_SELECTION_ONLY.test(k.split(".")[0] as string)).length).toBeGreaterThan(20);
   });
 
@@ -80,8 +81,9 @@ describe("invariant: restricted + modellflate => låst i utvalget OG (håndhevet
     expect(restrictedGaps(manifest, EXECUTION_GUARDED_RESTRICTED_KEYS)).toEqual([]);
   });
 
-  it("Finans-senteret er IKKE en valg-kun-lås: det står i EXECUTION_GUARDED_RESTRICTED_KEYS (og er restricted + låst), og mengden inneholder bare restricted, registrerte verktøy", () => {
+  it("Finans- og Verdi-senteret er IKKE valg-kun-låser: de står i EXECUTION_GUARDED_RESTRICTED_KEYS (og er restricted + låst), og mengden inneholder bare restricted, registrerte verktøy", () => {
     expect(EXECUTION_GUARDED_RESTRICTED_KEYS.has("executive.get_finance_center")).toBe(true);
+    expect(EXECUTION_GUARDED_RESTRICTED_KEYS.has("executive.get_value_center")).toBe(true);
     expect(ACCEPTED_SELECTION_ONLY.test("executive")).toBe(false);
     for (const key of EXECUTION_GUARDED_RESTRICTED_KEYS) {
       const entry = manifest.get(key) as ToolManifestEntry | undefined;
@@ -112,21 +114,24 @@ describe("invariant: restricted + modellflate => låst i utvalget OG (håndhevet
     // et verktøy uten modellflate (kun eier-/system-vei) er ikke omfattet
     const noSurface: ToolManifest = new Map([...manifest, ["executive.get_health_center", fake("executive", "get_health_center", [])]]);
     expect(restrictedGaps(noSurface, EXECUTION_GUARDED_RESTRICTED_KEYS)).toEqual([]);
-    // fjernes utførelses-vernet for Finans-senteret, feiler invarianten (det er ikke et finance_*-namespace)
-    expect(restrictedGaps(manifest, new Set())).toEqual(["executive.get_finance_center: restricted på web_chat - hverken håndhevet ved utførelse eller eksplisitt akseptert valg-kun-lås"]);
+    // fjernes utførelses-vernet for Finans- og Verdi-senteret, feiler invarianten (de er ikke et finance_*-namespace)
+    expect(restrictedGaps(manifest, new Set())).toEqual([
+      "executive.get_finance_center: restricted på web_chat - hverken håndhevet ved utførelse eller eksplisitt akseptert valg-kun-lås",
+      "executive.get_value_center: restricted på web_chat - hverken håndhevet ved utførelse eller eksplisitt akseptert valg-kun-lås"
+    ]);
   });
 });
 
 describe("utførelses-vernet virker på selve verktøyene i den håndhevede mengden", () => {
   const owner: IdentityContext = { person_id: "person-owner", tenant_id: "tenant-owner", memory_space_id: "personal", session_id: "s", device_id: "d", channel: "web", auth_strength: "signed" };
-  const probe: ControlCenterDefinition = {
-    id: "finance", title_no: "Finans", description_no: "test",
+  const probeFor = (id: ControlCenterId): ControlCenterDefinition => ({
+    id, title_no: id, description_no: "test",
     build: async () => ({ sections: [controlSection({ id: "s1", title_no: "S", source: "test", summary_no: "x", items: [controlItem({ id: "i1", label: "Rad", status: "OK", detail_no: "d", facts: { amount_ore: 99_000 } })] })], actions: [] })
-  };
+  });
 
   it("for hvert guardet verktøy: en skymodell får «holdt tilbake», en lokal modell og siden får rapporten - uten at noe utvalg er involvert", async () => {
     const registry = createControlCenterRegistry({ authority: { owner_person_id: "person-owner", owner_tenants: ["tenant-owner"] } });
-    registry.register(probe);
+    for (const center of CLOUD_WITHHELD_CENTERS) registry.register(probeFor(center));
     const fakeGw = { list: () => [], health: new Map(), hasSecret: async () => true } as unknown as ToolGateway;
     const transport = new ExecutiveTransport(new ExecutiveService(fakeGw, { controlCenters: registry, servedLocally: (m) => m.provider === "gemma_local" }));
     for (const key of EXECUTION_GUARDED_RESTRICTED_KEYS) {

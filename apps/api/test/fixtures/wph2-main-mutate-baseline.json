@@ -1,0 +1,55 @@
+{
+ "baseline": "origin/main",
+ "baseline_sha": "ec3e684e1333261e5f4d5456d35e941457019d42",
+ "note": "Opptak mot en REN kopi av origin/main (git archive): POST /executive/mutate med et gyldig grant (eier, signert web-økt) og en gateway som svarer unknown_tool. `gateway_calls` = antall kall som nådde gateway.execute. Endres kun ved bevisst regenerering mot en ny main (se wph2-flag-off-main-parity.test.ts).",
+ "responses": {
+  "run_golden_suite": {
+   "status": 400,
+   "body": {
+    "error": "malformed_request",
+    "reason": "action_not_allowed"
+   },
+   "gateway_calls": 0
+  },
+  "revoke_autonomy_binding": {
+   "status": 400,
+   "body": {
+    "error": "malformed_request",
+    "reason": "action_not_allowed"
+   },
+   "gateway_calls": 0
+  },
+  "totally_unknown_action": {
+   "status": 400,
+   "body": {
+    "error": "malformed_request",
+    "reason": "action_not_allowed"
+   },
+   "gateway_calls": 0
+  },
+  "pause_domain": {
+   "status": 403,
+   "body": {
+    "error": "tool_denied",
+    "reason": "unknown_tool"
+   },
+   "gateway_calls": 1
+  },
+  "cancel_task": {
+   "status": 403,
+   "body": {
+    "error": "tool_denied",
+    "reason": "unknown_tool"
+   },
+   "gateway_calls": 1
+  },
+  "run_golden_suite__bad_grant": {
+   "status": 400,
+   "body": {
+    "error": "malformed_request",
+    "reason": "action_not_allowed"
+   },
+   "gateway_calls": 0
+  }
+ }
+}

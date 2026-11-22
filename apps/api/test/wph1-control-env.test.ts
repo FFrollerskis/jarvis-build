@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error - ren .mjs uten typer (genererer compose-blokkene)
 import { NEVER_IN_RUNTIME, SERVICE_ENV } from "../../../infra/local/service-env.mjs";
-import { CONTROL_CENTER_FLAGS } from "../src/control-center/register.ts";
+import { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS } from "../src/control-center/register.ts";
 
 /**
  * WP-H1: FLAGGENE NÅR CONTAINEREN. Compose sender KUN de miljøvariablene manifestet (`infra/local/service-env.mjs`) lister - en verdi i `.env` som ikke står der når aldri api-containeren, og flagget ville vært
@@ -11,9 +11,15 @@ import { CONTROL_CENTER_FLAGS } from "../src/control-center/register.ts";
  * hvert flagg står i api sitt manifest (og kun der), og compose har nøyaktig én videresendingslinje for det.
  */
 const COMPOSE = readFileSync(fileURLToPath(new URL("../../../infra/local/docker-compose.yml", import.meta.url)), "utf8");
-const FLAGS: string[] = [...Object.values(CONTROL_CENTER_FLAGS), "JARVIS_GOVERNANCE_PROVENANCE"];
+// WP-H2 la til fire senterflagg (i CONTROL_CENTER_FLAGS) og to enkeltfunksjoner (CONTROL_FEATURE_FLAGS: golden-suite og tilbakekall av autonomi-binding) - alle må nå containeren.
+const FLAGS: string[] = [...Object.values(CONTROL_CENTER_FLAGS), ...Object.values(CONTROL_FEATURE_FLAGS), "JARVIS_GOVERNANCE_PROVENANCE"];
 
 describe("kontrollsenter-flaggene og proveniens-flagget når api-containeren", () => {
+  it("alle ti flagg (syv senterflagg + to enkeltfunksjoner + proveniens) er med - ingen er glemt", () => {
+    expect(FLAGS).toHaveLength(10);
+    expect(new Set(FLAGS).size).toBe(10);
+  });
+
   it("hvert flagg står i SERVICE_ENV.api - og ikke i worker, voice, browser eller migrate (kun api leser dem)", () => {
     for (const name of FLAGS) {
       expect(SERVICE_ENV.api, name).toContain(name);
