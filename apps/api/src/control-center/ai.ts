@@ -4,7 +4,7 @@ import {
   controlAction, controlItem, controlSection, unknownControlSection, worstStatus,
   type ControlAction, type ControlCenterBuildContext, type ControlCenterDefinition, type ControlCenterParts, type ControlItem, type ControlSection, type ControlStatus, type EvolutionReport
 } from "@jarvis/executive";
-import { BudgetGuard, budgetConfigFromEnv, dailySpentOre, type CouncilLimiterUsage, type MeshStatus, type ProviderOverviewRow } from "@jarvis/model-gateway";
+import { BudgetGuard, budgetConfigFromEnv, dailySpentOre, type ClaudeBudgetConfig, type CouncilLimiterUsage, type MeshStatus, type ProviderOverviewRow } from "@jarvis/model-gateway";
 import type { OwnerControls } from "@jarvis/policy";
 import { CONNECTOR_REGISTRY, type ConnectorDefinition, type ToolGateway } from "@jarvis/tool-gateway";
 import { modelFreezeTarget, pausedProvidersFrom, providerCredentialRefs } from "../provider-pause.ts";
@@ -12,6 +12,7 @@ import type { RunRateReport } from "../run-rate.ts";
 import { actionRequiresStepUp } from "../step-up.ts";
 import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute, type ToolTurnRoute } from "../tool-turn-route.ts";
 import { activeTaskRows, readActiveTasks, readTaskCounts, type ActiveTaskRow, type TaskCounts } from "./agents.ts";
+import { claudeBudgetItems } from "./ai-claude-budget.ts";
 import { DAY_MS, bySeverityThenLabel, countsNo, relativeNo, riskOf, settle, tenantRead, toIso, type ControlCenterPool, type Settled } from "./shared.ts";
 
 /**
@@ -227,6 +228,11 @@ export interface AiCenterDeps {
   /** Evolusjonsrapporten (B1) - EV-12 (skygge-modellrute) hentes derfra. Utelatt = UKJENT. */
   evolutionReport?: () => Promise<Pick<EvolutionReport, "sections">>;
   maxActiveJobs?: number;
+  /**
+   * WP-B4 (D-476): Claude-kreditten (`JARVIS_CLAUDE_BUDGET_USD`), allerede parset og validert. Utelatt = flagget er AV og Kost-seksjonen er uendret fra før. Med den får Kost tre elementer
+   * (kreditten, forbruk per tier, styrte kall) - men kun for lokal modell og siden, aldri for en skymodell (`restrictFinance`, se `ai-claude-budget.ts`).
+   */
+  claudeBudget?: ClaudeBudgetConfig;
   /** Standard: `CONNECTOR_REGISTRY` (nøkkelkart og «deles med»). Injiserbar for tester. */
   registry?: readonly ConnectorDefinition[];
 }
@@ -496,8 +502,13 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
       } else {
         costItems.push(controlItem({ id: "run_rate", label: "Kost og månedsprognose", status: "UNKNOWN", detail_no: `Kunne ikke måles (${runRateR.category}).`, facts: { projected_month_ore: null } }));
       }
+      // WP-B4 (D-476): Claude-kreditten - kun med flagget, og kun når mottakeren IKKE er en skymodell (AI-kost i øre er finansdata etter strengeste regel, Q-64). Utelatelsen skjer før elementene bygges.
+      const claudeBudgetRows = deps.claudeBudget !== undefined && ctx.restrictFinance !== true
+        ? await claudeBudgetItems({ pool: deps.pool, config: deps.claudeBudget, tenantId, nowMs })
+        : [];
+      costItems.push(...claudeBudgetRows);
       sections.push(controlSection({
-        id: "cost", title_no: "Kost", source: "cost_events via BudgetGuard og RunRateService (D-421; tenant-RLS) · miljø (JARVIS_COST_*)", observed_at: nowIso,
+        id: "cost", title_no: "Kost", source: `cost_events via BudgetGuard og RunRateService (D-421; tenant-RLS) · miljø (JARVIS_COST_*)${claudeBudgetRows.length > 0 ? " · Claude-kreditten (JARVIS_CLAUDE_BUDGET_*, D-476)" : ""}`, observed_at: nowIso,
         summary_no: `${costItems.length} kostopplysninger: ${countsNo(costItems)}.${runRateR?.ok ? ` Ikke målt: ${runRateR.value.not_measured.slice(0, 2).join("; ")}.` : ""}`,
         items: costItems
       }));

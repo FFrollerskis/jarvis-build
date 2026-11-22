@@ -232,6 +232,9 @@ export function createCodingHandler(deps: {
     let cloneUrl: string;
     let credentialSlug: string | undefined;
     let testCmd: string[];
+    // WP-K (D-471, JARVIS-068): hva `tests: "passed"` faktisk hviler på. `contract_command` = en kontraktstyrt, validert testløper kjørte; `internal_default_noop` = ingen testkommando ble oppgitt, så Jarvis' interne
+    // standard (en kommando som alltid består) kjørte - «passed» betyr da KUN at kommandoen avsluttet 0, ikke at noe ble testet. Feltet endrer ingen oppførsel; det gjør en tom «passed» gjenkjennelig.
+    let testsBasis: "contract_command" | "internal_default_noop";
     try {
       assertJobBranch(branch);
       if (deps.gitAuth || hostGit) {
@@ -249,7 +252,9 @@ export function createCodingHandler(deps: {
       }
       const requested = input.test_command;
       // Ingen/tom testkommando = Jarvis' EGEN interne standard (ikke kontraktstyrt). Alt kontraktstyrt må være en kjent testløper.
-      testCmd = Array.isArray(requested) && requested.length > 0 ? assertTestCommand(requested) : ["node", "-e", "process.exit(0)"];
+      const explicitTestCommand = Array.isArray(requested) && requested.length > 0;
+      testCmd = explicitTestCommand ? assertTestCommand(requested) : ["node", "-e", "process.exit(0)"];
+      testsBasis = explicitTestCommand ? "contract_command" : "internal_default_noop";
     } catch (err) {
       if (err instanceof GitPolicyError) throw new Error(`coding_input_rejected:${err.reason}`);
       throw err;
@@ -433,7 +438,7 @@ export function createCodingHandler(deps: {
         await deps.artifacts.save(task.tenant_id, task.task_id, "pr-result", "pr-result.json", JSON.stringify(pr));
       }
 
-      return { branch, description, tests: "passed", commit_sha: commitSha, ...(pr ? { pr } : {}) };
+      return { branch, description, tests: "passed", tests_basis: testsBasis, commit_sha: commitSha, ...(pr ? { pr } : {}) };
       } finally {
         await sandbox.dispose();
       }

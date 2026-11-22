@@ -11,9 +11,21 @@
 import type { AttentionBucket } from "@jarvis/business";
 
 export type ConversationIdentityStatus = "active" | "merged";
-export type ConversationChannel = "email" | "telegram";
+/**
+ * WP-G1 (D-463, migrasjon 117): kanalene er utvidet fra `email`/`telegram` til alle UA-7-kanalene. Hver kanal har SIN egen eksakte normalisering (se `normalize.ts`) - aldri fuzzy-matching,
+ * aldri et gjettet landnummer. `CONVERSATION_CHANNELS` er den ENE listen (speilet av CHECK-en i 117; låst av test), slik at en ny kanal aldri kan legges til i bare ett av stedene.
+ */
+export const CONVERSATION_CHANNELS = ["email", "telegram", "slack", "discord", "whatsapp", "sms", "teams", "messenger", "instagram", "phone"] as const;
+export type ConversationChannel = (typeof CONVERSATION_CHANNELS)[number];
+/** Kanaler der identifikatoren ER et telefonnummer (E.164): eksakt treff på tvers av disse gir samme person (`resolveIdentityByPhone`). */
+export const PHONE_CHANNELS = ["phone", "sms", "whatsapp"] as const satisfies readonly ConversationChannel[];
 export type ChannelLinkStatus = "active" | "revoked";
-export type ChannelLinkMatchMethod = "exact_email" | "owner_configured" | "manual";
+/**
+ * `exact_phone_e164` = nøyaktig samme E.164-nummer; `exact_handle` = nøyaktig samme kanal-spesifikke bruker-id (Slack/Discord/Teams/Messenger/Instagram);
+ * `contact_sync` = lenken kommer fra en kontaktsynk (Google People) der leverandøren selv knytter nummeret/e-posten til kontakten. Alle tre er deterministiske kilder -
+ * en modell kan aldri velge en av dem (verktøyflaten er skrivebeskyttet, D-119).
+ */
+export type ChannelLinkMatchMethod = "exact_email" | "owner_configured" | "manual" | "exact_phone_e164" | "exact_handle" | "contact_sync";
 export type MergeAction = "merge" | "split";
 export type MergePerformedBy = "owner" | "deterministic_rule";
 
@@ -80,6 +92,25 @@ export interface LinkChannelIdentityInput {
   linked_person_id?: string;
   created_by_person_id?: string;
 }
+
+/**
+ * WP-G1 fiks-runde 2 (B-H1 rest): inndata til `linkExclusiveIdentifiers` - ÉN kilde (f.eks. én Google-kontakt) sine identifikatorer som skal lenkes til ÉN identitet, uten å binde to personer sammen.
+ * `phone`/`sms`/`whatsapp` oppløses mot ALLE telefonkanalene (samme nummer = samme identifikator), øvrige kanaler mot seg selv.
+ */
+export interface LinkExclusiveIdentifiersInput {
+  identifiers: ReadonlyArray<{ channel: ConversationChannel; identifier: string }>;
+  /** Kilden som EIER lenkene (`source_type` + `external_id`, f.eks. `google_contacts` + `people/c123`). En annen kilde-id på samme identitet er en konflikt. */
+  source: { source_type: string; external_id: string };
+  confidence: number;
+  match_method: ChannelLinkMatchMethod;
+  display_name?: string;
+  created_by_person_id?: string;
+}
+
+export type LinkExclusiveIdentifiersResult =
+  | { status: "linked"; identity_id: string; linked: number }
+  /** Ingenting er skrevet. `with` = de andre kilde-id-ene som allerede eier identiteten (tom når identifikatorene peker på ULIKE identiteter). */
+  | { status: "conflict"; with: string[] };
 
 export interface MergeIdentitiesInput {
   source_identity_id: string;

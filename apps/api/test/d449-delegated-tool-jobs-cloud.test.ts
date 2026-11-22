@@ -474,7 +474,9 @@ describe("D-449: forfalskning og merknader", () => {
   it("en innsendt kontrakt som bærer `cloud_tool_turns_allowed` kan oppdages (brukes av POST /tasks/submit); vanlige kontrakter og ugyldige former gir null", () => {
     const withFlag = (value: unknown) => ({ input: { data: { prompt: "x", cloud_tool_turns_allowed: value } } });
     for (const value of [true, false, "true", 1, null]) expect(submittedContractHasReservedKey(withFlag(value)), String(value)).toBe("cloud_tool_turns_allowed");
-    expect(submittedContractHasReservedKey({ input: { data: { prompt: "x", delegated_from_chat: true } } })).toBeNull();
+    // WP-B4 (M2): `delegated_from_chat` er nå også reservert (styrer levering til eierens chat og prioriteten på Claude-kreditten) - en innsendt kontrakt kan ikke bære den. Vanlige kontrakter gir fortsatt null.
+    expect(submittedContractHasReservedKey({ input: { data: { prompt: "x", delegated_from_chat: true } } })).toBe("delegated_from_chat");
+    expect(submittedContractHasReservedKey({ input: { data: { prompt: "x", purpose: "BACKGROUND", sensitivity: "PRIVATE", tools: true } } })).toBeNull();
     for (const bad of [null, undefined, "x", 5, [], {}, { input: null }, { input: { data: null } }, { input: { data: "x" } }]) expect(submittedContractHasReservedKey(bad)).toBeNull();
   });
 
@@ -530,7 +532,7 @@ describe("D-449: oppkobling (kildevakt)", () => {
     for (const name of ["ANTHROPIC_API_KEY", "JARVIS_BUDGET_APPROVED"]) expect(workerEnv, name).toContain(name);
   });
 
-  it("eier-merket `contentOrigin: \"owner_direct\"` settes på nøyaktig ÉN plass i HELE produksjonskoden (hurtigbanen i main.ts, og kun når samtalemotoren sa cloudAllowed); `/confirmations` og modellflaten setter det aldri", () => {
+  it("eier-merket `contentOrigin: \"owner_direct\"` settes på nøyaktig TO steder i HELE produksjonskoden: hurtigbanen i main.ts (kun når samtalemotoren sa cloudAllowed) og dashbord-ruten POST /governance/mutate i server.ts (WP-H1: kun for den suverene eieren fra en enhetssignert eier-kanal-økt (L3), etter løst grant); `/confirmations`, `/executive/*` og modellflaten setter det aldri", () => {
     // Kun kode: kommentarer og typedeklarasjoner (`contentOrigin: "owner_direct" | undefined`) er ikke et sted merket SETTES.
     const code = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
     const setters = (text: string) => code(text).match(/contentOrigin:\s*"owner_direct"(?!\s*\|)/g);
@@ -543,11 +545,11 @@ describe("D-449: oppkobling (kildevakt)", () => {
     const files = sourceDirs.flatMap((dir) => { try { return walk(dir); } catch { return []; } });
     expect(files.length).toBeGreaterThan(100); // vakten skanner faktisk koden
     const hits = files.flatMap((file) => { const m = setters(readFileSync(file, "utf8")); return m ? [{ file: file.slice(root.length), n: m.length }] : []; });
-    expect(hits).toEqual([{ file: "apps/api/src/main.ts", n: 1 }]);
+    expect(hits).toEqual([{ file: "apps/api/src/main.ts", n: 1 }, { file: "apps/api/src/server.ts", n: 1 }]);
     // Gjennomgang nr. 3: en regex på den bokstavelige verdien fanger ikke en variabel, en beregnet nøkkel eller en spread. Derfor telles ALLE forekomster av identifikatoren i kode (ikke kommentarer) per fil,
-    // og tallene er låst: gateway (deklarasjon i to typer + videreføring), chat-jobs (les + typer + sending til gate-funksjonen), main.ts (den ene setteren). En ny bruk et annet sted feiler her og må vurderes.
+    // og tallene er låst: gateway (deklarasjon i to typer + videreføring), chat-jobs (les + typer + sending til gate-funksjonen), main.ts (hurtigbane-setteren), server.ts (WP-H1: dashbord-ruten for styringsjournalen), modules/governance/src/transport.ts (WP-H1: journal-transporten LESER attesten, en gang). En ny bruk et annet sted feiler her og må vurderes.
     const tokens = Object.fromEntries(files.flatMap((file) => { const n = (code(readFileSync(file, "utf8")).match(/\bcontentOrigin\b/g) ?? []).length; return n > 0 ? [[file.slice(root.length), n]] : []; }));
-    expect(tokens).toEqual({ "apps/api/src/chat-jobs.ts": 4, "apps/api/src/main.ts": 1, "modules/tool-gateway/src/gateway.ts": 5 });
+    expect(tokens).toEqual({ "apps/api/src/chat-jobs.ts": 4, "apps/api/src/main.ts": 1, "apps/api/src/server.ts": 1, "modules/governance/src/transport.ts": 1, "modules/tool-gateway/src/gateway.ts": 5 });
 
     const main = read("../src/main.ts");
     // Gjennomgang nr. 4: hurtigbanen får vite om jobben FAKTISK fikk skyflagget (transportens egen kontroll av jobbteksten) - kun eksplisitt `true` fra transporten teller, aldri antatt.
@@ -561,6 +563,21 @@ describe("D-449: oppkobling (kildevakt)", () => {
     // Modellens verktøykall går via mesh-bridge, som kun stempler `servingModel` fra adapteren.
     const mesh = readFileSync(fileURLToPath(new URL("../../../modules/tool-gateway/src/mesh-bridge.ts", import.meta.url)), "utf8");
     expect(mesh).not.toContain("contentOrigin");
+    // WP-H1 (JARVIS-087 del 2): den andre setteren står i `/governance/mutate` (proveniens på styringsjournalen) - ETTER at grantet er løst, KUN bak eier-porten (suveren eier), og ikke i noen annen rute.
+    // Verdien leses kun av journal-transporten (modules/governance), som bruker den til å skrive `prov_origin` - ingen rute åpnes av den.
+    const serverSource = read("../src/server.ts");
+    const govRoute = serverSource.indexOf('url.pathname === "/governance/mutate"');
+    const setterAt = serverSource.indexOf('contentOrigin: "owner_direct"');
+    const nextRoute = serverSource.indexOf('url.pathname === "/devices/register"', govRoute);
+    expect(govRoute).toBeGreaterThan(-1);
+    expect(setterAt).toBeGreaterThan(govRoute);
+    expect(setterAt).toBeLessThan(nextRoute);
+    expect(serverSource.indexOf("resolveFromGrant(deps", govRoute)).toBeLessThan(setterAt);
+    // Gjennomgang L3: attesten krever BÅDE eier-porten OG en enhetssignert økt fra en eier-kanal (`ownerStepUpDenial`) - en svak/passiv/tale-sesjon får aldri `owner_direct`.
+    expect(serverSource).toMatch(/\.\.\.\(deps\.ownerGate\?\.\(resolved\.identity\) === true && ownerStepUpDenial\(resolved\.identity\) === undefined \? \{ contentOrigin: "owner_direct" as const \} : \{\}\)/);
+    // Leseren: journal-transporten bruker attesten kun til å skrive `prov_origin` - en modell i løkka (`servingModel`) vinner alltid, og uten attest er opphavet `unspecified`. Ingen rute eller kostnadsvei åpnes av den.
+    const governanceTransport = readFileSync(fileURLToPath(new URL("../../../modules/governance/src/transport.ts", import.meta.url)), "utf8");
+    expect(governanceTransport).toContain('origin: context.servingModel !== undefined ? "model" : context.contentOrigin === "owner_direct" ? "owner_direct" : "unspecified"');
     // /tasks/submit avviser det interne flagget før submit.
     const server = read("../src/server.ts");
     expect(server.indexOf("submittedContractHasReservedKey(authed.body[\"contract\"])")).toBeGreaterThan(-1);

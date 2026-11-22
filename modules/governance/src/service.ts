@@ -20,6 +20,7 @@ import {
   type GoalKeyResult,
   type GoalStatus,
   type GoalWithKeyResults,
+  type GovernanceProvenance,
   type Risk,
   type Scenario,
   type ScenarioStatus
@@ -40,8 +41,26 @@ export class GovernanceNotFoundError extends Error {
  * samme RLS-skopet `withMemoryTransaction(pool, tenantId, [memorySpace], ...)`-
  * mønster som `@jarvis/situations`/`@jarvis/business` allerede bruker.
  */
+export interface GovernanceServiceOptions {
+  /** Injiserbar klokke (kun for tester): tidspunktet proveniensen stemples med. */
+  now?: () => Date;
+}
+
+/**
+ * WP-H1 (JARVIS-087 del 2): de fem `prov_*`-kolonnene (migrasjon 102) i fast rekkefølge, eller fem NULL når proveniens ikke skrives (eldre oppførsel, flagget er av).
+ * Alt-eller-ingenting håndheves også av en CHECK i databasen.
+ */
+function provenanceValues(provenance: GovernanceProvenance | undefined, now: () => Date): [string | null, string | null, string | null, string | null, string | null] {
+  if (provenance === undefined) return [null, null, null, null, null];
+  return [provenance.channel, provenance.session_id, provenance.task_id, provenance.origin, now().toISOString()];
+}
+
 export class GovernanceService {
-  constructor(private readonly pool: pg.Pool) {}
+  private readonly now: () => Date;
+
+  constructor(private readonly pool: pg.Pool, options: GovernanceServiceOptions = {}) {
+    this.now = options.now ?? (() => new Date());
+  }
 
   // ---------------------------------------------------------------------
   // Decision log
@@ -51,14 +70,16 @@ export class GovernanceService {
     tenantId: string,
     memorySpace: MemorySpace,
     input: CreateDecisionInput,
-    createdBy: string
+    createdBy: string,
+    provenance?: GovernanceProvenance
   ): Promise<DecisionLogEntry> {
     const value = CreateDecisionInputSchema.parse(input);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
         `INSERT INTO decision_log (decision_id, tenant_id, memory_space_id, title, rationale, decision_maker,
-                                    status, related_situation_id, owner_person_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+                                    status, related_situation_id, owner_person_id, created_by,
+                                    prov_channel, prov_session_id, prov_task_id, prov_origin, prov_recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
         [
           `dec-${randomUUID()}`,
           tenantId,
@@ -69,7 +90,8 @@ export class GovernanceService {
           value.status ?? "decided",
           value.related_situation_id ?? null,
           value.owner_person_id ?? null,
-          createdBy
+          createdBy,
+          ...provenanceValues(provenance, this.now)
         ]
       );
       return rows[0] as DecisionLogEntry;
@@ -116,13 +138,15 @@ export class GovernanceService {
     tenantId: string,
     memorySpace: MemorySpace,
     input: CreateScenarioInput,
-    createdBy: string
+    createdBy: string,
+    provenance?: GovernanceProvenance
   ): Promise<Scenario> {
     const value = CreateScenarioInputSchema.parse(input);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
-        `INSERT INTO scenarios (scenario_id, tenant_id, memory_space_id, title, assumptions, projected_outcome, owner_person_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+        `INSERT INTO scenarios (scenario_id, tenant_id, memory_space_id, title, assumptions, projected_outcome, owner_person_id, created_by,
+                                prov_channel, prov_session_id, prov_task_id, prov_origin, prov_recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
         [
           `scn-${randomUUID()}`,
           tenantId,
@@ -131,7 +155,8 @@ export class GovernanceService {
           value.assumptions,
           value.projected_outcome,
           value.owner_person_id ?? null,
-          createdBy
+          createdBy,
+          ...provenanceValues(provenance, this.now)
         ]
       );
       return rows[0] as Scenario;
@@ -173,12 +198,13 @@ export class GovernanceService {
   // Risk register
   // ---------------------------------------------------------------------
 
-  async createRisk(tenantId: string, memorySpace: MemorySpace, input: CreateRiskInput, createdBy: string): Promise<Risk> {
+  async createRisk(tenantId: string, memorySpace: MemorySpace, input: CreateRiskInput, createdBy: string, provenance?: GovernanceProvenance): Promise<Risk> {
     const value = CreateRiskInputSchema.parse(input);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
-        `INSERT INTO risks (risk_id, tenant_id, memory_space_id, title, description, severity, probability, mitigation_plan, owner_person_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        `INSERT INTO risks (risk_id, tenant_id, memory_space_id, title, description, severity, probability, mitigation_plan, owner_person_id, created_by,
+                            prov_channel, prov_session_id, prov_task_id, prov_origin, prov_recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
         [
           `risk-${randomUUID()}`,
           tenantId,
@@ -189,7 +215,8 @@ export class GovernanceService {
           value.probability,
           value.mitigation_plan ?? null,
           value.owner_person_id ?? null,
-          createdBy
+          createdBy,
+          ...provenanceValues(provenance, this.now)
         ]
       );
       return rows[0] as Risk;
@@ -240,12 +267,13 @@ export class GovernanceService {
   // Goals / OKRs
   // ---------------------------------------------------------------------
 
-  async createGoal(tenantId: string, memorySpace: MemorySpace, input: CreateGoalInput, createdBy: string): Promise<GoalWithKeyResults> {
+  async createGoal(tenantId: string, memorySpace: MemorySpace, input: CreateGoalInput, createdBy: string, provenance?: GovernanceProvenance): Promise<GoalWithKeyResults> {
     const value = CreateGoalInputSchema.parse(input);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
-        `INSERT INTO goals (goal_id, tenant_id, memory_space_id, title, description, target_date, owner_person_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+        `INSERT INTO goals (goal_id, tenant_id, memory_space_id, title, description, target_date, owner_person_id, created_by,
+                            prov_channel, prov_session_id, prov_task_id, prov_origin, prov_recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
         [
           `goal-${randomUUID()}`,
           tenantId,
@@ -254,7 +282,8 @@ export class GovernanceService {
           value.description ?? null,
           value.target_date ?? null,
           value.owner_person_id ?? null,
-          createdBy
+          createdBy,
+          ...provenanceValues(provenance, this.now)
         ]
       );
       return { ...(rows[0] as Omit<GoalWithKeyResults, "key_results">), key_results: [] };
@@ -311,7 +340,7 @@ export class GovernanceService {
     });
   }
 
-  async addKeyResult(tenantId: string, memorySpace: MemorySpace, input: AddKeyResultInput): Promise<GoalKeyResult> {
+  async addKeyResult(tenantId: string, memorySpace: MemorySpace, input: AddKeyResultInput, provenance?: GovernanceProvenance): Promise<GoalKeyResult> {
     const value = AddKeyResultInputSchema.parse(input);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       // D-64/D-68-disiplin: en Key Result MÅ tilhøre et Goal i SAMME
@@ -322,9 +351,10 @@ export class GovernanceService {
       const goalCheck = await client.query(`SELECT 1 FROM goals WHERE tenant_id = $1 AND goal_id = $2`, [tenantId, value.goal_id]);
       if (goalCheck.rows.length === 0) throw new GovernanceNotFoundError("goal", value.goal_id);
       const { rows } = await client.query(
-        `INSERT INTO goal_key_results (key_result_id, goal_id, tenant_id, memory_space_id, title)
-         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [`kr-${randomUUID()}`, value.goal_id, tenantId, memorySpace, value.title]
+        `INSERT INTO goal_key_results (key_result_id, goal_id, tenant_id, memory_space_id, title,
+                                       prov_channel, prov_session_id, prov_task_id, prov_origin, prov_recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        [`kr-${randomUUID()}`, value.goal_id, tenantId, memorySpace, value.title, ...provenanceValues(provenance, this.now)]
       );
       return rows[0] as GoalKeyResult;
     });

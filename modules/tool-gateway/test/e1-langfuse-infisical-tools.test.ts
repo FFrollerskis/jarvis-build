@@ -247,7 +247,7 @@ describe("D: Infisical gjennom gatewayen - metadata uten verdier, og rotasjon ba
     expect(h.notifications).toEqual([expect.objectContaining({ outcome: "unverified" })]);
   });
 
-  it("feilet rotasjon hos leverandøren -> tool_failed (ikke ok), journalført som failed, ingen varsel om «utført»", async () => {
+  it("feilet rotasjon hos leverandøren ETTER akseptert POST -> tool_failed:outcome_unknown (ikke ok), journalført som unverified (WP-K M-1: ikke retry-bar), «utfall ukjent»-varsel og ingen varsel om «utført»", async () => {
     const r = inf.seedRotation();
     const h = harness({ rotationIds: [r.id] });
     inf.rotationFails = true;
@@ -255,9 +255,10 @@ describe("D: Infisical gjennom gatewayen - metadata uten verdier, og rotasjon ba
     const res = await run(h, "infisical", "rotate_secrets", { rotation_id: r.id }, key);
     inf.rotationFails = false;
     expect(res.ok).toBe(false);
-    expect((res as { reason: string }).reason).toMatch(/^tool_failed:infisical_rotation_failed:failed/);
-    expect((await ledger(key))?.status).toBe("failed");
+    expect((res as { reason: string }).reason).toMatch(/^tool_failed:outcome_unknown:infisical_rotation_failed:failed/);
+    expect((await ledger(key))?.status).toBe("unverified");
     expect(h.notifications.filter((x) => x.outcome === "executed")).toHaveLength(0);
+    expect(h.notifications.filter((x) => x.outcome === "unknown")).toHaveLength(1);
   });
 
   it("PAUSED stanser rotasjon men aldri lesing; DEGRADED stanser rotasjon (klasse D); kill switch/frys stanser alt", async () => {

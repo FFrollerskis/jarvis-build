@@ -1,5 +1,6 @@
 import type { JsonValue } from "@jarvis/contracts";
 import { OUTCOME_UNKNOWN_PREFIX, type ToolTransport } from "./gateway.ts";
+import { abortableSleep, throwIfAborted } from "./call-signal.ts";
 import { guardedFetch, isRetrySafeStatus } from "./url-safety.ts";
 import { redactVendorText, vendorText, vendorTimestamp } from "./vendor-text.ts";
 import {
@@ -271,7 +272,8 @@ export class CloudflareTransport implements ToolTransport {
   }
 
   private sleep(ms: number): Promise<void> {
-    return this.options.sleep ? this.options.sleep(ms) : new Promise((resolve) => setTimeout(resolve, ms));
+    // WP-K (D-471, JARVIS-018): standardventingen avbrytes av gatewayens tidsavbrudd (en injisert test-`sleep` er uendret; løkken sjekker uansett signalet før hvert forsøk).
+    return this.options.sleep ? this.options.sleep(ms) : abortableSleep(ms);
   }
 
   private now(): number {
@@ -303,6 +305,8 @@ export class CloudflareTransport implements ToolTransport {
     const url = `${this.baseUrl}${path}${queryString.length > 0 ? `?${queryString}` : ""}`;
     let lastError: CloudflareApiError | undefined;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      // WP-K: aldri et nytt forsøk når kallet er avbrutt (en mutasjon kan allerede ha nådd Cloudflare; gatewayen har merket utfallet ukjent).
+      throwIfAborted();
       const response = await guardedFetch(url, {
         method,
         // L2 (review PR #324): Cloudflare-API-et redirecter aldri legitimt - en 3xx (også på GET) er en feil, og Authorization/kropp følges aldri til en annen URL.

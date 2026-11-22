@@ -3,8 +3,8 @@ import {
   composeControlCenterOverview, composeControlCenterReport, explainControlCenterNo, failureCategory, summarizeControlCenter, unknownCenterReport
 } from "./report.ts";
 import {
-  CONTROL_CENTER_IDS, isControlCenterId,
-  type ControlAction, type ControlCenterDefinition, type ControlCenterId, type ControlCenterOverview, type ControlCenterParts, type ControlCenterReport, type ControlSection
+  ALL_CONTROL_CENTER_IDS, isControlCenterId,
+  type ControlAction, type ControlCenterBuildOptions, type ControlCenterDefinition, type ControlCenterId, type ControlCenterOverview, type ControlCenterParts, type ControlCenterReport, type ControlSection
 } from "./types.ts";
 
 /**
@@ -170,9 +170,9 @@ export class ControlCenterRegistry {
     this.centers.set(center.id, center);
   }
 
-  /** De registrerte sentrene i masterplanens rekkefølge. */
+  /** De registrerte sentrene i masterplanens rekkefølge (tilleggssentre, D-475, sist). */
   list(): RegisteredControlCenter[] {
-    return CONTROL_CENTER_IDS.filter((id) => this.centers.has(id)).map((id) => {
+    return ALL_CONTROL_CENTER_IDS.filter((id) => this.centers.has(id)).map((id) => {
       const c = this.centers.get(id) as ControlCenterDefinition;
       return { id, title_no: c.title_no, description_no: c.description_no };
     });
@@ -215,22 +215,23 @@ export class ControlCenterRegistry {
    * Bevisst IKKE en resultat-cache: en rapport som er noen sekunder gammel rett etter at eieren har trykket Pause ville vist tilstanden FØR handlingen. Bygginger som ikke overlapper bygger alltid på nytt
    * (presence mot credential-kilden har sin egen, kortlevde cache). En bygging avsluttes alltid (tidsavbrudd), så en hengende bygging holder aldri nøkkelen opptatt.
    */
-  private buildOne(center: ControlCenterDefinition, identity: IdentityContext): Promise<ControlCenterReport> {
-    const key = `${center.id}\u0000${identityKey(identity)}`;
+  private buildOne(center: ControlCenterDefinition, identity: IdentityContext, options: ControlCenterBuildOptions = {}): Promise<ControlCenterReport> {
+    // M2 (H2): en bygging for en SKYmodell (`restrictFinance`) deler aldri nøkkel med en full bygging - ellers kunne en samtidig full bygging (siden) lekke finansavledede deler til skyen, eller omvendt.
+    const key = `${center.id}\u0000${options.restrictFinance === true ? "restricted" : "full"}\u0000${identityKey(identity)}`;
     const running = this.inflight.get(key);
     if (running !== undefined) return running;
-    const attempt = this.buildFresh(center, identity);
+    const attempt = this.buildFresh(center, identity, options);
     this.inflight.set(key, attempt);
     const clear = (): void => { if (this.inflight.get(key) === attempt) this.inflight.delete(key); };
     attempt.then(clear, clear);
     return attempt;
   }
 
-  private async buildFresh(center: ControlCenterDefinition, identity: IdentityContext): Promise<ControlCenterReport> {
+  private async buildFresh(center: ControlCenterDefinition, identity: IdentityContext, options: ControlCenterBuildOptions): Promise<ControlCenterReport> {
     const now = this.now();
     let report: ControlCenterReport;
     try {
-      const parts: ControlCenterParts = await withTimeout(center.build({ identity, now }), this.buildTimeoutMs);
+      const parts: ControlCenterParts = await withTimeout(center.build({ identity, now, ...(options.restrictFinance === true ? { restrictFinance: true } : {}) }), this.buildTimeoutMs);
       report = composeControlCenterReport(center, parts, now);
     } catch (err) {
       report = unknownCenterReport(center, buildFailureReason(err), now);
@@ -239,25 +240,34 @@ export class ControlCenterRegistry {
   }
 
   /** Full rapport for ett senter, eller `null` når senteret ikke er registrert (ukjent id eller ikke koblet inn). Kaster `ControlCenterAccessError` for andre enn eieren. */
-  async report(id: string, identity: IdentityContext): Promise<ControlCenterReport | null> {
+  async report(id: string, identity: IdentityContext, options: ControlCenterBuildOptions = {}): Promise<ControlCenterReport | null> {
     this.assertAuthorized(identity);
     if (!isControlCenterId(id)) return null;
     const center = this.centers.get(id);
     if (!center) return null;
-    return this.buildOne(center, identity);
+    return this.buildOne(center, identity, options);
   }
 
-  /** Oversikt over alle ti sentre: de registrerte bygges parallelt (hver fail-soft), de øvrige listes som `unregistered`. */
-  async overview(identity: IdentityContext): Promise<ControlCenterOverview> {
+  /**
+   * Oversikt over alle ti sentre: de registrerte bygges parallelt (hver fail-soft), de øvrige listes som `unregistered`. `options.withhold` (gjennomgang M2) = sentre som IKKE skal bygges for denne mottakeren
+   * (en skymodell får ikke finans): de leses ikke engang, og oversikten sier rett ut at de er holdt tilbake.
+   */
+  async overview(identity: IdentityContext, options: { withhold?: readonly ControlCenterId[]; restrictFinance?: boolean } = {}): Promise<ControlCenterOverview> {
     this.assertAuthorized(identity);
+    const withhold = new Set<string>(options.withhold ?? []);
     const registered = this.list();
-    const reports = await Promise.all(registered.map((c) => this.buildOne(this.centers.get(c.id) as ControlCenterDefinition, identity)));
-    return composeControlCenterOverview(reports.map((r, i) => summarizeControlCenter(r, (registered[i] as RegisteredControlCenter).description_no)), this.now());
+    const visible = registered.filter((c) => !withhold.has(c.id));
+    const reports = await Promise.all(visible.map((c) => this.buildOne(this.centers.get(c.id) as ControlCenterDefinition, identity, options.restrictFinance === true ? { restrictFinance: true } : {})));
+    return composeControlCenterOverview(
+      reports.map((r, i) => summarizeControlCenter(r, (visible[i] as RegisteredControlCenter).description_no)),
+      this.now(),
+      registered.filter((c) => withhold.has(c.id)).map((c) => c.id)
+    );
   }
 
   /** `explain(center)`: deterministisk norsk forklaring av hvorfor senteret har sin status (UA-11: «Jarvis forklarer hvorfor»). `null` for ukjent/ikke-koblet senter. */
-  async explain(id: string, identity: IdentityContext): Promise<string | null> {
-    const report = await this.report(id, identity);
+  async explain(id: string, identity: IdentityContext, options: ControlCenterBuildOptions = {}): Promise<string | null> {
+    const report = await this.report(id, identity, options);
     return report === null ? null : explainControlCenterNo(report);
   }
 }

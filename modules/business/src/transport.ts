@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
+import { correlationFields, type IdentityContext, type JsonValue, type MemorySpace } from "@jarvis/contracts";
 import { DailyBrief } from "@jarvis/tool-gateway";
 import type { BriefSource, ToolGateway, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { BusinessService } from "./service.ts";
@@ -324,7 +324,8 @@ export class BusinessTransport implements ToolTransport {
           session_id: `business-events-sync-${tenantId}`, device_id: "jarvis-core",
           channel: "api", auth_strength: "active"
         };
-        const result = await this.requireEventSync().syncTenant(tenantId, memorySpace, identity);
+        // WP-K (JARVIS-054): det nøstede `system`-kallet arver korrelasjons-ID-ene fra det YTRE kallet (hvis det hadde noen), slik at radene kan knyttes til jobben/oppgaven som ba om synken.
+        const result = await this.requireEventSync().syncTenant(tenantId, memorySpace, identity, correlationFields({ task_id: context?.task_id, trace_id: context?.trace_id }));
         return { data: result as unknown as JsonValue };
       }
       case "get_lead_score": {

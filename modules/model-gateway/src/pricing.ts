@@ -36,6 +36,12 @@ export interface PricingTable {
   default_rate: TokenRate;
 }
 
+/**
+ * WP-B4 (D-476): kronekursen satsene under er regnet om med (ca. 10,5 kr per USD, ikke sanntid). Claude-budsjettet er oppgitt i USD (kreditten hos Anthropic) og omregnes med DENNE kursen, så budsjett og
+ * bokført forbruk (`cost_events`, øre) er regnet på samme grunnlag og kan sammenlignes. Å bytte kurs her uten å regne om satsene ville forskjøvet forholdet mellom budsjett og forbruk.
+ */
+export const PRICING_NOK_PER_USD = 10.5;
+
 /** Grove omregninger (USD→øre ca. 10.5 kr/USD, aug 2026) - konfig, ikke fasit. */
 export const DEFAULT_PRICING: PricingTable = {
   version: "2026-10.1",
@@ -107,6 +113,8 @@ export const DEFAULT_PRICING: PricingTable = {
     // (30/150 øre per 1k) - fantomkostnad som traff 3 000-kr-hardgrensen.
     // Lokal inferens har ALDRI en API-kostnad (se `local_llm` over).
     gemma_local: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" },
+    // WP-G3 (D-465): lokal visjonsmodell for kamerabilder - lokal inferens har aldri en API-kostnad (se `local_llm` over).
+    local_vision: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" },
     // Deterministisk testprovider (ScriptedAdapter): aldri en reell kostnad.
     scripted: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" }
   },

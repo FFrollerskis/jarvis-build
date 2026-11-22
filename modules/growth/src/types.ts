@@ -40,7 +40,15 @@ export type CampaignEventType =
   | "action_recommendation_resolved"
   | "execution_command_generated"
   | "execution_command_cancelled"
-  | "marketing_observation_generated";
+  | "marketing_observation_generated"
+  // WP-D3 (D-459, migrasjon 112-114): eksperimentregister og plattform-skrivinger
+  | "experiment_variant_added"
+  | "experiment_outcome_recorded"
+  | "provider_write_applied"
+  | "provider_write_unknown"
+  | "provider_write_failed"
+  | "execution_command_executed"
+  | "execution_command_unknown";
 
 /**
  * D-85: anomaly -> recommended-action control-plane-fundament.
@@ -110,7 +118,11 @@ export interface CampaignActionRecommendation {
  * Finance Integrity-grense.
  */
 export type ExecutionCommandType = "reduce_budget";
-export type ExecutionCommandStatus = "pending_execution" | "cancelled" | "superseded";
+/**
+ * WP-D3 (D-459, migrasjon 114): `executed` finnes nå, men KUN med bevis - databasen krever en `applied` journalrad (`growth_write_journal`) for SAMME kampanje (`execution_write_id`) og
+ * `executed_at`. `execution_unknown` = plattformen aksepterte skrivingen uten bekreftet utfall (avstemming gjenstår; kommandoen er verken «venter» eller «utført»).
+ */
+export type ExecutionCommandStatus = "pending_execution" | "cancelled" | "superseded" | "executed" | "execution_unknown";
 
 export interface CampaignExecutionCommand {
   command_id: string;
@@ -127,6 +139,9 @@ export interface CampaignExecutionCommand {
   cancelled_at: string | null;
   cancelled_by_person_id: string | null;
   cancellation_reason: string | null;
+  /** WP-D3 (migrasjon 114): satt når kommandoen er utført/ukjent - peker på journalraden som er beviset. */
+  executed_at?: string | null;
+  execution_write_id?: string | null;
   created_at: string;
   updated_at: string;
 }

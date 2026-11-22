@@ -1,0 +1,2678 @@
+{
+ "baseline": "origin/main",
+ "baseline_sha": "ec3e684e1333261e5f4d5456d35e941457019d42",
+ "note": "Generert mot en REN kopi av origin/main (se wph1-flag-off-selection-baseline.test.ts for hvordan). Endres kun ved bevisst regenerering mot en ny main.",
+ "surface_keys": [
+  "brave_search.news_search",
+  "brave_search.web_search",
+  "business.assign_open_loop",
+  "business.cancel_followup",
+  "business.clear_manual_override",
+  "business.close_lead",
+  "business.close_opportunity",
+  "business.complete_followup",
+  "business.create_company",
+  "business.create_contact",
+  "business.create_followup",
+  "business.create_lead",
+  "business.create_opportunity",
+  "business.defer_open_loop",
+  "business.delete_lead",
+  "business.delete_opportunity",
+  "business.explain_score",
+  "business.find_companies",
+  "business.find_contacts",
+  "business.get_attention_queue",
+  "business.get_business_brief",
+  "business.get_calibration_report",
+  "business.get_churn_overview",
+  "business.get_customer_overview",
+  "business.get_lead_score",
+  "business.get_opportunity_score",
+  "business.link_product_account",
+  "business.list_open_loops",
+  "business.list_overdue_followups",
+  "business.rank_leads",
+  "business.rank_opportunities",
+  "business.read_company_timeline",
+  "business.read_metrics",
+  "business.read_open_loop",
+  "business.recalculate_score",
+  "business.record_activity",
+  "business.resolve_open_loop",
+  "business.set_manual_override",
+  "business.set_next_action",
+  "business.set_open_loop_next_action",
+  "business.sync_business_events",
+  "business.update_lead",
+  "business.update_lead_status",
+  "business.update_opportunity",
+  "business.update_opportunity_stage",
+  "calendar.create_event",
+  "calendar.list_events",
+  "calendar.read_events",
+  "contract.add_obligation",
+  "contract.add_version",
+  "contract.cancellable_now",
+  "contract.complete_obligation",
+  "contract.create_contract",
+  "contract.due_obligations",
+  "contract.get_contract",
+  "contract.get_current_version",
+  "contract.link_counterparty",
+  "contract.list_by_company",
+  "contract.list_contracts",
+  "contract.list_events",
+  "contract.list_obligations",
+  "contract.list_versions",
+  "contract.overdue_obligations",
+  "contract.reopen_obligation",
+  "contract.search_contracts",
+  "contract.set_owner",
+  "contract.set_renewal_date",
+  "contract.set_status",
+  "contract.set_termination_deadline",
+  "contract.upcoming_renewals",
+  "contract.upcoming_termination_deadlines",
+  "contract.waive_obligation",
+  "conversation_graph.list_channel_links",
+  "conversation_graph.read_cross_channel_attention",
+  "conversation_graph.read_cross_channel_commitment_view",
+  "conversation_graph.read_cross_channel_commitments",
+  "conversation_graph.read_identity",
+  "conversation_graph.read_identity_timeline",
+  "conversation_graph.resolve_effective_identity",
+  "conversation_graph.resolve_identity",
+  "discord.get_bot_info",
+  "discord.list_channels",
+  "discord.notify",
+  "discord.read_channel_history",
+  "drive.create_file",
+  "drive.create_folder",
+  "drive.get_metadata",
+  "drive.list_files",
+  "drive.move",
+  "drive.read_document",
+  "drive.read_permissions",
+  "drive.rename",
+  "drive.trash",
+  "drive.update_content",
+  "dropbox.create_folder",
+  "dropbox.download_file",
+  "dropbox.list_folder",
+  "dropbox.upload_file",
+  "email.list_messages",
+  "email.read_attachment",
+  "email.read_inbox",
+  "exa.find_similar",
+  "exa.web_search",
+  "executive.get_ai_mesh_status",
+  "executive.get_attention_item",
+  "executive.get_attention_queue",
+  "executive.get_capability_status",
+  "executive.get_connector_status",
+  "executive.get_control_center",
+  "executive.get_control_surface_status",
+  "executive.get_delegation_board",
+  "executive.get_evolution_report",
+  "executive.get_infra_status",
+  "executive.get_self_diagnosis",
+  "executive.get_slo_report",
+  "executive.get_value_report",
+  "finance_neonomics.complete_consent_callback",
+  "finance_neonomics.create_consent",
+  "finance_neonomics.get_consent",
+  "finance_neonomics.list_balances",
+  "finance_neonomics.list_bank_accounts",
+  "finance_neonomics.list_bank_transactions",
+  "finance_neonomics.list_banks",
+  "finance_neonomics.list_consents",
+  "finance_neonomics.reconcile_bank_transactions",
+  "finance_neonomics.refresh_payment_state",
+  "finance_neonomics.run_bank_anomaly_detection",
+  "finance_neonomics.run_provider_anomaly_detection",
+  "finance_neonomics.sync_accounts",
+  "finance_neonomics.sync_balances",
+  "finance_neonomics.sync_transactions",
+  "finance_neonomics.verify_consent",
+  "finance_spend.cancel_procurement_item",
+  "finance_spend.cancel_recurring_commitment",
+  "finance_spend.create_procurement_item",
+  "finance_spend.create_recurring_commitment",
+  "finance_spend.get_procurement_item",
+  "finance_spend.get_recurring_commitment",
+  "finance_spend.get_spend_record",
+  "finance_spend.list_procurement_items",
+  "finance_spend.list_recurring_commitments",
+  "finance_spend.list_spend_records",
+  "finance_spend.list_unresolved_spend_anomalies",
+  "finance_spend.pause_recurring_commitment",
+  "finance_spend.resume_recurring_commitment",
+  "finance_spend.run_spend_anomaly_detection",
+  "finance_spend.run_spend_reconciliation",
+  "finance_spend.sync_internal_spend",
+  "finance_spend.update_procurement_item",
+  "finance_spend.update_recurring_commitment",
+  "finance_stripe.get_balance",
+  "finance_stripe.get_webhook_event",
+  "finance_stripe.list_refunds",
+  "finance_stripe.request_refund",
+  "finance_stripe.run_provider_anomaly_detection",
+  "finance_vipps.cancel_payment",
+  "finance_vipps.get_webhook_event",
+  "finance_vipps.list_captures",
+  "finance_vipps.list_refunds",
+  "finance_vipps.request_capture",
+  "finance_vipps.request_refund",
+  "finance_vipps.run_provider_anomaly_detection",
+  "finance_wallester.activate_card",
+  "finance_wallester.close_card",
+  "finance_wallester.create_card",
+  "finance_wallester.get_card",
+  "finance_wallester.get_provider_balance",
+  "finance_wallester.get_spend_policy",
+  "finance_wallester.list_authorizations",
+  "finance_wallester.list_card_transactions",
+  "finance_wallester.list_cards",
+  "finance_wallester.reconcile_card_transactions",
+  "finance_wallester.run_card_anomaly_detection",
+  "finance_wallester.sync_authorizations",
+  "finance_wallester.sync_card_state",
+  "finance_wallester.sync_transactions",
+  "finance_wallester.update_spend_policy",
+  "github.cancel_workflow_run",
+  "github.comment_on_issue",
+  "github.create_branch",
+  "github.create_issue",
+  "github.create_pr",
+  "github.dispatch_workflow",
+  "github.get_branch",
+  "github.get_commit",
+  "github.get_pull_request",
+  "github.list_branches",
+  "github.list_pull_requests",
+  "github.list_workflow_jobs",
+  "github.list_workflow_runs",
+  "github.read_issues",
+  "github.read_repo_meta",
+  "github.request_reviewers",
+  "github.rerun_workflow_run",
+  "github.set_labels",
+  "github.update_issue",
+  "github.update_pr",
+  "google_maps.geocode",
+  "google_maps.reverse_geocode",
+  "google_places.get_place_details",
+  "google_places.search_places",
+  "google_routes.get_directions",
+  "google_routes.get_distance_matrix",
+  "google_sheets.append_row",
+  "google_sheets.list_sheets",
+  "google_sheets.read_range",
+  "google_sheets.update_range",
+  "googleads.list_campaigns",
+  "googleads.sync_campaigns",
+  "googleads.sync_spend",
+  "googleads.sync_tracking_tags",
+  "grafana.get_dashboard",
+  "grafana.search_dashboards",
+  "growth.attribute_from_tracking",
+  "growth.attribute_to_campaign",
+  "growth.campaign_performance",
+  "growth.cancel_execution_command",
+  "growth.create_campaign",
+  "growth.create_experiment",
+  "growth.generate_execution_command",
+  "growth.generate_marketing_observations",
+  "growth.get_campaign",
+  "growth.get_experiment",
+  "growth.list_action_recommendations",
+  "growth.list_attributions",
+  "growth.list_by_company",
+  "growth.list_campaign_tracking_tags",
+  "growth.list_campaigns",
+  "growth.list_events",
+  "growth.list_execution_commands",
+  "growth.list_experiments",
+  "growth.list_marketing_observations",
+  "growth.list_spend_events",
+  "growth.record_spend_event",
+  "growth.register_campaign_tracking_tag",
+  "growth.resolve_campaign_from_tracking",
+  "growth.search_campaigns",
+  "growth.set_budget",
+  "growth.set_campaign_status",
+  "growth.set_experiment_status",
+  "home-assistant.climate_set",
+  "home-assistant.light_set",
+  "home-assistant.list_states",
+  "home-assistant.read_state",
+  "hubspot.create_object",
+  "hubspot.get_object",
+  "hubspot.list_objects",
+  "hubspot.search_objects",
+  "hubspot.update_object",
+  "jira.create_issue",
+  "jira.get_issue",
+  "jira.list_transitions",
+  "jira.search_issues",
+  "jira.transition_issue",
+  "jira.update_issue",
+  "knowledge.get_claim_status",
+  "knowledge.search",
+  "linear.create_issue",
+  "linear.get_issue",
+  "linear.list_issues",
+  "linear.list_teams",
+  "linear.update_issue",
+  "make.get_current_user",
+  "make.run_scenario",
+  "memory.propose",
+  "memory.search",
+  "metaads.list_campaigns",
+  "metaads.sync_campaigns",
+  "metaads.sync_spend",
+  "microsoft_outlook.list_messages",
+  "n8n.activate_workflow",
+  "n8n.deactivate_workflow",
+  "n8n.list_workflows",
+  "notion.create_page",
+  "notion.search",
+  "onedrive.create_folder",
+  "onedrive.list_folder",
+  "operations.create_runbook",
+  "operations.create_task",
+  "operations.create_vendor",
+  "operations.escalate_task",
+  "operations.get_runbook",
+  "operations.get_task",
+  "operations.get_vendor",
+  "operations.link_runbook",
+  "operations.link_vendor",
+  "operations.list_by_vendor",
+  "operations.list_runbooks",
+  "operations.list_task_events",
+  "operations.list_tasks",
+  "operations.list_vendors",
+  "operations.search_tasks",
+  "operations.set_due_at",
+  "operations.set_owner",
+  "operations.set_priority",
+  "operations.set_runbook_active",
+  "operations.set_status",
+  "operations.set_vendor_status",
+  "operations.update_runbook_content",
+  "pipedrive.create_object",
+  "pipedrive.get_object",
+  "pipedrive.list_objects",
+  "pipedrive.search_objects",
+  "pipedrive.update_object",
+  "product.create_item",
+  "product.get_item",
+  "product.link_reporter",
+  "product.list_by_company",
+  "product.list_events",
+  "product.list_items",
+  "product.search_items",
+  "product.set_owner",
+  "product.set_priority",
+  "product.set_status",
+  "prometheus.query",
+  "prometheus.query_range",
+  "run_rate.get_cost_overview",
+  "run_rate.list_connector_maintenance",
+  "sentry.get_issue",
+  "sentry.list_issues",
+  "sentry.list_projects",
+  "sentry.update_issue",
+  "slack.get_bot_info",
+  "slack.list_channels",
+  "slack.notify",
+  "slack.read_channel_history",
+  "spotify.add_to_queue",
+  "spotify.get_currently_playing",
+  "support.add_internal_note",
+  "support.assign_ticket",
+  "support.create_ticket",
+  "support.get_ticket",
+  "support.ingest_message",
+  "support.list_events",
+  "support.list_tickets",
+  "support.reply",
+  "support.search_tickets",
+  "support.set_priority",
+  "support.set_status",
+  "support.update_ticket",
+  "tasks.delegate_background_task",
+  "tasks.get_task_status",
+  "tavily.news_search",
+  "tavily.web_search",
+  "telegram.get_bot_info",
+  "telegram.notify",
+  "telnyx.get_account_info",
+  "todoist.close_task",
+  "todoist.create_task",
+  "todoist.get_task",
+  "todoist.list_tasks",
+  "todoist.reopen_task",
+  "todoist.update_task",
+  "trello.close_card",
+  "trello.create_card",
+  "trello.get_card",
+  "trello.list_boards",
+  "trello.list_cards",
+  "trello.reopen_card",
+  "trello.update_card",
+  "twilio.get_account_info",
+  "twilio.read_messages",
+  "vercel.cancel_deployment",
+  "vercel.list_env",
+  "vercel.list_projects",
+  "vercel.promote_deployment",
+  "vercel.read_deployment",
+  "vercel.read_deployments",
+  "vercel.rollback_deployment",
+  "vercel.upsert_env",
+  "whatsapp.get_phone_number_info"
+ ],
+ "cases": [
+  {
+   "text": "vis finanssenteret",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er status på finans",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "c5a179845878de6134d5f91331d69fba638d69581782f78ce62256ee039bbd08",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "959d4172657d9bd8a15270d74e38d0f2b6f3a22e7f1f2300ef1e0c364689ddba",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "er det noen betalinger med ukjent utfall",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er ukjent utfall",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "jeg trenger en avstemming av styret",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvordan går avstemmingen",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis betalingsintensjonene",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva ligger i karantene",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er karantene",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis styringsjournalen med proveniens",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er proveniens",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva sier minnesenteret",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "finnes det slettebevis",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis agentsenteret",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "tasks.delegate_background_task",
+     "tasks.get_task_status"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "cd6c0baa8ddfa6cc2d82be47b558295ec6e5c9f6e28ed771c09717ae956f9217",
+    "schema_tokens": 327,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvilke agenter kjører akkurat nå",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "tasks.delegate_background_task",
+     "tasks.get_task_status"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "cd6c0baa8ddfa6cc2d82be47b558295ec6e5c9f6e28ed771c09717ae956f9217",
+    "schema_tokens": 327,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvilke workere kjører",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er en lease",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis kjørende jobber",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "tasks.delegate_background_task",
+     "tasks.get_task_status"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "cd6c0baa8ddfa6cc2d82be47b558295ec6e5c9f6e28ed771c09717ae956f9217",
+    "schema_tokens": 327,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er nettverksomfang",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis driftssenteret",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "operations.get_runbook",
+     "operations.get_task",
+     "operations.get_vendor",
+     "operations.list_by_vendor",
+     "operations.list_runbooks",
+     "operations.list_task_events",
+     "operations.list_tasks",
+     "operations.list_vendors",
+     "operations.search_tasks"
+    ],
+    "dropped_count": 362,
+    "dropped_sha256": "28295595c6a7eb9430cff5b3809cc71ceb051518306c1f94d1d15327998caf47",
+    "schema_tokens": 584,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "operations.get_runbook",
+     "operations.get_task",
+     "operations.get_vendor",
+     "operations.list_by_vendor",
+     "operations.list_runbooks",
+     "operations.list_task_events"
+    ],
+    "dropped_count": 164,
+    "dropped_sha256": "4a43f010fe22ebfca146c9ea09716be351171353f6dbb211f1933555b1d74797",
+    "schema_tokens": 360,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis runbooks",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "operations.create_runbook",
+     "operations.create_task",
+     "operations.create_vendor",
+     "operations.get_runbook",
+     "operations.get_task",
+     "operations.get_vendor",
+     "operations.list_by_vendor",
+     "operations.list_runbooks",
+     "operations.list_task_events",
+     "operations.list_tasks",
+     "operations.list_vendors",
+     "operations.search_tasks"
+    ],
+    "dropped_count": 359,
+    "dropped_sha256": "da5052a751b52c8c2294d68c88594e9ffd1257a112383b5b78cb7aa310dd3ac4",
+    "schema_tokens": 942,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "operations.get_runbook",
+     "operations.get_task",
+     "operations.get_vendor",
+     "operations.list_by_vendor",
+     "operations.list_runbooks",
+     "operations.list_task_events"
+    ],
+    "dropped_count": 164,
+    "dropped_sha256": "4a43f010fe22ebfca146c9ea09716be351171353f6dbb211f1933555b1d74797",
+    "schema_tokens": 360,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er oppetid",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvordan er backup-status",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "c5a179845878de6134d5f91331d69fba638d69581782f78ce62256ee039bbd08",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "959d4172657d9bd8a15270d74e38d0f2b6f3a22e7f1f2300ef1e0c364689ddba",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "når var siste restore-test",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis verdisenteret",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvor mye spart tid har vi",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er bruksfrekvens",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis personvernsenteret",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "må vi lage en DPIA",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvem er databehandler for e-posten",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search",
+     "email.read_inbox",
+     "email.list_messages",
+     "email.read_attachment"
+    ],
+    "dropped_count": 367,
+    "dropped_sha256": "23a5565e0efe5f60b331f0c8d6de161ab8d0ea276d98ec616ee5af85686841b5",
+    "schema_tokens": 321,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search",
+     "email.read_inbox",
+     "email.list_messages",
+     "email.read_attachment"
+    ],
+    "dropped_count": 166,
+    "dropped_sha256": "2be8db2f6e63689fe1d7b73967753f68a5c2bfd77ea8e1e3230d2fcf8b8d89e8",
+    "schema_tokens": 321,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis behandlingsoversikten",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "email.read_inbox",
+     "calendar.read_events",
+     "github.read_issues"
+    ],
+    "dropped_count": 368,
+    "dropped_sha256": "3deb1dd8dbf62bf5cb32d7bccc33cce95b4c14ce183d8c4a496fd7d794bb7b30",
+    "schema_tokens": 142,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "email.read_inbox",
+     "calendar.read_events",
+     "github.read_issues"
+    ],
+    "dropped_count": 167,
+    "dropped_sha256": "0bed67164791605b18d98a9a9aae9f6bff7de7d0e3f9abf0f03ab0a9bfc5a8de",
+    "schema_tokens": 142,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis sikkerhetssenteret",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis revisjonsloggen",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "kjør selvtesten",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "kjør golden suite",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "har det vært mistenkelig aktivitet",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "noen injeksjonsforsøk",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis credential-hendelser",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis kontrollsentrene",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_attention_item",
+     "executive.get_attention_queue",
+     "executive.get_connector_status",
+     "executive.get_control_center",
+     "executive.get_control_surface_status",
+     "executive.get_delegation_board",
+     "executive.get_self_diagnosis",
+     "executive.get_slo_report",
+     "executive.get_evolution_report",
+     "executive.get_ai_mesh_status",
+     "executive.get_value_report"
+    ],
+    "dropped_count": 360,
+    "dropped_sha256": "c906b663dc3529b4c6457ad13071d98c2d30817adfc7db0c2feb0e21ec31e68b",
+    "schema_tokens": 1375,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_attention_item",
+     "executive.get_attention_queue",
+     "executive.get_connector_status",
+     "executive.get_control_surface_status",
+     "executive.get_delegation_board",
+     "executive.get_self_diagnosis"
+    ],
+    "dropped_count": 164,
+    "dropped_sha256": "2a484b29580ebc34e21ff36b6a769266a0cf62b5ede45cc34269551dbc51083f",
+    "schema_tokens": 584,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "er alt i orden i kontrollsentrene?",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_attention_item",
+     "executive.get_attention_queue",
+     "executive.get_connector_status",
+     "executive.get_control_center",
+     "executive.get_control_surface_status",
+     "executive.get_delegation_board",
+     "executive.get_self_diagnosis",
+     "executive.get_slo_report",
+     "executive.get_evolution_report",
+     "executive.get_ai_mesh_status",
+     "executive.get_value_report"
+    ],
+    "dropped_count": 360,
+    "dropped_sha256": "c906b663dc3529b4c6457ad13071d98c2d30817adfc7db0c2feb0e21ec31e68b",
+    "schema_tokens": 1375,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_attention_item",
+     "executive.get_attention_queue",
+     "executive.get_connector_status",
+     "executive.get_control_surface_status",
+     "executive.get_delegation_board",
+     "executive.get_self_diagnosis"
+    ],
+    "dropped_count": 164,
+    "dropped_sha256": "2a484b29580ebc34e21ff36b6a769266a0cf62b5ede45cc34269551dbc51083f",
+    "schema_tokens": 584,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvordan går det med systemet",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_attention_item",
+     "executive.get_attention_queue",
+     "executive.get_connector_status",
+     "executive.get_control_center",
+     "executive.get_control_surface_status",
+     "executive.get_delegation_board",
+     "executive.get_self_diagnosis",
+     "executive.get_slo_report",
+     "executive.get_evolution_report",
+     "executive.get_ai_mesh_status",
+     "executive.get_value_report"
+    ],
+    "dropped_count": 360,
+    "dropped_sha256": "c906b663dc3529b4c6457ad13071d98c2d30817adfc7db0c2feb0e21ec31e68b",
+    "schema_tokens": 1375,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_attention_item",
+     "executive.get_attention_queue",
+     "executive.get_connector_status",
+     "executive.get_control_surface_status",
+     "executive.get_delegation_board",
+     "executive.get_self_diagnosis"
+    ],
+    "dropped_count": 164,
+    "dropped_sha256": "2a484b29580ebc34e21ff36b6a769266a0cf62b5ede45cc34269551dbc51083f",
+    "schema_tokens": 584,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er status",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "c5a179845878de6134d5f91331d69fba638d69581782f78ce62256ee039bbd08",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "959d4172657d9bd8a15270d74e38d0f2b6f3a22e7f1f2300ef1e0c364689ddba",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "er det noen åpne hendelser",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_infra_status"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "8818df7f1db0a725f1d27e83ddeaa2b6c73d540e393bdeeb6a83b156702d0ff5",
+    "schema_tokens": 216,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er infrastrukturstatus",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "c5a179845878de6134d5f91331d69fba638d69581782f78ce62256ee039bbd08",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "959d4172657d9bd8a15270d74e38d0f2b6f3a22e7f1f2300ef1e0c364689ddba",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvilke integrasjoner er koblet til",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "c5a179845878de6134d5f91331d69fba638d69581782f78ce62256ee039bbd08",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "959d4172657d9bd8a15270d74e38d0f2b6f3a22e7f1f2300ef1e0c364689ddba",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva koster AI denne måneden",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvilke modeller har du",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_attention_item",
+     "executive.get_attention_queue",
+     "executive.get_connector_status",
+     "executive.get_control_center",
+     "executive.get_control_surface_status",
+     "executive.get_delegation_board",
+     "executive.get_self_diagnosis",
+     "executive.get_slo_report",
+     "executive.get_evolution_report",
+     "executive.get_ai_mesh_status",
+     "executive.get_value_report"
+    ],
+    "dropped_count": 360,
+    "dropped_sha256": "c906b663dc3529b4c6457ad13071d98c2d30817adfc7db0c2feb0e21ec31e68b",
+    "schema_tokens": 1375,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_attention_item",
+     "executive.get_attention_queue",
+     "executive.get_connector_status",
+     "executive.get_control_surface_status",
+     "executive.get_delegation_board",
+     "executive.get_self_diagnosis"
+    ],
+    "dropped_count": 164,
+    "dropped_sha256": "2a484b29580ebc34e21ff36b6a769266a0cf62b5ede45cc34269551dbc51083f",
+    "schema_tokens": 584,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er status på bakgrunnsjobbene",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "executive.get_capability_status",
+     "tasks.delegate_background_task",
+     "tasks.get_task_status"
+    ],
+    "dropped_count": 368,
+    "dropped_sha256": "5ded8a8d86f29a12f1abb867abb59de4ed93f33952b44470ddca97a06b86022a",
+    "schema_tokens": 435,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "959d4172657d9bd8a15270d74e38d0f2b6f3a22e7f1f2300ef1e0c364689ddba",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "har vi noen avvik",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hei",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [],
+    "dropped_count": 371,
+    "dropped_sha256": "4b48b047cdbfb6bae23ab1350a6c7f394a60db1785ca4364fcfcc945923347a2",
+    "schema_tokens": 0,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [],
+    "dropped_count": 170,
+    "dropped_sha256": "cfc5208827f0834c31dcfacf7794034bd68bc52c0e37dacd955963936aca7f85",
+    "schema_tokens": 0,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er klokka",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [],
+    "dropped_count": 371,
+    "dropped_sha256": "4b48b047cdbfb6bae23ab1350a6c7f394a60db1785ca4364fcfcc945923347a2",
+    "schema_tokens": 0,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [],
+    "dropped_count": 170,
+    "dropped_sha256": "cfc5208827f0834c31dcfacf7794034bd68bc52c0e37dacd955963936aca7f85",
+    "schema_tokens": 0,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva skjer i kalenderen min i dag",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "email.read_inbox",
+     "calendar.read_events",
+     "github.read_issues",
+     "calendar.list_events"
+    ],
+    "dropped_count": 367,
+    "dropped_sha256": "f3fb3ff77a797951a1464fbb44ca337577adc7ce184ad5d0ce1a2da9b254518d",
+    "schema_tokens": 236,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "email.read_inbox",
+     "calendar.read_events",
+     "github.read_issues",
+     "calendar.list_events"
+    ],
+    "dropped_count": 166,
+    "dropped_sha256": "7a8e988de18b2eac225861dadd38bcb0bf20f6c529d92809080fa26f87bf1a73",
+    "schema_tokens": 236,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "har jeg nye e-poster",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "email.read_inbox",
+     "email.list_messages",
+     "email.read_attachment"
+    ],
+    "dropped_count": 368,
+    "dropped_sha256": "afa26d474da17e253002be5139c41efa0d631cc6c6fece4e68995b6d1e70ce8f",
+    "schema_tokens": 204,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "email.read_inbox",
+     "email.list_messages",
+     "email.read_attachment"
+    ],
+    "dropped_count": 167,
+    "dropped_sha256": "3ea50d272a94f7187923de03dce896ab1ef05973d9e4f022f29a269132df6e8c",
+    "schema_tokens": 204,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "send en e-post til Per om møtet",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "email.read_inbox",
+     "calendar.read_events",
+     "email.list_messages",
+     "email.read_attachment",
+     "calendar.list_events",
+     "calendar.create_event"
+    ],
+    "dropped_count": 365,
+    "dropped_sha256": "48a6b540dc6c4d70cbec78fd130f0a4eaa42bd68df5a52b243bbed763886017f",
+    "schema_tokens": 425,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "email.read_inbox",
+     "calendar.read_events",
+     "email.list_messages",
+     "email.read_attachment",
+     "calendar.list_events"
+    ],
+    "dropped_count": 165,
+    "dropped_sha256": "8e51c3c4bf65afc9d47a5c391d8ee10e4f251227b5b66061bb0ef0b092d1e2ca",
+    "schema_tokens": 344,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva husker du om meg",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "lag en oppgave: ring tannlegen",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva sa jeg om pappa",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "finn dokumentet om budsjett",
+   "finance_intent": true,
+   "web_chat": {
+    "selected": [
+     "drive.get_metadata",
+     "drive.list_files",
+     "drive.read_document",
+     "drive.read_permissions",
+     "finance_spend.get_procurement_item",
+     "finance_spend.get_recurring_commitment",
+     "finance_spend.get_spend_record",
+     "finance_spend.list_procurement_items",
+     "finance_spend.list_recurring_commitments",
+     "finance_spend.list_spend_records",
+     "finance_spend.list_unresolved_spend_anomalies"
+    ],
+    "dropped_count": 360,
+    "dropped_sha256": "37eeb170c94c9fc54e86a2422506f686d3eb9148841e76998bb5f8260465d14e",
+    "schema_tokens": 754,
+    "min_sensitivity": "SECRET_RESTRICTED"
+   },
+   "voice": {
+    "selected": [
+     "drive.get_metadata",
+     "drive.list_files",
+     "drive.read_document",
+     "drive.read_permissions"
+    ],
+    "dropped_count": 166,
+    "dropped_sha256": "976ba45c3b569b34d3808f357ef9c28ce490a6554be5861f12b0b8ecf5744c0c",
+    "schema_tokens": 260,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "skru på lyset i stua",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "home-assistant.climate_set",
+     "home-assistant.light_set",
+     "home-assistant.list_states",
+     "home-assistant.read_state"
+    ],
+    "dropped_count": 367,
+    "dropped_sha256": "25465cede2ee1d4f4f12abca027cc8be6dc7c6095f789f9828e9066c172ac501",
+    "schema_tokens": 317,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "home-assistant.list_states",
+     "home-assistant.read_state"
+    ],
+    "dropped_count": 168,
+    "dropped_sha256": "98ba9edfe4e58ff9679e090401c962fa7f5f0e92a95b0f0c8bcc513f7f6b59a8",
+    "schema_tokens": 143,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er værmeldingen i morgen",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "email.read_inbox",
+     "calendar.read_events",
+     "calendar.list_events"
+    ],
+    "dropped_count": 368,
+    "dropped_sha256": "1ad141f3a4bf33660fb0ef82abb09a90847aba52c5821d91019b635a47bd27ae",
+    "schema_tokens": 188,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "email.read_inbox",
+     "calendar.read_events",
+     "calendar.list_events"
+    ],
+    "dropped_count": 167,
+    "dropped_sha256": "6a57cfd03f19702aba7f926f690068245d9b213547cf07e20cffd2196e9e6937",
+    "schema_tokens": 188,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "oppsummer github-issues",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "github.read_issues",
+     "github.get_branch",
+     "github.get_commit",
+     "github.get_pull_request",
+     "github.list_branches",
+     "github.list_pull_requests",
+     "github.list_workflow_jobs",
+     "github.list_workflow_runs",
+     "github.read_repo_meta"
+    ],
+    "dropped_count": 362,
+    "dropped_sha256": "fd634471162143fd5b3ec0dbbca81fef687413bc0cd002d7a3db1970553599c5",
+    "schema_tokens": 564,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "github.read_issues",
+     "github.get_branch",
+     "github.get_commit",
+     "github.get_pull_request",
+     "github.list_branches",
+     "github.list_pull_requests"
+    ],
+    "dropped_count": 164,
+    "dropped_sha256": "55cc26c454587c9d3c415694fc8b9b11f637db3528929f42545d45abdba4d516",
+    "schema_tokens": 370,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvilke pull requests er åpne",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "github.read_issues",
+     "github.get_branch",
+     "github.get_commit",
+     "github.get_pull_request",
+     "github.list_branches",
+     "github.list_pull_requests",
+     "github.list_workflow_jobs",
+     "github.list_workflow_runs",
+     "github.read_repo_meta"
+    ],
+    "dropped_count": 362,
+    "dropped_sha256": "fd634471162143fd5b3ec0dbbca81fef687413bc0cd002d7a3db1970553599c5",
+    "schema_tokens": 564,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "github.read_issues",
+     "github.get_branch",
+     "github.get_commit",
+     "github.get_pull_request",
+     "github.list_branches",
+     "github.list_pull_requests"
+    ],
+    "dropped_count": 164,
+    "dropped_sha256": "55cc26c454587c9d3c415694fc8b9b11f637db3528929f42545d45abdba4d516",
+    "schema_tokens": 370,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva har jeg på programmet denne uken",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "email.read_inbox",
+     "calendar.read_events",
+     "github.read_issues"
+    ],
+    "dropped_count": 368,
+    "dropped_sha256": "3deb1dd8dbf62bf5cb32d7bccc33cce95b4c14ce183d8c4a496fd7d794bb7b30",
+    "schema_tokens": 142,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "email.read_inbox",
+     "calendar.read_events",
+     "github.read_issues"
+    ],
+    "dropped_count": 167,
+    "dropped_sha256": "0bed67164791605b18d98a9a9aae9f6bff7de7d0e3f9abf0f03ab0a9bfc5a8de",
+    "schema_tokens": 142,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "er fakturaen fra elektrikeren betalt",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvilke betalinger er planlagt",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvor mye har jeg brukt denne måneden",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "run_rate.get_cost_overview",
+     "run_rate.list_connector_maintenance"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "7efac07f4566dba0b365fe3e5e8d528d07a5d3e6d6e7116a6f6beb4330ecf439",
+    "schema_tokens": 159,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "run_rate.get_cost_overview",
+     "run_rate.list_connector_maintenance"
+    ],
+    "dropped_count": 168,
+    "dropped_sha256": "494bca51656919249bf4096666a8f895bde275d45483ba764c0a4ef4977ce55c",
+    "schema_tokens": 159,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er konto 6300",
+   "finance_intent": true,
+   "web_chat": {
+    "selected": [
+     "finance_neonomics.get_consent",
+     "finance_neonomics.list_balances",
+     "finance_neonomics.list_bank_accounts",
+     "finance_neonomics.list_bank_transactions",
+     "finance_neonomics.list_banks",
+     "finance_neonomics.list_consents"
+    ],
+    "dropped_count": 365,
+    "dropped_sha256": "d85d71a27e93e76e4799b5aeb4e8de37099a113ad07ae3d6e8ff4570af3e247d",
+    "schema_tokens": 404,
+    "min_sensitivity": "SECRET_RESTRICTED"
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "kan du huske at jeg liker kaffe",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er nytt",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "takk",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [],
+    "dropped_count": 371,
+    "dropped_sha256": "4b48b047cdbfb6bae23ab1350a6c7f394a60db1785ca4364fcfcc945923347a2",
+    "schema_tokens": 0,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [],
+    "dropped_count": 170,
+    "dropped_sha256": "cfc5208827f0834c31dcfacf7794034bd68bc52c0e37dacd955963936aca7f85",
+    "schema_tokens": 0,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvordan har du det",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [],
+    "dropped_count": 371,
+    "dropped_sha256": "4b48b047cdbfb6bae23ab1350a6c7f394a60db1785ca4364fcfcc945923347a2",
+    "schema_tokens": 0,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [],
+    "dropped_count": 170,
+    "dropped_sha256": "cfc5208827f0834c31dcfacf7794034bd68bc52c0e37dacd955963936aca7f85",
+    "schema_tokens": 0,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva gjør du akkurat nå",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvilke agenter finnes",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "tasks.delegate_background_task",
+     "tasks.get_task_status"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "cd6c0baa8ddfa6cc2d82be47b558295ec6e5c9f6e28ed771c09717ae956f9217",
+    "schema_tokens": 327,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvilke verktøy har du",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "slett den gamle jobben",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "tasks.delegate_background_task",
+     "tasks.get_task_status"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "cd6c0baa8ddfa6cc2d82be47b558295ec6e5c9f6e28ed771c09717ae956f9217",
+    "schema_tokens": 327,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "avbryt jobb 123",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "tasks.delegate_background_task",
+     "tasks.get_task_status"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "cd6c0baa8ddfa6cc2d82be47b558295ec6e5c9f6e28ed771c09717ae956f9217",
+    "schema_tokens": 327,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "pause alle varsler",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis meg hva som er viktig i dag",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "calendar.read_events",
+     "calendar.list_events"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "b2d33e8802b539a0608b83df0b6c20c92094e29c5c288019beb02a75405e49e7",
+    "schema_tokens": 140,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "calendar.read_events",
+     "calendar.list_events"
+    ],
+    "dropped_count": 168,
+    "dropped_sha256": "2f351922339a1047fb56cf1e66cc4abcf7dc730814443c6b1de1cb602399e392",
+    "schema_tokens": 140,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er kapasiteten på serveren",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvor mange timer har jeg spart",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva betyr personvern for oss",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvem har tilgang til dataene mine",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "home-assistant.list_states",
+     "home-assistant.read_state"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "da20455df63cc9e8ecbc972f4e368add58f60964289a2ca0474d8f9032650845",
+    "schema_tokens": 143,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "home-assistant.list_states",
+     "home-assistant.read_state"
+    ],
+    "dropped_count": 168,
+    "dropped_sha256": "98ba9edfe4e58ff9679e090401c962fa7f5f0e92a95b0f0c8bcc513f7f6b59a8",
+    "schema_tokens": 143,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva står i loggen",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "er backupen tatt",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvordan fungerer minnet ditt",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "legg til et minne om møtet i går",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search",
+     "calendar.read_events",
+     "calendar.create_event",
+     "calendar.list_events"
+    ],
+    "dropped_count": 367,
+    "dropped_sha256": "695cea13b9691fb544c5ed8d0817a9af5defa359b06d7c5326abdc0fd61287e8",
+    "schema_tokens": 338,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search",
+     "calendar.read_events",
+     "calendar.list_events"
+    ],
+    "dropped_count": 167,
+    "dropped_sha256": "3c4923d7fe49154bf6c64f411e9f7972b349802e86534b191e53f7675bae52d0",
+    "schema_tokens": 257,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "jeg vil se alle jobbene",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "vis meg avstemningen fra styremøtet",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "calendar.read_events",
+     "calendar.list_events"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "b2d33e8802b539a0608b83df0b6c20c92094e29c5c288019beb02a75405e49e7",
+    "schema_tokens": 140,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "calendar.read_events",
+     "calendar.list_events"
+    ],
+    "dropped_count": 168,
+    "dropped_sha256": "2f351922339a1047fb56cf1e66cc4abcf7dc730814443c6b1de1cb602399e392",
+    "schema_tokens": 140,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva er verdien av tiden vår",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "er Jarvis sikker",
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "og hva med den andre?",
+   "recent": [
+    "vis karantene"
+   ],
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hvordan er det nå?",
+   "recent": [
+    "vis finanssenteret"
+   ],
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "og backup?",
+   "recent": [
+    "vis driftssenteret"
+   ],
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "operations.get_runbook",
+     "operations.get_task",
+     "operations.get_vendor",
+     "operations.list_by_vendor",
+     "operations.list_runbooks",
+     "operations.list_task_events",
+     "operations.list_tasks",
+     "operations.list_vendors",
+     "operations.search_tasks"
+    ],
+    "dropped_count": 362,
+    "dropped_sha256": "28295595c6a7eb9430cff5b3809cc71ceb051518306c1f94d1d15327998caf47",
+    "schema_tokens": 584,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "operations.get_runbook",
+     "operations.get_task",
+     "operations.get_vendor",
+     "operations.list_by_vendor",
+     "operations.list_runbooks",
+     "operations.list_task_events"
+    ],
+    "dropped_count": 164,
+    "dropped_sha256": "4a43f010fe22ebfca146c9ea09716be351171353f6dbb211f1933555b1d74797",
+    "schema_tokens": 360,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "hva med agentene?",
+   "recent": [
+    "hva er status"
+   ],
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "tasks.delegate_background_task",
+     "tasks.get_task_status"
+    ],
+    "dropped_count": 369,
+    "dropped_sha256": "cd6c0baa8ddfa6cc2d82be47b558295ec6e5c9f6e28ed771c09717ae956f9217",
+    "schema_tokens": 327,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "executive.get_capability_status"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "959d4172657d9bd8a15270d74e38d0f2b6f3a22e7f1f2300ef1e0c364689ddba",
+    "schema_tokens": 108,
+    "min_sensitivity": null
+   }
+  },
+  {
+   "text": "og personvern da?",
+   "recent": [
+    "vis sikkerhetssenteret"
+   ],
+   "finance_intent": false,
+   "web_chat": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 370,
+    "dropped_sha256": "3d6928f017c00a5459609a5c027715042806e230d2686d5e3eb4f878c880924e",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   },
+   "voice": {
+    "selected": [
+     "memory.search"
+    ],
+    "dropped_count": 169,
+    "dropped_sha256": "026d2dc9f3699e1fd1b5feb69ba5c212fe24d10a9264086c917c14d1ee6f84e3",
+    "schema_tokens": 117,
+    "min_sensitivity": null
+   }
+  }
+ ]
+}

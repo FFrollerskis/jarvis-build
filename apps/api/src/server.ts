@@ -16,7 +16,7 @@ import {
 } from "@jarvis/incidents";
 import { OwnerControlUnauthorizedError, type InfraExecutionGate, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
-import { CLOUD_CONTROL_TOOL_IDS, type DockerMutationAction, type ToolGateway } from "@jarvis/tool-gateway";
+import { CLOUD_CONTROL_TOOL_IDS, ownerStepUpDenial, type DockerMutationAction, type ToolGateway } from "@jarvis/tool-gateway";
 import {
   InvalidWebhookSignatureError, StripeCredentialsUnavailableError, StripeTenantNotConfiguredError,
   VippsCredentialsUnavailableError, VippsTenantNotConfiguredError,
@@ -25,8 +25,16 @@ import {
   type CardService, type FinanceService
 } from "@jarvis/finance";
 import { ProductUsageError, UsageImportError, USAGE_LIMITS, USAGE_WEBHOOK_SIGNATURE_HEADER, type ProductUsageService } from "@jarvis/business";
-import { isControlCenterId } from "@jarvis/executive";
+import { CONTROL_CENTER_READ_TOOLS, isControlCenterId, isExtensionControlCenterId } from "@jarvis/executive";
+import { GROWTH_EXPERIMENT_TOOL_ACTIONS, executeGrowthWrite, type GrowthWriteExecutorDeps, type GrowthWriteStatusFilter } from "@jarvis/growth";
+import {
+  COMMS_CONTACT_READ_ACTIONS, COMMS_KNOWN_ACTIONS, COMMS_MEETING_READ_ACTIONS, COMMS_READ_ACTIONS, COMMS_VENDOR_READ_ACTIONS, WEBHOOK_MAX_BYTES as COMMS_WEBHOOK_MAX_BYTES, executeCommsOwnerAction, previewCommsSend,
+  type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel
+} from "@jarvis/comms";
 import type { ConversationEngine } from "./conversation.ts";
+import { handlePersonalRoute, type PersonalApiDeps } from "./personal-routes.ts";
+import { handleVisionRoute, type VisionApiDeps } from "./vision-routes.ts";
+import { handleSituationSignalRoute, type SituationSignalApiDeps } from "./situation-signal-routes.ts";
 import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
@@ -159,12 +167,34 @@ export interface ApiDeps {
    */
   businessTenants?: { pool: pg.Pool };
   /**
+   * WP-G3 (D-465, UA-9): `/vision/*` (eierens kamera-/«sist sett»-flate og iPhone-opptak på forespørsel, se `vision-routes.ts`). DORMANT: uten verdien finnes ingen av rutene (404, identisk med main);
+   * `main.ts` setter den KUN når `JARVIS_VISION_ENABLED=on`. Aldri et modellverktøy.
+   */
+  vision?: VisionApiDeps;
+  /**
+   * WP-G4 fiks-runde (D-466, B-MEDIUM-5): `/situations/signals/*` (eierens egen flate for hendelsesabonnementet: abonnementer, status, logg, vurderinger, simulering, stille-timer-valget og tilbakemelding; se `situation-signal-routes.ts`).
+   * DORMANT: uten verdien finnes ingen av rutene (404, identisk med main); `main.ts` setter den KUN med `JARVIS_SITUATION_SIGNALS=on`. Aldri et modellverktøy.
+   */
+  situationSignals?: SituationSignalApiDeps;
+  /**
    * WP-D2 (UA-3 «churn/product usage»): innkommende webhook for produktbruk-hendelser fra eierens egne produkter (`POST /webhooks/product-usage`). DORMANT: uten verdien
    * svarer ruten 404; `main.ts` setter den KUN når `JARVIS_PRODUCT_USAGE_TENANT_ID` er satt. Det finnes ingen identitet å oppløse her: autentiseringen ER HMAC-signaturen
    * (`X-Jarvis-Signature: t=<unix>,v1=<hex>` over `<t>.<rå kropp>`, ±300 s replay-vindu, konstant-tid-sammenligning) som `ProductUsageService.ingestWebhook()` håndhever FØR
    * noe parses eller skrives. Tenanten er eier-konfigurert, aldri avledet fra innholdet.
    */
   productUsage?: { service: ProductUsageService };
+  /**
+   * WP-G1 (D-463, UA-7 Communications Hub - resterende deler). DORMANT og `NOT VERIFIED`: `main.ts` setter hver del KUN med sitt eget flagg (`JARVIS_COMMS_WEBHOOKS` / `JARVIS_COMMS_OUTBOUND`); uten verdien finnes ingen av rutene
+   * (404, identisk med main) og de er heller ikke i den strenge per-IP-grensen.
+   *  - `webhooks`: `POST|GET /webhooks/comms/{slack,meta,twilio,telnyx}` - KUN leverandørene i `providers`. SAMME «signatur ER autentisering»-prinsipp som `/webhooks/stripe`: ingen identitet å oppløse, rå kropp med hard
+   *    størrelsesgrense FØR signaturen, svar uten innholdsekko. Innholdet er UBETRODD data i Ingestion Zone (ingen vei til verktøy/modell/utsendelse) - se `@jarvis/comms` `webhooks/ingest.ts`.
+   *  - `outbound`: eierens `POST /comms/preview` (tørrkjøring av policyen) og `POST /comms/action`. Grant -> KUN den suverene eieren (`ownerGate`) -> step-up (signert enhet) for sending/redigering/sletting/konto-administrasjon -> `gateway.execute()`
+   *    (policy, eier-binding, klasse D-kjeden, idempotens, varsling). Ruten har ingen egen sendevei og ingen egen sjekk å omgå, og er ALDRI et modellverktøy.
+   */
+  comms?: {
+    webhooks?: { service: CommsWebhookService; providers: ReadonlySet<CommsWebhookProvider> };
+    outbound?: { gateway: ToolGateway; funnel: OutboundFunnel };
+  };
   /**
    * Remediering del 2 (JARVIS-065): den ENE validerte eier-identiteten (fra `loadOwnerConfig`). Brukes KUN til å fylle
    * visningsfeltene (`person_id`/`tenant_id`) i de statiske sidene - aldri som autoritet (autoritet kommer alltid fra
@@ -177,6 +207,17 @@ export interface ApiDeps {
    * eier-tenant, ingen delegasjon), aldri en egen sammenligning her. FAIL-CLOSED: uten verdien (eller ved en kastet feil) nektes alle med `owner_required`.
    */
   ownerGate?: (identity: IdentityContext) => boolean;
+  /**
+   * WP-D3 (UA-4 Growth, D-459): eier-rutene for SKRIVING mot annonse-/analyseplattformene (`POST /growth/mutate`), lesing (`/growth/read`), journal (`/growth/writes/list`) og eksperimentregisteret
+   * (`/growth/experiments`). DORMANT: uten verdien svarer rutene 404; `main.ts` setter den KUN når `JARVIS_GROWTH_WRITE_PLATFORMS` er ikke-tom (skriving) eller `JARVIS_GROWTH_EXPERIMENTS=on` (eksperimenter).
+   * Utførelsen går UTELUKKENDE via `ToolGateway.execute()` (policy, mål-autorisasjon, step-up, klasse D-kjeden) - rutene omgår ingenting.
+   */
+  growthWrites?: { executor: GrowthWriteExecutorDeps; /** Skriving/lesing/journal (`/growth/mutate|read|writes/list`) finnes KUN når minst én plattform er slått på (`JARVIS_GROWTH_WRITE_PLATFORMS`). */ writes: boolean; experiments: boolean };
+  /**
+   * WP-G2 (D-464, UA-8 Personal Twin): rutene under `/personal/*` (kritiske hjem-/bilhandlinger, familie, helse-inntak, ...). DORMANT: uten verdien svarer `/personal/*` 404, identisk med main; `main.ts` setter den KUN når
+   * minst ett `JARVIS_PERSONAL_*`-flagg er på, og hver rutefamilie finnes kun med sitt eget flagg. Se `personal-routes.ts`/`personal-wiring.ts`.
+   */
+  personal?: PersonalApiDeps;
 }
 
 export interface HealthStatus {
@@ -403,6 +444,8 @@ const MEMORY_PROPOSAL_ACTIONS = ["list_proposals", "approve_proposal", "reject_p
  *
  * WP-H0 (JARVIS-087): den 13. handlingen, `cancel_task`, er kontrollsenterets avbryt-handling for en bakgrunnsjobb/agent. Den er et gjennomslag til den EKSISTERENDE kanselleringsveien (`TaskService.cancel`, samme som
  * chatens «avbryt jobb <id>»), eier-kun (verktøydefinisjonens parameterAuthorizer), klasse B og en stopp-handling uten step-up (se `STEP_UP_EXEMPT_ACTIONS`). Allowlisten er ellers uendret.
+ *
+ * WP-H2 (gjennomgang M1): de to FLAGGSTYRTE handlingene står IKKE i denne listen (den er NØYAKTIG main sin, 13 handlinger) men i `EXECUTIVE_MUTATE_FLAGGED_ACTIONS` under.
  */
 export const EXECUTIVE_MUTATE_ACTIONS = [
   "pause_domain", "resume_domain", "resolve_situation",
@@ -412,6 +455,39 @@ export const EXECUTIVE_MUTATE_ACTIONS = [
   "enable_finance_kill_switch", "disable_finance_kill_switch",
   "cancel_task"
 ] as const;
+
+/**
+ * WP-H2: to tilføyelser til `/executive/mutate` - hver bak sitt EGET flagg (AV som standard) og BARE akseptert når verktøyet faktisk er REGISTRERT i gatewayen (`deps.executive.gateway.get("executive", navn)`):
+ *  - `revoke_autonomy_binding` (14.): tilbakekall av eierens autonomi-binding for ett domene (klasse C, gjennomslag til `situations.clear_autonomy_policy`, eier-kun, KREVER step-up: ikke unntatt i `STEP_UP_EXEMPT_ACTIONS`,
+ *    og gatewayen krever den også selv: `step_up_required`).
+ *  - `run_golden_suite` (15.): golden-suite-knappen. BEVISST den ENESTE lesende handlingen i disse listene: den er en deterministisk selvtest uten sideeffekter (klasse A), men plassert her fordi knappen skal gå
+ *    gjennom SAMME grant-, step-up- (signert enhet) og revisjonsvei som alle andre kontrollsenter-knapper - ikke en ny rute, og ikke `/executive/query` (som ikke har step-up). Tool-porten krever i tillegg eier + signert økt.
+ * Gjennomgang M1: med flaggene AV er navnene IKKE kjent for ruten og svarer NØYAKTIG som main svarer på et ukjent navn (400 `action_not_allowed` FØR grantet løses, ingen `tool.denied`-revisjonsrad) - bevist mot en opptaket
+ * baseline fra ren main i `wph2-flag-off-main-parity.test.ts`. Kun CONTROL_ACTION_ALLOWED (knappenes tillatelsestabell) kjenner alle 16 navnene.
+ *
+ * WP-B3 (D-475, EV-23): en TREDJE flaggstyrt handling, `record_evolution_decision` (16.): eierens avgjørelse (godkjenn/avvis/utsett) om ett endringsforslag fra Evolusjon-senteret (klasse C, eier + signert enhet, KREVER step-up:
+ * ikke unntatt i `STEP_UP_EXEMPT_ACTIONS`, og gatewayen krever den også selv). KUN en registrering i revisjonssporet (`evolution.owner_decision`) - ingenting utføres, godkjennes i endringsregisteret eller aktiveres (selvendring er frosset, D-397).
+ * Samme regler som de to andre: kjent for ruten KUN når verktøyet faktisk er registrert (`JARVIS_CONTROL_EVOLUTION_APPROVAL=on` + Evolusjon-senteret koblet inn); ellers 400 `action_not_allowed` som for ethvert ukjent navn.
+ */
+export const EXECUTIVE_MUTATE_FLAGGED_ACTIONS = ["revoke_autonomy_binding", "run_golden_suite", "record_evolution_decision"] as const;
+
+/**
+ * D-475: er `center` et kjent valg for `/control/center`? Masterplanens ti alltid; et TILLEGGSSENTER (Evolusjon) kun når lese-verktøyet er registrert i gatewayen (flagget på og senteret koblet). Med flagget AV er «evolution» et ukjent senter og
+ * ruten svarer NØYAKTIG som main svarer på ethvert ukjent navn (400 `unknown_center`, FØR grantet løses). En gateway uten `get` (testdobler) registrerer ingen tilleggssentre (fail-closed).
+ */
+function controlCenterKnown(center: string, gateway: Pick<ToolGateway, "get">): boolean {
+  if (!isControlCenterId(center)) return false;
+  if (!isExtensionControlCenterId(center)) return true;
+  const tool = CONTROL_CENTER_READ_TOOLS.find((t) => t.center === center);
+  return tool !== undefined && typeof gateway.get === "function" && gateway.get("executive", tool.action) !== undefined;
+}
+
+/** Er handlingen kjent for `/executive/mutate`? Main sin 13, pluss de flaggstyrte kun når verktøyet er registrert. En gateway uten `get` (testdobler) registrerer ingen av de flaggstyrte (fail-closed). */
+function executiveMutateActionKnown(action: string, gateway: Pick<ToolGateway, "get">): boolean {
+  if ((EXECUTIVE_MUTATE_ACTIONS as readonly string[]).includes(action)) return true;
+  if (!(EXECUTIVE_MUTATE_FLAGGED_ACTIONS as readonly string[]).includes(action)) return false;
+  return typeof gateway.get === "function" && gateway.get("executive", action) !== undefined;
+}
 
 /**
  * Fail-closed parsing, speilbildet av `.strict()`: et forsøk på å sende f.eks.
@@ -526,9 +602,9 @@ const WEB_COMMAND = fileURLToPath(new URL("../../web/command.html", import.meta.
  */
 const WEB_VOICE = fileURLToPath(new URL("../../web/voice.html", import.meta.url));
 
-/** Størrelsesbegrenset JSON-parsing (413 over grensen, 400 `malformed_json` ved ugyldig JSON). */
-async function readBody(req: IncomingMessage): Promise<unknown> {
-  return readJsonBody(req);
+/** Størrelsesbegrenset JSON-parsing (413 over grensen, 400 `malformed_json` ved ugyldig JSON). `maxBytes` (kun WP-G3 sin bildeopplasting) heves bare for ruten som eksplisitt ber om det. */
+async function readBody(req: IncomingMessage, maxBytes?: number): Promise<unknown> {
+  return maxBytes === undefined ? readJsonBody(req) : readJsonBody(req, maxBytes);
 }
 
 /**
@@ -596,6 +672,37 @@ const AUTH_ROUTES: ReadonlySet<string> = new Set([
   "/webhooks/product-usage"
 ]);
 
+/**
+ * WP-G1 (D-463): de fire signerte kommunikasjons-webhook-rutene. De er KUN med i den strenge per-IP-grensen (som `AUTH_ROUTES`) når `deps.comms.webhooks` er satt og leverandøren er slått på - uten flagg er stien
+ * en vanlig 404 helt uten grensen (flagg AV = identisk med main, også for rate limits; `AUTH_ROUTES` er bevisst uendret).
+ */
+const COMMS_WEBHOOK_ROUTES: ReadonlyMap<string, CommsWebhookProvider> = new Map<string, CommsWebhookProvider>([
+  ["/webhooks/comms/slack", "slack"], ["/webhooks/comms/meta", "meta"], ["/webhooks/comms/twilio", "twilio"], ["/webhooks/comms/telnyx", "telnyx"]
+]);
+
+function commsStrictRoutes(deps: ApiDeps | undefined): ReadonlySet<string> {
+  const webhooks = deps?.comms?.webhooks;
+  if (webhooks === undefined) return new Set<string>();
+  return new Set([...COMMS_WEBHOOK_ROUTES].filter(([, provider]) => webhooks.providers.has(provider)).map(([path]) => path));
+}
+
+/** Eierens `/comms/action`: kroppsnøklene (identitet kan aldri være med - `grantBodyOrReject`), og hvilke handlinger som IKKE krever step-up (leser + registrering av en avmelding, som reduserer risiko). */
+const COMMS_ACTION_BODY_KEYS = ["grant_token", "action", "parameters", "idempotency_key"] as const;
+const COMMS_PREVIEW_BODY_KEYS = ["grant_token", "parameters"] as const;
+const COMMS_STEP_UP_EXEMPT: ReadonlySet<string> = new Set([...COMMS_READ_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_MEETING_READ_ACTIONS, "record_opt_out"]);
+
+/**
+ * B-M5: ÉN normalisering av forespørselsstien, brukt av BÅDE de strenge per-IP-begrenserne og rutingen (`route()` bruker `new URL(...).pathname`). Begrenseren nøklet før på den RÅ stien, så `/webhooks/comms/./slack` og
+ * `/webhooks/comms/%2e/slack` (samme rute etter URL-normalisering) aldri traff grensen (kun den romslige 600/min/IP-grensen gjaldt). Samme mønster gjaldt de eksisterende `AUTH_ROUTES`. Ugyldig URL faller tilbake til den rå stien.
+ */
+export function normalizedRequestPath(rawUrl: string | undefined): string {
+  try {
+    return new URL(rawUrl ?? "/", "http://localhost").pathname;
+  } catch {
+    return (rawUrl ?? "/").split("?")[0] ?? "/";
+  }
+}
+
 const limiterRegistry = new WeakMap<ServerResponse, RateLimiters>();
 
 function limitersFor(limits: ApiRateLimits): RateLimiters {
@@ -609,13 +716,14 @@ function limitersFor(limits: ApiRateLimits): RateLimiters {
 
 export function createApiServer(deps?: ApiDeps): Server {
   const limiters = limitersFor({ ...DEFAULT_RATE_LIMITS, ...(deps?.rateLimits ?? {}) });
+  const commsStrict = commsStrictRoutes(deps);
   return createServer((req, res) => {
     const requestId = newRequestId();
     res.setHeader("x-request-id", requestId);
     limiterRegistry.set(res, limiters);
     const peer = clientKey(req);
-    const path = (req.url ?? "/").split("?")[0] ?? "/";
-    const allowed = limiters.ip.take(peer) && (!AUTH_ROUTES.has(path) || limiters.auth.take(`${peer}|${path}`));
+    const path = normalizedRequestPath(req.url);
+    const allowed = limiters.ip.take(peer) && (!(AUTH_ROUTES.has(path) || commsStrict.has(path)) || limiters.auth.take(`${peer}|${path}`));
     if (!allowed) {
       req.resume();
       res.setHeader("retry-after", String(limiters.ip.retryAfterSeconds(peer)));
@@ -665,9 +773,9 @@ interface AuthedRequest {
 }
 
 async function authedRequest(
-  req: IncomingMessage, res: ServerResponse, deps: ApiDeps, allowedKeys: readonly string[]
+  req: IncomingMessage, res: ServerResponse, deps: ApiDeps, allowedKeys: readonly string[], maxBytes?: number
 ): Promise<AuthedRequest | null> {
-  const raw = await readBody(req);
+  const raw = await readBody(req, maxBytes);
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     json(res, 400, { error: "malformed_request", request_id: requestIdOf(res) });
     return null;
@@ -1107,7 +1215,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (typeof center !== "string") {
         return json(res, 400, { error: "malformed_request", reason: "center_required", request_id: requestIdOf(res) });
       }
-      if (!isControlCenterId(center)) {
+      if (!controlCenterKnown(center, deps.executive.gateway)) {
         return json(res, 400, { error: "malformed_request", reason: "unknown_center", request_id: requestIdOf(res) });
       }
       parameters = { center };
@@ -1226,6 +1334,28 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { error: "tool_denied", reason: result.reason });
     }
     return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  // WP-G3 (D-465): `/vision/*` finnes KUN når `deps.vision` er satt (JARVIS_VISION_ENABLED=on); ellers faller alt til den vanlige 404-en. Ruten håndterer selv grant/eier/step-up (vision-routes.ts).
+  if (deps.vision && url.pathname.startsWith("/vision/")) {
+    const handled = await handleVisionRoute(req, url.pathname, deps.vision, {
+      authed: (keys, maxBytes) => authedRequest(req, res, deps, keys, maxBytes),
+      requireOwner: (identity, subject) => requireOwner(res, deps, identity, subject),
+      json: (status, body) => json(res, status, body),
+      requestId: () => requestIdOf(res)
+    });
+    if (handled) return;
+  }
+
+  // WP-G4 fiks-runde (B-MEDIUM-5): `/situations/signals/*` finnes KUN når `deps.situationSignals` er satt (JARVIS_SITUATION_SIGNALS=on); ellers faller alt til den vanlige 404-en. Ruten håndterer selv grant/eier/step-up.
+  if (deps.situationSignals && url.pathname.startsWith("/situations/signals/")) {
+    const handled = await handleSituationSignalRoute(req, url.pathname, deps.situationSignals, {
+      authed: (keys, maxBytes) => authedRequest(req, res, deps, keys, maxBytes),
+      requireOwner: (identity, subject) => requireOwner(res, deps, identity, subject),
+      json: (status, body) => json(res, status, body),
+      requestId: () => requestIdOf(res)
+    });
+    if (handled) return;
   }
 
   if (deps.businessTenants && req.method === "POST" && url.pathname === "/owner/business-tenants") {
@@ -1454,7 +1584,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
     }
     const action = parsedBody["action"];
-    if (!(EXECUTIVE_MUTATE_ACTIONS as readonly string[]).includes(action)) {
+    if (!executiveMutateActionKnown(action, deps.executive.gateway)) {
       return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
     }
     const parameters =
@@ -1540,8 +1670,14 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
+    // WP-H1 (JARVIS-087 del 2): dashbord-ruten attesterer at parameterne er eierens EGNE ord (skjemaet i dashbordet, grant fra en innrullert enhet - ingen modell har formulert dem) - men KUN når kalleren er
+    // den suverene eieren (`deps.ownerGate`, samme predikat som kontrollsentrene) OG grantet er en enhetssignert økt fra en eier-kanal (`ownerStepUpDenial(identity) === undefined`, samme regel som gatewayens
+    // `step_up_required` og kontrollrutenes step-up; gjennomgang L3): en annen innrullert person i tenanten, en passiv/aktiv økt uten enhetssignatur, en tale-/Telegram-kanal eller en rute uten konfigurert eier-port
+    // får ingen attest, og journalraden står da som `unspecified` (fail-closed - aldri «eierens ord» på noe annet enn eierens egen inntasting fra en signert enhet). Kun journal-transporten leser verdien (og kun
+    // når JARVIS_GOVERNANCE_PROVENANCE=on); den åpner ingen rute.
     const result = await deps.executive.gateway.execute({
-      identity: resolved.identity, tool_id: "governance", action, parameters
+      identity: resolved.identity, tool_id: "governance", action, parameters,
+      ...(deps.ownerGate?.(resolved.identity) === true && ownerStepUpDenial(resolved.identity) === undefined ? { contentOrigin: "owner_direct" as const } : {})
     });
     if (!result.ok) {
       return json(res, 403, { error: "tool_denied", reason: result.reason });
@@ -1744,6 +1880,103 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     }
   }
 
+  // WP-G1 (D-463, P1d): signerte kommunikasjons-webhooks (Slack/Meta/Twilio/Telnyx). DORMANT: uten `deps.comms.webhooks` (main.ts setter den KUN med JARVIS_COMMS_WEBHOOKS) og leverandøren i `providers` finnes ikke ruten (404,
+  // identisk med main). SAMME «signatur ER autentisering»-prinsipp som /webhooks/stripe og /webhooks/product-usage: INGEN identitet å oppløse, kroppen leses som RÅ bytes med en HARD størrelsesgrense FØR signaturen vurderes
+  // (413), og alt som ikke består verifiseringen avvises uten å lese kroppen videre. Svaret ekkoer aldri meldingsinnhold. Innholdet er UBETRODD data i Ingestion Zone: inntaket har ingen vei til verktøy, modell, minne eller utsendelse.
+  const commsWebhookProvider = deps.comms?.webhooks !== undefined ? COMMS_WEBHOOK_ROUTES.get(url.pathname) : undefined;
+  if (commsWebhookProvider !== undefined && deps.comms?.webhooks?.providers.has(commsWebhookProvider) === true) {
+    if (req.method !== "POST") req.resume();
+    const rawBody = req.method === "POST" ? await readRawBodyLimited(req, COMMS_WEBHOOK_MAX_BYTES) : Buffer.alloc(0);
+    const headers: Record<string, string | undefined> = {};
+    for (const [name, value] of Object.entries(req.headers)) headers[name.toLowerCase()] = typeof value === "string" ? value : undefined;
+    const out = await deps.comms.webhooks.service.handle(commsWebhookProvider, {
+      method: req.method ?? "GET", headers, rawBody, pathAndQuery: url.pathname + url.search, query: url.searchParams
+    });
+    if (typeof out.body === "string") {
+      // Meta-håndtrykket (GET) forventer at `hub.challenge` ekkoes som ren tekst.
+      res.writeHead(out.status, { "content-type": "text/plain; charset=utf-8" });
+      res.end(out.body);
+      return;
+    }
+    if (commsWebhookProvider === "twilio" && out.status === 200) {
+      // Twilio forventer TwiML (eller en tom 2xx): en tom <Response/> = ingen automatisk svarmelding. Tellerne står i tjenestens egen logg, ikke i svaret.
+      res.writeHead(200, { "content-type": "text/xml; charset=utf-8" });
+      res.end("<Response></Response>");
+      return;
+    }
+    return json(res, out.status, out.body);
+  }
+
+  // WP-G1 (D-463, P1b): eierens kommunikasjonsflate. DORMANT: uten `deps.comms.outbound` (JARVIS_COMMS_OUTBOUND=on) finnes ingen av rutene (404). Alt går via `gateway.execute()` (verktøyene i `@jarvis/comms`): policy, eier-binding,
+  // klasse D-kjeden (idempotensnøkkel, preflight, ledger, readback, eier-varsling) og den felles utgående policyen kjøres der - ruten har ingen egen sendevei og ingen egen sjekk å omgå, og er ALDRI et modellverktøy. Rekkefølge,
+  // som `/executive/mutate`: ugyldig handling -> grant -> KUN suveren eier (`ownerGate`, samme predikat som kontrollsentrene) -> step-up (signert enhet) for alt unntatt lesing/avmeldingsregistrering -> gateway.
+  if (deps.comms?.outbound !== undefined && req.method === "POST" && url.pathname === "/comms/preview") {
+    const parsedBody = grantBodyOrReject(res, await readBodyOrUndefined(req), COMMS_PREVIEW_BODY_KEYS);
+    if (!parsedBody) return;
+    if (parsedBody["parameters"] !== undefined && (typeof parsedBody["parameters"] !== "object" || parsedBody["parameters"] === null || Array.isArray(parsedBody["parameters"]))) {
+      return json(res, 400, { error: "malformed_request", reason: "parameters_malformed", request_id: requestIdOf(res) });
+    }
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason, request_id: requestIdOf(res) });
+    }
+    if (!(await requireOwner(res, deps, resolved.identity, { tool_id: "comms", action: "preview" }))) return;
+    const preview = await previewCommsSend({ ...deps.comms.outbound, ownerGate: deps.ownerGate }, resolved.identity, (parsedBody["parameters"] ?? {}) as Record<string, JsonValue>);
+    if (!preview.ok) {
+      if (preview.status !== "denied" && preview.reason === "owner_required") return json(res, 403, { error: "owner_required", reason: "owner_required", request_id: requestIdOf(res) });
+      return json(res, 400, { error: "malformed_request", reason: preview.status === "denied" ? "policy_denied" : preview.reason, request_id: requestIdOf(res) });
+    }
+    return json(res, 200, { ok: true, data: preview.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.comms?.outbound !== undefined && req.method === "POST" && url.pathname === "/comms/action") {
+    const parsedBody = grantBodyOrReject(res, await readBodyOrUndefined(req), COMMS_ACTION_BODY_KEYS);
+    if (!parsedBody) return;
+    const action = parsedBody["action"];
+    if (typeof action !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
+    }
+    if (!COMMS_KNOWN_ACTIONS.includes(action)) {
+      return json(res, 400, { error: "malformed_request", reason: "action_not_allowed", request_id: requestIdOf(res) });
+    }
+    if (parsedBody["parameters"] !== undefined && (typeof parsedBody["parameters"] !== "object" || parsedBody["parameters"] === null || Array.isArray(parsedBody["parameters"]))) {
+      return json(res, 400, { error: "malformed_request", reason: "parameters_malformed", request_id: requestIdOf(res) });
+    }
+    if (parsedBody["idempotency_key"] !== undefined && typeof parsedBody["idempotency_key"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "idempotency_key_malformed", request_id: requestIdOf(res) });
+    }
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason, request_id: requestIdOf(res) });
+    }
+    if (!(await requireOwner(res, deps, resolved.identity, { tool_id: "comms", action }))) return;
+    const stepUp = COMMS_STEP_UP_EXEMPT.has(action) ? undefined : ownerStepUpDenial(resolved.identity);
+    if (stepUp !== undefined) {
+      return json(res, 403, { error: "step_up_required", reason: stepUp, request_id: requestIdOf(res) });
+    }
+    const result = await executeCommsOwnerAction({ ...deps.comms.outbound, ownerGate: deps.ownerGate }, resolved.identity, {
+      action, parameters: (parsedBody["parameters"] ?? {}) as Record<string, JsonValue>,
+      ...(typeof parsedBody["idempotency_key"] === "string" ? { idempotency_key: parsedBody["idempotency_key"] } : {})
+    });
+    if (result.ok) {
+      return json(res, 200, {
+        ok: true, ...(result.external_id !== undefined ? { external_id: result.external_id } : {}), data: result.data, output_trust: result.output_trust,
+        deduplicated: result.deduplicated, session_id: resolved.identity.session_id
+      });
+    }
+    if (result.status === "denied") {
+      // En policy-avvisning er et fullt, strukturert svar (ALLE regelutfall, aldri innhold) + journal-id som bevis - ikke en generisk feil.
+      return json(res, 403, { error: "comms_policy_denied", denial_codes: result.denial_codes, rules: result.rules, journal_id: result.journal_id, request_id: requestIdOf(res) });
+    }
+    if (result.status === "rejected") {
+      if (result.reason === "owner_required") return json(res, 403, { error: "owner_required", reason: "owner_required", request_id: requestIdOf(res) });
+      return json(res, 400, { error: "malformed_request", reason: result.reason, request_id: requestIdOf(res) });
+    }
+    return json(res, 403, { error: "tool_denied", reason: result.reason, request_id: requestIdOf(res) });
+  }
+
   if (deps.finance && req.method === "POST" && url.pathname === "/webhooks/neonomics") {
     // D-111 (UA-6 Slice 5): Neonomics sin EGEN offisielle webhook-kontrakt
     // (betalingsstatus-oppdateringer): API-NØKKEL-autentisering - nøkkelen
@@ -1835,6 +2068,19 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { decision: decision.decision, reason: decision.reason });
     }
     return json(res, 200, { decision: "ALLOW", executed: "critical_demo_stub" });
+  }
+
+  // WP-G2 (D-464): `/personal/*` finnes KUN når `deps.personal` er satt (minst ett JARVIS_PERSONAL_*-flagg på). Eier-kun og step-up håndheves inni rutene; uten verdien er dette en vanlig 404.
+  if (deps.personal !== undefined && url.pathname.startsWith("/personal/")) {
+    const personalDeps = deps.personal;
+    const handled = await handlePersonalRoute({
+      req, res, url, deps: personalDeps,
+      authed: (allowedKeys) => authedRequest(req, res, deps, allowedKeys),
+      requireOwner: (identity, subject) => requireOwner(res, deps, identity, subject),
+      stepUpDenial, json: (status, body) => json(res, status, body), requestId: () => requestIdOf(res),
+      fieldString, fieldOptionalString, fieldRecord, fieldOptionalNumber, domainFailure: (status, code, err) => domainFailure(res, status, code, err)
+    });
+    if (handled) return;
   }
 
   if (deps.incidents) {
@@ -2102,6 +2348,86 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (definition.capability_class !== "A") return json(res, 400, { error: "cloud_read_not_a_read_action", request_id: requestIdOf(res) });
       const result = await gateway.execute({
         identity: authed.identity, tool_id: provider, action,
+        parameters: (authed.body["parameters"] === undefined ? {} : fieldRecord(authed.body, "parameters")) as Record<string, JsonValue>
+      });
+      if (!result.ok) return json(res, 200, { ok: false, reason: result.reason.slice(0, 120), request_id: requestIdOf(res) });
+      return json(res, 200, { ok: true, output_trust: result.output_trust, data: result.data ?? null });
+    }
+
+    if (deps.growthWrites?.writes && req.method === "POST" && url.pathname === "/growth/mutate") {
+      // WP-D3 (UA-4 Growth, D-459): eier-initiert skriving mot en annonse-/analyseplattform (budsjett, bud, status, nøkkelord, kreativer ...). Rekkefølge: grant -> KUN eieren (ingen delegat) -> step-up (enhetssignert økt) ->
+      // `executeGrowthWrite` (journal + `ToolGateway.execute()`: mål-autorisasjon, klasse D-kjede, idempotens, readback, varsling). Svaret er journalraden med FØR-/ETTER-tilstand og utfall (SUCCESS/NOOP/UNKNOWN/PARTIAL/FAILED).
+      const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters", "idempotency_key", "command_id", "experiment_id", "variant_id"]);
+      if (!authed) return;
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "growth", action: "mutate" }))) return;
+      const growthStepUp = stepUpDenial(authed.identity, "growth_mutate");
+      if (growthStepUp) return json(res, 403, { error: "step_up_required", reason: growthStepUp, request_id: requestIdOf(res) });
+      const commandId = fieldOptionalString(authed.body, "command_id");
+      const experimentId = fieldOptionalString(authed.body, "experiment_id");
+      const variantId = fieldOptionalString(authed.body, "variant_id");
+      try {
+        const execution = await executeGrowthWrite(deps.growthWrites.executor, authed.identity, {
+          provider: fieldString(authed.body, "provider"), action: fieldString(authed.body, "action"), parameters: fieldRecord(authed.body, "parameters") as Record<string, JsonValue>,
+          idempotency_key: fieldString(authed.body, "idempotency_key"), source: "owner_route", session_id: authed.identity.session_id,
+          ...(commandId !== undefined ? { command_id: commandId } : {}), ...(experimentId !== undefined ? { experiment_id: experimentId } : {}), ...(variantId !== undefined ? { variant_id: variantId } : {})
+        });
+        return json(res, 200, { execution });
+      } catch (err) {
+        if (err instanceof HttpError) throw err;
+        // Kun VÅRE egne, bevisste feilkoder (ukjent handling, nøkkel-/kommando-/konfliktfeil) vises til eieren; alt annet logges og blir generisk.
+        const reason = (err as Error).message;
+        if (/^(growth_write_[a-z_]+|growth_command_[a-z_]+)(?::|$)/.test(reason)) return json(res, 400, { error: "growth_write_rejected", reason: reason.slice(0, 80), request_id: requestIdOf(res) });
+        return domainFailure(res, 400, "growth_write_rejected", err);
+      }
+    }
+
+    if (deps.growthWrites?.writes && req.method === "POST" && url.pathname === "/growth/read") {
+      // WP-D3: klasse A-lesing av leverandørtilstand (kampanje-/annonsegruppe-/nøkkelord-/eiendomstilstand osv.) for eieren. Kun registrerte klasse A-handlinger i skrive-familiens navnerom kan nås; utdata er UBETRODD data
+      // (kampanje-/kreativ-/omtaletekst er leverandør- eller brukerskrevet) og merkes som sådan - aldri instruksjoner.
+      const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters"]);
+      if (!authed) return;
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "growth", action: "read" }))) return;
+      const entry = deps.growthWrites.executor.index.get(`${fieldString(authed.body, "provider")}.${fieldString(authed.body, "action")}`);
+      if (!entry || entry.op.risk !== "A" || !deps.growthWrites.executor.gateway.get(entry.spec.toolId, entry.op.action)) return json(res, 400, { error: "growth_read_unknown_action", request_id: requestIdOf(res) });
+      const result = await deps.growthWrites.executor.gateway.execute({
+        identity: authed.identity, tool_id: entry.spec.toolId, action: entry.op.action,
+        parameters: (authed.body["parameters"] === undefined ? {} : fieldRecord(authed.body, "parameters")) as Record<string, JsonValue>
+      });
+      if (!result.ok) return json(res, 200, { ok: false, reason: result.reason.slice(0, 120), request_id: requestIdOf(res) });
+      return json(res, 200, { ok: true, output_trust: result.output_trust, data: result.data ?? null });
+    }
+
+    if (deps.growthWrites?.writes && req.method === "POST" && url.pathname === "/growth/writes/list") {
+      // WP-D3: skrivejournalen (FØR-/ETTER-tilstand, utfall, proveniens) for eieren. Ren lesing under RLS.
+      const authed = await authedRequest(req, res, deps, ["campaign_id", "status", "provider", "limit"]);
+      if (!authed) return;
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "growth", action: "writes_list" }))) return;
+      const status = fieldOptionalString(authed.body, "status") as GrowthWriteStatusFilter | undefined;
+      if (status !== undefined && !["requested", "applied", "failed", "outcome_unknown"].includes(status)) return json(res, 400, { error: "malformed_request", reason: "status", request_id: requestIdOf(res) });
+      const campaignFilter = fieldOptionalString(authed.body, "campaign_id");
+      const providerFilter = fieldOptionalString(authed.body, "provider");
+      const limit = fieldOptionalNumber(authed.body, "limit");
+      const writes = await deps.growthWrites.executor.journal.list(authed.identity.tenant_id, authed.identity.memory_space_id as never, {
+        ...(campaignFilter !== undefined ? { campaign_id: campaignFilter } : {}), ...(status !== undefined ? { status } : {}), ...(providerFilter !== undefined ? { provider: providerFilter } : {}), ...(limit !== undefined ? { limit } : {})
+      });
+      return json(res, 200, { writes });
+    }
+
+    if (deps.growthWrites?.experiments && req.method === "POST" && url.pathname === "/growth/experiments") {
+      // WP-D3: eksperimentregisteret (plan/variant/observasjon/utfall, evaluering, kreativ-intelligens) for eieren. Går via `ToolGateway.execute()` (verktøyet `growth.*` er eier-eksklusivt). Skriving krever step-up.
+      const authed = await authedRequest(req, res, deps, ["action", "parameters", "idempotency_key"]);
+      if (!authed) return;
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "growth", action: "experiments" }))) return;
+      const action = fieldString(authed.body, "action");
+      const definition = (GROWTH_EXPERIMENT_TOOL_ACTIONS as readonly string[]).includes(action) ? deps.growthWrites.executor.gateway.get("growth", action) : undefined;
+      if (!definition) return json(res, 400, { error: "growth_experiment_unknown_action", request_id: requestIdOf(res) });
+      if (definition.capability_class !== "A") {
+        const experimentStepUp = stepUpDenial(authed.identity, "growth_experiments");
+        if (experimentStepUp) return json(res, 403, { error: "step_up_required", reason: experimentStepUp, request_id: requestIdOf(res) });
+      }
+      const idempotencyKey = fieldOptionalString(authed.body, "idempotency_key");
+      const result = await deps.growthWrites.executor.gateway.execute({
+        identity: authed.identity, tool_id: "growth", action, ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
         parameters: (authed.body["parameters"] === undefined ? {} : fieldRecord(authed.body, "parameters")) as Record<string, JsonValue>
       });
       if (!result.ok) return json(res, 200, { ok: false, reason: result.reason.slice(0, 120), request_id: requestIdOf(res) });

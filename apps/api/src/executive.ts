@@ -1,11 +1,12 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import { DataSensitivitySchema, ModelPurposeSchema } from "@jarvis/contracts";
-import { NoEligibleProviderError, classifyContentSensitivity, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
+import { NoEligibleProviderError, claudeBudgetClosureOf, classifyContentSensitivity, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
 import { ProviderError } from "@jarvis/provider-adapters";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
 import { filterMeshToolsForJob, financeToolIntent, type MeshToolMapping } from "@jarvis/tool-gateway";
 import { cloudScreenedExecutor, jobWithheldNote } from "./cloud-tool-screen.ts";
-import { LOCAL_FALLBACK_ERROR_KINDS, jobDayCapNote } from "./tool-turn-route.ts";
+import { financeIntentOptions } from "./control-center/shared.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, claudeBudgetRouteNote, jobDayCapNote } from "./tool-turn-route.ts";
 
 export interface ExecutiveHandlerOptions {
   gateway: ModelGateway;
@@ -101,6 +102,10 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
         tenant_id: task.tenant_id,
         task_id: task.task_id,
         purpose: purpose.success ? purpose.data : ("BACKGROUND" as const),
+        // WP-B4 (D-476, review M2): en jobb EIEREN bestilte er VIKTIG for Claude-kreditten (selv om kontrakten merker den BACKGROUND som køetikett). Opphavet kommer KUN fra attestert kilde: markøren OG det interne flagget
+        // `cloud_tool_turns_allowed` - begge er reservert (`RESERVED_SUBMIT_DATA_KEYS`: en innsendt kontrakt kan ikke bære dem) og settes bare av `TasksDelegateTransport` når turen som delegerte er betrodd (skybetjent eller eierens
+        // egne ord, ikke SECRET_RESTRICTED). En jobb uten attesteringen er bakgrunnsarbeid (jobb-id → BAKGRUNN). Kun med Claude-kreditten på - ellers uendret innputt.
+        ...(opts.gateway.claudeBudgetActive === true && input.delegated_from_chat === true && input.cloud_tool_turns_allowed === true ? { budget_origin: "owner_task" as const } : {}),
         request: { messages: [{ role: "user" as const, content: input.prompt }], max_tokens: 1024 }
       };
       // BO-11 (§29) + Del 3: tools=true gir modellen KUN verktøyene kontrakten eksplisitt tillater, med kontraktens egen identitet.
@@ -127,7 +132,7 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
           // Forsvar i dybden: oppgaveteksten, tittelen (`goal`) og minnerommene jobben får lese klassifiseres OGSÅ her, uavhengig av hvordan kontrakten ble sendt inn (en kontrakt kan i prinsippet bygges av andre enn chatten).
           classifyContentSensitivity({ texts: [input.prompt, task.contract.goal], memory_spaces: task.contract.allowed_memory_spaces }).sensitivity !== "SECRET_RESTRICTED" &&
           // D-381-paritet (gjennomgang nr. 3): ord som får chatten til å velge et finansverktøy holder jobben lokal.
-          !financeToolIntent(`${task.contract.goal}\n${input.prompt}`);
+          !financeToolIntent(`${task.contract.goal}\n${input.prompt}`, financeIntentOptions());
         if (toolRoute !== null && cloudWanted) {
           // Dagstaket sjekkes kun når jobben faktisk ville gått til sky. Kan kostnaden ikke leses, feiler vi lukket (lokalt), som chatten (D-432).
           const dayCap = opts.toolTurnDayCap ?? null;
@@ -181,7 +186,11 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
                 kind: err instanceof ProviderError ? err.kind : "provider_preference_exhausted"
               }));
               route = "local_fallback";
+              // WP-B4 (N1): var det Claude-kreditten som stengte skyruten (gatewayen merker rutefeilen), sier jobben det: omkjøringen under har `paid_models_allowed: false`, tar ingen kredittbeslutning og bærer derfor ingen
+              // `claude_budget` selv - uten dette svarte jobben lokalt uten en eneste merknad. Lukkingen er kun kategorier fra gatewayen (aldri fra kontrakten), og den påføres kun når omkjøringen ikke har sin egen.
+              const closure = claudeBudgetClosureOf(err);
               result = await opts.gateway.completeWithTools(meshInput, { tools, executor });
+              if (closure !== undefined && result.metadata?.["claude_budget"] === undefined) result = { ...result, metadata: { ...result.metadata, claude_budget: closure } };
             }
           }
         } else {
@@ -192,6 +201,9 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
       } else {
         result = await opts.gateway.complete(meshInput);
       }
+      // WP-B4 (D-476): jobben kjørte lokalt fordi Claude-kreditten stengte Anthropic - sagt rett ut i svaret (tom uten Claude-kreditten).
+      const budgetNote = claudeBudgetRouteNote(result.metadata, "jobben", result);
+      if (budgetNote !== "") notes.push(budgetNote);
       const header = notes.length > 0 ? `${notes.join(" ")}\n\n` : "";
       return {
         text: `${header}${result.text.slice(0, Math.max(0, 4000 - header.length))}`,

@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { IdentityContext, JsonValue, MemorySpace, SweepFailureCollector } from "@jarvis/contracts";
+import { correlationFields, type IdentityContext, type JsonValue, type MemorySpace, type RunCorrelation, type SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import type { BusinessService } from "./service.ts";
@@ -138,12 +138,14 @@ export class BusinessEventSyncService {
     tenantId: string,
     memorySpace: MemorySpace,
     identity: IdentityContext,
-    opts: { max?: number; query?: string } = {}
+    opts: { max?: number; query?: string; correlation?: Partial<RunCorrelation> } = {}
   ): Promise<GmailSyncStats> {
     const stats: GmailSyncStats = { scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0 };
     const result = await this.gateway.execute({
       identity, tool_id: "email", action: "list_messages",
-      parameters: { max: opts.max ?? 25, ...(opts.query ? { query: opts.query } : {}) }
+      parameters: { max: opts.max ?? 25, ...(opts.query ? { query: opts.query } : {}) },
+      // WP-K (JARVIS-054): `person_id: "system"`-kallet bærer jobb-/spor-ID videre til revisjon og policy-journal (tom når kallet ikke kommer fra en planlagt kjøring).
+      ...correlationFields(opts.correlation)
     });
     if (!result.ok) throw new Error(result.reason);
     const messages = ((result.data as { messages?: JsonValue[] } | undefined)?.messages ?? []) as GmailMessage[];
@@ -174,7 +176,7 @@ export class BusinessEventSyncService {
     tenantId: string,
     memorySpace: MemorySpace,
     identity: IdentityContext,
-    opts: { fromIso?: string; toIso?: string; max?: number } = {}
+    opts: { fromIso?: string; toIso?: string; max?: number; correlation?: Partial<RunCorrelation> } = {}
   ): Promise<CalendarSyncStats> {
     const stats: CalendarSyncStats = { scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0 };
     const now = new Date();
@@ -182,7 +184,8 @@ export class BusinessEventSyncService {
     const toIso = opts.toIso ?? new Date(now.getTime() + 7 * 86_400_000).toISOString();
     const result = await this.gateway.execute({
       identity, tool_id: "calendar", action: "list_events",
-      parameters: { from: fromIso, to: toIso, max: opts.max ?? 25 }
+      parameters: { from: fromIso, to: toIso, max: opts.max ?? 25 },
+      ...correlationFields(opts.correlation)
     });
     if (!result.ok) throw new Error(result.reason);
     const events = ((result.data as { events?: JsonValue[] } | undefined)?.events ?? []) as CalendarEvent[];
@@ -230,12 +233,13 @@ export class BusinessEventSyncService {
    * "credential_unavailable"), ALDRI et rått credential/token (ToolGateway
    * logger/returnerer aldri selve secret-verdien).
    */
-  async syncTenant(tenantId: string, memorySpace: MemorySpace, identity: IdentityContext): Promise<BusinessEventSyncResult> {
+  async syncTenant(tenantId: string, memorySpace: MemorySpace, identity: IdentityContext, correlation?: Partial<RunCorrelation>): Promise<BusinessEventSyncResult> {
+    const opts = correlation === undefined ? {} : { correlation };
     const [gmail, calendar] = await Promise.all([
-      this.syncGmailActivities(tenantId, memorySpace, identity).catch(
+      this.syncGmailActivities(tenantId, memorySpace, identity, opts).catch(
         (err: unknown): GmailSyncStats => ({ scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0, error: sanitizeSyncError(err) })
       ),
-      this.syncCalendarActivities(tenantId, memorySpace, identity).catch(
+      this.syncCalendarActivities(tenantId, memorySpace, identity, opts).catch(
         (err: unknown): CalendarSyncStats => ({ scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0, error: sanitizeSyncError(err) })
       )
     ]);
@@ -294,7 +298,9 @@ export class BusinessEventSyncService {
 export async function runBusinessEventSyncForAllTenants(
   pool: pg.Pool,
   syncService: BusinessEventSyncService,
-  failures?: SweepFailureCollector
+  failures?: SweepFailureCollector,
+  /** WP-K (JARVIS-054): kjøringens oppgave-/spor-ID (`ScheduledRun` fra `DailyScheduler.start`) - ender i revisjonsradene og policy-journalen til hvert `person_id: "system"`-kall. */
+  correlation?: Partial<RunCorrelation>
 ): Promise<Record<string, BusinessEventSyncResult>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, BusinessEventSyncResult> = {};
@@ -305,7 +311,7 @@ export async function runBusinessEventSyncForAllTenants(
       channel: "api", auth_strength: "active"
     };
     try {
-      const synced = await syncService.syncTenant(tenantId, "business", identity);
+      const synced = await syncService.syncTenant(tenantId, "business", identity, correlation);
       results[tenantId] = synced;
       // `syncTenant()` fanger provider-feil per provider og returnerer dem som `error` på stats-objektet (Gmail og Calendar skjuler ikke hverandre).
       // Det er fortsatt arbeid som ikke ble gjort - registrer det, ellers ser en nede Gmail-synk ut som en fullført dag (D-442).

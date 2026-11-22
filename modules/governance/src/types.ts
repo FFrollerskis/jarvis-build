@@ -12,6 +12,34 @@ import { z } from "zod";
  */
 
 // ---------------------------------------------------------------------
+// WP-H1 (JARVIS-087 del 2): proveniens på journalradene (migrasjon 102)
+// ---------------------------------------------------------------------
+
+/**
+ * Hvem som skrev INNHOLDET i et journalkall: `owner_direct` = trusted kode attesterer at parameterne er eierens egne ord ordrett (hurtigbanen/dashbord-ruten),
+ * `model` = en modell formulerte kallet (servingModel satt), `unspecified` = trusted kode uten modell, eller ukjent. `unspecified` er aldri det samme som `owner_direct`.
+ */
+export type GovernanceProvenanceOrigin = "owner_direct" | "model" | "unspecified";
+
+/** Proveniensen som skrives sammen med journalraden (kun metadata - aldri innhold). Kommer fra den betrodde `ToolInvocationContext`, ALDRI fra parametre. */
+export interface GovernanceProvenance {
+  channel: string;
+  session_id: string;
+  /** Jobb-id når sesjonen er en jobbsesjon (`job:<task_id>`), ellers null. */
+  task_id: string | null;
+  origin: GovernanceProvenanceOrigin;
+}
+
+/** Feltene `prov_*` på en journalrad. Alle er null for rader skrevet før migrasjon 102 (eller mens `JARVIS_GOVERNANCE_PROVENANCE` var av). */
+export interface GovernanceProvenanceColumns {
+  prov_channel?: string | null;
+  prov_session_id?: string | null;
+  prov_task_id?: string | null;
+  prov_origin?: GovernanceProvenanceOrigin | null;
+  prov_recorded_at?: string | null;
+}
+
+// ---------------------------------------------------------------------
 // Decision log
 // ---------------------------------------------------------------------
 
@@ -20,7 +48,7 @@ export type DecisionMaker = z.infer<typeof DecisionMakerSchema>;
 
 export type DecisionStatus = "proposed" | "decided" | "reversed";
 
-export interface DecisionLogEntry {
+export interface DecisionLogEntry extends GovernanceProvenanceColumns {
   decision_id: string;
   tenant_id: string;
   memory_space_id: string;
@@ -55,7 +83,7 @@ export type CreateDecisionInput = z.infer<typeof CreateDecisionInputSchema>;
 
 export type ScenarioStatus = "draft" | "active" | "archived";
 
-export interface Scenario {
+export interface Scenario extends GovernanceProvenanceColumns {
   scenario_id: string;
   tenant_id: string;
   memory_space_id: string;
@@ -93,7 +121,7 @@ export type RiskProbability = z.infer<typeof RiskProbabilitySchema>;
 
 export type RiskStatus = "identified" | "mitigating" | "accepted" | "resolved";
 
-export interface Risk {
+export interface Risk extends GovernanceProvenanceColumns {
   risk_id: string;
   tenant_id: string;
   memory_space_id: string;
@@ -140,7 +168,7 @@ export type UpdateRiskInput = z.infer<typeof UpdateRiskInputSchema>;
 
 export type GoalStatus = "not_started" | "in_progress" | "at_risk" | "achieved" | "abandoned";
 
-export interface GoalKeyResult {
+export interface GoalKeyResult extends GovernanceProvenanceColumns {
   key_result_id: string;
   goal_id: string;
   tenant_id: string;
@@ -152,7 +180,7 @@ export interface GoalKeyResult {
 }
 
 /** Ett Objective + sine Key Results - ekte OKR-struktur (se 059_governance.sql sitt filhode). */
-export interface GoalWithKeyResults {
+export interface GoalWithKeyResults extends GovernanceProvenanceColumns {
   goal_id: string;
   tenant_id: string;
   memory_space_id: string;

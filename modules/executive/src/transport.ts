@@ -4,7 +4,8 @@ import type { JsonValue } from "@jarvis/contracts";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { ExecutiveService } from "./service.ts";
 import { summarizeCapabilityStatusNo, summarizeConnectorStatusNo, summarizeSelfDiagnosisNo } from "./status-summary.ts";
-import { CONTROL_CENTER_IDS } from "./control-center/index.ts";
+import { CLOUD_WITHHELD_CENTERS, CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, CONTROL_CENTER_TITLES_NO, EXTENSION_CONTROL_CENTER_IDS, controlCenterForReadAction, isCloudWithheldCenter, withheldCenterData, type ControlCenterId } from "./control-center/index.ts";
+import { EVOLUTION_DECISIONS, isEvolutionDecision, summarizeEvolutionDecisionNo } from "./evolution/index.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): eierens SAMLEDE kontrollflate, eksponert
@@ -26,6 +27,31 @@ export class ExecutiveTransport implements ToolTransport {
   /** WP-H0: eier-kun-porten for `get_control_center` (kobles på verktøydefinisjonen som `parameterAuthorizer`). */
   authorizeControlCenter(identity: Parameters<ExecutiveService["authorizeControlCenter"]>[0]): { allowed: boolean; reason: string } {
     return this.service.authorizeControlCenter(identity);
+  }
+
+  /** WP-H1/H2: eier + signert økt-porten for de per-senter verktøyene (`get_<senter>_center`) - fail-closed også uten register. */
+  authorizeControlCenterRead(identity: Parameters<ExecutiveService["authorizeControlCenterRead"]>[0]): { allowed: boolean; reason: string } {
+    return this.service.authorizeControlCenterRead(identity);
+  }
+
+  /**
+   * WP-H0/H1: ÉN rapport-respons for `get_control_center` (med `center`) og de per-senter verktøyene. Et ikke-koblet senter (registeret har det ikke, f.eks. avhengighetene mangler) er et ærlig, strukturert svar
+   * (`found: false`) - IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
+   * Gjennomgang M2: ber en SKYmodell om et senter som ikke skal til sky (`CLOUD_WITHHELD_CENTERS`, finans: D-378), bygges det ikke engang - svaret er en kort «holdt tilbake»-merknad. Lokale modeller og siden (ingen modell
+   * i løkka) får hele rapporten. Håndhevingen skjer HER, ved utførelse, uavhengig av hvilke verktøy utvalget valgte for turen.
+   */
+  private async centerResponse(identity: Parameters<ExecutiveService["getControlCenterReport"]>[0], center: string, servingModel: ToolInvocationContext["servingModel"]): Promise<{ data: JsonValue }> {
+    const cloud = this.service.isCloudServed(servingModel);
+    if (isCloudWithheldCenter(center) && cloud && this.service.hasControlCenter(center)) {
+      return { data: withheldCenterData(center as ControlCenterId, CONTROL_CENTER_TITLES_NO[center as ControlCenterId]) as unknown as JsonValue };
+    }
+    // M2 (H2): for en SKYmodell bygges de øvrige sentrene uten finansavledet tilstand (`restrictFinance`, f.eks. finans-nødbryteren i Sikkerhet og finansjobbene i Drift); lokal modell og siden får alt.
+    const result = await this.service.getControlCenterReport(identity, center, cloud ? { restrictFinance: true } : {});
+    if (result === null) {
+      return { data: { found: false, center, summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." } as unknown as JsonValue };
+    }
+    // `summary_no` og `explanation_no` først: chat-executoren kutter lange svar bakfra, og det er disse modellen skal relayere.
+    return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report } as unknown as JsonValue };
   }
 
   /** Gjennomgang av PR #324 (M3/L4): eier + signert økt-porten for `get_infra_status` - fail-closed også uten register. */
@@ -108,16 +134,47 @@ export class ExecutiveTransport implements ToolTransport {
         // IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
         const center = parameters["center"];
         if (center === undefined) {
-          const overview = await this.service.getControlCenterOverview(identity);
+          const overview = await this.service.getControlCenterOverview(identity, this.service.isCloudServed(context?.servingModel) ? { withhold: CLOUD_WITHHELD_CENTERS, restrictFinance: true } : {});
           const { summary_no, ...rest } = overview;
           return { data: { summary_no, ...rest } as unknown as JsonValue }; // `summary_no` først (se under)
         }
-        const result = await this.service.getControlCenterReport(identity, String(center));
-        if (result === null) {
-          return { data: { found: false, center: String(center), summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." } as unknown as JsonValue };
-        }
-        // `summary_no` og `explanation_no` først: chat-executoren kutter lange svar bakfra, og det er disse modellen skal relayere.
-        return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report } as unknown as JsonValue };
+        return this.centerResponse(identity, String(center), context?.servingModel);
+      }
+      case "get_finance_center":
+      case "get_memory_center":
+      case "get_agent_center":
+      case "get_operations_center":
+      case "get_value_center":
+      case "get_privacy_center":
+      case "get_security_center":
+      case "get_evolution_center": {
+        // WP-H1/H2: samme respons og samme register som `get_control_center {center}` - kun et smalere verktøynavn for chatten (egen port: eier + signert økt, fail-closed).
+        const center = controlCenterForReadAction(action) as ControlCenterId;
+        return this.centerResponse(identity, center, context?.servingModel);
+      }
+      case "run_golden_suite": {
+        // WP-H2: golden-suite-knappen. Lesende og deterministisk (ingen modell, ingen database, ingen skriving); eier + signert enhetsøkt håndheves FØR dette kalles (`parameterAuthorizer`).
+        const result = await this.service.runGoldenSuite();
+        return { data: { summary_no: `Golden-suite: ${result.passed} av ${result.ran} kjørte oppgaver bestått${result.failed.length > 0 ? `, ${result.failed.length} IKKE bestått` : ""}${result.skipped.length > 0 ? `, ${result.skipped.length} hoppet over (ikke målt)` : ""}. Ingen modellkall.`, result } as unknown as JsonValue };
+      }
+      case "revoke_autonomy_binding": {
+        // WP-H2: tilbakekall av eierens autonomi-binding for ÉTT domene (gjennomslag til situations.clear_autonomy_policy i kallerens eget minnerom). Eier-kun FØR dette kalles (`parameterAuthorizer`).
+        const domain = requireString(parameters, "domain");
+        const result = await this.service.revokeAutonomyBinding(identity, domain);
+        if (!result.ok) throw new Error(result.reason ?? "situations_call_denied");
+        const removed = (result.data as { removed?: unknown } | undefined)?.removed === true;
+        return { external_id: `${identity.tenant_id}:${identity.memory_space_id}:${domain}`, data: { removed, domain, memory_space: identity.memory_space_id } as unknown as JsonValue };
+      }
+      case "record_evolution_decision": {
+        // WP-B3 (D-475, EV-23): REGISTRER eierens avgjørelse om ett endringsforslag i revisjonssporet - uten virkning (selvendring er frosset, D-397). Eier + signert enhetsøkt + step-up håndheves FØR dette kalles
+        // (`parameterAuthorizer` + `step_up_required`). Identiteten kommer UTELUKKENDE fra konteksten (D-68). Svarets `summary_no` er en fast norsk tekst som alltid sier at ingenting utføres.
+        // GJENNOMGANG L2 (dybdeforsvar): INGEN modell kan registrere eierens avgjørelse. Verktøyet står på ingen modellflate (manifestet: effekt `control`), men er `servingModel` satt - en modellbetjent tur, SKY ELLER LOKAL -
+        // avvises kallet her med en fast kode, FØR noe annet leses. Kun siden (ingen modell i løkka) og eierens egen knapp kommer gjennom.
+        if (context?.servingModel !== undefined) throw new Error("evolution_decision_model_origin_denied");
+        const decision = parameters["decision"];
+        if (!isEvolutionDecision(decision)) throw new Error("invalid_evolution_decision_input");
+        const result = await this.service.recordEvolutionDecision(identity, { change_id: requireString(parameters, "change_id"), proposal_digest: requireString(parameters, "proposal_digest"), decision });
+        return { external_id: `${result.change_id}:${result.proposal_digest.slice(0, 12)}`, data: { summary_no: summarizeEvolutionDecisionNo(result), ...result } as unknown as JsonValue };
       }
       case "get_value_report": {
         // WP-C4: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
@@ -213,6 +270,20 @@ function requireString(parameters: Record<string, JsonValue>, key: string): stri
 
 const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as z.ZodType<Record<string, JsonValue>>;
 
+export interface ExecutiveToolOptions {
+  /**
+   * WP-H1/H2 (gjennomgang M1): sentrene hvis per-senter lese-verktøy (`get_<senter>_center`) registreres - KUN de hvis flagg er PÅ og som er registrert (`controlCentersWithTools(env, registry)` i apps/api). Utelatt/tom = ingen av dem finnes
+   * (identisk med main): verktøyet kan da hverken velges av utvalget, kalles av en modell eller listes som tilgjengelig. Rate-grensen på `get_control_center` heves først når minst ett senter er på.
+   */
+  controlCenters?: ReadonlyArray<ControlCenterId>;
+  /** WP-H2: registrer `run_golden_suite` (golden-suite-knappen). AV som standard - uten flagget finnes verktøyet ikke. */
+  goldenSuite?: boolean;
+  /** WP-H2: registrer `revoke_autonomy_binding` (tilbakekall av eierens autonomi-binding fra kontrollsenteret). AV som standard - uten flagget finnes verktøyet ikke. */
+  autonomyRevoke?: boolean;
+  /** WP-B3 (D-475, EV-23): registrer `record_evolution_decision` (eierens avgjørelse om et endringsforslag, KUN registrert i revisjonssporet - ingen virkning). AV som standard - uten flagget finnes verktøyet ikke. */
+  evolutionApproval?: boolean;
+}
+
 /**
  * ToolGateway-definisjonene for den samlede kontrollflaten. Lese-handlinger
  * er klasse A (samme som `situations.get_queue`/`get_pause_state` selv);
@@ -233,7 +304,10 @@ const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as 
  * `restore_credential`/`revoke_device` er klasse C, SAMME som
  * `owner_controls` sine egne - `control()` gjenbrukes uendret).
  */
-export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDefinition[] {
+export function executiveToolDefinitions(transport: ExecutiveTransport, options: ExecutiveToolOptions = {}): ToolDefinition[] {
+  const enabledCenters = new Set<ControlCenterId>(options.controlCenters ?? []);
+  // D-475: tilleggssentrene (Evolusjon) hvis lese-verktøy er registrert - de er da også gyldige `center`-verdier for `get_control_center`. Tom liste (flagget AV) = skjema og beskrivelse som på main.
+  const enabledExtensions = EXTENSION_CONTROL_CENTER_IDS.filter((id) => enabledCenters.has(id));
   const common = {
     credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF,
     output_trust: "internal" as const,
@@ -288,12 +362,23 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
     {
       ...read(
         "get_control_center",
-        "Les eierens kontrollsentre (UA-11 Admin Control Center): uten `center` en oversikt over alle ti sentre med status per seksjon (integrasjoner, autoritet, AI, finans, minne, agenter, drift, verdi, personvern, sikkerhet); med `center` full rapport for ett senter med hvert tall kildeforankret (tabell/kilde og når det ble målt), en norsk forklaring av hvorfor noe er advarsel/feil, og hvilke eksisterende kontrollhandlinger eieren kan ta (pause/tilbakekall). KUN lesing - jeg utfører ingenting herfra. Ukjent vises som ukjent, aldri som i orden. Kun eieren får svar, og kun fra en signert enhetsøkt (nettleser/app) - aldri over tale eller Telegram.",
-        { center: z.enum(CONTROL_CENTER_IDS).optional() }
+        "Les eierens kontrollsentre (UA-11 Admin Control Center): uten `center` en oversikt over alle ti sentre med status per seksjon (integrasjoner, autoritet, AI, finans, minne, agenter, drift, verdi, personvern, sikkerhet); med `center` full rapport for ett senter med hvert tall kildeforankret (tabell/kilde og når det ble målt), en norsk forklaring av hvorfor noe er advarsel/feil, og hvilke eksisterende kontrollhandlinger eieren kan ta (pause/tilbakekall). KUN lesing - jeg utfører ingenting herfra. Ukjent vises som ukjent, aldri som i orden. Kun eieren får svar, og kun fra en signert enhetsøkt (nettleser/app) - aldri over tale eller Telegram."
+        // D-475: tilleggssentre (Evolusjon) nevnes og er gyldige `center`-verdier KUN når senterets flagg er på - med flagget AV er beskrivelsen og skjemaet uendret fra main.
+        + (enabledExtensions.length > 0 ? ` Tilleggssenter (kun når slått på): ${enabledExtensions.map((id) => CONTROL_CENTER_TITLES_NO[id].toLowerCase()).join(", ")}.` : ""),
+        { center: z.enum([...CONTROL_CENTER_IDS, ...enabledExtensions] as [string, ...string[]]).optional() }
       ),
+      // WP-H1: siden gjør 1 + (antall sentre) kall per oppdatering (oversikt + ett per senter); med flere sentre på er 30/min for lavt (to oppdateringer på rad ga 429). 120/min er fortsatt lavt: kun eieren
+      // fra en signert enhetsøkt når verktøyet, og bygginger av samme senter for samme identitet deles (single-flight i registeret). Gjennomgang M1: heves KUN når minst ett senter er slått på - ellers er grensen som på main (30).
+      ...(enabledCenters.size > 0 ? { rate_limit_per_minute: 120 } : {}),
       // WP-H0: eier-kun FØR noe bygges (avslaget er en vanlig `tool.denied`-revisjonsrad). Rapportene er konfigurasjonsmetadata og handlingene peker på eier-ruter.
       parameterAuthorizer: (_parameters, identity) => transport.authorizeControlCenter(identity)
     },
+    // WP-H1/H2: per-senter lese-verktøy (`get_finance_center` m.fl.) - ingen parametre, samme register, EGEN fail-closed port (eier + signert enhetsøkt). Tabellen er `CONTROL_CENTER_READ_TOOLS`.
+    // Gjennomgang M1: registreres KUN for sentre med flagget på - ellers finnes verktøyet ikke (flagg AV er identisk med main).
+    ...CONTROL_CENTER_READ_TOOLS.filter((tool) => enabledCenters.has(tool.center)).map((tool): ToolDefinition => ({
+      ...read(tool.action, tool.description),
+      parameterAuthorizer: (_parameters, identity) => transport.authorizeControlCenterRead(identity)
+    })),
     read(
       "get_ai_mesh_status",
       "Svar på «hvilke modeller har du?»/«fungerer Kimi/Hermes/Gemma?»/«hva koster modellene?»/«er fallback i orden?»: AI Mesh slik det står NÅ - per leverandør konfigurert (kun presence), frisk, siste feil, kostnad og p50-latens siste 7 døgn, parallell-delegerings-overhead - og om akseptansen «≥3 live providers med fallback» er oppfylt. KUN lesing: jeg gjør ikke et testkall (eierens røyktest er mesh-live-smoke.ts). Ukjent vises som ukjent, konfigurert er aldri det samme som bevist."
@@ -332,6 +417,45 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
       rollback_procedure: "en avbrutt jobb kan ikke gjenopptas - send den inn på nytt", idempotent_external: true, ...common,
       parameterAuthorizer: (_parameters, identity) => transport.authorizeOwnerControl(identity)
     },
+    // WP-H2: golden-suite-knappen. Klasse A / lesing (deterministisk selvtest: ingen modell, ingen database, ingen skriving) - men BARE for eieren fra en signert enhetsøkt (samme port som kontrollsentrene), og
+    // aldri på en modellflate. Registreres kun med JARVIS_CONTROL_GOLDEN_SUITE=on. Maks 6 kjøringer i minuttet (én kjøring om gangen i kjøreren).
+    ...(options.goldenSuite === true
+      ? [{
+        ...read("run_golden_suite", "Kjør den deterministiske golden-suiten (regresjonsvern for Jarvis' egne regler) og returner antall bestått, ikke-bestått og digester. Ingen modell kalles, ingenting skrives. Kun eieren fra en signert enhetsøkt - kun fra kontrollsenteret."),
+        rate_limit_per_minute: 6,
+        parameterAuthorizer: (_parameters: Record<string, JsonValue>, identity: Parameters<ExecutiveTransport["authorizeControlCenterRead"]>[0]) => transport.authorizeControlCenterRead(identity)
+      } satisfies ToolDefinition]
+      : []),
+    // WP-H2: tilbakekall av eierens autonomi-binding (`situation_autonomy_policies`, D-160) for ÉTT domene i kallerens eget minnerom: gjennomslag til `situations.clear_autonomy_policy` (samme verktøy, samme sovereign-eier-port,
+    // samme revisjon). Fravær av binding = ingen auto-ACT (fail-closed), så domenet går tilbake til det strengeste nivået. Klasse C; eier-kun FØR noe kalles; ruten krever step-up (signert enhet). Kan ikke angres automatisk:
+    // parametrene til den slettede bindingen lagres i revisjonsraden `autonomy_binding.revoke_requested` (før-bildet, skrevet og committet FØR slettingen; se `ExecutiveService.revokeAutonomyBinding`). Registreres kun med JARVIS_CONTROL_AUTONOMY_REVOKE=on.
+    ...(options.autonomyRevoke === true
+      ? [{
+        ...control("revoke_autonomy_binding", "Tilbakekall eierens autonomi-binding (auto-ACT) for ÉTT situasjonsdomene i kallerens eget minnerom (gjennomslag til situations.clear_autonomy_policy); domenet går tilbake til ingen auto-ACT", { domain: z.string().min(1).max(100) }, "set_autonomy_policy med verdiene i før-bildet i revisjonsraden `autonomy_binding.revoke_requested` (domene, tool_id, action, enabled, parameters)"),
+        reversible: false,
+        // Gjennomgang L1: uopprettelig sletting = step-up på GATEWAY-nivå (signert enhetsøkt fra en eier-kanal, WP-F1-mekanismen), ikke bare i ruten - hver vei til verktøyet krever den (avslag: `step_up_required:<årsak>`).
+        step_up_required: true,
+        parameterAuthorizer: (_parameters: Record<string, JsonValue>, identity: Parameters<ExecutiveTransport["authorizeOwnerControl"]>[0]) => transport.authorizeOwnerControl(identity)
+      } satisfies ToolDefinition]
+      : []),
+    // WP-B3 (D-475, EV-23): eierens AVGJØRELSE om ett endringsforslag (godkjenn/avvis/utsett), registrert i revisjonssporet - og KUN det: ingenting utføres, godkjennes i endringsregisteret eller aktiveres (selvendring er
+    // frosset, D-397; `activation_decision` er alltid false). Klasse C; eier OG signert enhetsøkt FØR noe kalles (`authorizeControlCenterRead`), og step-up (signert enhet fra en eier-kanal) også på GATEWAY-nivå, så hver
+    // vei til verktøyet krever den. Bundet til forslagets versjon (`proposal_digest` = entry_hash til forslagets siste rad i endringsregisteret) og idempotent (samme avgjørelse for samme versjon skrives ikke på nytt).
+    // «Angre» = registrer en ny avgjørelse (den nyeste gjelder; alle står i revisjonssporet). Står på INGEN modellflate (effekt «control»: manifestet forbyr det) - kun kontrollsenterets knapp via /executive/mutate.
+    // Registreres kun med JARVIS_CONTROL_EVOLUTION_APPROVAL=on (og Evolusjon-senteret koblet inn).
+    ...(options.evolutionApproval === true
+      ? [{
+        ...control(
+          "record_evolution_decision",
+          "Registrer EIERENS avgjørelse (godkjenn, avvis eller utsett) om ÉTT endringsforslag fra Evolusjon-senteret, bundet til forslagets versjon (proposal_digest). KUN en registrering i revisjonssporet: ingenting utføres, godkjennes i endringsregisteret eller aktiveres (selvendring er frosset, D-397). Kun eieren fra en signert enhetsøkt - kun kontrollsenterets knapp.",
+          { change_id: z.string().min(1).max(60), proposal_digest: z.string().regex(/^[0-9a-f]{64}$/), decision: z.enum(EVOLUTION_DECISIONS) },
+          "registrer en ny avgjørelse for samme forslag (den nyeste gjelder); alle avgjørelser står i revisjonssporet `evolution.owner_decision` - registreringen har ingen virkning å angre"
+        ),
+        rate_limit_per_minute: 10,
+        step_up_required: true,
+        parameterAuthorizer: (_parameters: Record<string, JsonValue>, identity: Parameters<ExecutiveTransport["authorizeControlCenterRead"]>[0]) => transport.authorizeControlCenterRead(identity)
+      } satisfies ToolDefinition]
+      : []),
     critical("activate_kill_switch", "Stans HELE systemet umiddelbart (gjennomslag til owner_controls.activate_kill_switch)", { reason: z.string() }, "deactivate_kill_switch"),
     critical("deactivate_kill_switch", "Opphev kill switch og gjenoppta normal drift (gjennomslag til owner_controls.deactivate_kill_switch)", {}, "activate_kill_switch"),
     control("freeze_connector", "Frys ÉN navngitt connector/tool_id umiddelbart (gjennomslag til owner_controls.freeze_connector)", { connector_id: z.string(), reason: z.string() }, "unfreeze_connector"),

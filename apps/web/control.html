@@ -389,6 +389,8 @@
     }
   }
   const TITLES = { integration: "Integrasjoner", authority: "Autoritet", ai: "AI", finance: "Finans", memory: "Minne", agent: "Agenter", operations: "Drift", value: "Verdi", privacy: "Personvern", security: "Sikkerhet" };
+  // D-475: tilleggssentre (utenfor masterplanens ti) vises som egne flis når de er slått på, men teller ikke i «N av 10» og står aldri under «ikke koblet inn». Speiler EXTENSION_CONTROL_CENTER_IDS (låst av test).
+  const EXTENSION_CENTERS = new Set(["evolution"]);
 
   // ---------------------------------------------------------------------------------------------------------------------------------------------------------
   // Handlinger: peker KUN på eksisterende ruter. Lokal allowlist speiler CONTROL_ACTION_ENDPOINTS (testet) - alt annet vises ikke som knapp.
@@ -523,7 +525,9 @@
       for (const c of overview.centers) if (!document.getElementById("center-" + c.center)) renderCenter(c, null);
       await Promise.all(overview.centers.map(loadCenter));
       updatedEl.textContent = "Oppdatert " + new Date().toLocaleTimeString("no-NO");
-      say("Samlet status: " + statusInfo(overview.status).text + ". " + overview.centers.length + " av 10 sentre er koblet inn.");
+      const coreCount = overview.centers.filter((c) => !EXTENSION_CENTERS.has(c.center)).length;
+      const extraCount = overview.centers.length - coreCount;
+      say("Samlet status: " + statusInfo(overview.status).text + ". " + coreCount + " av 10 sentre er koblet inn." + (extraCount > 0 ? " Pluss " + extraCount + (extraCount === 1 ? " tilleggssenter." : " tilleggssentre.") : ""));
     } catch (err) {
       if (isLockdown(err)) {
         renderLockdown();

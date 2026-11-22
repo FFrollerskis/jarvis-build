@@ -3,8 +3,9 @@ import {
   controlAction, controlItem, controlSection, unknownControlSection,
   type ControlAction, type ControlCenterBuildContext, type ControlCenterDefinition, type ControlCenterParts, type ControlItem, type ControlSection, type ControlStatus
 } from "@jarvis/executive";
+import type { PolicyAuditSinkStats } from "@jarvis/core";
 import { budgetConfigFromEnv } from "@jarvis/model-gateway";
-import { resolveAuthorityMode, type AuthorityConfig, type InfraExecutionGate, type KillSwitch, type OwnerControls } from "@jarvis/policy";
+import { resolveAuthorityMode, type AuthorityConfig, type InfraExecutionGate, type KillSwitch, type OwnerControls, type PolicyAuditStats } from "@jarvis/policy";
 import { allowedReposFromEnv } from "@jarvis/tasks";
 import {
   assertManifestInvariants, buildToolManifest, configuredGithubRepo, githubReposUnlocked, parseDockerMutationTargets, parseGceMutationTargets,
@@ -29,7 +30,7 @@ import {
  *  - Aktive valgfrie policyer (kostnadsbudsjett, dagstak, klasse D-pipeline, credential-binding, step-up) og eksterne begrensninger (GitHub-repo-lås, destinasjons-allowlist, infra-mål).
  *  - Åpne bekreftelser (`action_confirmations`).
  *
- * DEFERRED (ikke stille utelatt): tilbakekall av en autonomi-binding (`situations.clear_autonomy_policy` har ingen HTTP-rute - pause av domenet stopper auto-ACT i mellomtiden), infra-modus-endring herfra og
+ * DEFERRED (ikke stille utelatt): tilbakekall av en autonomi-binding er DEFERRED uten `JARVIS_CONTROL_AUTONOMY_REVOKE=on` (WP-H2: da finnes `executive.revoke_autonomy_binding` på `/executive/mutate` og en knapp per binding i økta sitt eget rom; pause av domenet stopper auto-ACT i mellomtiden), infra-modus-endring herfra og
  * godkjenn/avvis av bekreftelser (utfører en handling; skjer i chat/dashbord der parametrene vises).
  */
 
@@ -155,9 +156,22 @@ export interface AuthorityCenterDeps {
   ownerControls: Pick<OwnerControls, "listFrozenConnectorsDurable" | "listRevokedCredentialsDurable">;
   killSwitch: Pick<KillSwitch, "currentStateDurable">;
   infraGate?: Pick<InfraExecutionGate, "statusDurable">;
+  /**
+   * WP-K (D-471, JARVIS-053): status for den varige policy-journalen (`JARVIS_POLICY_AUDIT_SINK=db`). Utelatt (journalen er AV) = ingen rad vises og seksjonen er byte-identisk med før.
+   * Kun tellere og sikre etiketter - aldri avgjørelsesinnhold.
+   */
+  policyAudit?: () => { gateway: PolicyAuditStats; sink: PolicyAuditSinkStats };
+  /**
+   * WP-H2: tilby «Tilbakekall autonomi» per binding (`executive.revoke_autonomy_binding`, klasse C, eier-kun, step-up). AV som standard (`JARVIS_CONTROL_AUTONOMY_REVOKE`): uten den er senteret uendret fra H0.
+   * Knappen tilbys kun for bindinger i den innloggede økta sitt EGET minnerom (`clear_autonomy_policy` virker alltid i identitetens eget rom) - bindinger i andre rom vises med en forklaring i stedet.
+   */
+  autonomyRevoke?: boolean;
 }
 
 const kr = (ore: number): string => `${Math.round(ore / 100)} kr`;
+
+/** Vinduet (5 min, samme som sinkens `degraded`) en journal-feil regnes som AKTUELL for Autoritet-senteret. */
+const POLICY_AUDIT_RECENT_MS = 5 * 60_000;
 
 export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterDefinition {
   return {
@@ -266,16 +280,27 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
           const paused = allPaused || pausedDomains.has(p.domain);
           // Gjennomgang av PR #316 (M-1): kan domene-pausene ikke leses, VET vi ikke om en aktiv binding er stanset - da er den ukjent (aldri «i orden»), og faktaet sier null i stedet for «ikke pauset».
           const pauseUnknown = !pausesR.ok && p.enabled;
+          const ownSpace = p.memory_space_id === ctx.identity.memory_space_id;
+          if (deps.autonomyRevoke === true && ownSpace) {
+            actions.push(controlAction({
+              id: `authority.revoke_autonomy:${p.memory_space_id}:${p.domain}`, label: `Tilbakekall autonomi: ${p.domain}`, endpoint: "/executive/mutate",
+              body: { action: "revoke_autonomy_binding", parameters: { domain: p.domain } },
+              risk_class: riskOf(deps.toolGateway, "executive", "revoke_autonomy_binding"), requires_step_up: actionRequiresStepUp("revoke_autonomy_binding"), reversible: false,
+              description_no: `Fjerner bindingen som lar Jarvis utføre ${p.tool_id}.${p.action} selv i domenet «${p.domain}» (rommet ${p.memory_space_id}). Uten binding utfører Jarvis ingenting selv i domenet (fail-closed): situasjoner blir liggende som forslag til du handler. Parametrene til bindingen slettes og lagres ikke.`,
+              rollback_no: "Kan ikke angres herfra: bind domenet på nytt med situations.set_autonomy_policy (handling og parametre må da gis på nytt).",
+              section_id: "autonomy", item_id: `${p.memory_space_id}:${p.domain}`
+            }));
+          }
           return controlItem({
             id: `${p.memory_space_id}:${p.domain}`, label: `${p.domain} (${p.memory_space_id})`, status: pauseUnknown ? "UNKNOWN" : p.enabled && paused ? "WARN" : "OK", observed_at: p.updated_at,
-            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}`,
+            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
             facts: { tool: p.tool_id, action: p.action, risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id }
           });
         });
         items.sort(bySeverityThenLabel);
         sections.push(controlSection({
           id: "autonomy", title_no: "Delegert autonomi (Jarvis handler selv)", source: "situation_autonomy_policies (tenant + minnerom-RLS; parametre vises aldri)", observed_at: nowIso,
-          summary_no: `${items.length} autonomi-bindinger (${autonomyR.value.rows.filter((p) => p.enabled).length} aktive)${autonomyR.value.health_count > 0 ? `; ${autonomyR.value.health_count} i health-rommet (isolert, ikke listet)` : ""}. Pause domenet under «Pauser og tilbakekall» for å stanse auto-ACT; tilbakekall av selve bindingen er DEFERRED (ingen rute).`,
+          summary_no: `${items.length} autonomi-bindinger (${autonomyR.value.rows.filter((p) => p.enabled).length} aktive)${autonomyR.value.health_count > 0 ? `; ${autonomyR.value.health_count} i health-rommet (isolert, ikke listet)` : ""}. Pause domenet under «Pauser og tilbakekall» for å stanse auto-ACT; ${deps.autonomyRevoke === true ? "«Tilbakekall autonomi» fjerner selve bindingen (kun i økta sitt eget rom; bindinger i health-rommet er isolert og kan ikke tilbakekalles herfra)." : "tilbakekall av selve bindingen er DEFERRED (ingen rute)."}`,
           items
         }));
       } else {
@@ -496,6 +521,38 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
         detail_no: `Alle kontrollhandlinger unntatt de som STOPPER ting krever signert enhetsøkt fra kanalene ${[...STEP_UP_CHANNELS].join(", ")}. Unntatt: ${[...STEP_UP_EXEMPT_ACTIONS].join(", ")}.`,
         facts: { channels: [...STEP_UP_CHANNELS].join(", "), exempt_actions: [...STEP_UP_EXEMPT_ACTIONS].join(", ") }
       }));
+      if (deps.policyAudit !== undefined) {
+        // WP-K (JARVIS-053): journalen er PÅ - vis om den faktisk virker. Mottrykk (full kø) og sink-feil betyr at avgjørelser er levert UTEN å være journalført; selve avgjørelsene er aldri berørt.
+        let audit: ReturnType<NonNullable<AuthorityCenterDeps["policyAudit"]>> | undefined;
+        try {
+          audit = deps.policyAudit();
+        } catch {
+          audit = undefined;
+        }
+        if (audit === undefined) {
+          policyItems.push(controlItem({ id: "policy_audit", label: "Varig policy-journal", status: "UNKNOWN", detail_no: "Statusen kan ikke leses.", facts: {} }));
+        } else {
+          const { gateway: g, sink: k } = audit;
+          // Review L4: statusen følger det AKTUELLE bildet, ikke livstidstellerne. Tidligere ga ENHVER avvisning siden oppstart `WARN` helt til neste omstart - en forbigående kø-overflyt for en uke siden skjulte om journalen
+          // fungerer NÅ. `k.degraded` = siste skriving feilet eller noe ble avvist de siste 5 minuttene; en sink-feil i gatewayen vurderes på samme vindu. Historikken beholdes i teksten og tellerne, ikke i statusen.
+          const lost = k.rejected_full + k.rejected_tenant_cap + k.rejected_invalid + g.sink_failures + g.sink_rejected;
+          const gatewayFailedAt = g.last_failure_at === null ? Number.NaN : Date.parse(g.last_failure_at);
+          const recentGatewayFailure = Number.isFinite(gatewayFailedAt) && nowMs - gatewayFailedAt < POLICY_AUDIT_RECENT_MS;
+          const status = k.degraded || k.pressure === "full" || recentGatewayFailure ? "WARN" : "OK";
+          policyItems.push(controlItem({
+            id: "policy_audit", label: "Varig policy-journal", status,
+            detail_no: status === "OK"
+              ? `PÅ: hver policy-avgjørelse skrives til databasen (${k.written} skrevet siden oppstart, ${k.queued} i kø).${lost > 0 ? ` Tidligere avvik siden oppstart (nå friskmeldt): ${lost} avgjørelser ble ikke journalført.` : ""}`
+              : `PÅ, men svekket: ${k.queued} i kø (${k.pressure}), ${k.rejected_full} avvist fordi køen var full, ${k.rejected_tenant_cap} avvist av tenant-taket, ${k.flush_failures} mislykkede skrivinger${k.last_failure ? ` (${k.last_failure})` : ""}. Avgjørelsene er uendret - men noen er ikke journalført.`,
+            facts: {
+              queued: k.queued, max_queue: k.max_queue, max_per_tenant: k.max_per_tenant, pressure: k.pressure, written: k.written, rejected_full: k.rejected_full, rejected_tenant_cap: k.rejected_tenant_cap,
+              rejected_invalid: k.rejected_invalid, skipped_unattributable: k.skipped_unattributable, flush_failures: k.flush_failures, consecutive_failures: k.consecutive_failures, last_failure: k.last_failure,
+              gateway_sink_failures: g.sink_failures, gateway_sink_rejected: g.sink_rejected
+            },
+            ...(k.last_written_at ? { observed_at: k.last_written_at } : {})
+          }));
+        }
+      }
       const autoApproveOff = deps.env["JARVIS_MEMORY_AUTO_APPROVE"] === "false";
       policyItems.push(controlItem({
         id: "memory_auto_approve", label: "Auto-godkjenning av dine uttrykte minner", status: "OK",
