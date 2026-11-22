@@ -223,6 +223,14 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // hard FK) - samme barnetabell-tier som marketing_attributions/
   // marketing_spend_events over, slettes FØR marketing_campaigns.
   add(result, "marketing_campaign_observations", await run(client, mode, "marketing_campaign_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-D3 (D-459, 112-114): plattform-skrivejournalen (komposittnøkkel -> marketing_campaigns; `marketing_campaign_execution_commands.execution_write_id` peker på den, og kommandoene er
+  // slettet ALLEREDE først i denne blokken). Så eksperimentregisteret: utfall -> observasjoner -> varianter (komposittnøkler til eksperimentet og til kampanjen) -> planer, alle FØR
+  // `marketing_experiments` og `marketing_campaigns`. Kundedata (ikke append-only systemrevisjon), samme klassifisering som resten av marketing_*.
+  add(result, "growth_write_journal", await run(client, mode, "growth_write_journal", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "marketing_experiment_outcomes", await run(client, mode, "marketing_experiment_outcomes", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "marketing_experiment_observations", await run(client, mode, "marketing_experiment_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "marketing_experiment_variants", await run(client, mode, "marketing_experiment_variants", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "marketing_experiment_plans", await run(client, mode, "marketing_experiment_plans", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_experiments", await run(client, mode, "marketing_experiments", "tenant_id = $1 AND memory_space_id = $2", tv));
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2,
   // 039_finance_spend_integrity.sql): `finance_spend_records` har en FK ->
@@ -349,6 +357,17 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // er FORTSATT IKKE registrert i denne planen) - INGEN ordringskonflikt
   // i dag, men MÅ slettes FØR `business_contacts` dersom den noen gang
   // legges til.
+  // WP-G1 (UA-7 resterende deler, D-463, 118_comms_outbound_policy.sql): kommunikasjonstabellene. `comms_inbound_events.identity_id` er en (tenant-sammensatt) FK -> `conversation_identities` -
+  // `comms_inbound_events` MÅ derfor slettes FØR `conversation_identities` (under). Mottakers avmelding (`comms_recipient_opt_outs`) slettes også her: en full tenant-/rom-sletting fjerner ALT, også undertrykkelseslisten
+  // (en eier som sletter hele rommet har ikke lenger noen avsender som kan sende dit). Øvrige comms_*-tabeller har ingen FK mellom seg.
+  // Møtetranskripsjon (119_comms_meetings.sql): forpliktelser og deltakere (deltakerne har FK -> `conversation_identities`, så de MÅ slettes FØR identitetene) slettes før møtene.
+  add(result, "comms_meeting_commitments", await run(client, mode, "comms_meeting_commitments", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "comms_meeting_participants", await run(client, mode, "comms_meeting_participants", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "comms_meetings", await run(client, mode, "comms_meetings", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "comms_inbound_events", await run(client, mode, "comms_inbound_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "comms_outbound_log", await run(client, mode, "comms_outbound_log", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "comms_recipient_opt_outs", await run(client, mode, "comms_recipient_opt_outs", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "comms_authorized_accounts", await run(client, mode, "comms_authorized_accounts", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "conversation_identity_merges", await run(client, mode, "conversation_identity_merges", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "conversation_channel_links", await run(client, mode, "conversation_channel_links", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "conversation_identities", await run(client, mode, "conversation_identities", "tenant_id = $1 AND memory_space_id = $2", tv));
@@ -453,9 +472,28 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // uten FK til noen av de to andre - slettes sist for konsistens (samme
   // "ingen dinglende konfigurasjonsrad"-begrunnelse som
   // `health_retention_policies` over).
+  // WP-G3 (D-465, 133-137): kameraregister, øyeblikksbilder, inventar og opptaksforespørsler. Rekkefølge (barn før forelder): opptaksforespørsler (peker på kamera og bilde), så hendelsene
+  // (en AFTER DELETE-trigger sletter bildet når siste hendelse som peker på det forsvinner, og en annen fjerner hendelsens vektor i `memory_vectors`), så gjenværende bilder (pending/uten
+  // hendelse), inventaret (peker på rom), kameraene (bilder kaskaderer) og til slutt rommene. BEFORE DELETE-triggeren på `vision_snapshots` skriver en gravstein per slettet bilde, så
+  // bildeobjektet også slettes (reaperen i modules/vision/src/snapshots.ts) - `vision_snapshot_tombstones` er BEVISST IKKE med her (arbeidskø uten personopplysninger, se d395-baselinen).
+  add(result, "vision_capture_requests", await run(client, mode, "vision_capture_requests", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vision_event_observations", await run(client, mode, "vision_event_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "vision_snapshots", await run(client, mode, "vision_snapshots", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "vision_inventory_items", await run(client, mode, "vision_inventory_items", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "vision_cameras", await run(client, mode, "vision_cameras", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vision_rooms", await run(client, mode, "vision_rooms", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vision_retention_policies", await run(client, mode, "vision_retention_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-G2 (D-464, UA-8, migrasjon 125): handlingsjournalen for kritiske hjem-/bilhandlinger. Eneste FK er sammensatt mot `person_tenants` (medlemskap) - ingen barnetabeller, rekkefølgen er likegyldig.
+  add(result, "personal_action_journal", await run(client, mode, "personal_action_journal", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-G2 (D-464, UA-8, migrasjon 126/127): familie-/delt-rom-autoritet. Alt bor i `shared`-rommet (CHECK). Rekkefølge etter FK-ene: elementer FØR lister (sammensatt FK), delinger og delegasjoner FØR medlemmer (sammensatte FK-er mot family_members);
+  // invitasjoner og hendelser har ingen FK seg imellom eller mot de andre.
+  add(result, "family_list_items", await run(client, mode, "family_list_items", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "family_lists", await run(client, mode, "family_lists", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "family_events", await run(client, mode, "family_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "family_shares", await run(client, mode, "family_shares", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "family_delegations", await run(client, mode, "family_delegations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "family_invitations", await run(client, mode, "family_invitations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "family_members", await run(client, mode, "family_members", "tenant_id = $1 AND memory_space_id = $2", tv));
   // Rekonsiliering PR #83 mot main (D163/D164): vision-blokken over (055) og
   // situations-blokken under (056) har INGEN FK seg imellom (055 refererer
   // kun tenants/people/person_tenants/vision_rooms; 056 refererer kun
@@ -489,6 +527,14 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "risks", await run(client, mode, "risks", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "scenarios", await run(client, mode, "scenarios", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "decision_log", await run(client, mode, "decision_log", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-G4 (D-466, migrasjon 139): signallogg, tilbakemelding og modellvurderinger peker (sammensatt FK, ON DELETE CASCADE) på `situations` og er avledet av eierens egne data; abonnementer og regeltuning er eierens
+  // konfigurasjon for rommet (et helseabonnement bærer personens id, et hjemabonnement eierens entitets-id-er). Alle fem er tenant+space-skopet og slettes sammen med rommet. Registrert FØR `situations` (barna eksplisitt, selv om kaskaden
+  // uansett ville tatt dem) så tellingene i erasure-resultatet er ærlige.
+  add(result, "situation_signal_log", await run(client, mode, "situation_signal_log", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "situation_feedback", await run(client, mode, "situation_feedback", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "situation_assessments", await run(client, mode, "situation_assessments", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "situation_subscriptions", await run(client, mode, "situation_subscriptions", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "situation_rule_tuning", await run(client, mode, "situation_rule_tuning", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "situations", await run(client, mode, "situations", "tenant_id = $1 AND memory_space_id = $2", tv));
   // WP-D2 (UA-3 «churn/product usage», 090): produktbruk + churn-vurderinger. Churn-loopen er REN DERIVERT state av bruksdataene (detection_key bærer konto-pseudonymet,
   // reason bærer tall utledet av dem) og slettes sammen med dem - snevert avgrenset til loop_type = 'customer_churn_risk' (rører aldri andre loops). Plassert ETTER
@@ -673,8 +719,41 @@ export async function planPerson(client: pg.PoolClient, mode: Mode, tenantId: st
     // `vision_retention_policies` BEVISST IKKE med her (tenant/space-nivå
     // POLICY-KONFIGURASJON, ikke person-eid data - samme begrunnelse som
     // `location_retention_policies`/`health_retention_policies` over).
+    // WP-G3 (D-465): samme rekkefølge som space-scope over (opptaksforespørsler, hendelser [trigger: bilde + vektor], gjenværende bilder, inventar, kameraer, rom).
+    add(result, "vision_capture_requests", await run(client, mode, "vision_capture_requests", "tenant_id = $1 AND person_id = $2", ownedValues));
     add(result, "vision_event_observations", await run(client, mode, "vision_event_observations", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "vision_snapshots", await run(client, mode, "vision_snapshots", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "vision_inventory_items", await run(client, mode, "vision_inventory_items", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "vision_cameras", await run(client, mode, "vision_cameras", "tenant_id = $1 AND person_id = $2", ownedValues));
     add(result, "vision_rooms", await run(client, mode, "vision_rooms", "tenant_id = $1 AND person_id = $2", ownedValues));
+    // WP-G2 (D-464, UA-8): handlingsjournalen er person-eid via `actor_person_id` (RESTRICTIVE memory-space-RLS, derfor HER innenfor `forEachSpaceGroup`).
+    add(result, "personal_action_journal", await run(client, mode, "personal_action_journal", "tenant_id = $1 AND actor_person_id = $2", ownedValues));
+    // WP-G2 (D-464, UA-8, 126/127): alt om personen i familiesirkelen. Delinger og delegasjoner der personen er subjekt/seer/prinsipal/agent slettes FØR medlemskapet (FK). Felles innhold (lister, elementer, hendelser) som personen har
+    // opprettet, utført eller som gjelder personen («på vegne av») slettes; en liste personen opprettet tar sine elementer med (sammensatt FK) - bevisst konservativt: sletting skal ikke etterlate pekere til en slettet person.
+    // Invitasjoner knyttet til personen slettes. Gjenværende `added_by_person_id`/`invited_by_person_id` hos ANDRE medlemmer peker kun på sirkelens eier og fjernes først når sirkel-tenanten selv slettes (tenant-scope).
+    add(result, "family_shares", await run(client, mode, "family_shares", "tenant_id = $1 AND (subject_person_id = $2 OR viewer_person_id = $2)", ownedValues));
+    add(result, "family_delegations", await run(client, mode, "family_delegations", "tenant_id = $1 AND (principal_person_id = $2 OR agent_person_id = $2)", ownedValues));
+    add(
+      result,
+      "family_list_items",
+      await run(
+        client, mode, "family_list_items",
+        "tenant_id = $1 AND (added_by_person_id = $2 OR on_behalf_of_person_id = $2 OR done_by_person_id = $2 OR list_id IN (SELECT list_id FROM family_lists WHERE tenant_id = $1 AND (created_by_person_id = $2 OR on_behalf_of_person_id = $2)))",
+        ownedValues
+      )
+    );
+    add(result, "family_lists", await run(client, mode, "family_lists", "tenant_id = $1 AND (created_by_person_id = $2 OR on_behalf_of_person_id = $2)", ownedValues));
+    add(result, "family_events", await run(client, mode, "family_events", "tenant_id = $1 AND (created_by_person_id = $2 OR on_behalf_of_person_id = $2 OR cancelled_by_person_id = $2)", ownedValues));
+    add(result, "family_invitations", await run(client, mode, "family_invitations", "tenant_id = $1 AND (invitee_person_id = $2 OR invited_by_person_id = $2 OR decided_by_person_id = $2)", ownedValues));
+    add(result, "family_members", await run(client, mode, "family_members", "tenant_id = $1 AND person_id = $2", ownedValues));
+    // WP-G4 (D-466, migrasjon 139; delta-review B, INFO-9): signalloggen, modellvurderingene, tilbakemeldingene og abonnementene er person-merket (`person_id`/`actor_person_id`/`created_by_person_id`: avledet av eller eid av personen) og slettes
+    // HER (RESTRICTIVE memory-space-RLS, derfor innenfor `forEachSpaceGroup`). De har ingen FK seg imellom (barn av `situations` kaskaderer kun fra situasjonen), så rekkefølgen er fri. BEVISST IKKE med: `situation_rule_tuning` (eierens
+    // regelkonfigurasjon for rommet; `updated_by_person_id` er kun «sist endret av» - sletting ville fjernet terskler som fortsatt gjelder resten av rommet, samme prinsipp som `*_retention_policies` over) og `situations` selv (ingen person-kolonne:
+    // rommets avledede kø, som ryddes av G4-retensjonen og forsvinner med memory_space-/tenant-scope; samme mønster som situasjoner avledet av kamera-/helsehendelser over).
+    add(result, "situation_signal_log", await run(client, mode, "situation_signal_log", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "situation_assessments", await run(client, mode, "situation_assessments", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "situation_feedback", await run(client, mode, "situation_feedback", "tenant_id = $1 AND actor_person_id = $2", ownedValues));
+    add(result, "situation_subscriptions", await run(client, mode, "situation_subscriptions", "tenant_id = $1 AND created_by_person_id = $2", ownedValues));
     return result;
   });
 

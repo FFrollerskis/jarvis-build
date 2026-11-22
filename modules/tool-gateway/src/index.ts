@@ -1,10 +1,14 @@
 export * from "./gateway.ts";
+export * from "./call-signal.ts";
+export * from "./transport-errors.ts";
+export * from "./after-accepted-mutation.ts";
 export * from "./class-d-pipeline.ts";
 export * from "./finance-class-d.ts";
 export * from "./integrations.ts";
 export * from "./home-assistant.ts";
 export * from "./home-assistant-transport.ts";
 export * from "./oauth-refresh.ts";
+export * from "./oauth-client-config.ts";
 export * from "./daily-brief.ts";
 export * from "./live-transports.ts";
 export * from "./docker-transport.ts";
@@ -48,3 +52,5 @@ export * from "./owner-stated-memory.ts";
 export * from "./tool-manifest.ts";
 export * from "./turn-context.ts";
 export * from "./url-safety.ts";
+// WP-G2 (D-464): personlig-domenet (dormant bak JARVIS_PERSONAL_*-flagg).
+export * from "./personal/index.ts";

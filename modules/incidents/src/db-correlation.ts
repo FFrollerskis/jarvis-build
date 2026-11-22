@@ -12,6 +12,11 @@ import { withTenantTransaction } from "@jarvis/core";
  */
 export interface DbStateEvidence {
   connectivity: "ok" | "unreachable";
+  /**
+   * WP-K (D-471, JARVIS-068): HVA `connectivity` faktisk beviser. `api_own_pool` = kun at API-prosessens EGEN databasepool nådde databasen akkurat nå - ikke at databasen er frisk for andre klienter,
+   * ikke replikering/disk/ytelse, og ikke at worker-prosessen når den. Feltet finnes slik at «ok» aldri leses som «databasen er frisk».
+   */
+  connectivity_scope: "api_own_pool";
   connectivity_checked_at: string;
   latest_migration: { name: string; applied_at: string } | null;
   /** Sant KUN når nyeste migrasjon ble anvendt <= `windowEndIso` OG >= `windowStartIso` - EKSPLISITT, aldri en heuristikk. */
@@ -47,7 +52,7 @@ export async function correlateDbState(
   }
 
   if (connectivity === "unreachable") {
-    return { connectivity, connectivity_checked_at: checkedAt, latest_migration: null, migration_in_window: false, relevant: "unknown" };
+    return { connectivity, connectivity_scope: "api_own_pool", connectivity_checked_at: checkedAt, latest_migration: null, migration_in_window: false, relevant: "unknown" };
   }
 
   const migration_in_window = Boolean(
@@ -57,6 +62,7 @@ export async function correlateDbState(
   );
   return {
     connectivity,
+    connectivity_scope: "api_own_pool",
     connectivity_checked_at: checkedAt,
     latest_migration,
     migration_in_window,

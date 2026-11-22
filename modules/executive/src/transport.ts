@@ -4,7 +4,8 @@ import type { JsonValue } from "@jarvis/contracts";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { ExecutiveService } from "./service.ts";
 import { summarizeCapabilityStatusNo, summarizeConnectorStatusNo, summarizeSelfDiagnosisNo } from "./status-summary.ts";
-import { CLOUD_WITHHELD_CENTERS, CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, CONTROL_CENTER_TITLES_NO, controlCenterForReadAction, isCloudWithheldCenter, withheldCenterData, type ControlCenterId } from "./control-center/index.ts";
+import { CLOUD_WITHHELD_CENTERS, CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, CONTROL_CENTER_TITLES_NO, EXTENSION_CONTROL_CENTER_IDS, controlCenterForReadAction, isCloudWithheldCenter, withheldCenterData, type ControlCenterId } from "./control-center/index.ts";
+import { EVOLUTION_DECISIONS, isEvolutionDecision, summarizeEvolutionDecisionNo } from "./evolution/index.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): eierens SAMLEDE kontrollflate, eksponert
@@ -101,11 +102,17 @@ export class ExecutiveTransport implements ToolTransport {
         return toolResultToTransportResult(result);
       }
       case "get_control_surface_status": {
-        const status = await this.service.getControlSurfaceStatus(identity);
+        // WP-N1 (review B, F-B1): det NØSTEDE `finance.get_kill_switch`-kallet har ingen `servingModel` (ToolGateway-låsen ser det ikke), så en skymodell får finans-nødbryteren her. Holdes tilbake for sky når begrenset-vakten er på;
+        // ellers (vakten AV, lokal modell, eier-rute uten modell) er kallet NØYAKTIG som før N1 (ingen ekstra argument).
+        const status = this.service.withholdsFinanceFromCloud(context?.servingModel)
+          ? await this.service.getControlSurfaceStatus(identity, { withholdFinance: true })
+          : await this.service.getControlSurfaceStatus(identity);
         return { data: status as unknown as JsonValue };
       }
       case "get_delegation_board": {
-        const board = await this.service.getDelegationBoard(identity);
+        const board = this.service.withholdsFinanceFromCloud(context?.servingModel)
+          ? await this.service.getDelegationBoard(identity, { withholdFinance: true })
+          : await this.service.getDelegationBoard(identity);
         return { data: board as unknown as JsonValue };
       }
       case "get_capability_status": {
@@ -145,7 +152,8 @@ export class ExecutiveTransport implements ToolTransport {
       case "get_operations_center":
       case "get_value_center":
       case "get_privacy_center":
-      case "get_security_center": {
+      case "get_security_center":
+      case "get_evolution_center": {
         // WP-H1/H2: samme respons og samme register som `get_control_center {center}` - kun et smalere verktøynavn for chatten (egen port: eier + signert økt, fail-closed).
         const center = controlCenterForReadAction(action) as ControlCenterId;
         return this.centerResponse(identity, center, context?.servingModel);
@@ -162,6 +170,17 @@ export class ExecutiveTransport implements ToolTransport {
         if (!result.ok) throw new Error(result.reason ?? "situations_call_denied");
         const removed = (result.data as { removed?: unknown } | undefined)?.removed === true;
         return { external_id: `${identity.tenant_id}:${identity.memory_space_id}:${domain}`, data: { removed, domain, memory_space: identity.memory_space_id } as unknown as JsonValue };
+      }
+      case "record_evolution_decision": {
+        // WP-B3 (D-475, EV-23): REGISTRER eierens avgjørelse om ett endringsforslag i revisjonssporet - uten virkning (selvendring er frosset, D-397). Eier + signert enhetsøkt + step-up håndheves FØR dette kalles
+        // (`parameterAuthorizer` + `step_up_required`). Identiteten kommer UTELUKKENDE fra konteksten (D-68). Svarets `summary_no` er en fast norsk tekst som alltid sier at ingenting utføres.
+        // GJENNOMGANG L2 (dybdeforsvar): INGEN modell kan registrere eierens avgjørelse. Verktøyet står på ingen modellflate (manifestet: effekt `control`), men er `servingModel` satt - en modellbetjent tur, SKY ELLER LOKAL -
+        // avvises kallet her med en fast kode, FØR noe annet leses. Kun siden (ingen modell i løkka) og eierens egen knapp kommer gjennom.
+        if (context?.servingModel !== undefined) throw new Error("evolution_decision_model_origin_denied");
+        const decision = parameters["decision"];
+        if (!isEvolutionDecision(decision)) throw new Error("invalid_evolution_decision_input");
+        const result = await this.service.recordEvolutionDecision(identity, { change_id: requireString(parameters, "change_id"), proposal_digest: requireString(parameters, "proposal_digest"), decision });
+        return { external_id: `${result.change_id}:${result.proposal_digest.slice(0, 12)}`, data: { summary_no: summarizeEvolutionDecisionNo(result), ...result } as unknown as JsonValue };
       }
       case "get_value_report": {
         // WP-C4: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
@@ -267,6 +286,8 @@ export interface ExecutiveToolOptions {
   goldenSuite?: boolean;
   /** WP-H2: registrer `revoke_autonomy_binding` (tilbakekall av eierens autonomi-binding fra kontrollsenteret). AV som standard - uten flagget finnes verktøyet ikke. */
   autonomyRevoke?: boolean;
+  /** WP-B3 (D-475, EV-23): registrer `record_evolution_decision` (eierens avgjørelse om et endringsforslag, KUN registrert i revisjonssporet - ingen virkning). AV som standard - uten flagget finnes verktøyet ikke. */
+  evolutionApproval?: boolean;
 }
 
 /**
@@ -291,6 +312,8 @@ export interface ExecutiveToolOptions {
  */
 export function executiveToolDefinitions(transport: ExecutiveTransport, options: ExecutiveToolOptions = {}): ToolDefinition[] {
   const enabledCenters = new Set<ControlCenterId>(options.controlCenters ?? []);
+  // D-475: tilleggssentrene (Evolusjon) hvis lese-verktøy er registrert - de er da også gyldige `center`-verdier for `get_control_center`. Tom liste (flagget AV) = skjema og beskrivelse som på main.
+  const enabledExtensions = EXTENSION_CONTROL_CENTER_IDS.filter((id) => enabledCenters.has(id));
   const common = {
     credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF,
     output_trust: "internal" as const,
@@ -345,8 +368,10 @@ export function executiveToolDefinitions(transport: ExecutiveTransport, options:
     {
       ...read(
         "get_control_center",
-        "Les eierens kontrollsentre (UA-11 Admin Control Center): uten `center` en oversikt over alle ti sentre med status per seksjon (integrasjoner, autoritet, AI, finans, minne, agenter, drift, verdi, personvern, sikkerhet); med `center` full rapport for ett senter med hvert tall kildeforankret (tabell/kilde og når det ble målt), en norsk forklaring av hvorfor noe er advarsel/feil, og hvilke eksisterende kontrollhandlinger eieren kan ta (pause/tilbakekall). KUN lesing - jeg utfører ingenting herfra. Ukjent vises som ukjent, aldri som i orden. Kun eieren får svar, og kun fra en signert enhetsøkt (nettleser/app) - aldri over tale eller Telegram.",
-        { center: z.enum(CONTROL_CENTER_IDS).optional() }
+        "Les eierens kontrollsentre (UA-11 Admin Control Center): uten `center` en oversikt over alle ti sentre med status per seksjon (integrasjoner, autoritet, AI, finans, minne, agenter, drift, verdi, personvern, sikkerhet); med `center` full rapport for ett senter med hvert tall kildeforankret (tabell/kilde og når det ble målt), en norsk forklaring av hvorfor noe er advarsel/feil, og hvilke eksisterende kontrollhandlinger eieren kan ta (pause/tilbakekall). KUN lesing - jeg utfører ingenting herfra. Ukjent vises som ukjent, aldri som i orden. Kun eieren får svar, og kun fra en signert enhetsøkt (nettleser/app) - aldri over tale eller Telegram."
+        // D-475: tilleggssentre (Evolusjon) nevnes og er gyldige `center`-verdier KUN når senterets flagg er på - med flagget AV er beskrivelsen og skjemaet uendret fra main.
+        + (enabledExtensions.length > 0 ? ` Tilleggssenter (kun når slått på): ${enabledExtensions.map((id) => CONTROL_CENTER_TITLES_NO[id].toLowerCase()).join(", ")}.` : ""),
+        { center: z.enum([...CONTROL_CENTER_IDS, ...enabledExtensions] as [string, ...string[]]).optional() }
       ),
       // WP-H1: siden gjør 1 + (antall sentre) kall per oppdatering (oversikt + ett per senter); med flere sentre på er 30/min for lavt (to oppdateringer på rad ga 429). 120/min er fortsatt lavt: kun eieren
       // fra en signert enhetsøkt når verktøyet, og bygginger av samme senter for samme identitet deles (single-flight i registeret). Gjennomgang M1: heves KUN når minst ett senter er slått på - ellers er grensen som på main (30).
@@ -417,6 +442,24 @@ export function executiveToolDefinitions(transport: ExecutiveTransport, options:
         // Gjennomgang L1: uopprettelig sletting = step-up på GATEWAY-nivå (signert enhetsøkt fra en eier-kanal, WP-F1-mekanismen), ikke bare i ruten - hver vei til verktøyet krever den (avslag: `step_up_required:<årsak>`).
         step_up_required: true,
         parameterAuthorizer: (_parameters: Record<string, JsonValue>, identity: Parameters<ExecutiveTransport["authorizeOwnerControl"]>[0]) => transport.authorizeOwnerControl(identity)
+      } satisfies ToolDefinition]
+      : []),
+    // WP-B3 (D-475, EV-23): eierens AVGJØRELSE om ett endringsforslag (godkjenn/avvis/utsett), registrert i revisjonssporet - og KUN det: ingenting utføres, godkjennes i endringsregisteret eller aktiveres (selvendring er
+    // frosset, D-397; `activation_decision` er alltid false). Klasse C; eier OG signert enhetsøkt FØR noe kalles (`authorizeControlCenterRead`), og step-up (signert enhet fra en eier-kanal) også på GATEWAY-nivå, så hver
+    // vei til verktøyet krever den. Bundet til forslagets versjon (`proposal_digest` = entry_hash til forslagets siste rad i endringsregisteret) og idempotent (samme avgjørelse for samme versjon skrives ikke på nytt).
+    // «Angre» = registrer en ny avgjørelse (den nyeste gjelder; alle står i revisjonssporet). Står på INGEN modellflate (effekt «control»: manifestet forbyr det) - kun kontrollsenterets knapp via /executive/mutate.
+    // Registreres kun med JARVIS_CONTROL_EVOLUTION_APPROVAL=on (og Evolusjon-senteret koblet inn).
+    ...(options.evolutionApproval === true
+      ? [{
+        ...control(
+          "record_evolution_decision",
+          "Registrer EIERENS avgjørelse (godkjenn, avvis eller utsett) om ÉTT endringsforslag fra Evolusjon-senteret, bundet til forslagets versjon (proposal_digest). KUN en registrering i revisjonssporet: ingenting utføres, godkjennes i endringsregisteret eller aktiveres (selvendring er frosset, D-397). Kun eieren fra en signert enhetsøkt - kun kontrollsenterets knapp.",
+          { change_id: z.string().min(1).max(60), proposal_digest: z.string().regex(/^[0-9a-f]{64}$/), decision: z.enum(EVOLUTION_DECISIONS) },
+          "registrer en ny avgjørelse for samme forslag (den nyeste gjelder); alle avgjørelser står i revisjonssporet `evolution.owner_decision` - registreringen har ingen virkning å angre"
+        ),
+        rate_limit_per_minute: 10,
+        step_up_required: true,
+        parameterAuthorizer: (_parameters: Record<string, JsonValue>, identity: Parameters<ExecutiveTransport["authorizeControlCenterRead"]>[0]) => transport.authorizeControlCenterRead(identity)
       } satisfies ToolDefinition]
       : []),
     critical("activate_kill_switch", "Stans HELE systemet umiddelbart (gjennomslag til owner_controls.activate_kill_switch)", { reason: z.string() }, "deactivate_kill_switch"),

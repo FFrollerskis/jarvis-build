@@ -52,7 +52,12 @@ export const CORE_ENV = [
   "JARVIS_OWNER_EXTRA_TENANTS",
   "JARVIS_OWNER_NAME",
   "JARVIS_OWNER_PERSON_ID",
+  // WP-K (D-471, JARVIS-053): varig policy-journal (`policy_decisions`). AV som standard (kun `db` slår på); api OG worker bruker samme sink-kode og leser samme bryter. Ingen hemmeligheter.
+  "JARVIS_POLICY_AUDIT_QUEUE_MAX",
+  "JARVIS_POLICY_AUDIT_SINK",
   "JARVIS_TENANT_ID",
+  // WP-K (D-471, JARVIS-018, review M2): nødutgang for avbruddsmekanismen i ToolGateway (kun eksakt `off` slår den av; standard PÅ). api OG worker bruker samme gateway-kode. Ingen hemmeligheter.
+  "JARVIS_TOOL_CALL_ABORT",
   "JARVIS_WATCHDOG_INTERVAL_MS",
   "LANGFUSE_PUBLIC_KEY",
   "LANGFUSE_SECRET_KEY"
@@ -64,6 +69,16 @@ export const MODEL_ENV = [
   "GEMMA_API_KEY",
   "HERMES_API_KEY",
   "JARVIS_BUDGET_APPROVED",
+  // WP-B4 (D-476): Claude-kreditten (100 USD/mnd) med tempostyring og behovsprioritering. AV som standard (tom/usatt = av; `JARVIS_CLAUDE_BUDGET_USD=100` slår på). Både api og worker kaller modellen, så begge får dem
+  // (MODEL_ENV er felles); worker kjører også varslingen (Telegram). Kun tall, flagg og tabeller - ingen hemmeligheter.
+  "JARVIS_CLAUDE_BUDGET_ALERT_PCTS",
+  "JARVIS_CLAUDE_BUDGET_HARD_STOP",
+  "JARVIS_CLAUDE_BUDGET_MARGIN_PCT",
+  "JARVIS_CLAUDE_BUDGET_RESERVE_PCT",
+  "JARVIS_CLAUDE_BUDGET_RESET_DAY",
+  "JARVIS_CLAUDE_BUDGET_TIERS",
+  "JARVIS_CLAUDE_BUDGET_TIGHT_RATIO",
+  "JARVIS_CLAUDE_BUDGET_USD",
   "JARVIS_COST_APPROVAL_ORE",
   "JARVIS_COST_HARD_LIMIT_ORE",
   "JARVIS_COST_WARN_ORE",
@@ -140,9 +155,14 @@ export const CONNECTOR_ENV = [
   "JARVIS_GOOGLE_ADS_DEVELOPER_TOKEN",
   "JARVIS_GOOGLE_ADS_LOGIN_CUSTOMER_ID",
   "JARVIS_GOOGLE_ADS_REFRESH_TOKEN",
+  "JARVIS_GOOGLE_ANALYTICS_REFRESH_TOKEN",
+  "JARVIS_GOOGLE_BUSINESS_PROFILE_REFRESH_TOKEN",
   "JARVIS_GOOGLE_CLIENT_ID",
   "JARVIS_GOOGLE_CLIENT_SECRET",
   "JARVIS_GOOGLE_CLOUD_PROJECT_ID",
+  "JARVIS_GOOGLE_SEARCH_CONSOLE_REFRESH_TOKEN",
+  // WP-G1 (D-463, P2e): Google Contacts - EGEN refresh-token med `contacts`-scope (eierens samtykke, BLOCKED_EXTERNAL live). Tom = kontakt-handlingene feiler lukket. Kun api.
+  "JARVIS_GOOGLE_CONTACTS_TOKEN",
   "JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN",
   "JARVIS_GOOGLE_MAPS_API_KEY",
   "JARVIS_GOOGLE_PLACES_API_KEY",
@@ -155,15 +175,20 @@ export const CONNECTOR_ENV = [
   "JARVIS_HA_ROOMS",
   "JARVIS_HA_TOKEN",
   "JARVIS_HUBSPOT_API_KEY",
+  // WP-G1 (D-463): Instagram-/Messenger-tilgangstokener (Meta Send API) og Teams' delegerte refresh-token. Tomme = kanalen kan ikke sende (credential_ref_unresolved). Kun api.
+  "JARVIS_INSTAGRAM_ACCESS_TOKEN",
   "JARVIS_INFISICAL_ROTATION_IDS",
   "JARVIS_JIRA_API_TOKEN",
   "JARVIS_JIRA_BASE_URL",
   "JARVIS_JIRA_EMAIL",
   "JARVIS_LINEAR_API_KEY",
+  "JARVIS_LINKEDIN_ACCESS_TOKEN",
+  "JARVIS_LINKEDIN_API_VERSION",
   "JARVIS_MCP_ZAPIER_SERVER_URL",
   "JARVIS_META_ADS_ACCESS_TOKEN",
   "JARVIS_META_ADS_AD_ACCOUNT_ID",
   "JARVIS_META_ADS_API_VERSION",
+  "JARVIS_META_PAGE_ACCESS_TOKEN",
   "JARVIS_MICROSOFT_CLIENT_ID",
   "JARVIS_MICROSOFT_CLIENT_SECRET",
   "JARVIS_MICROSOFT_REFRESH_TOKEN",
@@ -196,13 +221,16 @@ export const CONNECTOR_ENV = [
   "JARVIS_SUPPORT_INBOX_EMAILS",
   "JARVIS_SUPPORT_SLA_HOURS",
   "JARVIS_TAVILY_API_KEY",
+  "JARVIS_TEAMS_REFRESH_TOKEN",
   "JARVIS_TELEGRAM_CHAT_ID",
   "JARVIS_TELEGRAM_TOKEN",
+  "JARVIS_TIKTOK_ACCESS_TOKEN",
   "JARVIS_TODOIST_API_TOKEN",
   "JARVIS_TRELLO_API_KEY",
   "JARVIS_TRELLO_TOKEN",
   "JARVIS_VERCEL_TEAM_ID",
   "JARVIS_VERCEL_TOKEN",
+  "JARVIS_YOUTUBE_REFRESH_TOKEN",
   "JARVIS_VIPPS_CLIENT_ID",
   "JARVIS_VIPPS_CLIENT_SECRET",
   "JARVIS_VIPPS_ENVIRONMENT",
@@ -253,13 +281,54 @@ export const WORKER_CONNECTOR_ENV = [
 ];
 /** Webhook-hemmeligheter - KUN api (mottar webhooks). */
 export const WEBHOOK_ENV = [
+  // WP-G1 (D-463, UA-7): signeringshemmeligheter for POST /webhooks/comms/{slack,meta,twilio,telnyx}. Twilio-ruten bruker den EKSISTERENDE JARVIS_TWILIO_AUTH_TOKEN (MESSAGING_AUTOMATION_ENV). Tom/manglende = ruten svarer 503 (fail-closed).
+  "JARVIS_META_APP_SECRET",
+  "JARVIS_META_WEBHOOK_VERIFY_TOKEN",
   "JARVIS_NEONOMICS_WEBHOOK_API_KEY",
   // WP-D2 (UA-3 «churn/product usage»): HMAC-hemmelighet for POST /webhooks/product-usage (eierens egne produkter). Tom = ruten svarer 503 selv om tenanten er satt.
   "JARVIS_PRODUCT_USAGE_WEBHOOK_SECRET",
+  "JARVIS_SLACK_SIGNING_SECRET",
   "JARVIS_STRIPE_WEBHOOK_SECRET",
+  "JARVIS_TELNYX_WEBHOOK_PUBLIC_KEY",
   "JARVIS_VIPPS_WEBHOOK_SECRET",
   "JARVIS_WALLESTER_WEBHOOK_BASIC_PASSWORD",
   "JARVIS_WALLESTER_WEBHOOK_BASIC_USER"
+];
+/**
+ * WP-G1 (D-463, UA-7 Communications Hub): flagg og IKKE-hemmelig konfigurasjon for felles utgående kommunikasjon, innkommende webhooks, kontakter, møtetranskripsjon, utgående AI-ringing og oppfølgingssveip.
+ * ALT er AV som standard (kun den eksakte verdien `on` slår et flagg på; tom = AV) og NOT VERIFIED. KUN api (worker kjører ingen kommunikasjonsflate). Ingen hemmeligheter her - credentials er vault-referansene
+ * (`JARVIS_SLACK_BOT_TOKEN` m.fl. i CONNECTOR_ENV/MESSAGING_AUTOMATION_ENV) og signeringshemmelighetene i WEBHOOK_ENV.
+ */
+export const COMMS_ENV = [
+  "JARVIS_COMMS_AI_DISCLOSURE_TEXT",
+  "JARVIS_COMMS_CALLS",
+  "JARVIS_COMMS_CALL_WINDOW_END",
+  "JARVIS_COMMS_CALL_WINDOW_START",
+  "JARVIS_COMMS_CHANNELS",
+  "JARVIS_COMMS_CONTACTS",
+  "JARVIS_COMMS_INBOUND_RETENTION_DAYS",
+  "JARVIS_COMMS_LOG_RETENTION_DAYS",
+  "JARVIS_COMMS_MAX_CALLS_PER_NUMBER_DAY",
+  "JARVIS_COMMS_MAX_COLD_PER_RECIPIENT_DAY",
+  "JARVIS_COMMS_MAX_PER_ACCOUNT_HOUR",
+  "JARVIS_COMMS_MAX_PER_RECIPIENT_DAY",
+  "JARVIS_COMMS_MEDIA_URL_HOSTS",
+  "JARVIS_COMMS_MEETINGS",
+  "JARVIS_COMMS_MEETING_RETENTION_DAYS",
+  "JARVIS_COMMS_MEMORY_SPACE",
+  "JARVIS_COMMS_OUTBOUND",
+  "JARVIS_COMMS_PUBLIC_BASE_URL",
+  "JARVIS_COMMS_QUIET_END",
+  "JARVIS_COMMS_QUIET_HOURS",
+  "JARVIS_COMMS_QUIET_START",
+  "JARVIS_COMMS_REPLY_AFTER_HOURS",
+  "JARVIS_COMMS_REPLY_SWEEP",
+  "JARVIS_COMMS_REPLY_WINDOW_DAYS",
+  "JARVIS_COMMS_TEMPLATES_WITH_DISCLOSURE",
+  "JARVIS_COMMS_TENANT_ID",
+  "JARVIS_COMMS_VENDOR_READS",
+  "JARVIS_COMMS_WEBHOOKS",
+  "JARVIS_META_GRAPH_VERSION"
 ];
 /** Media-/hjem-/underholdnings-leverandører - KUN api. */
 export const MEDIA_HOME_ENV = [
@@ -328,7 +397,7 @@ const WORKER_EXCLUDES = new Set(["JARVIS_BRIEF_HOUR", "JARVIS_BROWSER_GATEWAY_TO
 
 /** Hva hver tjeneste får videresendt fra operatørens `.env` (interpolasjon `${NAVN:-}` i compose). */
 export const SERVICE_ENV = {
-  api: [...CORE_ENV, ...MODEL_ENV, ...CONNECTOR_ENV, ...WEBHOOK_ENV, ...MEDIA_HOME_ENV, ...MESSAGING_AUTOMATION_ENV, "LANGFUSE_BASE_URL", "JARVIS_API_PORT", "JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", "JARVIS_CONSTITUTION_PUBKEY_SHA256",
+  api: [...CORE_ENV, ...MODEL_ENV, ...CONNECTOR_ENV, ...WEBHOOK_ENV, ...MEDIA_HOME_ENV, ...MESSAGING_AUTOMATION_ENV, ...COMMS_ENV, "LANGFUSE_BASE_URL", "JARVIS_API_PORT", "JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", "JARVIS_CONSTITUTION_PUBKEY_SHA256",
     // D-433: nød-/utviklingsbryter - API-et tømmer `executive`-køen selv (standard: worker-containeren eier køen).
     "JARVIS_API_DRAINS_EXECUTIVE",
     // EV-1 (D-412): bygg-sha og versjon som selvdiagnosen viser (uten dem vises bygget som UKJENT).
@@ -351,6 +420,8 @@ export const SERVICE_ENV = {
     "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_RECONCILE_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG",
     // WP-E1 (JARVIS-068): incident-produsentene i api-prosessen - intervall (ms), grener hvis utrullinger teller, og repoer som leses aktivt for nye Actions-kjøringer (tom = ingen polling). Ingen hemmeligheter.
     "JARVIS_INCIDENT_PRODUCERS_INTERVAL_MS", "JARVIS_INCIDENT_DEPLOY_REFS", "JARVIS_INCIDENT_DEPLOY_REPOS",
+    // WP-K (D-471, JARVIS-053): oppbevaring (dager, 30..3650, standard 90) for den varige policy-journalen - retensjonssveipet kjører i api-prosessen.
+    "JARVIS_POLICY_AUDIT_RETENTION_DAYS",
     // WP-D2 (JARVIS-044/Q-48): dashbord-ruten for å opprette en bedrifts-tenant er AV som standard (api-only; CLI-en trenger ikke flagget).
     "JARVIS_BUSINESS_TENANT_PROVISIONING",
     // WP-D2 (UA-3 «churn/product usage»): bedrifts-tenanten produktbruk-webhooken skriver til (api-only; tom = ruten finnes ikke, 404).
@@ -364,7 +435,30 @@ export const SERVICE_ENV = {
     // Uten disse linjene når en verdi i `.env` aldri containeren (compose sender kun det manifestet lister) - flaggene ville vært stille virkningsløse.
     "JARVIS_CONTROL_CENTER_FINANCE", "JARVIS_CONTROL_CENTER_MEMORY", "JARVIS_CONTROL_CENTER_AGENT", "JARVIS_GOVERNANCE_PROVENANCE",
     // WP-H2 (UA-11): kontrollsentrene Drift/Verdi/Personvern/Sikkerhet og de to enkeltfunksjonene golden-suite-knappen og tilbakekall av autonomi-binding. Alle AV som standard (kun eksakt «on»), api-only, ingen hemmeligheter.
-    "JARVIS_CONTROL_CENTER_OPERATIONS", "JARVIS_CONTROL_CENTER_VALUE", "JARVIS_CONTROL_CENTER_PRIVACY", "JARVIS_CONTROL_CENTER_SECURITY", "JARVIS_CONTROL_GOLDEN_SUITE", "JARVIS_CONTROL_AUTONOMY_REVOKE"],
+    "JARVIS_CONTROL_CENTER_OPERATIONS", "JARVIS_CONTROL_CENTER_VALUE", "JARVIS_CONTROL_CENTER_PRIVACY", "JARVIS_CONTROL_CENTER_SECURITY", "JARVIS_CONTROL_GOLDEN_SUITE", "JARVIS_CONTROL_AUTONOMY_REVOKE",
+    // WP-D3 (UA-4 Growth, D-459): skrivehandlinger mot annonse-/analyseplattformene (plattformliste, eierens EGNE konto-/eiendoms-id-er, tillatte kreativ-verter) og eksperimentregisteret. ALLE AV som standard
+    // (tom/manglende = ingen verktøy, ingen rute). Api-only (bakgrunnsflaten er read-only). Ingen hemmeligheter - kun flagg og eksakte, ikke-hemmelige id-er; credentials er vault-referansene i CONNECTOR_ENV.
+    "JARVIS_GROWTH_WRITE_PLATFORMS", "JARVIS_GROWTH_WRITE_TARGETS", "JARVIS_GROWTH_CREATIVE_URL_HOSTS", "JARVIS_GROWTH_EXPERIMENTS",
+    // WP-B3 (D-475, EV-22/EV-23): tilleggssenteret Evolusjon og eierens avgjørelse om et endringsforslag (kun en registrering, ingen virkning). Begge AV som standard; kun eksakt «on», api-only, ingen hemmeligheter.
+    "JARVIS_CONTROL_CENTER_EVOLUTION", "JARVIS_CONTROL_EVOLUTION_APPROVAL",
+    // WP-G2 (D-464, UA-8 Personal Twin): kritiske hjem-/bilhandlinger, familie/delte rom, helse-inntak, Apple CalDAV/CardDAV, personlig økonomi-lesing og kontekstmotor. ALLE AV som standard (kun eksakt «on»; tom/manglende
+    // liste = ingenting tillatt), api-only (worker/bakgrunn er read-only). Ikke-hemmelig konfigurasjon (eierens EGNE entitets-/kjøretøy-id-er, settle-tid, konto-referanser) + vault-referanser (alarmkode, iCloud-bruker og
+    // app-spesifikt passord - verdiene leses via `SecretProvider`, aldri her). Uten disse linjene når en verdi i `.env` aldri containeren og flaggene ville vært stille virkningsløse (vakt: `wpg2-flags-wiring.test.ts`).
+    "JARVIS_PERSONAL_HOME_CRITICAL", "JARVIS_PERSONAL_HOME_TARGETS", "JARVIS_PERSONAL_HOME_SETTLE_MS", "JARVIS_PERSONAL_HOME_SETTLE_BY_DOMAIN", "JARVIS_PERSONAL_CAR", "JARVIS_PERSONAL_CAR_TARGETS", "JARVIS_PERSONAL_CAR_SETTLE_MS",
+    "JARVIS_PERSONAL_FAMILY", "JARVIS_PERSONAL_HEALTH_INGEST", "JARVIS_PERSONAL_APPLE_DAV", "JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS", "JARVIS_PERSONAL_FINANCE_READ", "JARVIS_PERSONAL_CONTEXT",
+    "JARVIS_PERSONAL_HOME_ALARM_CODE", "JARVIS_PERSONAL_CAR_CREDENTIAL", "JARVIS_PERSONAL_APPLE_DAV_USER", "JARVIS_PERSONAL_APPLE_DAV_APP_PASSWORD",
+    // WP-G3 (D-465, UA-9): kamerabilder (hendelses-øyeblikksbilder), lokal klassifisering, bilde-lagring, HA-poller og iPhone-opptak. ALLE AV som standard (kun eksakt «on» slår dem på; JARVIS_VISION_ENABLED er hovedbryter),
+    // api-only (bakgrunnsflaten bruker dem ikke). Ingen hemmeligheter - kun flagg, tall, en lokal modell-URL og en lagringsmappe. HA-credentials er de EKSISTERENDE JARVIS_HA_BASE_URL/JARVIS_HA_TOKEN (vault-kjeden).
+    // JARVIS_VISION_LOCAL_URL MÅ peke til en lokal/privat adresse (kamerabilder forlater aldri maskinen) - validert ved oppstart. JARVIS_VISION_RETENTION_SWEEP_HOUR er videresendt fra før (D-153).
+    "JARVIS_VISION_ENABLED", "JARVIS_VISION_CLASSIFIER", "JARVIS_VISION_LOCAL_URL", "JARVIS_VISION_LOCAL_MODEL", "JARVIS_VISION_ALLOW_TAILSCALE", "JARVIS_VISION_MODEL_TIMEOUT_MS", "JARVIS_VISION_STORE_SNAPSHOTS", "JARVIS_VISION_STORAGE_DIR", "JARVIS_VISION_MAX_STORED_MB",
+    "JARVIS_VISION_HA_POLL", "JARVIS_VISION_POLL_INTERVAL_SECONDS", "JARVIS_VISION_MAINTENANCE_INTERVAL_MINUTES", "JARVIS_VISION_MAINTENANCE_HOUR",
+    // WP-G4 (D-466, UA-10): samlet hendelsesabonnement (abonnementsregister, inntaksbuss, hendelsesløper) med hjem-/kamera-/helse-/hendelseskilder, modellassistert vurdering og tilbakemeldingslæring. ALLE AV som standard (kun eksakt «on»;
+    // JARVIS_SITUATION_SIGNALS er hovedbryter, de begrensede kildene helse og kamera har hvert sitt eksplisitte flagg), api-only. Ingen hemmeligheter - kun flagg og tall (vakt: `wpg4-flags-wiring.test.ts`).
+    "JARVIS_SITUATION_SIGNALS", "JARVIS_SITUATION_HOME", "JARVIS_SITUATION_VISION", "JARVIS_SITUATION_HEALTH", "JARVIS_SITUATION_INCIDENTS", "JARVIS_SITUATION_MODEL_ASSIST", "JARVIS_SITUATION_FEEDBACK",
+    "JARVIS_SITUATION_BUS_INTERVAL_SECONDS", "JARVIS_SITUATION_LOG_RETENTION_DAYS",
+    // WP-N1 (Q-66, JARVIS-101): «begrenset»-merking av samtalehistorikken (messages.restricted) og utførelseslås for finance/finance_* mot skymodeller (Q-64 pkt 3). AV som standard (kun eksakt «on»), api-only,
+    // ingen hemmeligheter. Uten denne linjen når en verdi i `.env` aldri containeren og flagget ville vært stille virkningsløst (vakt: `wpn1-guard-env.test.ts`).
+    "JARVIS_RESTRICTED_CONTEXT_GUARD"],
   worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...WORKER_CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
     // WP-C1 (D-32 / Q-45a): vertsside job-runner (JARVIS_JOB_RUNNER=host). Socket-katalogen og tokenfilen monteres inn via infra/job-runner/docker-compose.job-runner.yml
     // (valgfri override) - uten den, og med tomme verdier her, feiler hver kodejobb lukket som før.

@@ -28,8 +28,89 @@ import type pg from "pg";
  * domain-pause.ts) for å gjøre en deadlock STRUKTURELT umulig: ingen kaller
  * venter noensinne på en lås en ANNEN kaller selv holder mens den ØNSKER en
  * lås DENNE kalleren allerede holder.
+ *
+ * WP-G4 fiks-runde (A-MEDIUM-5, ARVET dødlås): hver kaller holdt ÉN pool-forbindelse for sesjonslåsene - også mens den VENTET på dem. Pool max 10 uten connectionTimeout: noen få samtidige ventere (to
+ * `pause_domain` mot én pågående `actOn`) tømte poolen, og `actOn` fikk aldri en forbindelse til sine egne spørringer (reviewer-probe R4: pool på 3 = dødlås). Den delte poolen røres IKKE. I stedet begrenser en
+ * PROSESS-LOKAL semafor (per pool) hvor mange kallere som har en forbindelse samtidig til `max(1, floor(poolMax/2) - 1)`; resten venter i en FIFO-kø UTEN forbindelse (begrenset ventetid og køstørrelse: raskt
+ * `DomainLockBusyError`, «ikke utført, prøv igjen»). Selve låsene er uendret blokkerende gjensidig utelukkelse mellom `actOn` og pause/binding. Begrensning (ærlig): semaforen gjelder innen ÉN prosess.
  */
-export async function withDomainAdvisoryLocks<T>(pool: pg.Pool, domains: readonly string[], fn: () => Promise<T>): Promise<T> {
+export class DomainLockBusyError extends Error {
+  constructor(public readonly reason: "wait_timeout" | "queue_full") {
+    super(`domain_lock_busy:${reason}`);
+    this.name = "DomainLockBusyError";
+  }
+}
+
+/** Standard ventetid på en plass før `DomainLockBusyError("wait_timeout")`. */
+export const DEFAULT_LOCK_WAIT_MS = 30_000;
+/** Maks ventere i køen; kall nummer MAX+1 avvises umiddelbart (`queue_full`). */
+export const MAX_LOCK_WAITERS = 100;
+
+interface LockGate {
+  cap: number;
+  active: number;
+  waiters: Array<{ grant: () => void; timer: NodeJS.Timeout }>;
+}
+const gates = new WeakMap<pg.Pool, LockGate>();
+
+/** Kapasiteten for en pool: `max(1, floor(max/2) - 1)` (ukjent størrelse = pg-standard 10). Eksportert for test/diagnostikk. */
+export function domainLockCapacity(pool: pg.Pool): number {
+  return gateFor(pool).cap;
+}
+
+function gateFor(pool: pg.Pool): LockGate {
+  let gate = gates.get(pool);
+  if (gate === undefined) {
+    const max = Number((pool as unknown as { options?: { max?: unknown } }).options?.max);
+    const poolMax = Number.isFinite(max) && max > 0 ? max : 10;
+    gate = { cap: Math.max(1, Math.floor(poolMax / 2) - 1), active: 0, waiters: [] };
+    gates.set(pool, gate);
+  }
+  return gate;
+}
+
+/** Tar en plass (venter UTEN forbindelse hvis full) og gir tilbake frigjøringen. En plass overdras direkte til første ventende (aktiv teller uendret), ellers telles den ned. */
+async function acquireSlot(pool: pg.Pool, waitMs: number): Promise<() => void> {
+  const gate = gateFor(pool);
+  const release = (): void => {
+    const next = gate.waiters.shift();
+    if (next !== undefined) {
+      clearTimeout(next.timer);
+      next.grant();
+    } else {
+      gate.active -= 1;
+    }
+  };
+  if (gate.active < gate.cap) {
+    gate.active += 1;
+    return release;
+  }
+  if (gate.waiters.length >= MAX_LOCK_WAITERS) throw new DomainLockBusyError("queue_full");
+  await new Promise<void>((resolve, reject) => {
+    const waiter = {
+      grant: resolve,
+      timer: setTimeout(() => {
+        const index = gate.waiters.indexOf(waiter);
+        if (index >= 0) gate.waiters.splice(index, 1);
+        reject(new DomainLockBusyError("wait_timeout"));
+      }, Math.max(1, waitMs))
+    };
+    waiter.timer.unref();
+    gate.waiters.push(waiter);
+  });
+  return release;
+}
+
+export async function withDomainAdvisoryLocks<T>(pool: pg.Pool, domains: readonly string[], fn: () => Promise<T>, options: { waitMs?: number } = {}): Promise<T> {
+  const releaseSlot = await acquireSlot(pool, options.waitMs ?? DEFAULT_LOCK_WAIT_MS);
+  try {
+    return await withConnectionLocks(pool, domains, fn);
+  } finally {
+    releaseSlot();
+  }
+}
+
+async function withConnectionLocks<T>(pool: pg.Pool, domains: readonly string[], fn: () => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
     for (const domain of domains) {

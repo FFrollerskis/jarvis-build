@@ -7,6 +7,7 @@ import {
   ProviderError,
   sseLines,
   textOnly,
+  type ChatMessage,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult,
@@ -148,9 +149,73 @@ export class ThinkFilter {
   }
 }
 
+/**
+ * WP-G3 (D-465): bildedeler til et OpenAI-kompatibelt lokalt endepunkt. Kun `image_url` med en `data:`-URL (base64) - ALDRI en ekstern URL
+ * (verken modellserveren eller noen annen får hente noe på nettet for oss, så ingen SSRF-flate og ingen utgående trafikk fra bildet).
+ * Format verifisert mot Ollama sin OpenAI-kompatibilitetsside (vision: `image_url` med `data:image/...;base64,...`) og llama.cpp-serverens
+ * multimodal-dokumentasjon (`image_url`-del i `/v1/chat/completions`) via WebSearch - IKKE live-verifisert mot en ekte lokal modell i
+ * denne økten (se docs/runbooks/WPG3_VISION.md, `unverified`).
+ * `media_type` må være jpeg/png/webp og `data` rå base64 (samme kontrakt som `ContentPart`): alt annet avvises som `bad_request` før noe sendes.
+ */
+const LOCAL_VISION_MEDIA_TYPES: ReadonlySet<string> = new Set(["image/jpeg", "image/png", "image/webp"]);
+const BASE64_BODY = /^[A-Za-z0-9+/]+={0,2}$/;
+const MAX_LOCAL_IMAGE_BASE64_CHARS = 28 * 1024 * 1024;
+
+/**
+ * WP-G3 (review A-L6): tak på svarkroppen fra den dedikerte visjonsidentiteten. Klassifisereren ber om maks 500 tokens (noen KB), så 1 MiB er rause rom; en lokal server som svarer med mer (feil, kompromittert
+ * eller en endeløs strøm) avbrytes ved grensen i stedet for å fylle api-prosessens minne. Øvrige identiteter (`local_llm`/`gemma_local`) leser uendret med `response.json()`.
+ */
+const MAX_LOCAL_VISION_RESPONSE_BYTES = 1024 * 1024;
+
+async function readJsonLimited(response: Response, maxBytes: number): Promise<unknown> {
+  const declared = Number(response.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error("response_too_large");
+  }
+  if (response.body === null) throw new Error("response_no_body");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("response_too_large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const all = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    all.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return JSON.parse(new TextDecoder().decode(all));
+}
+
+function toOpenAiVisionContent(provider: string, content: ChatMessage["content"]): string | Array<Record<string, unknown>> {
+  if (typeof content === "string") return content;
+  if (!content.some((part) => part.type === "image")) return textOnly(content);
+  return content.map((part) => {
+    if (part.type === "text") return { type: "text", text: part.text };
+    if (!LOCAL_VISION_MEDIA_TYPES.has(part.media_type) || part.data.length === 0 || part.data.length > MAX_LOCAL_IMAGE_BASE64_CHARS || !BASE64_BODY.test(part.data)) {
+      throw new ProviderError(provider, "bad_request", `${provider}_invalid_image_part`);
+    }
+    return { type: "image_url", image_url: { url: `data:${part.media_type};base64,${part.data}` } };
+  });
+}
+
 export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
   readonly name: string;
   private readonly chatCompletionsUrl: string | undefined;
+  private readonly vision: boolean;
 
   constructor(
     private readonly baseUrl: string | undefined = process.env["LOCAL_LLM_BASE_URL"],
@@ -162,9 +227,15 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
      * på resonnering (tale har 320 tokens - hele budsjettet kan ellers gå til «tenking» og gi tomt svar). Av som standard: uendret
      * oppførsel for modeller/servere uten tenking. Styres av `JARVIS_LOCAL_LLM_THINKING=off`.
      */
-    private readonly thinking: "off" | "default" = process.env["JARVIS_LOCAL_LLM_THINKING"] === "off" ? "off" : "default"
+    private readonly thinking: "off" | "default" = process.env["JARVIS_LOCAL_LLM_THINKING"] === "off" ? "off" : "default",
+    /**
+     * WP-G3 (D-465): `vision: true` sender bildedeler (`image_url` med base64 `data:`-URL) i stedet for å droppe dem stille (`textOnly`). Av som standard:
+     * `local_llm`/`gemma_local` er byte-for-byte uendret. Brukes KUN av den dedikerte `local_vision`-identiteten (`JARVIS_VISION_LOCAL_URL`).
+     */
+    options: { vision?: boolean } = {}
   ) {
     this.name = name;
+    this.vision = options.vision === true;
     this.chatCompletionsUrl = baseUrl ? `${normalizeLocalLlmBaseUrl(baseUrl)}/v1/chat/completions` : undefined;
   }
 
@@ -191,7 +262,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
   private buildMessages(request: ModelRequest): Array<Record<string, unknown>> {
     const messages: Array<Record<string, unknown>> = [
       ...(request.system ? [{ role: "system", content: request.system }] : []),
-      ...request.messages.map((m) => ({ role: m.role, content: textOnly(m.content) }))
+      ...request.messages.map((m) => ({ role: m.role, content: this.vision ? toOpenAiVisionContent(this.name, m.content) : textOnly(m.content) }))
     ];
     for (const ex of request.tool_exchanges ?? []) {
       messages.push({
@@ -244,7 +315,9 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs),
-        body: JSON.stringify(this.buildBody(request, false))
+        body: JSON.stringify(this.buildBody(request, false)),
+        // WP-G3: den dedikerte visjonsidentiteten følger ALDRI en redirect (en 307/308 ville sendt kamerabildene videre til et annet mål); øvrige identiteter er uendret.
+        ...(this.vision ? { redirect: "error" as const } : {})
       });
     } catch (err) {
       throw classifyFetchError(this.name, err);
@@ -260,12 +333,14 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
       usage?: { prompt_tokens: number; completion_tokens: number };
     };
     try {
-      body = (await response.json()) as typeof body;
+      // WP-G3 (review A-L6): visjonsidentiteten leser svaret med et bytetak; øvrige identiteter er uendret (`response.json()`).
+      body = (this.vision ? await readJsonLimited(response, MAX_LOCAL_VISION_RESPONSE_BYTES) : await response.json()) as typeof body;
       if (!Array.isArray(body.choices)) {
         throw new Error("mangler choices");
       }
-    } catch {
-      throw new ProviderError(this.name, "invalid_response", `${this.name}_invalid_response`);
+    } catch (err) {
+      const tooLarge = this.vision && err instanceof Error && err.message === "response_too_large";
+      throw new ProviderError(this.name, "invalid_response", tooLarge ? `${this.name}_response_too_large` : `${this.name}_invalid_response`);
     }
     const message = body.choices[0]?.message;
     const text = stripThinking(message?.content ?? "");
@@ -314,7 +389,8 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-        body: JSON.stringify(this.buildBody(request, true))
+        body: JSON.stringify(this.buildBody(request, true)),
+        ...(this.vision ? { redirect: "error" as const } : {})
       });
     } catch (err) {
       if (signal?.aborted) throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);

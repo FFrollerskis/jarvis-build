@@ -66,7 +66,8 @@ describe("M24: NATURLIG utløp stoppes av SQL-filteret `expires_at > now()` (ikk
   it("kontroll: en ferskt opprettet bekreftelse godkjennes nøyaktig én gang med kallet slik det ble bundet", async () => {
     const store = new ConfirmationStore(appPool);
     const created = await store.requestPending(call, owner, ["wpf1"]);
-    expect(await store.approveAndTake(owner, created.confirmation_id)).toEqual({ confirmation_id: created.confirmation_id, tool_id: call.tool_id, action: call.action, parameters: call.parameters });
+    // WP-N1 (F2-A1): `approveAndTake` returnerer i tillegg grunnene kortet ble opprettet med (`taint_reasons`) - her `wpf1`.
+    expect(await store.approveAndTake(owner, created.confirmation_id)).toEqual({ confirmation_id: created.confirmation_id, tool_id: call.tool_id, action: call.action, parameters: call.parameters, taint_reasons: ["wpf1"] });
     expect(await store.approveAndTake(owner, created.confirmation_id)).toBeNull(); // engangs
   });
 });

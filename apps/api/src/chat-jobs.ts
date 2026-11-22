@@ -32,8 +32,10 @@ const RESULT_PREVIEW_CHARS = 1500;
 /**
  * D-449 (Q-50): `input.data`-nøkler som BARE trusted kode (`TasksDelegateTransport`) kan sette. `POST /tasks/submit` avviser en innsendt kontrakt som bærer dem, så et rutingsflagg aldri kan
  * forfalskes via API-et (revisjonsfunn: flagget var tidligere bare «trusted» etter konvensjon). Workeren klassifiserer i tillegg oppgaveteksten selv, uavhengig av flagget.
+ * WP-B4 (D-476, review M2): `delegated_from_chat` er nå også reservert. Markøren styrer hva som leveres tilbake i eierens chat (`DELEGATED`-filteret) og, sammen med `cloud_tool_turns_allowed`, hvilken prioritet
+ * jobben får på Claude-kreditten (en bestilt oppgave = VIKTIG, se `executive.ts`) - en grant-innehaver kunne ellers satt den selv og hoppet foran bakgrunnsarbeid ved stramt tempo.
  */
-export const RESERVED_SUBMIT_DATA_KEYS: readonly string[] = ["cloud_tool_turns_allowed"];
+export const RESERVED_SUBMIT_DATA_KEYS: readonly string[] = ["cloud_tool_turns_allowed", "delegated_from_chat"];
 
 export function submittedContractHasReservedKey(contract: unknown): string | null {
   if (typeof contract !== "object" || contract === null) return null;
@@ -86,6 +88,19 @@ export interface DelegatedJobView {
   created_at: string;
   finished_at: string | null;
   delivered: boolean;
+  /**
+   * WP-N1 (fiks-runde 2, F2-B1): `true` KUN når tittel, resultat og feil er holdt tilbake fra en skymodell fordi jobben ble startet fra en LÅST tur (`restricted_origin`; D-378). Utelatt ellers - et view som ikke er holdt tilbake er
+   * byte-likt det fra før N1 (også med begrenset-vakten AV).
+   */
+  withheld?: true;
+  /** WP-N1 (F2-B1): kort norsk forklaring, kun sammen med `withheld`. Uten sifre, id-er, tellinger og leverandørnavn. */
+  note_no?: string;
+  /**
+   * WP-N1 (fiks-runde 3, R3-1): TRUSTED boolean. `true` KUN i det UHOLDTE, modellvendte viewet (en LOKAL modell, begrenset-vakten på) for en jobb startet fra en LÅST tur - det lokale svaret kan gjengi resultatet, så samtalemotoren
+   * (`trackedExecutor`) låser turen når en `tasks.get_task_status`-output bærer feltet. Settes av `present` fra kontraktens `restricted_origin` (trusted kode) - aldri fra tittel, resultat, feil eller parametere. Utelatt ellers: eierens ruter,
+   * vakten AV, jobber uten merket og det tilbakeholdte skyviewet har ikke feltet.
+   */
+  restricted?: true;
 }
 
 interface JobRow {
@@ -97,6 +112,8 @@ interface JobRow {
   created_at: Date | string;
   finished_at: Date | string | null;
   delivered_at: Date | string | null;
+  /** WP-N1 (F2-B1): `'true'` når jobben ble startet fra en LÅST tur (kontraktens `restricted_origin`). Brukes kun til tilbakehold; `toView` ignorerer feltet. */
+  restricted_origin?: string | null;
 }
 
 const iso = (d: Date | string): string => (d instanceof Date ? d.toISOString() : new Date(d).toISOString());
@@ -115,11 +132,56 @@ function toView(r: JobRow): DelegatedJobView {
   };
 }
 
+/** WP-N1 (F2-B1): nøytral tittel for en jobb hvis tittel (de første tegnene av forespørselen) er holdt tilbake. Ingen tekst fra forespørselen. */
+export const WITHHELD_JOB_TITLE = "Bakgrunnsjobb (begrenset)";
+/**
+ * WP-N1 (F2-B1): merknaden en SKYmodell får i stedet for tittel/resultat/feil fra en jobb som ble startet fra en LÅST tur (D-378: kun lokal modell). Kort, norsk, uten sifre, id-er, tellinger eller leverandørnavn (låst av en test) -
+ * samme prinsipp som «holdt tilbake»-merknaden til utførelseslåsen for finansverktøyene.
+ */
+export const WITHHELD_JOB_NOTE_NO =
+  "Innholdet i denne bakgrunnsjobben (tittel, resultat og eventuell feil) er begrenset og holdes tilbake fra denne modellen, fordi jobben ble startet fra en samtale som holdes lokal. " +
+  "Si det kort til Tobias, uten å gjette på innholdet. Resultatet kommer i chatten når jobben er ferdig, og han kan spørre den lokale modellen om det.";
+
+/** WP-N1 (F2-B1): status og tidspunkter kan vises; tittel, resultat og feil (tekst fra den låste turen) gjør det ikke. */
+function withheldView(r: JobRow): DelegatedJobView {
+  return {
+    task_id: r.task_id,
+    title: WITHHELD_JOB_TITLE,
+    status: r.status,
+    result_text: null,
+    error: null,
+    created_at: iso(r.created_at),
+    finished_at: r.finished_at === null ? null : iso(r.finished_at),
+    delivered: r.delivered_at !== null,
+    withheld: true,
+    note_no: WITHHELD_JOB_NOTE_NO
+  };
+}
+
+/**
+ * WP-N1 (F2-B1): `opts.withholdRestricted` er KUN satt av `TasksDelegateTransport` når begrenset-vakten er på og kallet betjenes av en skymodell/ukjent modell. Uten valget er alt som før N1.
+ * WP-N1 (R3-1): `opts.markRestricted` er KUN satt av transporten når vakten er på og kallet betjenes av en LOKAL modell: viewet er det fulle, men en jobb med `restricted_origin` får den trusted booleanen `restricted: true`.
+ */
+export interface JobViewOptions {
+  withholdRestricted?: true;
+  markRestricted?: true;
+}
+function present(r: JobRow, opts: JobViewOptions | undefined): DelegatedJobView {
+  if (r.restricted_origin === "true") {
+    if (opts?.withholdRestricted === true) return withheldView(r);
+    if (opts?.markRestricted === true) return { ...toView(r), restricted: true as const };
+  }
+  return toView(r);
+}
+
 const DELEGATED = `contract->'input'->'data'->>'delegated_from_chat' = 'true'`;
 
 export interface ChatJobsOptions {
-  /** Lagrer leveringsmeldingen i opprinnelig økt (samtalehistorikk). */
-  saveMessage(identity: IdentityContext, role: "assistant", content: string): Promise<unknown>;
+  /**
+   * Lagrer leveringsmeldingen i opprinnelig økt (samtalehistorikk). `opts.restricted` (WP-N1, F-A2) er kun med når jobben ble startet fra en tur som var LÅST til SECRET_RESTRICTED (`restricted_origin` i kontrakten): leveringen
+   * lagres da begrenset (`messages.restricted`), så den ikke følger historikken til en senere skytur. Uten merket i kontrakten (og alltid med begrenset-vakten AV) kalles den med TRE argumenter, som før N1.
+   */
+  saveMessage(identity: IdentityContext, role: "assistant", content: string, opts?: { restricted: true }): Promise<unknown>;
   /** Valgfritt varsel (Telegram) - best effort, feil stopper aldri leveringen. */
   notify?(text: string): Promise<void>;
   log?(event: Record<string, unknown>): void;
@@ -129,10 +191,11 @@ export class ChatJobs {
   constructor(private readonly pool: pg.Pool, private readonly options: ChatJobsOptions) {}
 
   /** Eierens delegerte jobber (nyeste først) siste døgn, pluss alle som fortsatt kjører. */
-  async list(identity: Pick<IdentityContext, "tenant_id" | "person_id">, limit = 10): Promise<DelegatedJobView[]> {
+  async list(identity: Pick<IdentityContext, "tenant_id" | "person_id">, limit = 10, opts?: JobViewOptions): Promise<DelegatedJobView[]> {
     const res = await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
       client.query<JobRow>(
-        `SELECT task_id, goal, status, result, last_error, created_at, finished_at, delivered_at
+        `SELECT task_id, goal, status, result, last_error, created_at, finished_at, delivered_at,
+                contract->'input'->'data'->>'restricted_origin' AS restricted_origin
            FROM tasks
           WHERE owner_person_id = $1 AND ${DELEGATED}
             AND (status IN ('created', 'running', 'paused') OR created_at > now() - interval '24 hours')
@@ -140,18 +203,31 @@ export class ChatJobs {
         [identity.person_id, Math.min(Math.max(limit, 1), 25)]
       )
     );
-    return res.rows.map(toView);
+    return res.rows.map((r) => present(r, opts));
   }
 
-  async get(identity: Pick<IdentityContext, "tenant_id" | "person_id">, taskId: string): Promise<DelegatedJobView | null> {
+  async get(identity: Pick<IdentityContext, "tenant_id" | "person_id">, taskId: string, opts?: JobViewOptions): Promise<DelegatedJobView | null> {
     const res = await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
       client.query<JobRow>(
-        `SELECT task_id, goal, status, result, last_error, created_at, finished_at, delivered_at
+        `SELECT task_id, goal, status, result, last_error, created_at, finished_at, delivered_at,
+                contract->'input'->'data'->>'restricted_origin' AS restricted_origin
            FROM tasks WHERE task_id = $1 AND owner_person_id = $2 AND ${DELEGATED}`,
         [taskId, identity.person_id]
       )
     );
-    return res.rows[0] ? toView(res.rows[0]) : null;
+    return res.rows[0] ? present(res.rows[0], opts) : null;
+  }
+
+  /**
+   * WP-N1 (F2-B1b): ble jobben startet fra en LÅST tur (kontraktens `restricted_origin`, satt av trusted kode)? Brukes av hurtigbanens `jobbstatus <id>` (kun med begrenset-vakten på) til å låse turen FØR jobbens resultat gjengis i et svar
+   * som ellers ville ligget umerket i historikken. Leser kun nøkkelen (aldri innhold); en ukjent jobb gir `false` (det finnes ikke noe å holde tilbake). Gjelder alle jobber i tenanten (RLS), ikke bare delegerte: en innsendt jobb med nøkkelen
+   * kan bare gjøre svaret MER begrenset.
+   */
+  async isRestrictedOrigin(identity: Pick<IdentityContext, "tenant_id">, taskId: string): Promise<boolean> {
+    const res = await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
+      client.query<{ restricted: boolean | null }>(`SELECT (contract->'input'->'data'->>'restricted_origin') = 'true' AS restricted FROM tasks WHERE task_id = $1`, [taskId])
+    );
+    return res.rows[0]?.restricted === true;
   }
 
   async activeCount(identity: Pick<IdentityContext, "tenant_id" | "person_id">): Promise<number> {
@@ -171,9 +247,10 @@ export class ChatJobs {
    */
   async sweepDeliveries(base: IdentityContext): Promise<number> {
     const pending = await withTenantTransaction(this.pool, base.tenant_id, (client) =>
-      client.query<JobRow & { provenance: string | null }>(
+      client.query<JobRow & { provenance: string | null; restricted_origin: string | null }>(
         `SELECT task_id, goal, status, result, last_error, created_at, finished_at, delivered_at,
-                contract->'input'->>'provenance' AS provenance
+                contract->'input'->>'provenance' AS provenance,
+                contract->'input'->'data'->>'restricted_origin' AS restricted_origin
            FROM tasks
           WHERE delivered_at IS NULL AND status IN ('completed', 'failed', 'cancelled') AND ${DELEGATED}
           ORDER BY finished_at NULLS LAST LIMIT 10`
@@ -189,7 +266,11 @@ export class ChatJobs {
       const text = renderDelivery(view);
       const sessionId = row.provenance?.startsWith("chat:") ? row.provenance.slice("chat:".length) : undefined;
       try {
-        if (sessionId) await this.options.saveMessage({ ...base, session_id: sessionId }, "assistant", text);
+        // WP-N1 (F-A2): en jobb startet fra en LÅST tur (`restricted_origin`, satt av `TasksDelegateTransport` fra trusted kode) leveres begrenset. Kun eksakt `true` (JSON-teksten «true») teller; uten merket er kallet NØYAKTIG som før N1.
+        if (sessionId) {
+          if (row.restricted_origin === "true") await this.options.saveMessage({ ...base, session_id: sessionId }, "assistant", text, { restricted: true });
+          else await this.options.saveMessage({ ...base, session_id: sessionId }, "assistant", text);
+        }
         delivered += 1;
         this.options.log?.({ msg: "chat_job_delivered", task_id: row.task_id, status: row.status });
       } catch (error) {
@@ -225,7 +306,15 @@ const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as 
  * parametere). Kontrakten bygges her i trusted kode: modellen oppgir kun tittel, prompt og om jobben trenger lese-verktøy.
  */
 export class TasksDelegateTransport implements ToolTransport {
-  constructor(private readonly tasks: Pick<TaskService, "submit">, private readonly jobs: ChatJobs) {}
+  /**
+   * `withholdRestrictedFromCloud` (WP-N1, F2-B1): vakt-styrt «skal en jobb startet fra en LÅST tur holdes tilbake fra DENNE modellen?» - satt av `main.ts` KUN når begrenset-vakten er på (samme mønster som `withholdFinanceFromCloud`). Utelatt
+   * (vakten AV) = `get_task_status` er NØYAKTIG som før N1 (samme kall mot `ChatJobs`, samme view). Svaret er `true` for sky og alt ukjent (fail-closed); `false` uten `servingModel` (eierens ruter) og for en lokal modell.
+   */
+  constructor(
+    private readonly tasks: Pick<TaskService, "submit">,
+    private readonly jobs: ChatJobs,
+    private readonly withholdRestrictedFromCloud?: (model: { provider: string; model: string } | undefined) => boolean
+  ) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>, _credential: string, context?: ToolInvocationContext): Promise<{ data?: JsonValue }> {
     const identity = context?.identity;
@@ -267,7 +356,10 @@ export class TasksDelegateTransport implements ToolTransport {
             ...(useTools ? { tools: true } : {}),
             // D-449 (Q-50, eierens ja): jobber MED verktøy får bruke chattens skyrute (workeren avgjør selv ved kjøring: konfigurert rute, dagstak, fallback). Flagget settes her i trusted
             // kode; `POST /tasks/submit` avviser det i en innsendt kontrakt (det kan ikke forfalskes via API-et), og workeren klassifiserer oppgaveteksten på nytt uansett.
-            ...(cloudToolTurns ? { cloud_tool_turns_allowed: true } : {})
+            ...(cloudToolTurns ? { cloud_tool_turns_allowed: true } : {}),
+            // WP-N1 (F-A2): jobben ble delegert fra en tur som er LÅST til SECRET_RESTRICTED (D-378; satt av trusted kode: hurtigbanen eller `MeshToolExecutor`, aldri fra parametere) - leveringen av resultatet lagres da
+            // begrenset i samtalen (`ChatJobs.sweepDeliveries`). Settes kun når merket finnes, så en kontrakt uten (vakten AV) er byte-identisk med før N1. Merket kan bare ØKE begrensningen, så det trenger ikke være reservert i `/tasks/submit`.
+            ...(context?.restrictedOrigin === true ? { restricted_origin: true } : {})
           },
           trust_level: "internal",
           provenance: `chat:${identity.session_id}`
@@ -284,12 +376,23 @@ export class TasksDelegateTransport implements ToolTransport {
       return { data: { started: true, task_id: result.value.task_id, title, cloud_tool_turns: cloudToolTurns, message: "Jobben kjører i bakgrunnen. Si til Tobias at du gir beskjed i chatten når den er ferdig - han kan fortsette å snakke med deg." } };
     }
     if (action === "get_task_status") {
+      // WP-N1 (F2-B1): resultatet av en jobb startet fra en LÅST tur nås ellers av en skymodell (leveringsmeldingen merkes, men dette verktøyet leste jobben rått). Holdes tilbake VED UTFØRELSE, som utførelseslåsen for finans.
+      // WP-N1 (R3-1): en LOKAL modell får fortsatt det fulle viewet (D-378 pkt 2), men en jobb med `restricted_origin` bærer den trusted booleanen `restricted: true`, så samtalemotoren låser turen (svaret kan gjengi resultatet).
+      // Eierens ruter (ingen `servingModel`) og vakten AV (ingen predikat) får NØYAKTIG det gamle viewet og kallformen (to argumenter).
+      const model = context?.servingModel;
+      const withhold = this.withholdRestrictedFromCloud?.(model) === true;
+      const opts: JobViewOptions | undefined = withhold
+        ? { withholdRestricted: true }
+        : this.withholdRestrictedFromCloud !== undefined && model !== undefined
+          ? { markRestricted: true }
+          : undefined;
       const id = parameters["task_id"];
       if (typeof id === "string" && id.length > 0) {
-        const job = await this.jobs.get(identity, id);
+        const job = opts ? await this.jobs.get(identity, id, opts) : await this.jobs.get(identity, id);
         return { data: { job: (job ?? null) as unknown as JsonValue } };
       }
-      return { data: { jobs: (await this.jobs.list(identity, 8)) as unknown as JsonValue } };
+      const jobs = opts ? await this.jobs.list(identity, 8, opts) : await this.jobs.list(identity, 8);
+      return { data: { jobs: jobs as unknown as JsonValue } };
     }
     throw new Error(`unknown_tasks_action:${action}`);
   }

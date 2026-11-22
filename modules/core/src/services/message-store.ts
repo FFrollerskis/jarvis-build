@@ -11,15 +11,35 @@ export interface StoredMessage {
   role: MessageRole;
   content: string;
   created_at: string;
+  /**
+   * WP-N1 (Q-66, JARVIS-101): meldingen hører til en tur som var låst til SECRET_RESTRICTED (helse/finans, D-378) og skal behandles som SECRET_RESTRICTED uansett tekst.
+   * Settes kun av samtalemotoren når begrenset-vakten (WP-N1-flagget, se `apps/api/src/restricted-context-guard.ts`) er på; eldre rader og alle rader med flagget AV er `false`. Kolonnen er enveis (migrasjon 140).
+   */
+  restricted: boolean;
 }
 
 /** Sesjonshistorikk i Postgres under tenant-RLS. */
 export class MessageStore {
   constructor(private readonly pool: pg.Pool) {}
 
-  async save(identity: IdentityContext, role: MessageRole, content: string): Promise<string> {
+  /**
+   * `opts.restricted` (WP-N1; alt unntatt `undefined`/`false` regnes som begrenset, fail-closed) lagrer meldingen som begrenset fra første stund (assistentsvar fra en låst tur). Uten valget er SQL-en og revisjonsraden NØYAKTIG som før N1 - kolonnen settes aldri
+   * (standard `false`). Revisjonen bærer aldri innhold; en begrenset lagring har i tillegg `restricted: true` i nyttelasten.
+   */
+  async save(identity: IdentityContext, role: MessageRole, content: string, opts: { restricted?: boolean } = {}): Promise<string> {
+    // Fiks-runde 1 (F-B4/I2): FAIL-CLOSED normalisering for JS-kallere uten TS-typer - ALT som ikke er `undefined`/`false` lagres begrenset (`"true"`, `1`, `null`, `{}` ...). Kun et eksplisitt valg om å IKKE begrense gir en vanlig rad.
+    const restricted = opts?.restricted !== undefined && opts.restricted !== false;
     return withTenantTransaction(this.pool, identity.tenant_id, async (client) => {
       const messageId = `msg-${randomUUID()}`;
+      if (restricted) {
+        await client.query(
+          `INSERT INTO messages (message_id, tenant_id, session_id, role, content, restricted)
+           VALUES ($1, $2, $3, $4, $5, true)`,
+          [messageId, identity.tenant_id, identity.session_id, role, content]
+        );
+        await writeAudit(client, identity, { type: "message.saved", payload: { role, restricted: true } });
+        return messageId;
+      }
       await client.query(
         `INSERT INTO messages (message_id, tenant_id, session_id, role, content)
          VALUES ($1, $2, $3, $4, $5)`,
@@ -30,10 +50,34 @@ export class MessageStore {
     });
   }
 
+  /**
+   * WP-N1: merker en allerede lagret melding som begrenset (brukermeldingen lagres FØR rutingen er kjent og merkes når en låst rute er avgjort). Idempotent og enveis: en melding som allerede er begrenset
+   * endres ikke og gir ingen ny revisjonsrad. Gjelder KUN egen tenant (RLS + eksplisitt `tenant_id`) og egen sesjon (`identity.session_id`) - en annen tenants eller sesjons melding berøres aldri.
+   * Returnerer `true` når meldingen finnes i egen tenant/sesjon og nå er (eller allerede var) begrenset, `false` når den ikke finnes der. Revisjonen bærer kun meldings-id-en, aldri innhold.
+   */
+  async markRestricted(identity: IdentityContext, messageId: string): Promise<boolean> {
+    return withTenantTransaction(this.pool, identity.tenant_id, async (client) => {
+      const updated = await client.query(
+        `UPDATE messages SET restricted = true
+          WHERE message_id = $1 AND tenant_id = $2 AND session_id = $3 AND restricted = false`,
+        [messageId, identity.tenant_id, identity.session_id]
+      );
+      if ((updated.rowCount ?? 0) > 0) {
+        await writeAudit(client, identity, { type: "message.restricted_marked", payload: { message_id: messageId } });
+        return true;
+      }
+      const existing = await client.query(
+        `SELECT 1 FROM messages WHERE message_id = $1 AND tenant_id = $2 AND session_id = $3`,
+        [messageId, identity.tenant_id, identity.session_id]
+      );
+      return (existing.rowCount ?? 0) > 0;
+    });
+  }
+
   async history(identity: IdentityContext, limit = 20): Promise<StoredMessage[]> {
     return withTenantTransaction(this.pool, identity.tenant_id, async (client) => {
       const result = await client.query(
-        `SELECT message_id, role, content, created_at FROM messages
+        `SELECT message_id, role, content, created_at, restricted FROM messages
          WHERE session_id = $1 ORDER BY created_at DESC, message_id DESC LIMIT $2`,
         [identity.session_id, limit]
       );

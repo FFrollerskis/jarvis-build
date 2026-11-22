@@ -119,6 +119,10 @@ export interface ControlSurfaceStatus {
   owner_control: OwnerControlState;
   situation_domain_pauses: { paused: string[] };
   finance_kill_switch: FinanceKillSwitch | null;
+  /**
+   * WP-N1 (F-B1): `true` KUN når finans-nødbryteren er holdt tilbake fra en skymodell (D-378: finansdata er SECRET_RESTRICTED) - da er `finance_kill_switch` `null` uten at det betyr «aldri en rad». Utelatt ellers (felt som før N1).
+   */
+  finance_kill_switch_withheld?: true;
 }
 
 /**
@@ -146,6 +150,8 @@ export interface DelegationBoard {
   frozen_connectors: FrozenConnectorEntry[];
   revoked_credentials: RevokedCredentialEntry[];
   finance_kill_switch: FinanceKillSwitch | null;
+  /** WP-N1 (F-B1): se `ControlSurfaceStatus.finance_kill_switch_withheld`. */
+  finance_kill_switch_withheld?: true;
 }
 
 /**

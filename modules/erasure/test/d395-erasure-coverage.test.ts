@@ -83,6 +83,11 @@ const BASELINE_REASON: Record<string, string> = {
   erasure_fingerprints: "APPEND_ONLY_EVIDENCE",
   erasure_requests: "APPEND_ONLY_EVIDENCE",
   events: "APPEND_ONLY_EVIDENCE",
+  // WP-K (D-471, JARVIS-053, migrasjon 108): policy-journalen er append-only (ingen DELETE-grant for runtime; kun `prune_policy_decisions()` sletter, etter 90 dager) og inneholder kun metadata - samme kategori som `audit_events`/`tool_executions`.
+  // PRESIS (review L3): tabellen er IKKE dekket av noen erasure-plan og slettes IKKE av en kaskade - dette er en oppføring i GJELDSREGISTERET, ikke en løsning. `tenant_id` har FK mot `tenants` UTEN `ON DELETE CASCADE`, så en hard
+  // `DELETE FROM tenants` (admin-opprydding) må først slette tenantens `policy_decisions` som admin, og `person_id` står i klartekst til retensjonen (standard 90 dager, gulv 30) har ryddet raden. Om erasure skal pseudonymisere
+  // `person_id` her er en eierbeslutning sammen med `audit_events` (JARVIS-030/074) - ikke tatt i WP-K, og tabellen er tom så lenge `JARVIS_POLICY_AUDIT_SINK` er AV.
+  policy_decisions: "APPEND_ONLY_EVIDENCE",
   revoked_device_keys: "APPEND_ONLY_EVIDENCE",
   tool_executions: "APPEND_ONLY_EVIDENCE",
   // IDENTITY_SCAFFOLD: identitets-/strukturrader som følger tenant-/person-slettingen på høyere nivå (tenants/people), ikke en datainnholds-sletting per scope
@@ -118,6 +123,9 @@ const BASELINE_REASON: Record<string, string> = {
   memory_sources: "OPERATIONAL",
   situation_autonomy_policies: "OPERATIONAL",
   situation_notification_policies: "OPERATIONAL",
+  // WP-G3 (D-465, migrasjon 134): ARBEIDSKØ for sletting av bildeobjekter (kun lagringsnøkler - ingen person-, bilde- eller hendelsesdata). BEVISST ikke i erasure-planen: å slette en gravstein
+  // før objektet er bekreftet borte ville etterlatt et foreldreløst bilde. Raden fjernes av reaperen (modules/vision/src/snapshots.ts) først når StorageAdapter har bekreftet slettingen.
+  vision_snapshot_tombstones: "OPERATIONAL",
   tasks: "OPERATIONAL",
 };
 

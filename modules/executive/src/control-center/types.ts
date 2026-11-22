@@ -20,10 +20,24 @@ import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 export const CONTROL_CENTER_IDS = [
   "integration", "authority", "ai", "finance", "memory", "agent", "operations", "value", "privacy", "security"
 ] as const;
-export type ControlCenterId = (typeof CONTROL_CENTER_IDS)[number];
 
+/**
+ * WP-B3 (D-475, EV-22): TILLEGGSSENTRE utenfor masterplanens ti. Masterplanens ti (`CONTROL_CENTER_IDS`) er uendret (og telles fortsatt som «N av 10»); et tilleggssenter er alltid valgfritt og finnes KUN når
+ * eierens flagg er på: det listes aldri som «ikke koblet inn», teller ikke i «av 10», og er ikke et gyldig `center`-valg for verktøyskjemaet eller ruten før flagget er på - så med flagget AV er alt som på main.
+ */
+export const EXTENSION_CONTROL_CENTER_IDS = ["evolution"] as const;
+export type ExtensionControlCenterId = (typeof EXTENSION_CONTROL_CENTER_IDS)[number];
+export type ControlCenterId = (typeof CONTROL_CENTER_IDS)[number] | ExtensionControlCenterId;
+/** Alle kjente sentre i visningsrekkefølge: masterplanens ti, deretter tilleggssentrene. */
+export const ALL_CONTROL_CENTER_IDS: readonly ControlCenterId[] = [...CONTROL_CENTER_IDS, ...EXTENSION_CONTROL_CENTER_IDS];
+
+/** Kjent senter-id (masterplanens ti OG tilleggssentre). Om et tilleggssenter er PÅ avgjøres av flagget/registeret, ikke av denne funksjonen. */
 export function isControlCenterId(value: unknown): value is ControlCenterId {
-  return typeof value === "string" && (CONTROL_CENTER_IDS as readonly string[]).includes(value);
+  return typeof value === "string" && (ALL_CONTROL_CENTER_IDS as readonly string[]).includes(value);
+}
+
+export function isExtensionControlCenterId(value: unknown): value is ExtensionControlCenterId {
+  return typeof value === "string" && (EXTENSION_CONTROL_CENTER_IDS as readonly string[]).includes(value);
 }
 
 /**
@@ -99,7 +113,9 @@ export const CONTROL_ACTION_ALLOWED: Readonly<Record<ControlActionEndpoint, read
     "enable_finance_kill_switch", "disable_finance_kill_switch",
     "cancel_task",
     // WP-H2 (additivt): `revoke_autonomy_binding` (klasse C, eier-kun + step-up; kun med JARVIS_CONTROL_AUTONOMY_REVOKE=on) og `run_golden_suite` (klasse A, lesende selvtest; kun med JARVIS_CONTROL_GOLDEN_SUITE=on).
-    "revoke_autonomy_binding", "run_golden_suite"
+    "revoke_autonomy_binding", "run_golden_suite",
+    // WP-B3 (D-475, EV-23; additivt): `record_evolution_decision` (klasse C, eier + signert enhet + step-up; KUN registrering i revisjonssporet, ingen virkning; kun med JARVIS_CONTROL_EVOLUTION_APPROVAL=on).
+    "record_evolution_decision"
   ],
   "/owner-controls/connector-credentials": ["test_connector"]
 };

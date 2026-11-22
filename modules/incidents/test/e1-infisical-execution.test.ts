@@ -99,7 +99,24 @@ describe("Infisical-rotasjon i den sammenhengende infra-journalen", () => {
     fx.rotationFails = true;
     const failed = await mutate(r.id, key("fail"));
     fx.rotationFails = false;
-    expect(failed.verification_outcome).toBe("FAILED");
-    expect((failed.provider_receipt as { reason: string }).reason).toMatch(/^tool_failed:infisical_rotation_failed/);
+    // WP-K (M-1 + delta-review L-1): leverandøren aksepterte POST-en og melder så «failed» - utfallet er UKJENT (ledger `unverified`), og journalen sier det samme (UNKNOWN), ikke FAILED.
+    expect(failed.verification_outcome).toBe("UNKNOWN");
+    expect((failed.provider_receipt as { reason: string }).reason).toMatch(/^tool_failed:outcome_unknown:infisical_rotation_failed/);
+  });
+
+  it("WP-K M-1/L-1: readback som feiler ETTER akseptert rotate-POST journalføres som UNKNOWN (ledger `unverified`), og en gjentatt nøkkel gir samme rad uten en ANDRE rotasjon", async () => {
+    const r = fx.seedRotation();
+    allowed = [r.id];
+    fx.failReadbackAfterRotate(503, { times: 3 });
+    const k = key("readback");
+    const first = await mutate(r.id, k);
+    fx.clearReadbackFailure();
+    expect(first).toMatchObject({ verification_outcome: "UNKNOWN", risk_class: "D", target: `infisical:rotation:${r.id}` });
+    expect((first.provider_receipt as { reason: string }).reason).toBe("tool_failed:outcome_unknown:infisical_rotation_readback_failed");
+    const ledgerRow = (await admin.query("SELECT status FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2", [TENANT, k])).rows[0] as { status: string };
+    expect(ledgerRow.status).toBe("unverified");
+    const again = await mutate(r.id, k);
+    expect(again.execution_id).toBe(first.execution_id);
+    expect(fx.requestsMatching("POST", /rotate-secrets$/).filter((q) => q.path.includes(r.id))).toHaveLength(1);
   });
 });

@@ -1,6 +1,6 @@
 import type { ToolCallRequest, ToolDefinition as MeshToolDefinition, ToolResultMessage } from "@jarvis/provider-adapters";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { jobContractAllows, type ToolGateway } from "./gateway.ts";
+import { isUnknownOutcomeReason, jobContractAllows, type ToolDefinition, type ToolGateway } from "./gateway.ts";
 import { ownerStatesMemory } from "./owner-stated-memory.ts";
 import type { JobContract, JsonValue } from "@jarvis/contracts";
 import { SURFACE_TOOL_GRANTS, requiresConfirmationWhenTainted, scopeFieldsOf, type ToolManifest } from "./tool-manifest.ts";
@@ -373,6 +373,13 @@ export function chatReadTierMeshTools(
 }
 
 /**
+ * WP-N1 (fiks-runde 2, F2-A1): grunnen en bekreftelse får når den opprettes i en tur som er LÅST til SECRET_RESTRICTED (`TurnContext.restricted`, kun satt av samtalemotoren med begrenset-vakten på). Kortet bærer den i `taint_reasons`, og
+ * `/confirmations` bruker den etter godkjenning til å utføre en delegert bakgrunnsjobb med `restrictedOrigin` (ellers mistet jobben merket når utførelsen flyttet fra executoren til godkjenningsruten). Nøytral intern kode: ingen innhold,
+ * tall eller leverandørnavn. Settes IKKE på turens taint (kun på kortets grunner), så den kan aldri gjøre en ren tur «tainted».
+ */
+export const RESTRICTED_TURN_REASON = "restricted_turn";
+
+/**
  * Del 3 (JARVIS-002/014): bekreftelsesport (strukturell grensesnitt - implementert av `ConfirmationStore` i @jarvis/core). Executoren bruker den
  * KUN i en tainted tur for handlinger som krever ny bekreftelse. Modellen når aldri denne porten.
  */
@@ -445,6 +452,12 @@ export class MeshToolExecutor {
     };
   }
 
+  /** Klasse A (ren lesing) ifølge gatewayens registrerte definisjon. Enkle test-fakes uten `get`, og ukjente verktøy, regnes IKKE som lesing (konservativt). */
+  private isReadOnly(mapped: { tool_id: string; action: string }): boolean {
+    const definition = (this.toolGateway as { get?: (toolId: string, action: string) => ToolDefinition | undefined }).get?.(mapped.tool_id, mapped.action);
+    return definition?.capability_class === "A";
+  }
+
   /** Tjenestene som faktisk finnes på turens flate (til «verktøyet finnes ikke»-forklaringen). */
   private availableServices(): string[] {
     const surface = this.turn?.surface;
@@ -508,7 +521,8 @@ export class MeshToolExecutor {
       if (isAct || taintedNeeds) {
         const gate = this.guards.confirmations;
         const identity = this.identity as { tenant_id: string; person_id: string; device_id?: string; session_id?: string };
-        const reasons = [...(turn?.taint?.reasons ?? []), ...(isAct ? ["owner_action_tier"] : [])];
+        // WP-N1 (F2-A1): en bekreftelse opprettet i en LÅST tur bærer `restricted_turn`, så godkjenningsruten kan utføre en delegert jobb med `restrictedOrigin`. Uten merket på turen (vakten AV) er listen NØYAKTIG som før N1.
+        const reasons = [...(turn?.taint?.reasons ?? []), ...(isAct ? ["owner_action_tier"] : []), ...(turn?.restricted === true ? [RESTRICTED_TURN_REASON] : [])];
         const check = gate
           ? await gate.checkAndConsume({ tool_id: mapped.tool_id, action: mapped.action, parameters: parameters as Record<string, JsonValue> }, identity, reasons)
           : ({ ok: false, reason: "confirmation_unavailable" } as { ok: false; reason: string; confirmation_id?: string });
@@ -540,10 +554,14 @@ export class MeshToolExecutor {
       // D-317: `call.provider`/`.model` er stemplet av selve adapteren som genererte
       // DENNE turen (se ToolCallRequest sitt filhode i provider-adapters) - ALDRI fra
       // modell-oppgitte argumenter, SAMME trusted-lag-kanal som identity/approval.
-      servingModel: { provider: call.provider, model: call.model }
+      servingModel: { provider: call.provider, model: call.model },
+      // WP-N1 (F-A2): turen er låst til SECRET_RESTRICTED (satt av samtalemotoren, aldri fra argumentene) - en delegert bakgrunnsjobb får da leveringen sin lagret begrenset. Uten merket (vakten AV): ingen ny nøkkel.
+      ...(this.turn?.restricted === true ? { restrictedOrigin: true as const } : {})
     });
     if (!result.ok) {
-      return this.failure(call, result.reason, at, failCtx, ctx.idempotency_key);
+      // WP-K (delta-review L-1): ukjent utfall på en HANDLING gir «ikke kjør på nytt» (retry never); en ren lesing (klasse A) har ingenting å ha utført og beholder «prøv igjen senere».
+      const readOnly = isUnknownOutcomeReason(result.reason) && this.isReadOnly(mapped);
+      return this.failure(call, result.reason, at, readOnly ? { ...failCtx, read_only: true } : failCtx, ctx.idempotency_key);
     }
     let output: unknown = result.data ?? null;
     const serialized = JSON.stringify(output);

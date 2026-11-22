@@ -2,6 +2,7 @@ import { envInt, type DataSensitivity, type IdentityContext } from "@jarvis/cont
 import { ContextBuilder, MessageStore, delegationRequestVariants, describeSecretFindings, fastRoute, scanForSecrets } from "@jarvis/core";
 import {
   BudgetExceededError,
+  ClaudeBudgetBlockedError,
   CouncilAutoTriggerLimiter,
   classifyContentSensitivity,
   partitionHistoryBySensitivity,
@@ -29,8 +30,9 @@ import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type CouncilSubmitResult, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
 import { chatKnowledgeWithheldNote, chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
-import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, reserveModelNote, stripSourceMarkerIds, stripSystemNotes } from "./tool-turn-route.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, claudeBudgetRouteNote, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, reserveModelNote, stripSourceMarkerIds, stripSystemNotes } from "./tool-turn-route.ts";
 import { DEFAULT_CHAT_CANDIDATES, type ChatCandidates } from "./chat-candidates.ts";
+import { FAST_INTENT_RESTRICTED, RestrictedTurnMarker, toolOutputBearsRestrictedJob } from "./restricted-context-guard.ts";
 
 export interface ConversationDeps {
   messages: MessageStore;
@@ -57,10 +59,12 @@ export interface ConversationDeps {
    * D-424: «… i bakgrunnen» for hurtigbanen (`tasks.delegate_background_task` via Tool Gateway/Policy - eierens egen melding, ikke modellens valg).
    * D-449: `options.cloudAllowed` er motorens EGEN avgjørelse (samme regler som chatten bruker for en verktøytur: eierens ruteoverstyring, de siste meldingene, minnerommet, innlimt tekst) - kun `true`
    * lar jobben bruke skyruten. Udefinert/`false` = jobben kjører lokalt som før D-449 (fail-closed).
+   * WP-N1 (F-A2): `options.restricted` er KUN satt (og da `true`) når begrenset-vakten er på og ruteavgjørelsen er LÅST til SECRET_RESTRICTED - leveringen av jobbresultatet lagres da begrenset i samtalen. Uten (vakten AV) er
+   * `options` nøyaktig som før N1 (`{ cloudAllowed }`).
    * Svaret har `cloud`: om jobben FAKTISK fikk skyflagget. Det kan være `false` selv når motoren sa ja, fordi transporten gjør en egen kontroll av selve jobbteksten (gjennomgang nr. 4: et slikt stille
    * lokalt-utfall skal ha merknad).
    */
-  delegateBackground?: { run(identity: IdentityContext, prompt: string, options?: { cloudAllowed: boolean }): Promise<{ started: boolean; reply: string; cloud: boolean } | null> };
+  delegateBackground?: { run(identity: IdentityContext, prompt: string, options?: { cloudAllowed: boolean; restricted?: true }): Promise<{ started: boolean; reply: string; cloud: boolean } | null> };
   /** D-395: injiserbar begrenser for automatisk råd-trigger (tester); default bygges fra JARVIS_COUNCIL_AUTO_MAX_PER_HOUR. */
   councilAutoLimiter?: CouncilAutoTriggerLimiter;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
@@ -157,9 +161,23 @@ export interface ConversationDeps {
    * (identisk med oppførsel før D-214).
    */
   personality?: () => PersonalityConfig;
+  /**
+   * WP-N1 (Q-66/JARVIS-101): «begrenset»-vakten (flagget parses ÉN gang i `restricted-context-guard.ts`; `main.ts` setter dette KUN når det er på). `true`: (1) en tur som er låst til SECRET_RESTRICTED merker brukermeldingen og
+   * ALLE meldinger som lagres for turen (`messages.restricted`), (2) historikkens merker leses (en merket rad regnes som SECRET_RESTRICTED uansett tekst, løfter en tur den blir værende i, og holdes utenfor skyvarianten),
+   * (3) minneuttrekket får ikke merkede rader som kontekst. Udefinert/`false` = NØYAKTIG som før N1: kolonnen settes aldri, `messages.save` kalles med tre argumenter, merker i historikken ignoreres helt.
+   */
+  restrictedContextGuard?: boolean;
+  /**
+   * WP-N1 (fiks-runde 2, F2-B1b): ble en jobb startet fra en LÅST tur (`restricted_origin`)? `main.ts` setter dette KUN med vakten på. Hurtigbanens `jobbstatus <id>` gjengir jobbens resultat i et svar; er jobben begrenset, låses turen FØR svaret
+   * lagres (bruker- og assistentrad lagres begrenset). Kan opprinnelsen ikke avgjøres (feil, eller `jobOrigin` mangler med vakten på - R3-2), regnes jobben som begrenset (fail-closed). Vakten AV: `jobbstatus` er som før N1 (ingen markør, ingen oppslag).
+   */
+  jobOrigin?: { isRestricted(identity: IdentityContext, taskId: string): Promise<boolean> };
 }
 
-type HistoryRow = { role: "assistant" | "user"; content: string };
+type HistoryRow = { role: "assistant" | "user"; content: string; /** WP-N1: raden hører til en tur som var låst til SECRET_RESTRICTED (kun satt når vakten er på). */ restricted?: boolean };
+
+/** WP-N1: kun `role` og `content` går til modellen. Et `restricted`-merke er intern tilstand og skal aldri krysse grensen til en leverandør (verken som felt eller som innhold). */
+const wireMessages = (rows: ReadonlyArray<HistoryRow>): Array<{ role: HistoryRow["role"]; content: string }> => rows.map(({ role, content }) => ({ role, content }));
 type ToolSelection = ReturnType<NonNullable<NonNullable<ConversationDeps["tools"]>["select"]>>;
 
 /**
@@ -359,7 +377,9 @@ export class ConversationEngine {
       const last = rows[rows.length - 1];
       const withoutCurrent = last && last.role === "user" && last.content === currentText ? rows.slice(0, -1) : rows;
       // Rutemerknadene Jarvis selv la bak svar (D-447, dagstak, Q-51 D) er til eieren og sendes aldri til en modell; uten stripping låste merknadene selv minneuttrekket lokalt (gjennomgang av WP-A, D-451).
-      return withoutCurrent.slice(-4).map((m) => ({ role: m.role as "user" | "assistant", content: (m.role === "assistant" ? stripSystemNotes(m.content) : m.content).slice(0, 400) }));
+      // WP-N1: med vakten på sendes ikke merkede rader (lokale svar fra låste turer) videre som kontekst til minneuttrekket. Uten vakten er listen uendret.
+      const recent = withoutCurrent.slice(-4);
+      return (this.deps.restrictedContextGuard === true ? recent.filter((m) => m.restricted !== true) : recent).map((m) => ({ role: m.role as "user" | "assistant", content: (m.role === "assistant" ? stripSystemNotes(m.content) : m.content).slice(0, 400) }));
     } catch {
       return [];
     }
@@ -380,7 +400,9 @@ export class ConversationEngine {
      */
     onToolCall?: (toolName: string) => void
   ): Promise<ChatReply> {
-    await this.deps.messages.save(identity, "user", text);
+    const userMessageId = await this.deps.messages.save(identity, "user", text);
+    // WP-N1: markøren finnes KUN med vakten på. Brukermeldingen lagres før rutingen er kjent og merkes først når turen er avgjort låst (`lock()`).
+    const marker = this.deps.restrictedContextGuard === true ? new RestrictedTurnMarker(this.deps.messages, identity, userMessageId) : undefined;
 
     // D-283: skriver eierens RÅ ord til minnet, UAVHENGIG av rute (rask bane/
     // Council/modell) - alle tre grener representerer noe eieren faktisk sa.
@@ -390,6 +412,7 @@ export class ConversationEngine {
     // godkjenning finnes (chat-id alene er ikke nok autoritet for skriving) - derfor ingen minneskriving fra Telegram.
     const surface = surfaceForChannel(identity.channel);
     const turn = createTurnContext(surface, text);
+    marker?.attachTurn(turn); // WP-N1 (F-A2): en turbilde-markering `restricted` følger låsen (kun med vakten på)
     // Del 3: ingen minneskriving av en melding som inneholdt en hemmelighet; lange/innlimte tekster (e-post, dokumenter) regnes ikke
     // som eierens egne ord (JARVIS-013) og går via karantene i stedet for å bli aktivt, betrodd minne.
     const intent = fastRoute(text);
@@ -410,7 +433,10 @@ export class ConversationEngine {
 
     if (intent) {
       const started = Date.now();
-      const result = await this.handleFastIntent(identity, intent, text, surface, provider);
+      // WP-N1: svar som bærer finansavledet innhold (AI-kost i øre: kostnads-, verdi- og tjenestemålsrapporten og selvdiagnosen, Q-64 pkt 1 strengeste regel) merkes begrenset (brukermelding og svar) FØR intensjonen kjøres. Bakgrunnsjobber
+      // låses inne i `handleFastIntent` FØR jobben startes (F-A6: en kastet merking skal ikke etterlate en kjørende jobb).
+      if (marker && FAST_INTENT_RESTRICTED[intent.kind]) await marker.lock([`fast_intent:${intent.kind}`]);
+      const result = await this.handleFastIntent(identity, intent, text, surface, provider, marker);
       await this.deps.trace.record({
         trace_id: `trace-${randomUUID()}`,
         kind: "fast_route",
@@ -422,7 +448,7 @@ export class ConversationEngine {
         metadata: { llm_used: false }
       });
       onToken?.(result.reply);
-      await this.deps.messages.save(identity, "assistant", result.reply);
+      await this.saveAssistant(identity, result.reply, marker);
       return result;
     }
 
@@ -491,7 +517,7 @@ export class ConversationEngine {
         }
       }
       if (triggerSource && councilAllowed) {
-        return this.runCouncil(identity, text, triggerSource, classification, override, surface, onToken);
+        return this.runCouncil(identity, text, triggerSource, classification, override, surface, onToken, marker);
       }
     }
 
@@ -603,6 +629,9 @@ export class ConversationEngine {
       const fullView: TurnView = { history, selection, toolDefinitions, sensitivityDecision };
       const primaryView: TurnView = cloudVariant ?? fullView;
       if (cloudVariant !== undefined) console.log(JSON.stringify({ msg: "q51_cloud_variant_without_sensitive_messages", withheld: cloudVariant.withheld, reasons: sensitivityDecision.reasons }));
+      // WP-N1 (K3): er det som FAKTISK sendes i første forsøk SECRET_RESTRICTED (verktøyutvalg-lås D-381, minne, tekst, eller en merket rad som ble værende i konteksten) - og ikke en trygg skyvariant - låses turen: brukermeldingen
+      // merkes nå (FØR modellkallet), og alle meldinger som lagres for turen (svar, feil-, avbrudds- og budsjettstopp-svar) lagres begrenset. En skyvariant er trygg og merkes ikke; faller den tilbake til den strenge lokale visningen, låses turen da (se `fellBackToFullView`).
+      if (marker && primaryView.sensitivityDecision.sensitivity === "SECRET_RESTRICTED") await marker.lock(primaryView.sensitivityDecision.reasons);
       // WP-D4 (JARVIS-033): standardkjeden (hard liste, failover inne i gatewayen - hver port gjelder per medlem) og sporet over hvem som feilet før noen svarte, til merknaden bak svaret.
       const chat = this.deps.chatCandidates ?? DEFAULT_CHAT_CANDIDATES;
       const reserveFailed = new Set<string>();
@@ -622,7 +651,7 @@ export class ConversationEngine {
         ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
         // D-382: tale skal være kort (TTS-latens og muntlig form) - teksten styres av prompten, taket er et sikkerhetsnett.
         request: {
-          system, messages: primaryView.history, max_tokens: surface === "voice" ? 320 : 1024,
+          system, messages: wireMessages(primaryView.history), max_tokens: surface === "voice" ? 320 : 1024,
           ...(toolsToCloud && toolRoute?.model ? { model: toolRoute.model } : {})
         }
       };
@@ -661,6 +690,10 @@ export class ConversationEngine {
           if (o && o.confirmation_required === true && typeof o.confirmation_id === "string" && !confirmations.some((c) => c.confirmation_id === o.confirmation_id)) {
             confirmations.push({ confirmation_id: o.confirmation_id, tool: out.source ?? call.tool_name, status: o.status ?? "confirmation_required" });
           }
+          // WP-N1 (R3-1): en LOKAL modell i en tur som ikke var låst (dagstak, `JARVIS_TOOL_TURN_MODEL=off` eller fallback) får det fulle jobbviewet fra `tasks.get_task_status`; bærer det en restricted-origin-jobb (den TRUSTED booleanen
+          // `restricted`, satt av `ChatJobs` fra kontrakten - aldri fra tekst, og kun fra denne kilden), låses turen NÅ: brukermeldingen merkes og alle svar som lagres for turen (som kan gjengi resultatet) lagres begrenset. En SKYmodell
+          // får det tilbakeholdte viewet uten feltet og trenger ingen lås. Kaster merkingen, feiler turen (`restricted_marking_failed`) som ved lås før modellkallet. Kun med vakten på (`marker` finnes ellers ikke).
+          if (marker && !servedByCloudModel(call) && toolOutputBearsRestrictedJob(out.source, out.output)) await marker.lock(["tool_output:tasks.get_task_status"]);
           return out;
         }
       });
@@ -677,6 +710,7 @@ export class ConversationEngine {
       let withheldKnowledgeFromCloud = 0; // WP-D1: kunnskapstreff har egen merknad (egen prefiks i SYSTEM_NOTE_PREFIXES)
       const screenedExecutor = (): ToolExecutor =>
         cloudScreenedExecutor(
+          // WP-N1 (F-A2): en LÅST tur (kun med vakten på) har `turn.restricted === true` (satt av markøren når turen låses, se `RestrictedTurnMarker.attachTurn`), så delegerte bakgrunnsjobber får `restricted_origin`. Vakten AV: `turn` uendret.
           this.deps.tools!.executorFor(identity, turn),
           ({ tool, withheld }) => {
             if (tool.startsWith("knowledge.")) withheldKnowledgeFromCloud += withheld;
@@ -701,8 +735,13 @@ export class ConversationEngine {
             : this.deps.gateway.complete(callInput);
       // Q-51 D: en lokal reserve etter at skyvarianten feilet får ALLTID hele historikken og den opprinnelige, strenge sensitiviteten (SECRET_RESTRICTED → routeren slipper kun lokale modeller).
       let servedByVariant = cloudVariant !== undefined;
+      // WP-N1: faller en skyvariant tilbake til den lokale reserven, er det nå den STRENGE visningen (hele historikken, SECRET_RESTRICTED) som svarer - turen låses og alt som lagres for den merkes.
+      const fellBackToFullView = async (): Promise<void> => {
+        servedByVariant = false;
+        if (marker && cloudVariant !== undefined && fullView.sensitivityDecision.sensitivity === "SECRET_RESTRICTED") await marker.lock(fullView.sensitivityDecision.reasons);
+      };
       const toFullView = <T extends typeof input>(i: T): T =>
-        cloudVariant === undefined ? i : { ...i, sensitivity: sensitivityDecision.sensitivity, request: { ...i.request, messages: fullView.history } };
+        cloudVariant === undefined ? i : { ...i, sensitivity: sensitivityDecision.sensitivity, request: { ...i.request, messages: wireMessages(fullView.history) } };
       let result;
       try {
         result = await callGateway(input);
@@ -730,7 +769,7 @@ export class ConversationEngine {
               reason: err.message
             })
           );
-          servedByVariant = false;
+          await fellBackToFullView();
           result = await callGateway(toFullView(stripRouteModel(fallbackInput)), fullView);
         } else if (
           // D-404: «Gemma først» er en HARD preferanse (ingen stille sky-fallback ved planlegging), men når den lokale leverandøren er nede (PC av,
@@ -751,7 +790,7 @@ export class ConversationEngine {
           console.error(
             JSON.stringify({ msg: "d404_gemma_provider_failed_fallback", provider: err.provider, kind: err.kind, omitted_preference: omittedGemmaPreference })
           );
-          servedByVariant = false;
+          await fellBackToFullView();
           // L6 (gjennomgang av PR #315): omkjøringen gjennom vanlig ruting skal ikke gjenta leverandørene som allerede er forsøkt i kjeden (hver prøvde opptil to ganger; målt: opptil 4 kall til samme leverandør og 11 per tur).
           // Er alt som ellers kvalifiserer allerede forsøkt, er den ærligste feilen den opprinnelige fra kjeden - ikke «ingen kvalifisert leverandør».
           try {
@@ -774,7 +813,7 @@ export class ConversationEngine {
           console.error(JSON.stringify({ msg: "d431_cloud_tools_failed_fallback_local", kind: err.kind }));
           const { model: omittedCloudModel, ...localRequest } = input.request;
           void omittedCloudModel;
-          servedByVariant = false;
+          await fellBackToFullView();
           result = await callGateway(toFullView({ ...input, request: localRequest, providerPreference: ["gemma_local", "gemma_hosted"] }), fullView);
         } else if (
           useTools &&
@@ -811,27 +850,36 @@ export class ConversationEngine {
       const reserveUsed = reserveFailedBeforeAnswer.length > 0 || (reserveFailed.size > 0 && earlierCloud.length > 0);
       const reserveNote = reserveUsed && surface !== "voice" ? reserveModelNote([...reserveFailed], result.provider, servedByCloudModel(result), earlierCloud) : "";
       if (reserveUsed) console.log(JSON.stringify({ msg: "wpd4_chat_reserve_used", failed: reserveFailedBeforeAnswer.length > 0 ? reserveFailedBeforeAnswer : [...reserveFailed], served: result.provider, cloud: servedByCloudModel(result), ...(earlierCloud.length > 0 ? { earlier_cloud: earlierCloud } : {}) }));
-      const notes = `${routeNote}${variantNote}${withheldNote}${reserveNote}`;
+      // WP-B4 (D-476): svaret kom fra lokal modell fordi Claude-kreditten stengte Anthropic - sagt rett ut (aldri en usynlig nedgradering). Da droppes den generelle «Reservemodell brukt: anthropic var ikke tilgjengelig»-merknaden,
+      // som ville vært misvisende (Anthropic var tilgjengelig, men stengt av kreditten). Uten Claude-kreditten er `budgetNote` alltid tom og strengen under er identisk med før.
+      const budgetNote = surface !== "voice" ? claudeBudgetRouteNote(result.metadata, "svaret", result) : "";
+      const notes = `${routeNote}${variantNote}${withheldNote}${budgetNote !== "" && [...reserveFailed].every((name) => name === "anthropic") ? "" : reserveNote}${budgetNote}`;
       const replyText = notes ? `${result.text}${notes}` : result.text;
       if (notes) onToken?.(notes);
-      await this.deps.messages.save(identity, "assistant", replyText);
+      await this.saveAssistant(identity, replyText, marker);
       return { reply: replyText, routed: "model", ...(confirmations.length > 0 ? { confirmations } : {}) };
     } catch (err) {
       if (err instanceof BudgetExceededError) {
         const reply = `Modellkall stoppet av budsjettvakten: ${err.message}`;
-        await this.deps.messages.save(identity, "assistant", reply);
+        await this.saveAssistant(identity, reply, marker);
         onToken?.(reply);
         return { reply, routed: "blocked" };
+      }
+      if (err instanceof ClaudeBudgetBlockedError) {
+        // WP-B4 (D-476): Claude-kreditten stengte Anthropic og ingen lokal modell kunne svare. Teksten er ferdig norsk, uten beløp og uten ord sensitivitetsklassifiseringen reagerer på (den lagres i samtalen).
+        await this.saveAssistant(identity, err.message, marker);
+        onToken?.(err.message);
+        return { reply: err.message, routed: "blocked" };
       }
       if (err instanceof ProviderError && err.kind === "cancelled") {
         // §6: rent avbrudd - delvis tekst persisteres med eksplisitt markør,
         // ingen zombie-generation, neste tur er upåvirket.
-        await this.deps.messages.save(identity, "assistant", `${partial} [avbrutt av bruker]`.trim());
+        await this.saveAssistant(identity, `${partial} [avbrutt av bruker]`.trim(), marker);
         return { reply: partial, routed: "model", cancelled: true };
       }
       if (err instanceof ProviderError && err.kind === "stream_interrupted") {
         // §11: avbruddet er eksplisitt - aldri stille provider-bytte i samme tekst.
-        await this.deps.messages.save(identity, "assistant", `${partial} [stream avbrutt]`.trim());
+        await this.saveAssistant(identity, `${partial} [stream avbrutt]`.trim(), marker);
         return { reply: partial, routed: "model", interrupted: true };
       }
       throw err;
@@ -853,11 +901,14 @@ export class ConversationEngine {
     classification: DecisionClassification,
     override: RoutingOverrideIntent | null,
     surface: Surface,
-    onToken?: (t: string) => void
+    onToken?: (t: string) => void,
+    marker?: RestrictedTurnMarker
   ): Promise<ChatReply> {
     if (!this.deps.council) {
       const reply = "AI-rådet er ikke konfigurert i denne kjøringen.";
-      await this.deps.messages.save(identity, "assistant", reply);
+      // WP-N1: rådet kjørte ikke, men turen kan likevel gjelde et begrenset emne (meldingen alene) - fail-closed: da merkes både meldingen og denne beskjeden.
+      if (marker && classifyContentSensitivity({ texts: [text], memory_spaces: [identity.memory_space_id] }).sensitivity === "SECRET_RESTRICTED") await marker.lock(["council:unconfigured"]);
+      await this.saveAssistant(identity, reply, marker);
       onToken?.(reply);
       // D-395: ingen modell kjørte - `routed: "model"` var uriktig (samme semantikk som en blokkert tur).
       return { reply, routed: "blocked" };
@@ -878,11 +929,15 @@ export class ConversationEngine {
     }
     // Del 3: rådet går gjennom SAMME sensitivitetsregler som chat (innholdsbasert, fail-closed) - aldri udefinert/«public». D-381: velger utvalget finanshandlinger, er rådet SECRET_RESTRICTED (kun lokale modeller), som i chatten.
     const contentSensitivity = classifyContentSensitivity({ texts: [text], memory_spaces: [identity.memory_space_id] }).sensitivity;
+    const councilSensitivity = minSensitivity ? maxSensitivity(contentSensitivity, minSensitivity) : contentSensitivity;
+    // WP-N1: rådet er låst til lokale modeller når sensitiviteten er SECRET_RESTRICTED (meldingen eller handlingsutvalgets finanslås, D-381) - da merkes meldingen FØR rådet kjører, og vurderingen lagres begrenset.
+    // (Rådet får aldri samtalehistorikken, kun meldingen, så en merket historikk løfter ikke rådet.)
+    if (marker && councilSensitivity === "SECRET_RESTRICTED") await marker.lock(["council:SECRET_RESTRICTED"]);
     const result = await this.deps.council.run({
       tenant_id: identity.tenant_id,
       session_id: identity.session_id,
       decision_context: text,
-      sensitivity: minSensitivity ? maxSensitivity(contentSensitivity, minSensitivity) : contentSensitivity,
+      sensitivity: councilSensitivity,
       ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
       ...(proposable.length > 0 ? { proposable_actions: proposable } : {}),
       trigger: {
@@ -916,9 +971,18 @@ export class ConversationEngine {
     } else if (proposals && result.provenance?.proposal_review?.outcome === "REJECTED") {
       reply += `\n\nRådet foreslo en handling, men ${describeProposalRejectionNo(result.provenance.proposal_review.reason)}. Ingenting er utført.`;
     }
-    await this.deps.messages.save(identity, "assistant", reply);
+    await this.saveAssistant(identity, reply, marker);
     onToken?.(reply);
     return { reply, routed: "model", ...(confirmations.length > 0 ? { confirmations } : {}) };
+  }
+
+  /**
+   * WP-N1: lagrer et assistentsvar for turen. Er turen låst (kun mulig med vakten på) lagres svaret BEGRENSET fra første stund; ellers er kallet NØYAKTIG det samme som før N1 (tre argumenter, kolonnen settes aldri).
+   * Alle assistentlagringer i denne klassen går via denne ene metoden (låst av `wpn1-engine-guard.test.ts`).
+   */
+  private async saveAssistant(identity: IdentityContext, content: string, marker: RestrictedTurnMarker | undefined): Promise<void> {
+    if (marker?.locked === true) await this.deps.messages.save(identity, "assistant", content, { restricted: true });
+    else await this.deps.messages.save(identity, "assistant", content);
   }
 
   /**
@@ -933,15 +997,17 @@ export class ConversationEngine {
     surface: Surface;
     provider: string | undefined;
     override: RoutingOverrideIntent | null;
-    historyRows: ReadonlyArray<{ role: string; content: string }>;
+    historyRows: ReadonlyArray<{ role: string; content: string; restricted?: boolean }>;
     touchMemory: boolean;
   }): Promise<TurnRouting> {
     const { identity, text, surface, provider, override } = input;
+    const guardOn = this.deps.restrictedContextGuard === true;
     // Rutemerknadene Jarvis selv la bak tidligere svar (D-447, dagstak, Q-51 D) er til eieren; de fjernes før historikken klassifiseres og sendes til noen modell (se `stripSystemNotes`).
     const fullHistory: HistoryRow[] = input.historyRows.slice(-20).flatMap((m) => {
       const role: HistoryRow["role"] = m.role === "assistant" ? "assistant" : "user";
       const content = role === "assistant" ? stripSystemNotes(m.content) : m.content;
-      return role === "assistant" && content.trim() === "" ? [] : [{ role, content }];
+      // WP-N1: merket leses KUN med vakten på (ellers ignoreres også et gammelt merke helt, så flagg AV er identisk med main).
+      return role === "assistant" && content.trim() === "" ? [] : [{ role, content, ...(guardOn && m.restricted === true ? { restricted: true as const } : {}) }];
     });
     const memoryMeta: TurnRouting["memoryMeta"] = this.deps.memory
       ? this.deps.memory.contextWithMeta
@@ -977,12 +1043,17 @@ export class ConversationEngine {
     const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
     // Del 3 (JARVIS-016/035): sensitivitet utledes av INNHOLDET (minne, historikk, melding, verktøykilder) - ikke lenger hardkodet «public».
     // Helse/finans/hemmeligheter ⇒ kun lokal behandler; privat/forretningsminne og verktøyruter ⇒ aldri gratis/delt sky.
-    const classified = classifyContentSensitivity({
+    const classifiedByText = classifyContentSensitivity({
       texts: [text, stripSourceMarkerIds(memoryMeta.text), ...history.map((m) => m.content)],
       memory_spaces: memoryMeta.spaces,
       memory_sensitivities: memoryMeta.sensitivities,
       private_tool_output: useTools
     });
+    // WP-N1 (K4): en MERKET rad som blir værende i konteksten (D-384 beholder alltid de nylige) løfter turen til SECRET_RESTRICTED (kun lokal modell) uansett hva teksten sier - et lokalt svar fra en låst tur kan gjengi det
+    // følsomme uten stikkord. Eldre merkede rader (og parene deres) er allerede holdt utenfor av partisjoneringen over.
+    const classified = guardOn && history.some((m) => m.restricted === true)
+      ? { ...classifiedByText, sensitivity: maxSensitivity(classifiedByText.sensitivity, "SECRET_RESTRICTED"), reasons: [...new Set([...classifiedByText.reasons, "history:restricted"])] }
+      : classifiedByText;
     // D-381: velger utvalget finans-verktøy, er turen SECRET_RESTRICTED allerede FØR første modellkall (kun lokal modell) - verktøyresultatet
     // skal aldri kunne nå en skymodell i en senere runde, uansett hvordan meldingen var formulert.
     const sensitivityDecision = selection?.min_sensitivity
@@ -1036,6 +1107,8 @@ export class ConversationEngine {
     const selection = select({ surface, text, recent_owner_messages: carriedOwnerTurns });
     if (selection.min_sensitivity !== undefined) return undefined;
     if (selection.definitions.length === 0 || isMemoryReserveOnly(selection.definitions, selection.tool_ids)) return undefined;
+    // WP-N1 (belt og seler): en merket rad skal aldri nå skyvarianten. `withholdSensitiveMessages` tar dem alle som «direkte følsomme»; blir en likevel igjen, forblir turen lokal.
+    if (this.deps.restrictedContextGuard === true && cleanHistory.some((m) => m.restricted === true)) return undefined;
     const sensitivityDecision = classifyContentSensitivity({
       texts: [text, stripSourceMarkerIds(memoryMeta.text), ...cleanHistory.map((m) => m.content)],
       memory_spaces: memoryMeta.spaces,
@@ -1059,7 +1132,7 @@ export class ConversationEngine {
    *  - innlimt tekst (e-post, dokumenter) er ikke «eierens egne ord» og får ikke eier-merket,
    *  - kan ruteavgjørelsen ikke beregnes (historikk, minne), er svaret nei (fail-closed).
    */
-  private async delegationCloudDecision(identity: IdentityContext, text: string, surface: Surface, provider: string | undefined): Promise<{ allowed: boolean; reasons: string[] }> {
+  private async delegationCloudDecision(identity: IdentityContext, text: string, surface: Surface, provider: string | undefined): Promise<{ allowed: boolean; reasons: string[]; restricted?: boolean }> {
     if (provider !== undefined) return { allowed: false, reasons: ["explicit_provider"] };
     // «… i bakgrunnen» treffer selv verktøyutvalgets delegeringsord (`tasks`), som hindrer at tjenester fra eierens tidligere meldinger arves (D-389) - det ville de blitt for selve forespørselen uten
     // delegeringsfrasen. Derfor vurderes ALT (ruteinstruksjon, innlimt tekst og ruten selv) for meldingen slik den står OG for hver fjerning av frasen (`delegationRequestVariants`: som om eieren hadde
@@ -1082,11 +1155,12 @@ export class ConversationEngine {
         const rows = ownRow < 0 ? historyRows : historyRows.map((m, i) => (i === ownRow ? { ...m, content: variant } : m));
         const routing = await this.resolveTurnRouting({ identity, text: variant, surface, provider, override: null, historyRows: rows, touchMemory: false });
         // Q-51 D (D-450): kan chatten sende denne forespørselen til skyen uten de enkelte følsomme meldingene (`cloudVariant`), kan jobben det også (jobben får uansett kun selve oppgaveteksten, ikke samtalen).
-        if (routing.sensitivityDecision.sensitivity === "SECRET_RESTRICTED" && routing.cloudVariant === undefined) return { allowed: false, reasons: routing.sensitivityDecision.reasons };
+        // WP-N1: `restricted` (kun med vakten på) = ruteavgjørelsen er låst til SECRET_RESTRICTED uten trygg skyvariant - brukermeldingen og svaret merkes da begrenset. `routing_unreadable` kan ikke avgjøres og regnes som låst (fail-closed).
+        if (routing.sensitivityDecision.sensitivity === "SECRET_RESTRICTED" && routing.cloudVariant === undefined) return { allowed: false, reasons: routing.sensitivityDecision.reasons, ...(this.deps.restrictedContextGuard === true ? { restricted: true } : {}) };
       }
       return { allowed: true, reasons: [] };
     } catch {
-      return { allowed: false, reasons: ["routing_unreadable"] };
+      return { allowed: false, reasons: ["routing_unreadable"], ...(this.deps.restrictedContextGuard === true ? { restricted: true } : {}) };
     }
   }
 
@@ -1095,7 +1169,8 @@ export class ConversationEngine {
     intent: NonNullable<ReturnType<typeof fastRoute>>,
     text: string,
     surface: Surface,
-    provider: string | undefined
+    provider: string | undefined,
+    marker?: RestrictedTurnMarker
   ): Promise<ChatReply> {
     switch (intent.kind) {
       case "system_status":
@@ -1125,9 +1200,12 @@ export class ConversationEngine {
         return { reply: text ?? "Jeg kan ikke lese verdi- og bruksrapporten akkurat nå, så jeg vil ikke gjette på hva jeg har hjulpet deg med.", routed: "fast" };
       }
       case "delegate_background": {
-        const cloud = this.deps.delegateBackground ? await this.delegationCloudDecision(identity, text, surface, provider) : { allowed: false, reasons: [] as string[] };
+        const cloud: { allowed: boolean; reasons: string[]; restricted?: boolean } = this.deps.delegateBackground ? await this.delegationCloudDecision(identity, text, surface, provider) : { allowed: false, reasons: [] };
+        // WP-N1: er ruteavgjørelsen LÅST til SECRET_RESTRICTED (kun med vakten på; `routing_unreadable` regnes som låst, fail-closed), låses turen FØR jobben startes - brukermeldingen merkes, og en kastet merking etterlater ingen kjørende jobb (F-A6).
+        // Det gjelder også når jobben ikke lar seg starte (svaret under merkes likevel, C11). `restricted` følger med til jobben, så leveringen av resultatet lagres begrenset (F-A2).
+        if (marker && cloud.restricted === true) await marker.lock(["fast_intent:delegate_background"]);
         const started = this.deps.delegateBackground
-          ? await this.deps.delegateBackground.run(identity, intent.prompt, { cloudAllowed: cloud.allowed }).catch(() => null)
+          ? await this.deps.delegateBackground.run(identity, intent.prompt, { cloudAllowed: cloud.allowed, ...(cloud.restricted === true ? { restricted: true as const } : {}) }).catch(() => null)
           : null;
         if (started === null) {
           return { reply: "Jeg fikk ikke startet bakgrunnsjobben (verktøyet svarte ikke eller ble avslått). Ingenting er startet.", routed: "fast" };
@@ -1162,6 +1240,13 @@ export class ConversationEngine {
         const result = await this.deps.tasks.get(identity, intent.task_id);
         if (!result.ok) {
           return { reply: `Fant ikke jobben: ${result.reason}`, routed: "fast" };
+        }
+        // WP-N1 (F2-B1b): jobbens resultat er avledet av en LÅST tur når jobben ble startet derfra (`restricted_origin`) - svaret (og dermed brukermeldingen) lagres da begrenset, ellers ligger resultatet umerket i historikken og følger med til
+        // neste skytur. Låsen settes FØR svaret bygges og lagres; kan merkingen ikke gjøres, kastes turen uten at noe er lagret/gjengitt. Kun med vakten på (`marker` og `jobOrigin` finnes ellers ikke).
+        // WP-N1 (R3-2): med vakten på og UTEN `jobOrigin` (feilkoblet motor) kan opprinnelsen ikke avgjøres: fail-closed (turen låses), som ved oppslagsfeil. Vakten AV: `marker` finnes ikke og ingenting endres.
+        if (marker) {
+          const restrictedJob = this.deps.jobOrigin ? await this.deps.jobOrigin.isRestricted(identity, intent.task_id).catch(() => true) : true;
+          if (restrictedJob) await marker.lock(["fast_intent:task_status"]);
         }
         const res = result.value.result ? ` Resultat: ${JSON.stringify(result.value.result)}` : "";
         return { reply: `Jobb ${result.value.task_id}: ${result.value.status}.${res}`, routed: "fast" };

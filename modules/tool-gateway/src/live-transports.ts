@@ -14,7 +14,9 @@ import type pg from "pg";
 import { AccessTokenCache, bearerFor, type RefreshedToken, dropboxRefreshExchange, microsoftRefreshExchange, spotifyRefreshExchange } from "./oauth-refresh.ts";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
+import { createVaultFirstConfigReader, readEnvConfig, type ConfigReader, type VaultFirstConfigReader } from "./oauth-client-config.ts";
 import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
+import { abortableSleep, throwIfAborted } from "./call-signal.ts";
 
 /**
  * UA-2 P1B-A HOST FIX #1 (2026-08-16, host-funn run_id `3af67dab`): den
@@ -175,9 +177,24 @@ export function parseGoogleAuthFailureReason(reason: string): GoogleAuthErrorCla
  * aldri). Konto-/tenant-oppløsning: hver transport-instans er bundet til én
  * eksplisitt konto (accountEmail) - ingen implisitt cross-account fallback.
  */
+/**
+ * WP-K (D-471, JARVIS-056): hvor Google-klientens id/secret leses fra. Uten en konfigurert kilde (skript, tester) leses miljøet stille som før. api/worker kobler inn hvelv-først-leseren ved
+ * oppstart (`configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault }))`): dashbord-lagret/Infisical FØRST, miljøet som LOGGET-DEPRECATED fallback. En endret kilde nullstiller
+ * access-token-cachen (et token utvekslet med en annen klient skal aldri gjenbrukes) og Drive-sjekken under.
+ */
+let googleClientSource: ConfigReader | undefined;
+export function configureGoogleOAuthClientSource(reader: ConfigReader | undefined): void {
+  googleClientSource = reader;
+  googleDriveSnapshot = undefined;
+  resetGoogleAccessTokenCache();
+}
+async function readGoogleClientRef(ref: "JARVIS_GOOGLE_CLIENT_ID" | "JARVIS_GOOGLE_CLIENT_SECRET"): Promise<string | null> {
+  return googleClientSource ? googleClientSource(ref) : readEnvConfig(ref);
+}
+
 async function googleTokenExchange(refreshToken: string): Promise<RefreshedToken> {
-  const clientId = process.env["JARVIS_GOOGLE_CLIENT_ID"];
-  const clientSecret = process.env["JARVIS_GOOGLE_CLIENT_SECRET"];
+  // Review M3b: id og secret leses PARALLELT (hver med kort hvelvfrist i leseren) - to sekvensielle oppslag mot et hengt hvelv ga 10 s ventetid FØR selve token-forespørselen.
+  const [clientId, clientSecret] = await Promise.all([readGoogleClientRef("JARVIS_GOOGLE_CLIENT_ID"), readGoogleClientRef("JARVIS_GOOGLE_CLIENT_SECRET")]);
   if (!clientId || !clientSecret) throw new Error("google_oauth_client_not_configured");
   // HOST FIX #2: KUN LEST (aldri skrevet/eksponert) for å avgjøre om DENNE
   // klienten allerede er host-bevist Desktop-type - samme markør
@@ -961,9 +978,65 @@ export class GoogleDriveTransport implements ToolTransport {
  * logges/returneres/eksponeres her.
  */
 export function googleDriveCredentialsConfigured(): boolean {
+  // WP-K (JARVIS-056): etter `primeGoogleDriveCredentialCheck()` (api/worker, ved oppstart) gjelder hvelv-bevisst-målingen; uten den er dette den uendrede miljøsjekken.
+  if (googleDriveSnapshot !== undefined) return googleDriveSnapshot;
   return Boolean(
-    process.env["JARVIS_GOOGLE_CLIENT_ID"] && process.env["JARVIS_GOOGLE_CLIENT_SECRET"] && process.env["JARVIS_GOOGLE_TOKEN"]
+    readEnvConfig("JARVIS_GOOGLE_CLIENT_ID") && readEnvConfig("JARVIS_GOOGLE_CLIENT_SECRET") && readEnvConfig("JARVIS_GOOGLE_TOKEN")
   );
+}
+
+/** WP-K (JARVIS-056): sist målte Drive-konfig (hvelv-bevisst); `undefined` = ikke primet (da gjelder miljøsjekken over). */
+let googleDriveSnapshot: boolean | undefined;
+
+export interface PrimeDriveCheckOptions {
+  /** Antall målinger når hvelvet IKKE svarte (standard 7). Svarer hvelvet (selv «finnes ikke») er første måling endelig. */
+  attempts?: number;
+  /** Pause mellom målingene (ms, standard 5000: ca. 30 s totalt - Infisical er ofte tregere enn api ved en NAS-omstart). */
+  delayMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  log?: (line: Record<string, string>) => void;
+}
+
+/**
+ * WP-K (D-471, JARVIS-056): Drive-verktøyene registreres kun når client id + secret + refresh-token finnes - og til nå ble det målt i miljøet alene, så dashbord-/Infisical-lagret Google-konfig ga
+ * et «delvis konfigurert»-system der token-utvekslingen kunne lese hvelvet men Drive-verktøyene aldri ble registrert. api/worker kaller denne ÉN gang ved oppstart FØR `firstWaveTools()` (den
+ * synkrone `driveTransportsIfConfigured()` er uendret og leser målingen). `readRefreshToken` er den vanlige secret-kjeden (`readSecretProvider.get`). Kaster aldri: en feil gir `false`.
+ *
+ * Review M3c: målingen er et engangsøyeblikksbilde. Etter en NAS-omstart kan Infisical være tregere enn api; med `.env`-verdiene fjernet (runbookens sluttilstand) ble Drive da stille utelatt til neste omstart.
+ * Derfor: når målingen gir «ikke konfigurert» OG hvelvet IKKE svarte (leserens `vaultState() === "error"`), måles det på nytt (`attempts` x `delayMs`) før svaret blir endelig, og en endelig «hoppet over fordi hvelvet
+ * var nede» logges tydelig (`drive_registration_skipped_vault_unavailable`). Når hvelvet svarer (selv «finnes ikke») eller verdiene finnes i miljøet er første måling endelig - ingen ekstra ventetid i dagens oppsett.
+ * (`depends_on` Infisical i compose ville stoppet api helt ved en Infisical-feil - bevisst ikke gjort.)
+ */
+export async function primeGoogleDriveCredentialCheck(readRefreshToken: ConfigReader, options: PrimeDriveCheckOptions = {}): Promise<boolean> {
+  const attempts = Math.max(1, Math.trunc(options.attempts ?? 7));
+  const delayMs = Math.max(0, Math.trunc(options.delayMs ?? 5_000));
+  const sleep = options.sleep ?? ((ms: number) => abortableSleep(ms)); // oppstartsvei: ingen ambient kallsignal, så dette er en vanlig sleep
+  const log = options.log ?? ((line: Record<string, string>) => console.warn(JSON.stringify(line)));
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let configured: boolean;
+    try {
+      const [clientId, clientSecret, token] = await Promise.all([
+        readGoogleClientRef("JARVIS_GOOGLE_CLIENT_ID"), readGoogleClientRef("JARVIS_GOOGLE_CLIENT_SECRET"), readRefreshToken("JARVIS_GOOGLE_TOKEN")
+      ]);
+      configured = Boolean(clientId && clientSecret && token);
+    } catch {
+      configured = false;
+    }
+    googleDriveSnapshot = configured;
+    if (configured) return true;
+    const vaultDown = (googleClientSource as Partial<VaultFirstConfigReader> | undefined)?.vaultState?.() === "error";
+    if (!vaultDown) return false; // hvelvet svarte (eller finnes ikke): «ikke konfigurert» er endelig
+    if (attempt === attempts) {
+      log({
+        msg: "drive_registration_skipped_vault_unavailable", attempts: String(attempts),
+        action: "Drive-verktøyene er IKKE registrert: hvelvet var utilgjengelig ved oppstart og verdiene finnes ikke i miljøet. Start api og worker på nytt når Infisical er oppe."
+      });
+      return false;
+    }
+    log({ msg: "drive_registration_waiting_for_vault", attempt: String(attempt), of: String(attempts) });
+    await sleep(delayMs);
+  }
+  return false;
 }
 
 /**
@@ -1475,8 +1548,9 @@ export class GithubApiError extends Error {
   }
 }
 
+/** WP-K (D-471, JARVIS-018): venting mellom forsøk slutter når kallet avbrytes (gatewayens tidsavbrudd) - ingen sovende retry som våkner ETTER at utfallet er meldt ukjent. */
 function githubSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return abortableSleep(ms);
 }
 
 /** GitHub sin feilkonvolutt (`{message, documentation_url,...}`) - avkortet (200 tegn), aldri rå kropp/headere videre. */
@@ -1519,9 +1593,36 @@ async function githubFetchRaw(url: string, init: RequestInit, controller?: Githu
   const attemptAll = async (): Promise<Response> => {
     let lastError: GithubApiError | undefined;
     for (let attempt = 1; attempt <= GITHUB_MAX_ATTEMPTS; attempt++) {
+      // WP-K: aldri et nytt forsøk (heller ikke etter 429) når kallet er avbrutt - en POST som er satt i gang har et UKJENT utfall, og gatewayen har merket raden `unverified`.
+      throwIfAborted();
       const response = await guardedFetch(url, init);
       if (response.ok) {
-        if (controller) await controller.recordOutcome(mutation, response.status, response.headers, "");
+        if (controller) {
+          if (mutation) {
+            // WP-K (D-471, uavhengig review M-1, revisjon av transportene): leverandøren har svart 2xx - en mutasjon er AKSEPTERT. Rate-limit-bokføringen er en Postgres-skriving (`PgGithubRateLimitStore.recordSuccess`),
+            // altså hjelpetilstand som kan feile uavhengig av GitHub (tilkobling, tidsavbrudd, manglende tabell). Den må ALDRI gjøre en akseptert merge/sletting/dispatch/kommentar om til en kastet feil: raden ville endt
+            // `failed`, og et samme-nøkkel-replay ville sendt mutasjonen en gang til. Feilen logges (kun navn/kode, aldri meldingstekst) og svelges; neste vellykkede svar retter tilstanden.
+            try {
+              await controller.recordOutcome(mutation, response.status, response.headers, "");
+            } catch (err) {
+              let label = "unknown";
+              try {
+                const name = (err as { name?: unknown } | null | undefined)?.name;
+                if (typeof name === "string") label = name.slice(0, 40);
+              } catch { /* en kastende getter: bruk «unknown» - loggingen skal aldri selv kaste */ }
+              // Delta-2 review L-A: navnet alene sier lite (en pg-serverfeil heter «error», en nettverksfeil «Error»); en hvitelistet SQLSTATE-/errno-kode (store bokstaver, sifre, understrek) tas også med,
+              // aldri meldingstekst. Formen er uendret når feilen ikke har en slik kode.
+              let code: string | undefined;
+              try {
+                const raw = (err as { code?: unknown } | null | undefined)?.code;
+                if (typeof raw === "string" && /^[A-Z0-9_]{3,20}$/.test(raw)) code = raw;
+              } catch { /* en kastende getter: ingen kode */ }
+              console.error(JSON.stringify({ msg: "github_rate_limit_record_failed", status: response.status, error: label, ...(code ? { code } : {}) }));
+            }
+          } else {
+            await controller.recordOutcome(mutation, response.status, response.headers, "");
+          }
+        }
         return response;
       }
       const rawBody = await response.text().catch(() => "");
@@ -2851,8 +2952,10 @@ export class SpotifyTransport implements ToolTransport {
   private readonly cache: AccessTokenCache;
 
   constructor(options: SpotifyTransportOptions = {}) {
-    const clientId = options.clientId ?? (async () => process.env["JARVIS_SPOTIFY_CLIENT_ID"] || null);
-    const clientSecret = options.clientSecret ?? (async () => process.env["JARVIS_SPOTIFY_CLIENT_SECRET"] || null);
+    // WP-K (JARVIS-056): uten resolvere (api/worker gir dem alltid) faller klienten tilbake til miljøet - nå LOGGET som deprecated (én linje per ref, aldri verdien).
+    const envFallback = createVaultFirstConfigReader();
+    const clientId = options.clientId ?? (() => envFallback("JARVIS_SPOTIFY_CLIENT_ID"));
+    const clientSecret = options.clientSecret ?? (() => envFallback("JARVIS_SPOTIFY_CLIENT_SECRET"));
     this.cache = new AccessTokenCache(spotifyRefreshExchange(clientId, clientSecret), { label: "spotify", ...(options.persist ? { persist: options.persist } : {}) });
   }
 

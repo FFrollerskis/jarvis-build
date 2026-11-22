@@ -64,12 +64,24 @@ export function parseIncidentProducerConfig(env: Record<string, string | undefin
 
 /**
  * Tilkoblingshelse fra `ToolGateway.health` (BO-03) - UTEN hvelv-oppslag (`listConnectorStatus` gjør ett `hasSecret()` per credential, altså hundrevis av Infisical-kall hvert intervall). En helserad
- * finnes kun når transporten faktisk ble kalt, dvs. når credentialen var tilgjengelig - derfor er en rad i seg selv «konfigurert».
+ * finnes kun når transporten faktisk ble kalt, dvs. når credentialen var tilgjengelig - derfor er en rad i seg selv «konfigurert» - unntatt Jarvis' egne kontrollflater (`NOT_A_CONNECTION_TOOL_IDS`), som sendes med
+ * `configured: false`: de er aldri en tilkobling som kan svikte.
  */
 export function connectorStatusesFromGateway(gateway: Pick<ToolGateway, "health">): ProviderStatusLike[] {
   const names = new Map(CONNECTOR_REGISTRY.map((def) => [def.live_test?.tool_id ?? def.id, def.display_name]));
-  return [...gateway.health].map(([id, health]) => ({ id, display_name: names.get(id) ?? id, configured: true, health }));
+  return [...gateway.health].map(([id, health]) => ({ id, display_name: names.get(id) ?? id, configured: !NOT_A_CONNECTION_TOOL_IDS.has(id), health }));
 }
+
+/**
+ * GJENNOMGANG L1 (WP-B3): verktøy som er Jarvis' EGEN kontrollflate i prosessen - ikke en tilkobling til et eksternt system. `ToolGateway` merker helsen til HVERT verktøy som kaster, og et avslag (utdatert versjon, lukket forslag,
+ * feil digest, `cancel_task` for en oppgave som ikke finnes ...) kastes som en feil: `executive` ble da «utilgjengelig» til neste vellykkede kall, og `providerProducer` åpnet «Tilkobling svikter: executive» (kun med
+ * JARVIS_INCIDENT_PRODUCERS_ENABLED=true). Et avslag er et riktig svar, ikke en tilkobling som svikter - og det finnes ingen ekstern tilkobling å reparere. Raden er fortsatt i `gateway.health` (statusrapportene viser den
+ * uendret); den blir bare ikke en HENDELSE.
+ * RADEN SENDES LIKEVEL (med `configured: false`), ALDRI droppet (re-review NYTT 1): `providerProducer` åpner kun fakta for KONFIGURERTE rader (ingen ny hendelse), men løser en aktiv hendelse bare når emnets rad FINNES og er frisk igjen
+ * og nyere enn siste observerte svikt. Droppet jeg raden, kunne en «Tilkobling svikter: executive»-hendelse som allerede var åpen ved utrulling (åpnet av et kastet avslag på main) aldri auto-lukkes og ville matet situasjonsmotoren til
+ * den ble lukket for hånd. Andre interne verktøy med samme mønster (owner_controls, situations ...) er ikke kartlagt her (se runbook, WPB3 «Kjente grenser»); legg dem til kun etter en egen vurdering.
+ */
+export const NOT_A_CONNECTION_TOOL_IDS: ReadonlySet<string> = new Set(["executive"]);
 
 export interface ApiIncidentProducerDeps {
   pool: pg.Pool;

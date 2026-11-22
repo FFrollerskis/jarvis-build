@@ -5,6 +5,7 @@ import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute } from ".
 import { parseChatCandidates, unknownChainMembers } from "./chat-candidates.ts";
 import { parseCouncilProposals } from "./council-proposals.ts";
 import { fileURLToPath } from "node:url";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
@@ -27,10 +28,14 @@ import {
   assertRuntimeCredentialsConfigured,
   assertRuntimeRoleSafe,
   configFromEnv,
+  createPolicyAuditSinkFromEnv,
   createPool,
   ConfirmationStore,
+  installPolicyAuditDrain,
+  policyAuditSinkConfigFromEnv,
   runMigrationsAsAdmin,
   runOperationalRetentionSweep,
+  runPolicyDecisionRetentionSweep,
   withTenantTransaction,
   writeAudit
 } from "@jarvis/core";
@@ -39,9 +44,13 @@ import { DeploymentService, DiagnosisService, INCIDENT_PRODUCER_NAMES, IncidentS
 import { ClaimVerificationService, KnowledgeRetriever, createKnowledgeClaimsPort } from "@jarvis/knowledge";
 import {
   AiCouncil,
+  CapabilityRegistry,
+  ClaudeBudgetEnforcer,
   CouncilAutoTriggerLimiter,
   DEFAULT_PROFILES,
+  PROFILES_WITH_LOCAL_VISION,
   assertProvidersHaveExplicitPricing,
+  claudeBudgetConfigFromEnv,
   pricingFromEnv,
   ModelGateway,
   InteractivePriorityGate,
@@ -82,7 +91,8 @@ import {
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, schedulerSource, DailyScheduler, runConnectorHealthSweep,
   CONNECTOR_REGISTRY, FORBIDDEN_MODEL_TOOL_IDS, listConnectorStatus,
   CloudflareTransport, INFRA_GATED_TOOL_IDS, cloudControlToolDefinitions, parseCloudflareMutationZones,
-  InfisicalTransport, LangfuseTransport, PostgresOpsTransport, parseInfisicalRotationIds, parsePostgresOpsConfig
+  InfisicalTransport, LangfuseTransport, PostgresOpsTransport, parseInfisicalRotationIds, parsePostgresOpsConfig,
+  configureGoogleOAuthClientSource, createVaultFirstConfigReader, primeGoogleDriveCredentialCheck
 } from "@jarvis/tool-gateway";
 import {
   BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ProductUsageService,
@@ -96,10 +106,12 @@ import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import { LocationService, runLocationRetentionSweepForAllTenants } from "@jarvis/location";
 import { HealthService, runHealthRetentionSweepForAllTenants } from "@jarvis/health";
 import { VisionService, runVisionRetentionSweepForAllTenants } from "@jarvis/vision";
+import { buildVisionRuntime, verifyVisionEndpoints, visionAdapterFromEnv } from "./vision-runtime.ts";
 import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
 } from "@jarvis/situations";
+import { createSituationSignalsWiring } from "./situation-signals-wiring.ts";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, parseFollowUpPushPolicy, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
@@ -116,13 +128,16 @@ import {
 } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import {
-  GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
+  ExperimentRegistryService, GoogleAdsTransport, GrowthExperimentTransport, GrowthService, GrowthTransport, GrowthWriteJournal, MetaAdsTransport,
+  createGrowthWriteTransports, growthExperimentToolDefinitions, growthOpIndex, growthWriteConfigFromEnv, growthWriteSpecs, growthWriteToolDefinitions,
+  marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
 } from "@jarvis/growth";
 import { OwnerControls } from "@jarvis/policy";
 import {
   ConversationGraphService, ConversationGraphSyncService, ConversationGraphTransport,
   runConversationGraphSyncForAllTenants
 } from "@jarvis/conversation-graph";
+import { buildCommsRuntime } from "./comms-wiring.ts";
 import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
@@ -130,7 +145,8 @@ import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { parseIncidentProducerConfig, startApiIncidentProducers } from "./incident-producers.ts";
 import { createInfraStatusSource } from "./infra-status-source.ts";
 import { createRadarState, radarSweepFailures } from "./evolution-radar.ts";
-import { createEvolutionReportProvider } from "./evolution-source.ts";
+import { createEvolutionReadinessProvider, createEvolutionReportProvider, type EvolutionSourceDeps } from "./evolution-source.ts";
+import { createEvolutionDecisionRecorder } from "./evolution-decisions.ts";
 import { createAiMeshReportProvider } from "./ai-mesh-source.ts";
 import { parseKnowledgeClaimWrites } from "./knowledge-flags.ts";
 import { createPushSendGuard, startFollowUpPush } from "./follow-up-push.ts";
@@ -142,9 +158,11 @@ import { createControlCenterRegistry, ownerPredicate, registerControlCenters } f
 import { CONTROL_FEATURE_FLAGS, controlCentersWithTools, flagOn } from "./control-center/shared.ts";
 import { createAutonomyAudit } from "./autonomy-audit.ts";
 import { createGoldenSuiteRunner } from "./golden-suite-runner.ts";
-import { servedByCloudModel } from "./cloud-tool-screen.ts";
+import { FINANCE_EXECUTION_LOCK, createDeliverySaver, financeLockServedLocally, parseRestrictedContextGuard, withholdsRestrictedJobFromCloud } from "./restricted-context-guard.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
+import { claudeBudgetBriefSource } from "./claude-budget-surfaces.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
+import { createPersonalWiring } from "./personal-wiring.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
@@ -218,7 +236,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     lastResensitize = summary;
     return summary;
   };
-  const evolutionReports = createEvolutionReportProvider({
+  // WP-B3 (D-475): kildene er trukket ut til ÉN verdi (uendret innhold) så Evolusjon-senteret kan lese den samme rapporten og de samme beredskapsfaktaene (`createEvolutionReadinessProvider`) uten en parallell kobling.
+  const evolutionSourceDeps: EvolutionSourceDeps = {
     radar: evolutionRadar,
     resensitize: () => lastResensitize,
     pool,
@@ -229,7 +248,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
     mesh: () => gateway.meshStatus(),
     toolSurface: () => modelToolSurface
-  });
+  };
+  const evolutionReports = createEvolutionReportProvider(evolutionSourceDeps);
+  const evolutionReadiness = createEvolutionReadinessProvider(evolutionSourceDeps);
   // WP-D4 (JARVIS-033/036/078): AI Mesh-status (`executive.get_ai_mesh_status`) - leverandørhelse i prosessen + cost_events siste 7 døgn. Kun lesing; gjør aldri et modellkall.
   const aiMeshReports = createAiMeshReportProvider({
     pool,
@@ -282,6 +303,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   }), 30_000).unref();
   // Gjennomgang av PR #316 (M-2): ÉN eier-autoritetskonfigurasjon, delt av Policy Gateway og kontrollsentrene (eier-porten og Authority Center), så de aldri kan være uenige om hvem eieren er.
   const ownerAuthority: AuthorityConfig = { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants };
+  // WP-K (D-471, JARVIS-053): varig policy-journal (AV som standard; `JARVIS_POLICY_AUDIT_SINK=db` skriver hver avgjørelse til `policy_decisions`). En sink-feil kan aldri endre en avgjørelse (telt og vist i
+  // Autoritet-senteret); uten flagget er `policyAuditSink` null og PolicyGateway bruker ringbufferen som før (byte-identisk oppførsel).
+  const policyAuditSink = createPolicyAuditSinkFromEnv(pool);
+  if (policyAuditSink) installPolicyAuditDrain(policyAuditSink);
   const policy = new PolicyGateway({
     devices: deviceRegistry,
     nonces: new PgApprovalStore(pool),
@@ -297,10 +322,20 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // SCOPED-modus og krevde approval for owners D-kall. A-D er risikoklasser -
     // for owner gir SOVEREIGN autonom utførelse; sikkerheten ligger i D-pipelinen
     // (preflight/readback/evidens/recovery) + owner-kontrollene, ikke approval.
-    authority: ownerAuthority
+    authority: ownerAuthority,
+    ...(policyAuditSink ? { auditSink: policyAuditSink.write } : {})
   });
   const queue = new PgTaskQueue(pool);
   const worker = new InProcessWorker(queue);
+  // WP-B4 (D-476): Claude-kreditten (100 USD/mnd, tempostyring og behovsprioritering). AV som standard (`JARVIS_CLAUDE_BUDGET_USD` tom/usatt = ingen enforcer, gatewayen er identisk med main). En ugyldig
+  // JARVIS_CLAUDE_BUDGET_* KASTER her og stopper oppstarten (buildDeps().catch → exit 1) - aldri en stille standard. Samme parsing og samme enforcer-type i worker-main.ts.
+  const claudeBudgetConfig = claudeBudgetConfigFromEnv(process.env);
+  const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace, actor_person_id: owner.owner_person_id, owner_tenant_id: owner.tenant_id });
+  // WP-G3 (D-465): `local_vision` (lokal bildeklassifisering av kamerabilder) registreres KUN når JARVIS_VISION_ENABLED=on og JARVIS_VISION_CLASSIFIER=on - ellers `null` (ingenting registreres, identisk med main).
+  // En ikke-lokal/manglende JARVIS_VISION_LOCAL_URL KASTER her og stopper oppstarten (kamerabilder forlater aldri maskinen).
+  // Review A-L5/A-INFO-4: vertsnavnene i endepunktene løses ved oppstart og må peke til det lokale nettet (offentlig oppløsning KASTER); embedding-endepunktet som ikke er lokalt gir kun «ingen vision-embedding».
+  const visionEndpoints = await verifyVisionEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
+  const visionAdapter = visionAdapterFromEnv(process.env);
   const gateway = new ModelGateway({
     pool,
     trace,
@@ -340,7 +375,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       ),
       new KimiAdapter(),
       new HermesAdapter(),
-      new OllamaAdapter()
+      new OllamaAdapter(),
+      ...(visionAdapter !== null ? [visionAdapter] : [])
       // D-106 HOST-FIX (produksjonsherding, Defekt E): `ScriptedAdapter` er ALDRI
       // registrert her lenger - live host-kjøring viste at den, som en ordinær
       // "local"-profilert provider, kunne bli et LEGITIMT AUTO-rutingvalg under
@@ -357,7 +393,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // D-395 (JARVIS-039): samme budsjettkilde som workeren (`budgetConfigFromEnv`) - tidligere hardkodet her og med `DEFAULT_BUDGET` i workeren.
     budget: budgetConfigFromEnv(),
     // WP-H0 (JARVIS-087): eierens pause/tilbakekall av en modellleverandør, lest LIVE fra `owner_control_state` ved hvert kall (samme kilde i worker-main.ts) - se provider-pause.ts.
-    providerPause: createProviderPauseSourceFromPool(pool)
+    providerPause: createProviderPauseSourceFromPool(pool),
+    // WP-B4: Claude-kreditten (kun når JARVIS_CLAUDE_BUDGET_USD er satt) - beslutningen tas inne i gatewayen FØR leverandørvalg, for api OG worker (samme miljøvariabler).
+    ...(claudeBudget !== undefined ? { claudeBudget } : {}),
+    // WP-G3 (review A-L3): `local_vision`-PROFILEN (lokal, dedikert til vision) legges til registeret KUN når adapteren registreres - uten JARVIS_VISION_* er registeret byte-identisk med main.
+    ...(visionAdapter !== null ? { registry: new CapabilityRegistry(PROFILES_WITH_LOCAL_VISION) } : {})
   });
   // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
   assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());
@@ -367,6 +407,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // med SPECIFIC_PROVIDER-override, samme budsjett/kost/helse/trace/
   // sensitivitet/paid_models_allowed-håndhevelse som alle andre kall).
   const aiCouncil = new AiCouncil(gateway, pool);
+  // WP-N1 (Q-66/JARVIS-101 + Q-64 pkt 3): ÉN flaggavlesing (parseren; kun eksakt «on»). Flagg AV (standard) = verken gatewayen eller samtalemotoren får noe av dette, og begge er identiske med main.
+  // Står bevisst HER og ikke mellom `readSecretProvider` og selve gateway-konstruksjonen: `ua3-business-events-host-run-wiring.test.ts` låser at ingen setninger står mellom dem (kun kommentarer).
+  const restrictedContextGuard = parseRestrictedContextGuard(process.env);
+  console.log(JSON.stringify({ msg: "restricted_context_guard", enabled: restrictedContextGuard.enabled }));
   // BO-03: Tool Gateway m/live transporter (aktiveres av credentials i .env),
   // Daily Brief-kilder, morgenlevering og Telegram-kommandoer.
   // K1 (D-164): `ownerControls` konstruert lenger opp (delt med `policy`).
@@ -401,8 +445,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
     classDPipeline: { enforce: true },
     // Del 3 (JARVIS-003/005): eier-tilkoblede leverandør-credentials bindes til den autentiserte eieren i eierens tenant.
-    credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
+    credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) },
+    // WP-N1 (K6): utførelseslås for finance/finance_* mot skymodeller. Lokalitet fra leverandørregisteret (SAMME `servedByCloudModel` som chattens verktøyskjerm og Finans-senteret); ukjent leverandør regnes som sky (fail-closed).
+    // Prediktatet bor i `restricted-context-guard.ts` (F-A1/F-B2) og er testet mot de ekte profilene.
+    ...(restrictedContextGuard.enabled ? { financeExecutionLock: FINANCE_EXECUTION_LOCK } : {})
   });
+  // WP-K (D-471, JARVIS-056): Google-klientens id/secret leses hvelv-først (dashbord-lagret/Infisical) med miljøet som LOGGET-DEPRECATED fallback (dagens NAS-oppsett virker uendret);
+  // Drive-registreringssjekken (`driveTransportsIfConfigured()` under) måles hvelv-bevisst ÉN gang her, FØR `firstWaveTools()`. API/worker-parity: samme to linjer i worker-main.ts.
+  configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault: infisicalSecretProvider }));
+  await primeGoogleDriveCredentialCheck((ref) => readSecretProvider.get(ref));
   // D-104: egen tjeneste over SAMME runtime-pool, ingen ny motor - gjenbruker
   // DEN SAMME `toolGateway`-instansen (registrert med github under) for
   // recovery-forsøk, ALDRI et direkte transport-kall (se recovery.ts).
@@ -719,7 +770,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   };
   // D-416: chat og agenter er to løp - delegerte bakgrunnsjobber (kø), levering av resultat tilbake til samtalen (melding + Telegram).
   const chatJobs = new ChatJobs(pool, {
-    saveMessage: (identity, role, content) => new MessageStore(pool).save(identity, role, content),
+    // WP-N1 (F-A2): en levering fra en jobb startet av en LÅST tur (`restricted_origin` i kontrakten) lagres begrenset - KUN med vakten på. Flagg AV (eller uten merket) = det opprinnelige TRE-argumentskallet (kolonnen settes aldri).
+    saveMessage: createDeliverySaver(new MessageStore(pool), restrictedContextGuard.enabled),
     notify: (text) => sendTelegram(`🔔 ${text}`),
     log: (event) => console.log(JSON.stringify(event))
   });
@@ -756,12 +808,55 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   registerControlCenters(controlCenters, {
     pool, env: process.env, toolGateway, ownerControls, meshStatus: () => gateway.meshStatus(),
     authority: ownerAuthority, killSwitch, infraGate,
+    ...(policyAuditSink ? { policyAudit: () => ({ gateway: policy.auditStats(), sink: policyAuditSink.stats() }) } : {}),
     modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS,
+    // WP-B3 (D-475, EV-22): Evolusjon-senteret (kun med JARVIS_CONTROL_CENTER_EVOLUTION=on) leser samme rapport + beredskap + oppstartssjekk, bundet til eierens tenant.
+    evolutionReadiness, ev0Status: () => getLastEv0BootStatus(), evolutionTenantId: owner.tenant_id,
     valueReport: (tenantId) => lateExecutive().getValueReport(tenantId), infraStatus: (tenantId) => lateExecutive().getInfraStatus(tenantId),
     ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
     ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
   });
-  for (const tool of firstWaveTools({
+  // WP-D3 (UA-4 Growth, D-459): skrivehandlinger mot annonse-/analyseplattformene + eksperimentregisteret. ALT er AV som standard: uten `JARVIS_GROWTH_WRITE_PLATFORMS` registreres INGEN skriveverktøy, og uten
+  // `JARVIS_GROWTH_EXPERIMENTS=on` ingen eksperimentverktøy - verktøylister, utvalg og rate-grenser er da identiske med main, og `deps.growthWrites` (rutene) finnes ikke (404). Skriving krever dessuten
+  // eierens EGNE konto-/eiendoms-id-er i `JARVIS_GROWTH_WRITE_TARGETS` (mål-autorisasjon i gatewayen, fail-closed). Kun API-prosessen registrerer dem (worker/bakgrunn er read-only).
+  const growthWriteConfig = growthWriteConfigFromEnv(process.env);
+  const growthWriteEnabled = growthWriteConfig.platforms.size > 0;
+  const growthExperimentsEnabled = process.env["JARVIS_GROWTH_EXPERIMENTS"] === "on";
+  const growthWriteTransports = growthWriteEnabled
+    ? createGrowthWriteTransports(growthWriteConfig, {
+        readSecret: (ref) => readSecretProvider.get(ref), env: process.env,
+        // UA-6: pengeøkende handlinger nektes mens eierens finans-nødbryter er på OG når tilstanden er ukjent (fail-closed i fabrikken); det er ikke et beløpstak.
+        financeKillSwitch: async (tenantId) => (await financeService.getKillSwitch(tenantId))?.enabled === true
+      })
+    : {};
+  const growthExperimentRegistry = growthExperimentsEnabled ? new ExperimentRegistryService(pool) : undefined;
+  // Review INFO: loggen kommer KUN når et av flaggene er satt (med alt AV er oppstarten identisk med main - ingen ekstra loggline).
+  if (growthWriteEnabled || growthExperimentsEnabled) {
+    console.log(JSON.stringify({ msg: "growth_writes", platforms: [...growthWriteConfig.platforms], targets: [...growthWriteConfig.targets.entries()].map(([p, ids]) => ({ platform: p, count: ids.size })), experiments: growthExperimentsEnabled }));
+  }
+  // WP-B3 (D-475, EV-23): eierens avgjørelse om et endringsforslag (`executive.record_evolution_decision`, kun en registrering i revisjonssporet - ingen virkning) finnes KUN med JARVIS_CONTROL_EVOLUTION_APPROVAL=on OG når
+  // Evolusjon-senteret faktisk er koblet inn (knappene bor der). Uten flagget finnes hverken verktøyet, skriveren eller ruten-navnet (flagg AV er identisk med main).
+  const evolutionApprovalOn = flagOn(process.env, CONTROL_FEATURE_FLAGS.evolutionApproval) && controlCenters.has("evolution");
+  // WP-G1 (D-463, UA-7): felles utgående kommunikasjon + signerte innkommende webhooks. DORMANT og NOT VERIFIED: alt AV = ingenting konstrueres (identisk med main). Ugyldig konfigurasjon kaster og stopper oppstarten.
+  const commsRuntime = buildCommsRuntime({
+    env: process.env, pool, graph: conversationGraphService, business: businessService, secrets: readSecretProvider,
+    warn: (event) => console.error(JSON.stringify({ msg: "comms_warn", ...event }))
+  });
+  // WP-G2 (D-464, UA-8 Personal Twin): kritiske hjem-/bilhandlinger, familie, helse-inntak, Apple CalDAV/CardDAV, personlig økonomi-lesing og kontekstmotor. ALT er AV som standard: uten `JARVIS_PERSONAL_*`-flagg er
+  // `personal.tools` tom, `filterTools` identiteten og `personal.deps` `undefined` (verktøylister, utvalg, rate-grenser og ruter er identiske med main, ingen ekstra loggline). Kun API-prosessen kobler det inn.
+  const personal = createPersonalWiring({ env: process.env, pool, gateway: toolGateway, readSecret: (ref) => readSecretProvider.get(ref), ownerPersonId: owner.owner_person_id, controls: { killSwitch, ownerControls } });
+  const personalLog = personal.describe();
+  if (personalLog) console.log(JSON.stringify(personalLog));
+  // WP-G4 (D-466, UA-10): samlet hendelsesabonnement (abonnementsregister, inntaksbuss, hendelsesløper, kildeporter). ALT er AV som standard: uten `JARVIS_SITUATION_SIGNALS=on` er `tools` tom, `runner` null og ingenting logges
+  // (verktøylister, utvalg, intents, rate-grenser, ruter og det daglige sveipet er identiske med main). Helse-/visjonsporten tas strukturelt inn fra de ALLEREDE konstruerte tjenestene (denne filen er en godkjent helse-importør).
+  const situationSignals = createSituationSignalsWiring({
+    env: process.env, pool, engine: situationEngine, domainPauses: situationDomainPauses, gateway: toolGateway, modelGateway: gateway, ownerIdentity, ownerTenant: owner.tenant_id,
+    ownerPersonId: owner.owner_person_id, incidents: incidentService, vision: visionService, health: healthService, killSwitch,
+    haTransport: new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))
+  });
+  const situationSignalsLog = situationSignals.describe();
+  if (situationSignalsLog) console.log(JSON.stringify(situationSignalsLog));
+  for (const tool of personal.filterTools(firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
     // D-247: `chatId` som en resolver mot `readSecretProvider` (samme
@@ -1055,7 +1150,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           limitations: {
             forbiddenModelToolIds: FORBIDDEN_MODEL_TOOL_IDS,
             connectors: CONNECTOR_REGISTRY.map((c) => ({ id: c.id, category: c.category, test_method: c.live_test ? "live" : "presence_only" })),
-            modelProfiles: DEFAULT_PROFILES,
+            // WP-G3 (review A-L3): begrensningsregisteret (self-model) får `local_vision` KUN når adapteren er registrert - ellers er listen identisk med main.
+            modelProfiles: visionAdapter !== null ? PROFILES_WITH_LOCAL_VISION : DEFAULT_PROFILES,
             allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"],
             backupStatusReadable: backupStatusSource !== undefined
           }
@@ -1072,8 +1168,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         },
         controlCenters,
         // Gjennomgang M2: finansdata er SECRET_RESTRICTED (D-378) - en SKYmodell får aldri finans-senteret (holdes tilbake ved utførelse i executive-transporten, uansett hvilke verktøy turens utvalg valgte); en lokal modell
-        // og siden får det. Lokalitet kommer fra leverandørregisteret (SAMME `servedByCloudModel` som chattens verktøyskjerm); ukjent leverandør regnes som sky (fail-closed).
-        servedLocally: (model) => !servedByCloudModel({ provider: model.provider }),
+        // og siden får det. Lokalitet kommer fra leverandørregisteret; ukjent leverandør regnes som sky (fail-closed). WP-N1 (F2-A3): SAMME prediktat som ToolGateway-låsen (`financeLockServedLocally` i `restricted-context-guard.ts`,
+        // `!servedByCloudModel`) - ingen inline-kopi (identisk oppførsel som før; kopien var den eneste som ikke var testet).
+        servedLocally: financeLockServedLocally,
+        // WP-N1 (review B, F-B1): nøstede finansavlesninger (`get_control_surface_status`/`get_delegation_board` -> `finance.get_kill_switch`) holdes tilbake fra skymodeller KUN med vakten på (flagg AV: feltet settes ikke = identisk med main).
+        ...(restrictedContextGuard.enabled ? { withholdFinanceFromCloud: true } : {}),
         // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling bruker den EKSISTERENDE kanselleringsveien (samme `taskService` som chatens «avbryt jobb <id>»).
         tasks: { cancel: (identity, taskId) => taskService.cancel(identity, taskId) },
         // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.
@@ -1087,6 +1186,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {}),
         // WP-H2 (gjennomgang L1): før-bildet av en autonomi-binding skrives og committes i revisjonssporet FØR `revoke_autonomy_binding` sletter den (kun brukt når verktøyet er registrert, JARVIS_CONTROL_AUTONOMY_REVOKE=on).
         autonomyAudit: createAutonomyAudit(pool),
+        // WP-B3 (D-475, EV-23): skriveren (kun revisjonssporet; aldri endringsregisteret) finnes KUN når avgjørelsesverktøyet er registrert.
+        ...(evolutionApprovalOn ? { evolutionDecisions: createEvolutionDecisionRecorder(pool) } : {}),
         holder: executiveRef
       })), {
         // WP-H1/H2 (gjennomgang M1): per-senter lese-verktøyene (`get_<senter>_center`) registreres KUN for sentrene hvis flagg er på - flagg AV er identisk med main (ingen verktøy, ingen utvalgstreff, ingen rate-endring).
@@ -1094,7 +1195,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         controlCenters: controlCentersWithTools(process.env, controlCenters),
         // WP-H2 (M1): `run_golden_suite` og `revoke_autonomy_binding` registreres KUN med sine egne flagg (uten flagg finnes verktøyene ikke - og `/executive/mutate` godtar ikke navnene, se `server.ts`).
         goldenSuite: goldenSuiteRunner !== undefined,
-        autonomyRevoke: flagOn(process.env, CONTROL_FEATURE_FLAGS.autonomyRevoke)
+        autonomyRevoke: flagOn(process.env, CONTROL_FEATURE_FLAGS.autonomyRevoke),
+        // WP-B3 (D-475, EV-23): `record_evolution_decision` registreres kun med eget flagg + Evolusjon-senteret (se `evolutionApprovalOn`).
+        evolutionApproval: evolutionApprovalOn
       }),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
@@ -1127,7 +1230,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // finnes KUN med JARVIS_KNOWLEDGE_CLAIM_WRITES=on, og står uansett på ingen modellflate.
       ...knowledgeToolDefinitions(new KnowledgeSearchTransport(knowledgeRetriever, knowledgeClaims), { claimWrites: knowledgeClaimWrites }),
       // D-416: delegeringsnivået (opprett lesende bakgrunnsjobb / les jobbstatus) over SAMME `taskService` (policy + kontraktsregler).
-      ...tasksDelegateToolDefinitions(new TasksDelegateTransport(taskService, chatJobs)),
+      // WP-N1 (F2-B1): med vakten på holder `get_task_status` tittel/resultat/feil fra en jobb startet fra en LÅST tur tilbake fra skymodeller. Vakten AV: nøyaktig konstruksjonen fra før N1 (ingen nytt argument).
+      ...tasksDelegateToolDefinitions(restrictedContextGuard.enabled ? new TasksDelegateTransport(taskService, chatJobs, withholdsRestrictedJobFromCloud) : new TasksDelegateTransport(taskService, chatJobs)),
       // D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger (kun lesing for modellen; skriving via dashbord-ruten).
       ...runRateToolDefinitions(new RunRateTransport(new RunRateService(pool))),
       // WP-E1 (UA-5): de kontrollerte skymålene (Cloudflare nå; Langfuse/Infisical/Postgres-drift legges til i samme fabrikk). SOVENDE uten credential;
@@ -1145,9 +1249,20 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           postgres_ops: new PostgresOpsTransport({ config: postgresOpsConfig })
         },
         { cloudflareMutationZones: parseCloudflareMutationZones(process.env["JARVIS_CLOUDFLARE_MUTATION_ZONES"]), postgresOps: postgresOpsConfig, infisicalRotationIds: parseInfisicalRotationIds(process.env["JARVIS_INFISICAL_ROTATION_IDS"]) }
-      )
+      ),
+      // WP-D3 (UA-4 Growth): kun med flaggene på (se over). Eier-eksklusive navnerom (`growth_*`) som aldri står på en modellflate; skriving går alltid gjennom step-up + klasse D-kjeden.
+      ...(growthWriteEnabled ? growthWriteToolDefinitions(growthWriteConfig, growthWriteTransports) : []),
+      ...(growthExperimentRegistry ? growthExperimentToolDefinitions(new GrowthExperimentTransport(growthExperimentRegistry)) : []),
+      // WP-G4 (D-466): kontrollhandlinger for hendelsesabonnementet på `situations` (eier-eksklusivt navnerom), HA-lesehandlingen `read_state_detail` og `set_autonomy_policy` med valgfri `expires_at` (erstatter den tidligere
+      // definisjonen med samme navn; står bevisst ETTER `situationsToolDefinitions(...)`). Tom liste uten `JARVIS_SITUATION_SIGNALS=on` = identisk med main. Står FØR comms/personal: kildevaktene krever at de to står sist.
+      ...situationSignals.tools,
+      // WP-G1 (D-463, UA-7): `comms.*` (felles utgående kommunikasjon - klasse D `outbound_message`, eier-kun, aldri en modellflate) registreres KUN med JARVIS_COMMS_OUTBOUND=on. Flagg AV = tom liste = identisk med main
+      // (ingen verktøy, ingen utvalgstreff, ingen rate-endring). Samme ene register-løkke som resten - ingen parallell registreringsvei.
+      ...commsRuntime.tools,
+      // WP-G2 (D-464): personlig-domenet (tom liste uten flagg). Eier-/step-up-krevende, aldri på en modellflate.
+      ...personal.tools
     ]
-  })) toolGateway.register(tool);
+  }))) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
   // lenger koblet til noen aktiv flate. Chat, tale, Telegram og executive-jobber
   // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
@@ -1269,6 +1384,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     toolTurnRoute,
     toolTurnDayCap: toolTurnRoute !== null && toolTurnDailyCapOre > 0 ? { cap_ore: toolTurnDailyCapOre, spentToday: (tenantId) => dailySpentOre(pool, tenantId) } : null,
     chatCandidates,
+    // WP-N1 (Q-66/JARVIS-101): «begrenset»-merking av låste turer + lesing av merket. KUN med flagget på; utelatt = motoren er identisk med main (kolonnen settes aldri, merker i historikken ignoreres).
+    ...(restrictedContextGuard.enabled ? { restrictedContextGuard: true } : {}),
+    // WP-N1 (F2-B1b): hurtigbanens `jobbstatus <id>` låser turen når jobben ble startet fra en LÅST tur. KUN med vakten på.
+    ...(restrictedContextGuard.enabled ? { jobOrigin: { isRestricted: (identity: Parameters<ChatJobs["isRestrictedOrigin"]>[0], taskId: string) => chatJobs.isRestrictedOrigin(identity, taskId) } } : {}),
     // EV-1 (D-412): hurtigbanens selvdiagnose går gjennom Tool Gateway (Policy + revisjon) - samme verktøy som modellen kan kalle.
     selfDiagnosis: {
       async run(identity, opts) {
@@ -1317,7 +1436,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           idempotency_key: `fast-delegate:${identity.session_id}:${Date.now()}`,
           // D-449 (Q-50): hurtigbanen bruker ingen modell - oppgaveteksten ER eierens egne ord (ordrett). Eneste sted `contentOrigin` settes, og KUN når samtalemotoren har avgjort at chatten ville latt en
           // verktøytur gå til sky (eierens ruteoverstyring, de siste meldingene, minnerom og innlimt tekst, se `delegationCloudDecision`). Uten merket (eller `servingModel`) kjører jobben lokalt.
-          ...(options?.cloudAllowed === true ? { contentOrigin: "owner_direct" as const } : {})
+          ...(options?.cloudAllowed === true ? { contentOrigin: "owner_direct" as const } : {}),
+          // WP-N1 (F-A2): samtalemotoren har avgjort at ruten er LÅST til SECRET_RESTRICTED (kun med vakten på) - leveringen av jobbresultatet lagres da begrenset (`restricted_origin` i kontrakten). Uten merket: ingen ny nøkkel.
+          ...(options?.restricted === true ? { restrictedOrigin: true as const } : {})
         });
         if (!result.ok) return null;
         const data = result.data as { started?: unknown; message?: unknown; cloud_tool_turns?: unknown } | undefined;
@@ -1395,6 +1516,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `buildSystemPrompt()`/`loadPersonality()`.
     personality: loadPersonalityConfig
   });
+  const commsApiDeps = commsRuntime.apiDeps(toolGateway);
+  commsRuntime.startSweeps(ownerTenants, owner.owner_person_id);
+  // WP-G3 (D-465): UA-9-kjøretiden (pipeline, HA-poller, `/vision/*`-rutene, vedlikehold). `null` (ingenting bygget) uten JARVIS_VISION_ENABLED=on. Se vision-runtime.ts for flaggene.
+  const visionRuntime = buildVisionRuntime({
+    pool, env: process.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, ownerTenantId: owner.tenant_id, secrets: readSecretProvider,
+    ownerControls: { killSwitch, controls: ownerControls }, embeddingBlockedReason: visionEndpoints.embeddingBlockedReason
+  });
   const deps: ApiDeps = {
     // D-393 (JARVIS-026): `/health` svarer 503 når databasen ikke svarer (tidligere konstant «ok»).
     readiness: makeReadiness({ database: () => pool.query("SELECT 1") }),
@@ -1441,9 +1569,28 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     chatJobs,
     // WP-D2 (JARVIS-044/Q-48): eier-ruten for å opprette en bedrifts-tenant er AV som standard - kun eksakt `true` åpner den (ellers 404). Ingenting provisjoneres automatisk.
     ...(process.env["JARVIS_BUSINESS_TENANT_PROVISIONING"] === "true" ? { businessTenants: { pool } } : {}),
+    // WP-G3 (D-465): `/vision/*` finnes KUN med JARVIS_VISION_ENABLED=on (ellers 404, identisk med main).
+    ...(visionRuntime !== null ? { vision: visionRuntime.api } : {}),
+    // WP-G4 fiks-runde (D-466, B-MEDIUM-5): `/situations/signals/*` finnes KUN med JARVIS_SITUATION_SIGNALS=on (ellers 404, identisk med main).
+    ...(situationSignals.api !== null ? { situationSignals: situationSignals.api } : {}),
     // WP-D2 (UA-3 «churn/product usage»): produktbruk-webhooken er AV som standard - ruten finnes først når eieren har satt JARVIS_PRODUCT_USAGE_TENANT_ID (en bedrifts-tenant;
     // tjenesten avviser alt annet). Hemmeligheten leses ved HVERT kall via den delte kjeden (Infisical-primær, .env-fallback), slik at rotasjon gjelder umiddelbart; er den
     // borte eller kortere enn 32 tegn svarer ruten 503 (fail closed).
+    // WP-D3 (UA-4 Growth): eier-rutene `/growth/*` finnes KUN når skriving (plattformliste) eller eksperimenter er slått på; ellers 404 (identisk med main).
+    ...(growthWriteEnabled || growthExperimentsEnabled
+      ? {
+          growthWrites: {
+            executor: {
+              pool, gateway: toolGateway, journal: new GrowthWriteJournal(pool), index: growthOpIndex(growthWriteSpecs(growthWriteConfig)),
+              findCampaign: (tenantId, space, channel, externalId) => growthService.findCampaignByExternalId(tenantId, space, channel, externalId)
+            },
+            // Review INFO: skrive-/lese-/journalrutene finnes KUN med minst én plattform (kun `JARVIS_GROWTH_EXPERIMENTS=on` gir bare eksperimentruten; de øvrige gir 404).
+            writes: growthWriteEnabled, experiments: growthExperimentsEnabled
+          }
+        }
+      : {}),
+    // WP-G2 (D-464): `/personal/*` finnes KUN når minst ett JARVIS_PERSONAL_*-flagg er på; ellers 404 (identisk med main).
+    ...(personal.deps ? { personal: personal.deps } : {}),
     ...(process.env["JARVIS_PRODUCT_USAGE_TENANT_ID"]
       ? {
           productUsage: {
@@ -1453,7 +1600,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             })
           }
         }
-      : {})
+      : {}),
+    // WP-G1 (D-463, UA-7): webhook-rutene finnes KUN med JARVIS_COMMS_WEBHOOKS og eier-rutene /comms/* KUN med JARVIS_COMMS_OUTBOUND=on (uten flaggene er `comms` ikke satt = 404, identisk med main).
+    ...(commsApiDeps ? { comms: commsApiDeps } : {})
   };
   // D-416: lever ferdige bakgrunnsjobber tilbake til samtalen (nøyaktig én gang). Feil logges, stopper aldri prosessen.
   setInterval(
@@ -1477,7 +1626,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tasksSource(pool),
     schedulerSource(pool, (id) => id.person_id === owner.owner_person_id && id.tenant_id === owner.tenant_id),
     buildStatusSource(toolGateway),
-    emailSource(toolGateway), calendarSource(toolGateway)
+    emailSource(toolGateway), calendarSource(toolGateway),
+    // WP-B4 (D-476): ÉN linje om Claude-kreditten i den daglige briefen - kun med JARVIS_CLAUDE_BUDGET_USD (uten flagget er kildelisten uendret).
+    ...(claudeBudgetConfig !== null ? [claudeBudgetBriefSource({ pool, config: claudeBudgetConfig })] : [])
   ], pool);
   const aiMeshText = async () => {
     const mesh = gateway.meshStatus();
@@ -1732,6 +1883,8 @@ porter: se docs/RUNTIME_GATES.md`;
       ...ownerIdentity, tenant_id: tenantId, memory_space_id: memorySpace, session_id: `${ownerIdentity.session_id}-situation-sweep`
     })
   }).then(assertSituationSweepHealthy));
+  // WP-G4 (D-466): hendelsesløperen starter KUN med hovedbryteren på (ingen effekt ellers). Første tikk etter ett intervall; eier-kontrollene (kill switch, pause) gjelder per tikk.
+  situationSignals.start();
   // UA-3 business-event-linkage (D-57) §19/§20/§21: periodisk Gmail/Calendar->
   // Business-OS-synkronisering - SAMME reboot-durable DailyScheduler-mekanisme
   // (eget job_name, egen klokkeslett-env), uavhengig av Telegram-konfig.
@@ -1740,14 +1893,14 @@ porter: se docs/RUNTIME_GATES.md`;
   // morgenbriefen kjører.
   new DailyScheduler(
     pool, "business-events-sync", envHour("JARVIS_BUSINESS_EVENTS_SYNC_HOUR", 5)
-  ).start(() => failOnSweepFailures("business-events-sync", (failures) => runBusinessEventSyncForAllTenants(pool, businessEventSyncService, failures)));
+  ).start((run) => failOnSweepFailures("business-events-sync", (failures) => runBusinessEventSyncForAllTenants(pool, businessEventSyncService, failures, run)));
   // UA-7 Communications Hub - foerste slice (D-119): periodisk Gmail->
   // Conversation Graph-identitetskobling - SAMME reboot-durable
   // DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av business-events-sync over.
   new DailyScheduler(
     pool, "conversation-graph-sync", envHour("JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", 5)
-  ).start(() => failOnSweepFailures("conversation-graph-sync", (failures) => runConversationGraphSyncForAllTenants(pool, conversationGraphSyncService, failures)));
+  ).start((run) => failOnSweepFailures("conversation-graph-sync", (failures) => runConversationGraphSyncForAllTenants(pool, conversationGraphSyncService, failures, run)));
   // UA-3 profiling/scoring-slice (D-61) §23: periodisk, idempotent
   // score-rekalkulering - SAMME reboot-durable DailyScheduler-mekanisme (eget
   // job_name, egen klokkeslett-env). Kjøres ETTER events-sync (05) og
@@ -1768,7 +1921,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // klassifiseres som support, se `email-ingress.ts`).
   new DailyScheduler(
     pool, "support-inbox-sync", envHour("JARVIS_SUPPORT_INBOX_SYNC_HOUR", 8)
-  ).start(() => failOnSweepFailures("support-inbox-sync", (failures) => runSupportInboxSyncForAllTenants(pool, supportEmailService, failures)));
+  ).start((run) => failOnSweepFailures("support-inbox-sync", (failures) => runSupportInboxSyncForAllTenants(pool, supportEmailService, failures, run)));
   // D-85: periodisk anomaly->anbefaling-sveip (growth-eid BESLUTNINGS-lag,
   // ALDRI utførelse) - SAMME reboot-durable DailyScheduler-mekanisme, eget
   // job_name/klokkeslett-env. Kjøres ETTER business-open-loop-sweep (default
@@ -1804,6 +1957,17 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "vision-retention-sweep", envHour("JARVIS_VISION_RETENTION_SWEEP_HOUR", 2)
   ).start(() => runVisionRetentionSweepForAllTenants(pool, visionService).then((summary) => assertNoSweepFailures("vision-retention-sweep", summary.failed)));
+  // WP-G3 (D-465): vedlikehold av bilder/inventar/vektorer/gravsteiner/opptaksforespørsler - KUN med JARVIS_VISION_ENABLED=on (ellers ingen jobb, identisk med main). Daglig full kjøring (reboot-durable,
+  // samme mekanisme som over) + en hyppig LETT kjøring (gravsteiner, pending, utløp) slik at et slettet bilde forsvinner fra disken innen minutter.
+  if (visionRuntime !== null) {
+    new DailyScheduler(
+      pool, "vision-maintenance-sweep", envHour("JARVIS_VISION_MAINTENANCE_HOUR", 3)
+    ).start(() => visionRuntime.fullMaintenance().then((summary) => assertNoSweepFailures("vision-maintenance-sweep", summary.failed)));
+    setInterval(
+      () => void visionRuntime.lightMaintenance().catch((err: unknown) => console.error(JSON.stringify({ msg: "vision_light_maintenance_failed", error: err instanceof Error ? err.message.slice(0, 80) : "unknown" }))),
+      envInt("JARVIS_VISION_MAINTENANCE_INTERVAL_MINUTES", 15, { min: 1, max: 1440 }) * 60_000
+    ).unref();
+  }
   // D-286 (Tobias direkte i chat, "alle" - alle tre foreslåtte tilnærminger
   // til ubegrenset minnevekst): periodisk konsolidering av gamle EPISODISKE
   // samtale-minner til dagssammendrag - SAMME reboot-durable
@@ -1851,6 +2015,16 @@ porter: se docs/RUNTIME_GATES.md`;
     const result = await runOperationalRetentionSweep(pool);
     console.log(JSON.stringify({ msg: "operational_retention_sweep_completed", ...result }));
   });
+  // WP-K (D-471, JARVIS-053): oppbevaring for den varige policy-journalen (`policy_decisions`, migrasjon 108) - SAMME mønster og klokkeslett som sveipet over, men egen jobb (egen claim/retry/helse i
+  // `scheduler_state`, så en feil her aldri skjuler resultatet av det eksisterende sveipet). Kun registrert når journalen er PÅ (AV = ingenting nytt kjører); `prune_policy_decisions()` har et fast gulv på 30 dager.
+  if (policyAuditSink) {
+    new DailyScheduler(
+      pool, "policy-decision-retention-sweep", envHour("JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", 3)
+    ).start(async () => {
+      const result = await runPolicyDecisionRetentionSweep(pool, { days: policyAuditSinkConfigFromEnv().retentionDays });
+      console.log(JSON.stringify({ msg: "policy_decision_retention_sweep_completed", ...result }));
+    });
+  }
   if (memoryEmbedding.model !== "local-hash-v1") {
     setTimeout(() => {
       runMemoryReembedSweepForAllTenants(pool, memoryEmbedding, { maxRows: 500 }).catch((err: unknown) => {

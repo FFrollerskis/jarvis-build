@@ -49,6 +49,8 @@ export interface SituationNotificationPolicy {
   quiet_hours_start_utc: number | null;
   quiet_hours_end_utc: number | null;
   resuppress_hours: number;
+  /** WP-G4 (139): eierens eksplisitte valg om at sikkerhetssignaler (`urgent`) får bryte stille timer. Standard false. */
+  critical_bypass_quiet: boolean;
   actor_person_id: string | null;
   updated_at: string;
 }
@@ -86,7 +88,14 @@ export const SituationCandidateInputSchema = z
     confidence: z.number().min(0).max(1).optional(),
     reason: z.string().min(1),
     owner_person_id: z.string().min(1).optional(),
-    source_open_loop_id: z.string().min(1).optional()
+    source_open_loop_id: z.string().min(1).optional(),
+    /** WP-G4: sikkerhetssignal (vannlekkasje, utløst alarm). Bryter stille timer KUN hvis eieren har valgt det (`critical_bypass_quiet`); påvirker ellers ingenting. */
+    urgent: z.boolean().optional(),
+    /**
+     * WP-G4 fiks-runde (A-LOW-6): en signalkandidat (inntaksbussen) kan aldri SENKE en åpen situasjon som allerede bærer en høyere prioritet. Flere kilder for samme nøkkel (HA og kamera for samme åpning) ga «siste vinner» som overskrev
+     * prioritet, konfidens og begrunnelse. Med flagget vinner den høyeste prioriteten, og konfidens og begrunnelse følger vinneren. Uten flagget (alle eksisterende kallere: sveipene) er oppførselen uendret.
+     */
+    no_downgrade: z.boolean().optional()
   })
   .strict();
 export type SituationCandidateInput = z.infer<typeof SituationCandidateInputSchema>;
@@ -163,6 +172,8 @@ export interface SituationAutonomyPolicy {
   action: string;
   parameters: Record<string, JsonValue>;
   enabled: boolean;
+  /** WP-G4 (139): valgfri utløpstid. `null` = ingen utløp. En utløpt binding gir ingen ACT. */
+  expires_at: string | null;
   actor_person_id: string;
   created_at: string;
   updated_at: string;
@@ -179,7 +190,9 @@ export const SetSituationAutonomyPolicyInputSchema = z
     tool_id: z.string().min(1),
     action: z.string().min(1),
     parameters: z.record(JsonValueSchema).optional(),
-    enabled: z.boolean().optional()
+    enabled: z.boolean().optional(),
+    /** WP-G4: valgfri utløpstid (ISO 8601). Må ligge i fremtiden og høyst 365 dager frem (håndheves ved binding). */
+    expires_at: z.string().min(10).max(40).optional()
   })
   .strict();
 export type SetSituationAutonomyPolicyInput = z.infer<typeof SetSituationAutonomyPolicyInputSchema>;

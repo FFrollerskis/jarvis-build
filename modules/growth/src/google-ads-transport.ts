@@ -1,6 +1,6 @@
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
-import type { ToolTransport } from "@jarvis/tool-gateway";
-import { googleAccessToken } from "@jarvis/tool-gateway";
+import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { abortableSleep, adoptCallSignal, currentCallSignal, googleAccessToken, throwIfAborted } from "@jarvis/tool-gateway";
 import type { GrowthService } from "./service.ts";
 import type { CampaignStatus } from "./types.ts";
 
@@ -72,8 +72,9 @@ export class GoogleAdsApiError extends Error {
   }
 }
 
+/** WP-K (D-471, JARVIS-018): venting mellom forsøk avbrytes av gatewayens kallsignal. */
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return abortableSleep(ms);
 }
 
 /**
@@ -154,7 +155,10 @@ async function gaqlSearch(options: GaqlSearchOptions): Promise<GaqlRow[]> {
     let lastError: GoogleAdsApiError | undefined;
     let json: { results?: GaqlRow[]; nextPageToken?: string } | undefined;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const response = await fetch(url, { method: "POST", headers, body });
+      // WP-K (D-471, JARVIS-018): gatewayens kallsignal avbryter forespørselen (rå `fetch` hadde INGEN frist før), og et avbrutt kall sender aldri et nytt forsøk.
+      throwIfAborted();
+      const callSignal = currentCallSignal();
+      const response = await fetch(url, { method: "POST", headers, body, ...(callSignal ? { signal: callSignal } : {}) });
       if (response.ok) {
         json = (await response.json()) as { results?: GaqlRow[]; nextPageToken?: string };
         lastError = undefined;
@@ -248,7 +252,13 @@ export class GoogleAdsTransport implements ToolTransport {
     private readonly apiVersion: string = (process.env["JARVIS_GOOGLE_ADS_API_VERSION"] ?? "").trim() || DEFAULT_API_VERSION
   ) {}
 
-  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
+  async invoke(
+    action: string, parameters: Record<string, JsonValue>, credential: string, _context?: ToolInvocationContext, signal?: AbortSignal
+  ): Promise<{ external_id?: string; data?: JsonValue }> {
+    return adoptCallSignal(signal, () => this.dispatch(action, parameters, credential));
+  }
+
+  private async dispatch(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
     const tenantId = requireString(parameters, "tenant_id");
     const memorySpace = (parameters["memory_space"] !== undefined ? String(parameters["memory_space"]) : "business") as MemorySpace;
     const customerId = parameters["customer_id"] !== undefined ? String(parameters["customer_id"]) : this.defaultCustomerId;

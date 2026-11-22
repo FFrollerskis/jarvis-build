@@ -5,16 +5,17 @@ import { envInt, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { createWatchdogIncidentBridge, parseIncidentProducerConfig } from "./incident-producers.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
-import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
+import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPolicyAuditSinkFromEnv, createPool, installPolicyAuditDrain, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
-import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
+import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ClaudeBudgetEnforcer, claudeBudgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv, type ClaudeBudgetConfig } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubTransport, createGitHubAuth, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
   CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, memoryToolDefinitions,
   ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets,
   INFRA_GATED_TOOL_IDS,
-  configuredGithubRepo, githubReposUnlocked
+  configuredGithubRepo, githubReposUnlocked,
+  configureGoogleOAuthClientSource, createVaultFirstConfigReader, primeGoogleDriveCredentialCheck
 } from "@jarvis/tool-gateway";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService, parseSupportSlaHours } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
@@ -33,6 +34,7 @@ import {
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import { GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
+import { ClaudeBudgetAlerter, startClaudeBudgetAlerts } from "./claude-budget-surfaces.ts";
 import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute } from "./tool-turn-route.ts";
 import {
   AnthropicAdapter,
@@ -92,9 +94,18 @@ const worker = new InProcessWorker(queue);
 
 // BO-09 (§22): worker bruker AI Mesh gjennom ModelGateway med purpose -
 // aldri provider-API direkte, aldri låst til én provider.
+// WP-B4 (D-476): Claude-kreditten - samme miljøvariabler og samme enforcer som api (workeren kaller også modellen: minneuttrekk, sammendrag, delegerte jobber). AV som standard; ugyldig verdi stopper oppstarten.
+let claudeBudgetConfig: ClaudeBudgetConfig | null = null;
+try {
+  claudeBudgetConfig = claudeBudgetConfigFromEnv(process.env);
+} catch (err) {
+  failStartup(err);
+}
+const workerTrace = traceSinkFromEnv("var/worker-traces.jsonl");
+const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace: workerTrace, actor_person_id: owner.owner_person_id, owner_tenant_id: owner.tenant_id });
 const gateway = new ModelGateway({
   pool,
-  trace: traceSinkFromEnv("var/worker-traces.jsonl"),
+  trace: workerTrace,
   pricing: pricingFromEnv(), // D-399: se apps/api/src/main.ts
   providers: [
     new OpenAiAdapter(),
@@ -118,7 +129,9 @@ const gateway = new ModelGateway({
   // i api gjaldt ikke her. Samme kilde som api: `budgetConfigFromEnv()`.
   budget: budgetConfigFromEnv(),
   // WP-H0 (JARVIS-087): eierens pause/tilbakekall av en modellleverandør, lest LIVE fra `owner_control_state` ved hvert kall - en pause satt via api stanser også workerens modellkall (se provider-pause.ts).
-  providerPause: createProviderPauseSourceFromPool(pool)
+  providerPause: createProviderPauseSourceFromPool(pool),
+  // WP-B4: Claude-kreditten (kun når JARVIS_CLAUDE_BUDGET_USD er satt).
+  ...(claudeBudget !== undefined ? { claudeBudget } : {})
 });
 // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
 try {
@@ -157,6 +170,10 @@ await deviceRegistry.refresh().catch((err) => {
     error: err instanceof Error ? err.message : String(err)
   }));
 });
+// WP-K (D-471, JARVIS-053): varig policy-journal (AV som standard; `JARVIS_POLICY_AUDIT_SINK=db` skriver hver avgjørelse til `policy_decisions`). Samme sink-kode som api; retensjonssveipet kjører i api.
+// En sink-feil kan aldri endre en avgjørelse (telt i `policy.auditStats()` og sinkens egen statistikk). Uten flagget er `policyAuditSink` null og PolicyGateway bruker ringbufferen som før.
+const policyAuditSink = createPolicyAuditSinkFromEnv(pool);
+if (policyAuditSink) installPolicyAuditDrain(policyAuditSink);
 // v4.0 sovereign-owner (BO-11.1 §2-funn): samme authority-wiring som api -
 // uten denne kjørte workeren i legacy SCOPED-modus for owners D-kall.
 const policy = new PolicyGateway({
@@ -170,7 +187,8 @@ const policy = new PolicyGateway({
   authority: {
     owner_person_id: owner.owner_person_id,
     owner_tenants: ownerTenants
-  }
+  },
+  ...(policyAuditSink ? { auditSink: policyAuditSink.write } : {})
 });
 // D-181 (BLOCKER B1, D184): hoistet til en NAVNGITT konstant (var tidligere
 // inline i ToolGateway-konstruksjonen) slik at NØYAKTIG SAMME
@@ -199,6 +217,10 @@ const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerContr
   classDPipeline: { enforce: true },
   credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
 });
+// WP-K (D-471, JARVIS-056): samme hvelv-først-lesing av Google-klientens id/secret som apps/api/src/main.ts (API/worker-parity) - miljøet er en LOGGET-DEPRECATED fallback, og Drive-sjekken
+// (`driveTransportsIfConfigured()` under) måles hvelv-bevisst ÉN gang her, FØR `firstWaveTools()`.
+configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault: infisicalSecretProvider }));
+await primeGoogleDriveCredentialCheck((ref) => toolSecretProvider.get(ref));
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
@@ -612,6 +634,11 @@ setInterval(
       .catch((err) => console.error(JSON.stringify({ msg: "watchdog_tick_error", error: (err as Error).message }))),
   WATCHDOG_INTERVAL_MS
 );
+// WP-B4 (D-476): Telegram-varsel om Claude-kreditten (50/75/90/100 % og tempo over 1,3 × kurven) - ÉN gang per terskel per kredittperiode, via vakthundens eksisterende varslingsvei (samme sink som `costWarningCheck`,
+// D-395). Kun eierens tenant. AV uten JARVIS_CLAUDE_BUDGET_USD. Ingen modellkall og ingen verktøykall: kun lesing av `cost_events` og skriving av revisjonsmarkører.
+if (claudeBudgetConfig !== null) {
+  startClaudeBudgetAlerts(new ClaudeBudgetAlerter({ pool, config: claudeBudgetConfig, tenantId: owner.tenant_id, ownerPersonId: owner.owner_person_id, sink: watchdogAlertSink }));
+}
 
 // REMEDIERING DEL 2 (JARVIS-010): kodejobber kjører KUN i en per-jobb-container med eksplisitt policy
 // (ikke-root, read-only rootfs, ressursgrenser, egress via allowlistet proxy, ingen arvede secrets) -

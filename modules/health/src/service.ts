@@ -2,9 +2,6 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import {
-  HealthObservationInputSchema,
-  METRIC_CANONICAL_UNITS,
-  METRIC_VALUE_BOUNDS,
   type HealthMetricObservation,
   type HealthMetricSource,
   type HealthObservationInput,
@@ -12,6 +9,7 @@ import {
   type MetricType,
   type SetHealthRetentionPolicyInput
 } from "./types.ts";
+import { validateHealthObservation } from "./validation.ts";
 
 /**
  * UA-8 Personal Digital Twin: JARVIS_CANONICAL helse-ingestion-/lese-tjeneste
@@ -114,26 +112,10 @@ export class HealthService {
    * konfigurert et vindu (se `049_health.sql` sin migrasjons-kommentar).
    */
   async ingestObservation(tenantId: string, personId: string, input: HealthObservationInput): Promise<HealthMetricObservation> {
-    const parsed = HealthObservationInputSchema.safeParse(input);
-    if (!parsed.success) {
-      const firstIssue = parsed.error.issues[0];
-      throw new HealthObservationValidationError(firstIssue?.path.join(".") || "input", firstIssue?.message ?? "schema_validation_failed");
-    }
-    const value = parsed.data;
-    if (Number.isNaN(Date.parse(value.observed_at))) {
-      throw new HealthObservationValidationError("observed_at", "not_a_valid_iso_datetime");
-    }
-    const expectedUnit = METRIC_CANONICAL_UNITS[value.metric_type];
-    if (value.unit !== expectedUnit) {
-      throw new HealthObservationValidationError("unit", `expected '${expectedUnit}' for metric_type '${value.metric_type}', got '${value.unit}'`);
-    }
-    const bounds = METRIC_VALUE_BOUNDS[value.metric_type];
-    if (value.value < bounds.min || value.value > bounds.max) {
-      throw new HealthObservationValidationError(
-        "value",
-        `${value.value} outside plausible range [${bounds.min}, ${bounds.max}] for metric_type '${value.metric_type}'`
-      );
-    }
+    // WP-G2 P1d: valideringen bor i `validation.ts` (delt med det enhetssignerte batch-inntaket); rekkefølge og meldinger er uendret.
+    const checked = validateHealthObservation(input);
+    if (!checked.ok) throw new HealthObservationValidationError(checked.field, checked.detail);
+    const value = checked.value;
 
     return withMemoryTransaction(this.pool, tenantId, ["health"], async (client) => {
       const policy = await client.query(`SELECT 1 FROM health_retention_policies WHERE tenant_id = $1 AND memory_space_id = 'health'`, [tenantId]);
@@ -195,12 +177,14 @@ export class HealthService {
    * Lese-API, health-space-scoped (RLS + strukturell CHECK, se
    * `049_health.sql`). `metricType`/`sinceMs` er valgfrie filtre - `sinceMs`
    * filtrerer på `observed_at` (hendelsestidspunktet, IKKE `recorded_at`).
+   * WP-G4 (B-LOW-6): valgfri `limit` (de NYESTE `limit` radene) - uten den er oppførselen uendret (ingen LIMIT) for alle eksisterende kallere; situasjonsløperen setter alltid et tak.
    */
   async getRecentMetrics(
     tenantId: string,
     personId: string,
     metricType?: MetricType,
-    sinceMs?: number
+    sinceMs?: number,
+    limit?: number
   ): Promise<HealthMetricObservation[]> {
     return withMemoryTransaction(this.pool, tenantId, ["health"], async (client) => {
       const conditions = ["tenant_id = $1", "person_id = $2"];
@@ -213,8 +197,13 @@ export class HealthService {
         params.push(new Date(sinceMs).toISOString());
         conditions.push(`observed_at >= $${params.length}`);
       }
+      let limitClause = "";
+      if (limit !== undefined && Number.isFinite(limit)) {
+        params.push(Math.max(1, Math.floor(limit)));
+        limitClause = ` LIMIT $${params.length}`;
+      }
       const { rows } = await client.query(
-        `SELECT * FROM health_metric_observations WHERE ${conditions.join(" AND ")} ORDER BY observed_at DESC, seq DESC`,
+        `SELECT * FROM health_metric_observations WHERE ${conditions.join(" AND ")} ORDER BY observed_at DESC, seq DESC${limitClause}`,
         params
       );
       return rows as HealthMetricObservation[];

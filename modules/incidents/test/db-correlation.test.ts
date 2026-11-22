@@ -54,6 +54,8 @@ describe("D-105 Part F: correlateDbState (EKTE schema_migrations, ingen ny lever
     const latest = await adminPool.query("SELECT name, applied_at FROM schema_migrations ORDER BY applied_at DESC LIMIT 1");
     const result = await correlateDbState(appPool, TENANT, "1970-01-01T00:00:00.000Z", new Date(Date.now() + 86_400_000).toISOString());
     expect(result.connectivity).toBe("ok");
+    // WP-K (JARVIS-068): «ok» beviser kun at API-prosessens egen pool nådde databasen - feltet sier det eksplisitt.
+    expect(result.connectivity_scope).toBe("api_own_pool");
     expect(result.latest_migration?.name).toBe((latest.rows[0] as { name: string }).name);
   });
 
@@ -72,6 +74,7 @@ describe("D-105 Part F: correlateDbState (EKTE schema_migrations, ingen ny lever
   it("D: EKTE uoppnåelig database gir EKSPLISITT connectivity=unreachable/relevant=unknown - ALDRI en fabrikkert 'ok'", async () => {
     const result = await correlateDbState(unreachablePool, TENANT, "1970-01-01T00:00:00.000Z", new Date().toISOString());
     expect(result.connectivity).toBe("unreachable");
+    expect(result.connectivity_scope).toBe("api_own_pool");
     expect(result.relevant).toBe("unknown");
     expect(result.latest_migration).toBeNull();
   }, 10_000);

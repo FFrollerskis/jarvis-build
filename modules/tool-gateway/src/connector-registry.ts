@@ -302,6 +302,9 @@ export interface ConnectorDefinition {
   live_test?: { tool_id: string; action: string; parameters: (identity: IdentityContext) => Record<string, JsonValue> };
 }
 
+/** WP-K (JARVIS-056): Google OAuth-klientens id/secret - delt av Gmail/Calendar/Drive/Sheets (+ GCE/Ads via `googleAccessToken`). Hver connector får sin EGEN kopi av listen (ingen delt, muterbar referanse). */
+const googleOAuthClientRefs = (): string[] => ["JARVIS_GOOGLE_CLIENT_ID", "JARVIS_GOOGLE_CLIENT_SECRET"];
+
 export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   {
     id: "github", display_name: "GitHub", category: "tool_gateway",
@@ -315,6 +318,9 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   {
     id: "google_calendar", display_name: "Google Calendar", category: "tool_gateway",
     credential_refs: ["JARVIS_GOOGLE_TOKEN"],
+    // WP-K (D-471, JARVIS-056): Google-familiens OAuth-KLIENT (delt app-konfig, ikke en per-konto-secret). Valgfri her slik at eieren kan lagre dem i dashbordet/Infisical (`set_connector_credential`)
+    // uten at `configured` endres (en `.env`-konfig er fortsatt «konfigurert»); leses hvelv-først med miljøet som logget-deprecated fallback (`oauth-client-config.ts`).
+    optional_credential_refs: googleOAuthClientRefs(),
     // SAMME "dagens hendelser"-vindu som `mesh-bridge.ts` sin `read_calendar_today` allerede bygger.
     live_test: {
       tool_id: "calendar", action: "read_events",
@@ -328,11 +334,13 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   {
     id: "gmail", display_name: "Gmail", category: "tool_gateway",
     credential_refs: ["JARVIS_EMAIL_TOKEN"],
+    optional_credential_refs: googleOAuthClientRefs(),
     live_test: { tool_id: "email", action: "read_inbox", parameters: () => ({ max: 1 }) }
   },
   {
     id: "google_drive", display_name: "Google Drive/Docs", category: "tool_gateway",
     credential_refs: ["JARVIS_GOOGLE_TOKEN"],
+    optional_credential_refs: googleOAuthClientRefs(),
     // Uten `folder_id` lister `drive.list_files` roten av driven - samme
     // trygge, side-effektfrie klasse A-lesing `drive-source.ts` allerede bruker.
     live_test: { tool_id: "drive", action: "list_files", parameters: () => ({}) }
@@ -479,6 +487,7 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     // oppføring med samme id (D-293-lærdommen).
     id: "google_sheets", display_name: "Google Sheets", category: "tool_gateway",
     credential_refs: ["JARVIS_GOOGLE_SHEETS_TOKEN"],
+    optional_credential_refs: googleOAuthClientRefs(),
     live_test: {
       tool_id: "google_sheets", action: "list_sheets",
       parameters: () => ({ spreadsheet_id: process.env["JARVIS_GOOGLE_SHEETS_TEST_SPREADSHEET_ID"] ?? "" })

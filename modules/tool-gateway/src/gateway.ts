@@ -3,7 +3,10 @@ import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
+import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal, toolCallAbortEnabled } from "./call-signal.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, ownerStepUpDenial, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
+import { isIndeterminateTransportError, transportErrorKind } from "./transport-errors.ts";
+import { isFinancialNamespace } from "./tool-manifest.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
 /**
@@ -17,6 +20,13 @@ export type SecretSourceHealth = "healthy" | "unavailable" | "unconfigured";
  * kall), og derfor ble «Infisical nede» vist som «ikke konfigurert» med status OK i kontrollsenteret.
  */
 export type SecretPresence = "present" | "absent" | "unknown";
+
+/** WP-K (D-471, JARVIS-054): korrelasjonen som følger en revisjonsrad: oppgave-/spor-ID fra kalleren og ID-en til Policy Gateway-avgjørelsen som førte til raden. */
+interface AuditCorrelation {
+  task_id?: string;
+  trace_id?: string;
+  policy_decision_id?: string;
+}
 
 /** Secrets bak adapter (D-16): env/SOPS nå; Infisical/OpenBao (Q-05, krever Docker) senere. */
 export interface SecretProvider {
@@ -318,15 +328,43 @@ export interface ToolInvocationContext {
    * UKJENT, og en transport som bruker opphavet til å åpne en dyrere/mer eksponert rute må da regne det som ikke betrodd (fail-closed).
    */
   contentOrigin?: "owner_direct";
+  /**
+   * WP-N1 (fiks-runde 1, F-A2): innholdet i `parameters` stammer fra en tur som er LÅST til SECRET_RESTRICTED (D-378: helse/finans, kun lokal modell). En transport som oppretter varig tilstand ut fra kallet (i dag: `tasks.delegate_background_task`,
+   * som bærer det som `restricted_origin` i jobbkontrakten, så leveringen av resultatet lagres begrenset i samtalen) må ikke la den miste dette merket. Settes KUN av trusted kode i kallerens `ToolGateway.execute()`-kall, ALDRI fra
+   * `parameters` - SAMME disiplin som `servingModel`/`contentOrigin`. Nøyaktig TO godkjente setter-steder i produksjonskoden (låst av `wpn1-job-delivery.test.ts`): (1) hurtigbanen i `main.ts` (`delegateBackground`, kun når samtalemotoren
+   * har avgjort at ruten er låst), (2) `MeshToolExecutor` (videreformidler `TurnContext.restricted`, satt av samtalemotoren når turen er låst). Uten dem (vakten AV) er det aldri satt, og alt er som før N1.
+   */
+  restrictedOrigin?: true;
+  /**
+   * WP-K (D-471, JARVIS-054): korrelasjons-ID-ene fra det YTRE kallet (`ToolGateway.execute({ task_id, trace_id })`), slik at en transport som gjør NØSTEDE gateway-kall (f.eks. `business.sync_business_events`,
+   * som leser Gmail/Calendar som `person_id: "system"`) kan bære dem videre til revisjonsradene og policy-avgjørelsene det nøstede kallet gir. Settes KUN av gatewayen, aldri fra `parameters`.
+   */
+  task_id?: string;
+  trace_id?: string;
+  /**
+   * WP-G2 (D-464, fiks-runde A-L12): gatewayens idempotensnøkkel for DETTE kallet (klasse C/D krever den), slik at en transport hvis leverandør støtter idempotensnøkkel kan sende SAMME nøkkel videre i stedet for å finne på en ny
+   * (en leverandør-side dobbeltkommando hindres da også utenfor Jarvis' ledger). Settes KUN av gatewayen fra `request.idempotency_key`, aldri fra `parameters`. Mangler for kall uten nøkkel (klasse A).
+   */
+  idempotency_key?: string;
 }
 
-/** Transport per integrasjon: ekte HTTP i drift, kontrollert fake i test. */
+/**
+ * Transport per integrasjon: ekte HTTP i drift, kontrollert fake i test.
+ *
+ * WP-K (D-471, JARVIS-018): `signal` er gatewayens avbruddssignal for DETTE kallet - det avbrytes når `ToolDefinition.timeout_ms` slår inn (se `call-signal.ts`). Kontrakten:
+ *  - en transport som gjør nettverkskall via `guardedFetch` uten eget `signal` får signalet AUTOMATISK (ambient kontekst) - den trenger ikke gjøre noe, men RETRY-/POLL-løkker må sjekke
+ *    `throwIfAborted()` før hvert nytt forsøk og vente med `abortableSleep()`;
+ *  - en transport med EGEN I/O (prosess, database, egen `fetch`, eget `signal`) MÅ selv koble `signal ?? currentCallSignal()` til I/O-en (se Docker-, Postgres-drift-, nettleser- og annonse-transportene);
+ *  - etter at signalet er avbrutt skal INGEN ny forespørsel sendes (aldri en automatisk retry av en ikke-idempotent POST etter tidsavbrudd - utfallet er da UKJENT og gatewayen har merket raden `unverified`).
+ * Parameteren er valgfri: transporter som ikke gjør ekstern I/O (databasebaserte domenetransporter) kan la den stå ureferert, og eldre kallere uten signal er uendret.
+ */
 export interface ToolTransport {
   invoke(
     action: string,
     parameters: Record<string, JsonValue>,
     credential: string,
-    context: ToolInvocationContext
+    context: ToolInvocationContext,
+    signal?: AbortSignal
   ): Promise<{ external_id?: string; data?: JsonValue }>;
 }
 
@@ -490,6 +528,30 @@ export function isOutcomeUnknownMessage(message: string): boolean {
   return message === "tool_timeout" || message.startsWith(OUTCOME_UNKNOWN_PREFIX);
 }
 
+/**
+ * WP-K (uavhengig delta-review L-1): ÉN felles definisjon av hvilke `ToolResult.reason`-strenger som betyr at utfallet av leverandørkallet er UKJENT (kallet KAN ha blitt utført) - for forbrukere av resultatet
+ * (infra-journalen i `modules/incidents`, feilforklaringen til modellen). Ledgeren lagrer ukjent utfall som `unverified`, men det første kallets SVAR bærer `tool_failed:tool_timeout` /
+ * `tool_failed:outcome_unknown:...` (kun replay-svaret er `postcondition_unverified:tool_timeout_outcome_unknown`), og en retry mot en reservert rad gir `execution_in_flight_or_outcome_unknown`.
+ * Forbrukere som la disse i «feilet»-bøtta (FAILED / retry «later») fortalte ledgeren og journalen to forskjellige historier om samme kall. Endrer ingen `postcondition_reason`-streng (11 testfiler og
+ * produksjonskode er festet til dem); dette er kun en klassifisering av strengene som finnes.
+ */
+export function isUnknownOutcomeReason(reason: string): boolean {
+  return reason === "execution_in_flight_or_outcome_unknown"
+    || reason === "tool_failed:tool_timeout"
+    || reason.startsWith(`tool_failed:${OUTCOME_UNKNOWN_PREFIX}`)
+    || reason.startsWith("postcondition_unverified:tool_timeout")
+    || reason.startsWith("postcondition_unverified:ledger_finalize_failed");
+}
+
+/**
+ * WP-K (review M1): klasse C/D-mutasjoner som IKKE er idempotente hos leverandøren (`idempotent_external: false`). En uavklart transportfeil (`TimeoutError`/`AbortError`, nullstilt socket etter sending, `fetch failed`)
+ * betyr at leverandøren KAN ha utført mutasjonen - da er utfallet ukjent (`unverified`), aldri `failed`, ellers re-armer et samme-nøkkel-replay raden og sender POST-en en gang til. Klasse A (lesing) har ingen ledger,
+ * idempotente mutasjoner tåler en retry, og klasse B (intern/reversibel bokføring og varsler) er bevisst utenfor (se runbook).
+ */
+function mayDuplicateOnRetry(definition: Pick<ToolDefinition, "capability_class" | "idempotent_external">): boolean {
+  return (definition.capability_class === "C" || definition.capability_class === "D") && definition.idempotent_external === false;
+}
+
 /** Årsakskoder fra en validator havner i avslagsårsaken og audit - kun et trygt tegnsett og en kort lengde. */
 function sanitizeReasonCode(reason: string): string {
   return reason.replace(/[^A-Za-z0-9_:.-]/g, "_").slice(0, 80);
@@ -523,9 +585,29 @@ export interface CredentialBinding {
   internalRefs: ReadonlySet<string>;
 }
 
+/**
+ * WP-N1 (Q-64 pkt 3, K6): UTFØRELSESLÅS for finansverktøyene (`finance`, `finance_*`, se `isFinancialNamespace`). Finansdata er SECRET_RESTRICTED (D-378: kun lokal modell). De eksisterende finansverktøyene hadde bare en
+ * UTVALGSLÅS (en tur som VELGER dem blir låst lokalt), men `MeshToolExecutor` sjekker bare flate-tildelingen: en skymodell som likevel kaller et ikke-valgt `finance_*`-verktøy (hallusinert eller injisert kall) omgikk den.
+ * Når dette valget er satt, nektes kall der `servingModel` (stemplet av adapteren, aldri fra parametere) er en SKYMODELL ELLER en ukjent modell - FØR policy og transport (ingenting hentes, ingenting utføres), med en vanlig
+ * `tool.denied`-revisjonsrad (årsakskode, aldri innhold). Uten `servingModel` (eierens egne HTTP-ruter, `/control`, eier-godkjente bekreftelser: ingen modell i løkka) er oppførselen uendret, og en LOKAL modell får
+ * hele resultatet (D-378 pkt 2). Uten valget (flagg AV) er gatewayen identisk med main.
+ */
+export interface FinanceExecutionLock {
+  /**
+   * Er modellen som betjener kallet LOKAL? I drift: leverandørregisterets `locality` (`!servedByCloudModel`, apps/api). FAIL-CLOSED: utelatt, et kast, en ikke-`true` verdi eller en `servingModel` uten gyldig leverandørnavn
+   * regnes som SKY.
+   */
+  servedLocally?: (model: { provider: string; model: string }) => boolean;
+}
+
+/** WP-N1: årsakskoden for en finansnektelse (revisjonsraden og modellens forklaring, `tool-failure.ts`). Ingen tall, id-er eller leverandørnavn. */
+export const FINANCE_WITHHELD_REASON = "finance_withheld_from_cloud_model";
+
 export interface ToolGatewayOptions {
   classDPipeline?: ClassDPipelineOptions;
   credentialBinding?: CredentialBinding;
+  /** WP-N1 (K6): utførelseslås for finansverktøyene mot skymodeller. Utelatt = av (identisk med main). */
+  financeExecutionLock?: FinanceExecutionLock;
 }
 
 /** Parameterfelt som er identitet/scope - utledes av den autentiserte identiteten, aldri av en modell- eller klientverdi. */
@@ -676,28 +758,55 @@ export class ToolGateway {
     servingModel?: { provider: string; model: string };
     /** D-449: se `ToolInvocationContext.contentOrigin` sitt filhode (kun trusted kode setter den). */
     contentOrigin?: "owner_direct";
+    /** WP-N1 (F-A2): se `ToolInvocationContext.restrictedOrigin` (kun trusted kode setter den). */
+    restrictedOrigin?: true;
     /** D-394 (JARVIS-054): korrelasjons-ID-er som følger HVER audit-rad for dette kallet. */
     task_id?: string;
     trace_id?: string;
+    /**
+     * WP-G2 (fiks-runde A-L7): kalles etter at klasse D-varslingen er FORSØKT, med `notified` og en kort, sanert feilkode. Resultatformen er uendret (også for MISMATCH/UKJENT, der varslingsstatus ellers ikke fantes
+     * på resultatet), så eksisterende kallere og tester påvirkes ikke. Kun trusted kode setter den; en feil i observatøren bryter aldri kjeden.
+     */
+    onClassDNotification?: (status: { notified: boolean; error: string | null }) => void;
   }): Promise<ToolResult> {
     const definition = this.get(request.tool_id, request.action);
     const corr = { ...(request.task_id !== undefined ? { task_id: request.task_id } : {}), ...(request.trace_id !== undefined ? { trace_id: request.trace_id } : {}) };
+    // WP-K (D-471, JARVIS-054): ID-en til Policy Gateway-avgjørelsen som førte til dette kallet står i HVER revisjonsrad herfra (`payload.policy_decision_id`), og avslag
+    // etter policy (rate limit, frys, credential, preflight ...) bærer den samme ID-en - «policy sa ALLOW, men porten X stoppet det» kan rekonstrueres. Før policy finnes ingen avgjørelse (ingen ID).
+    let policyDecisionId: string | undefined;
+    const auditPayload = (payload: Record<string, unknown> = {}): Record<string, unknown> =>
+      policyDecisionId === undefined ? payload : { ...payload, policy_decision_id: policyDecisionId };
+    const deny = (reason: string): Promise<ToolResult> =>
+      this.deny(request, reason, { ...corr, ...(policyDecisionId !== undefined ? { policy_decision_id: policyDecisionId } : {}) });
+    // WP-K (D-471, JARVIS-018): et NØSTET kall (en transport som selv kaller `execute()`, f.eks. `support.reply` -> `email.send`) startes aldri på vegne av et ytre kall som allerede er avbrutt/tidsavbrutt -
+    // ellers kunne en forlatt transport utføre en mutasjon ETTER at det ytre kallet er meldt «utfall ukjent».
+    // UNNTAK (review H1): sikkerhetsbryterne (kill switch, `CLASS_D_EXEMPT_ACTIONS`) og selvgjenopprettings-handlingene (`isSelfRecoveryAction`) MÅ virke også fra en avbrutt kontekst - de er
+    // nettopp det eieren trenger når noe har gått galt, og de kan aldri være «en forlatt mutasjon». Klasse D-varslingen (`notifyClassD`/`ready()`) kjører i tillegg frakoblet fra kallsignalet.
+    const exemptFromAbortGuard = definition !== undefined && (isClassDExempt(definition) || isSelfRecoveryAction(request.tool_id, request.action));
+    if (!exemptFromAbortGuard && toolCallAbortEnabled() && currentCallSignal()?.aborted === true) {
+      return deny("caller_call_aborted");
+    }
     if (!definition) {
-      return this.deny(request, "unknown_tool");
+      return deny("unknown_tool");
     }
     if (request.jobContract && !jobContractAllows(request.jobContract.allowed_tools, request.tool_id, request.action)) {
-      return this.deny(request, "tool_not_in_job_contract");
+      return deny("tool_not_in_job_contract");
     }
     // Del 3 (JARVIS-005/012): en jobb kan aldri handle som en annen person/tenant enn den signerte kontrakten sier.
     if (
       request.jobContract &&
       (request.jobContract.owner_person_id !== request.identity.person_id || request.jobContract.tenant_id !== request.identity.tenant_id)
     ) {
-      return this.deny(request, "job_identity_mismatch");
+      return deny("job_identity_mismatch");
+    }
+    // WP-N1 (Q-64 pkt 3, K6): utførelseslås for finansverktøyene - TIDLIG (før parametervalidering, policy og transport): en nektet skytur verken bruker en policy-avgjørelse, henter noe eller får tilbakemelding om
+    // parametre, og låsen er uavhengig av hva kallet inneholder. Revisjonsraden bærer kun årsakskoden.
+    if (this.options?.financeExecutionLock !== undefined && isFinancialNamespace(request.tool_id) && this.servedByCloud(request.servingModel, this.options.financeExecutionLock)) {
+      return deny(FINANCE_WITHHELD_REASON);
     }
     const input = definition.input_schema.safeParse(request.parameters);
     if (!input.success) {
-      return this.deny(request, "invalid_parameters");
+      return deny("invalid_parameters");
     }
     // Del 3 (JARVIS-005/035): identitets-/scope-felt i parametrene må samsvare med den autentiserte identiteten (gatewayen avviser avvik).
     const binding = this.options?.credentialBinding;
@@ -710,22 +819,22 @@ export class ToolGateway {
       const expected = field === "tenant_id" ? request.identity.tenant_id : request.identity.person_id;
       // `owner_person_id` er «eier/ansvarlig» i CRM/styring: bare den suverene eieren kan tildele en annen person.
       if (supplied !== expected && !(field === "owner_person_id" && isOwner)) {
-        return this.deny(request, `scope_mismatch:${field}`);
+        return deny(`scope_mismatch:${field}`);
       }
     }
     if (request.jobContract) {
       const space = request.parameters["memory_space"] ?? request.parameters["memory_space_id"];
       if (typeof space === "string" && !request.jobContract.allowed_memory_spaces.includes(space)) {
-        return this.deny(request, "job_memory_space_not_allowed");
+        return deny("job_memory_space_not_allowed");
       }
     }
     // Eier-tilkoblede leverandør-credentials kan bare brukes av den autentiserte eieren i eierens tenant (aldri en annen person/tenant/delegat).
     if (binding && definition.credential_ref !== "" && !binding.internalRefs.has(definition.credential_ref) && !isOwner) {
-      return this.deny(request, "credential_not_bound_to_identity");
+      return deny("credential_not_bound_to_identity");
     }
     // WP-F1 (review F9): eier-eksklusive handlinger (finans-lesinger) også for klasse A.
     if (definition.owner_only === true && binding && !isOwner) {
-      return this.deny(request, "owner_only");
+      return deny("owner_only");
     }
     const decision = await this.policy.authorize({
       identity: request.identity,
@@ -737,15 +846,18 @@ export class ToolGateway {
       },
       ...(request.approval !== undefined ? { approval: request.approval } : {}),
       // JARVIS-051: noncen forbrukes FØRST rett før handlingen, etter alle ortogonale porter.
-      deferNonceConsumption: true
+      deferNonceConsumption: true,
+      // WP-K (JARVIS-054): oppgave-/spor-ID-en følger avgjørelsen, så den kan slås opp sammen med revisjonsraden.
+      ...(Object.keys(corr).length > 0 ? { correlation: corr } : {})
     });
+    policyDecisionId = decision.decision_id;
     if (decision.decision !== "ALLOW") {
-      return this.deny(request, decision.reason);
+      return deny(decision.reason);
     }
     if (definition.parameterAuthorizer) {
       const paramDecision = definition.parameterAuthorizer(request.parameters, request.identity);
       if (!paramDecision.allowed) {
-        return this.deny(request, paramDecision.reason);
+        return deny(paramDecision.reason);
       }
     }
     // Del 3 (JARVIS-013/043): klasse D-pipelinen er en HARD port i produksjon (påslått i api og worker).
@@ -754,17 +866,17 @@ export class ToolGateway {
     // Review F4: UAVHENGIG av `classDPipeline.enforce` - en gateway uten options (testhjelper, host-skript) skal ikke la en svakere økt flytte penger.
     if (definition.step_up_required === true) {
       const stepUp = ownerStepUpDenial(request.identity);
-      if (stepUp !== undefined) return this.deny(request, stepUp);
+      if (stepUp !== undefined) return deny(stepUp);
     }
     if (!this.withinRateLimit(definition, request.identity.tenant_id)) {
-      return this.deny(request, "rate_limited");
+      return deny("rate_limited");
     }
     // K1 (Sovereign graduation, D-164): LIVE, delt sjekk (aldri den rene
     // synkrone `isFrozen()`/`isRevoked()`) - se `OwnerControls` sitt
     // filhode. `owner_controls` selv kan aldri fryse seg selv ute (samme
     // selvgjenopprettings-unntak som `PolicyGateway.authorize()` - se der).
     if (request.tool_id !== "owner_controls" && (await this.controls?.isFrozenDurable(request.tool_id))) {
-      return this.deny(request, "connector_frozen");
+      return deny("connector_frozen");
     }
     // D-166 (arkitekt-review PR #93, funn B1): `owner_controls.*` deler
     // SAMME `credential_ref` (`BUSINESS_INTERNAL_CREDENTIAL_REF`) som
@@ -819,7 +931,11 @@ export class ToolGateway {
       identity: request.identity,
       ...(request.approval !== undefined ? { approval: request.approval } : {}),
       ...(request.servingModel !== undefined ? { servingModel: request.servingModel } : {}),
-      ...(request.contentOrigin !== undefined ? { contentOrigin: request.contentOrigin } : {})
+      ...(request.contentOrigin !== undefined ? { contentOrigin: request.contentOrigin } : {}),
+      ...(request.restrictedOrigin === true ? { restrictedOrigin: true as const } : {}),
+      ...(request.idempotency_key !== undefined ? { idempotency_key: request.idempotency_key } : {}),
+      // WP-K (JARVIS-054): nøstede kall fra transporten (system-synk via `business.sync_business_events`) bærer samme korrelasjon videre.
+      ...corr
     };
     // WP-F1 (JARVIS-072): credential-kravet kan bestemmes per kall (f.eks. intensjonens provider). Skjer ETTER alle autorisasjonsportene over, og er
     // fail-closed: en resolver som feiler eller ikke kan avgjøre refen gir avslag - aldri en stille fallback til en annen leverandørs credential.
@@ -832,45 +948,46 @@ export class ToolGateway {
         resolved = null;
       }
       if (typeof resolved !== "string" || resolved === "") {
-        return this.deny(request, "credential_ref_unresolved");
+        return deny("credential_ref_unresolved");
       }
       credentialRef = resolved;
       // Samme eier-binding for den løste refen som for den statiske (aldri svakere).
       if (binding && !binding.internalRefs.has(credentialRef) && !isOwner) {
-        return this.deny(request, "credential_not_bound_to_identity");
+        return deny("credential_not_bound_to_identity");
       }
     }
     // WP-F1 (review F8): frys gjelder også CONNECTOR-id-en (stripe/vipps/fiken/neonomics) utledet av den løste credential-referansen, ikke bare tool-namespacet.
     if (this.controls && request.tool_id !== "owner_controls") {
       for (const connectorId of definition.connector_ids_for?.(credentialRef) ?? []) {
-        if (await this.controls.isFrozenDurable(connectorId)) return this.deny(request, "connector_frozen");
+        if (await this.controls.isFrozenDurable(connectorId)) return deny("connector_frozen");
       }
     }
     if (!isCredentialRevocationSelfRecovery && (await this.controls?.isRevokedDurable(credentialRef))) {
-      return this.deny(request, "credential_revoked");
+      return deny("credential_revoked");
     }
     const credential = await this.secrets.get(credentialRef);
     if (!credential) {
-      return this.deny(request, "credential_unavailable");
+      return deny("credential_unavailable");
     }
 
     // Del 3 (JARVIS-013/043): klasse D-pipelinen er en HARD port - uten hele kjeden er handlingen utilgjengelig (fail-closed).
     if (classDGoverned) {
       const assessment = assessClassDPipeline(definition);
       if (!assessment.complete) {
-        return this.deny(request, `class_d_pipeline_incomplete:${assessment.missing.join(",")}`);
+        return deny(`class_d_pipeline_incomplete:${assessment.missing.join(",")}`);
       }
       if (!request.idempotency_key) {
-        return this.deny(request, "class_d_idempotency_key_required");
+        return deny("class_d_idempotency_key_required");
       }
       let notifierReady = false;
       try {
-        notifierReady = this.classDNotifier ? await this.classDNotifier.ready() : false;
+        // Review H1: frakoblet fra det ytre kallets signal (varslerens egen nøstede `telegram.notify` skal aldri nektes fordi et YTRE kall har fått tidsavbrudd).
+        notifierReady = this.classDNotifier ? await detachFromCallSignal(() => this.classDNotifier!.ready()) : false;
       } catch {
         notifierReady = false;
       }
       if (!notifierReady) {
-        return this.deny(request, this.classDNotifier ? "class_d_notifier_not_ready" : "class_d_notifier_missing");
+        return deny(this.classDNotifier ? "class_d_notifier_not_ready" : "class_d_notifier_missing");
       }
     }
 
@@ -907,7 +1024,7 @@ export class ToolGateway {
         // startet, så avslaget her har PRESIS samme "ingenting å rulle
         // tilbake"-egenskap som en kastet preflight-feil under.
         if (definition.capability_class === "D" && definition.preflight_requires_target && beforeState === null) {
-          return this.deny(request, "preflight_target_not_found");
+          return deny("preflight_target_not_found");
         }
         // Q-34 P1-oppfølging: den FINERE sjekken - ressursen finnes (over),
         // men det PÅSTÅTTE mål-ID-et inni den må også faktisk finnes.
@@ -917,13 +1034,13 @@ export class ToolGateway {
           definition.preflight_target_check &&
           !definition.preflight_target_check(beforeState, request.parameters)
         ) {
-          return this.deny(request, "preflight_target_not_found");
+          return deny("preflight_target_not_found");
         }
         // WP-F1: validering med SPESIFIKK årsak (beløp/valuta/konto/leverandør/tilstand/duplikat/nødbryter). En replay av en nøkkel som allerede har et
         // endelig utfall i ledgeren (gjennomført/uverifisert/under utførelse) valideres IKKE på nytt: tilstanden har da flyttet seg ved handlingen selv, og
         // ledger-porten under svarer med det lagrede utfallet (aldri en ny mutasjon) i stedet for et misvisende «ikke lenger gyldig».
         if (definition.capability_class === "D" && definition.preflight_validator) {
-          if (beforeState === null) return this.deny(request, "preflight_target_not_found");
+          if (beforeState === null) return deny("preflight_target_not_found");
           const replayStatus = ledgerKey !== undefined ? await this.peekLedgerStatus(tenantId, ledgerKey) : null;
           if (replayStatus === null || replayStatus === "failed") {
             let invalid: string | null;
@@ -932,14 +1049,14 @@ export class ToolGateway {
             } catch {
               invalid = "validator_error";
             }
-            if (invalid !== null) return this.deny(request, `preflight_invalid:${sanitizeReasonCode(invalid)}`);
+            if (invalid !== null) return deny(`preflight_invalid:${sanitizeReasonCode(invalid)}`);
           } else {
             validatorSkipped = true;
           }
         }
       } catch (err) {
         if (definition.capability_class === "D") {
-          return this.deny(request, `preflight_failed:${(err as Error).message.slice(0, 60)}`);
+          return deny(`preflight_failed:${(err as Error).message.slice(0, 60)}`);
         }
       }
     }
@@ -949,7 +1066,9 @@ export class ToolGateway {
     if (decision.commit) {
       const committed = await decision.commit();
       if (!committed.ok) {
-        return this.deny(request, committed.reason);
+        // En nonce som feiler ved forbruk gir en NY (DENY-)avgjørelse i Policy Gateway - revisjonsraden refererer til den, ikke til den foreløpige ALLOW-en.
+        if (decision.commit_decision_id !== undefined) policyDecisionId = decision.commit_decision_id;
+        return deny(committed.reason);
       }
     }
 
@@ -975,7 +1094,7 @@ export class ToolGateway {
         if (row?.status === "succeeded") {
           await writeAudit(client, request.identity, { ...corr,
             type: "tool.deduplicated", tool_id: request.tool_id, action: request.action,
-            payload: { external_id: row.external_id }
+            payload: auditPayload({ external_id: row.external_id })
           });
           return {
             ok: true,
@@ -990,7 +1109,7 @@ export class ToolGateway {
           await writeAudit(client, request.identity, { ...corr,
             type: "tool.postcondition_unverified", decision: "ALLOW",
             tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class,
-            payload: { external_id: row.external_id, replayed: true, reason: row.postcondition_reason }
+            payload: auditPayload({ external_id: row.external_id, replayed: true, reason: row.postcondition_reason })
           });
           return { ok: false, reason: row.postcondition_reason ?? "postcondition_unverified:replayed" } as const;
         }
@@ -1007,7 +1126,7 @@ export class ToolGateway {
         await writeAudit(client, request.identity, { ...corr,
           type: "tool.execution_in_flight", decision: "DENY", reason: "execution_in_flight_or_outcome_unknown",
           tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class,
-          payload: { status: row?.status ?? null }
+          payload: auditPayload({ status: row?.status ?? null })
         });
         return { ok: false, reason: "execution_in_flight_or_outcome_unknown" } as const;
       });
@@ -1017,7 +1136,7 @@ export class ToolGateway {
         const revalidated = await this.revalidateAfterRearm(definition, request, credential, invocationContext);
         if (revalidated.reason !== null) {
           await this.releaseLedgerReservation(tenantId, ledgerKey, `rearm_${revalidated.reason}`);
-          return this.deny(request, revalidated.reason);
+          return deny(revalidated.reason);
         }
         beforeState = revalidated.beforeState;
         await this.updateLedgerBeforeState(tenantId, ledgerKey, beforeState);
@@ -1033,7 +1152,7 @@ export class ToolGateway {
       const denial = await this.liveControlDenial(request.tool_id, definition, credentialRef, isCredentialRevocationSelfRecovery);
       if (denial !== null) {
         await this.releaseLedgerReservation(tenantId, ledgerKey, `recheck_${denial}`);
-        return this.deny(request, denial);
+        return deny(denial);
       }
     }
 
@@ -1042,17 +1161,21 @@ export class ToolGateway {
     let external: { external_id?: string; data?: JsonValue } = {};
     let failure: { message: string; timedOut: boolean } | undefined;
     try {
+      // WP-K (D-471, JARVIS-018): tidsavbruddet AVBRYTER nå selve forespørselen (signal til transporten + ambient kontekst) - ikke bare løftet.
       external = await withTimeout(
-        definition.transport.invoke(request.action, request.parameters, credential, invocationContext),
+        (signal) => invokeWithCallSignal(definition.transport, request.action, request.parameters, credential, invocationContext, signal),
         definition.timeout_ms
       );
     } catch (err) {
-      const message = (err as Error).message;
+      const raw = (err as Error).message;
       // WP-F1: «utfall ukjent» = gateway-tidsavbrudd ELLER en transport som selv vet at leverandørkallet kan ha gått gjennom (`outcome_unknown:...`).
+      // Review M1: OG en uavklart transportfeil på en ikke-idempotent klasse C/D-mutasjon (feilformen avgjøres av `isIndeterminateTransportError`; DNS/tilkobling nektet/TLS beviser at ingenting ble sendt og forblir `failed`).
+      const transportUnknown = !isOutcomeUnknownMessage(raw) && mayDuplicateOnRetry(definition) && isIndeterminateTransportError(err);
+      const message = transportUnknown ? `${OUTCOME_UNKNOWN_PREFIX}:transport_${transportErrorKind(err)}` : raw;
       failure = { message, timedOut: isOutcomeUnknownMessage(message) };
       this.setHealth(request.tool_id,
-        /401|403|auth/.test(message) ? "auth_failed" : /429|rate/.test(message) ? "rate_limited" : "unavailable",
-        message.slice(0, 60));
+        /401|403|auth/.test(raw) ? "auth_failed" : /429|rate/.test(raw) ? "rate_limited" : "unavailable",
+        raw.slice(0, 60));
     }
 
     let afterState: JsonValue | null = null;
@@ -1063,7 +1186,7 @@ export class ToolGateway {
       if (needsEvidence) {
         try {
           const post = await withTimeout(
-            definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext),
+            (signal) => invokeWithCallSignal(definition.transport, definition.preflight_action!, request.parameters, credential, invocationContext, signal),
             definition.timeout_ms
           );
           afterState = post.data ?? null;
@@ -1124,7 +1247,7 @@ export class ToolGateway {
             type: "tool.failed", decision: "DENY", reason: failure.message.slice(0, 120),
             tool_id: request.tool_id, action: request.action,
             capability_class: definition.capability_class,
-            payload: { credential_ref: credentialRef, outcome_unknown: failure.timedOut }
+            payload: auditPayload({ credential_ref: credentialRef, outcome_unknown: failure.timedOut })
           });
           return;
         }
@@ -1133,13 +1256,13 @@ export class ToolGateway {
           type: postconditionVerified ? "tool.executed" : "tool.postcondition_unverified", decision: "ALLOW",
           tool_id: request.tool_id, action: request.action,
           capability_class: definition.capability_class,
-          payload: {
+          payload: auditPayload({
             credential_ref: credentialRef, // referanse - aldri verdien
             external_id: external.external_id ?? null,
             scopes: definition.scopes,
             rollback: definition.rollback_procedure,
             ...(needsEvidence ? { before_state: beforeState, after_state: afterState, recovery: { snapshot: beforeState, procedure: definition.rollback_procedure } } : {})
-          }
+          })
         });
       });
     let finalized = false;
@@ -1160,7 +1283,7 @@ export class ToolGateway {
       const unfinalized: ToolResult = failure
         ? { ok: false, reason: `tool_failed:${failure.message.slice(0, 80)}` }
         : { ok: false, reason: "postcondition_unverified:ledger_finalize_failed" };
-      if (classDGoverned && classDOutcome) return this.notifyClassD(request, definition, classDOutcome, unfinalized, beforeState);
+      if (classDGoverned && classDOutcome) return this.notifyClassD(request, definition, classDOutcome, unfinalized, beforeState, { ...corr, ...(policyDecisionId !== undefined ? { policy_decision_id: policyDecisionId } : {}) });
       return unfinalized;
     }
     let result: ToolResult;
@@ -1186,7 +1309,7 @@ export class ToolGateway {
       }
     }
     if (classDGoverned && classDOutcome) {
-      return this.notifyClassD(request, definition, classDOutcome, result, beforeState);
+      return this.notifyClassD(request, definition, classDOutcome, result, beforeState, { ...corr, ...(policyDecisionId !== undefined ? { policy_decision_id: policyDecisionId } : {}) });
     }
     return result;
   }
@@ -1272,13 +1395,15 @@ export class ToolGateway {
    * WP-F1: også ved UKJENT utfall (`unknown`), og med et redigert sammendrag (`notification_summary`) av hva handlingen gjaldt.
    */
   private async notifyClassD(
-    request: { identity: IdentityContext; tool_id: string; action: string; idempotency_key?: string; parameters?: Record<string, JsonValue> },
+    request: { identity: IdentityContext; tool_id: string; action: string; idempotency_key?: string; parameters?: Record<string, JsonValue>; onClassDNotification?: (status: { notified: boolean; error: string | null }) => void },
     definition: ToolDefinition,
     outcome: { outcome: "executed" | "unverified" | "unknown"; external_id: string | null },
     result: ToolResult,
-    summaryState: JsonValue | null = null
+    summaryState: JsonValue | null = null,
+    audit: AuditCorrelation = {}
   ): Promise<ToolResult> {
     let notified = false;
+    let notifyError: string | null = null;
     let summary: string | null = null;
     try {
       summary = definition.notification_summary?.(summaryState, request.parameters ?? {}) ?? null;
@@ -1286,23 +1411,30 @@ export class ToolGateway {
       summary = null; // et sammendrag er pynt - aldri en grunn til å miste selve varselet
     }
     try {
-      await this.classDNotifier!.notify({
+      // Review H1: out-of-band-varslingen er hele poenget med klasse D-kjeden («aldri stille»), og den er ALLTID mest nødvendig når utfallet er ukjent - nettopp da kan det YTRE kallet ha fått tidsavbrudd.
+      // Varsleren er selv en nøstet `execute(telegram.notify)`, så den kjører frakoblet fra kallsignalet (egen frist per leverandørkall gjelder fortsatt).
+      await detachFromCallSignal(() => this.classDNotifier!.notify({
         tenant_id: request.identity.tenant_id, person_id: request.identity.person_id,
         tool_id: request.tool_id, action: request.action, outcome: outcome.outcome,
         external_id: outcome.external_id, idempotency_key: request.idempotency_key ?? "",
         recovery: definition.rollback_procedure, at: new Date().toISOString(),
         ...(summary !== null && summary.length > 0 ? { summary: summary.slice(0, 300) } : {})
-      });
+      }));
       notified = true;
     } catch (err) {
+      // Kun en FAST kode (aldri feilteksten: den kan sitere URL-er/tokens fra varsel-leverandøren).
+      notifyError = isIndeterminateTransportError(err) ? `notification_failed:${transportErrorKind(err)}` : "notification_failed";
       await withTenantTransaction(this.pool, request.identity.tenant_id, (client) =>
         writeAudit(client, request.identity, {
+          ...(audit.task_id !== undefined ? { task_id: audit.task_id } : {}), ...(audit.trace_id !== undefined ? { trace_id: audit.trace_id } : {}),
           type: "tool.class_d_notification_failed", decision: "ALLOW", reason: (err as Error).message.slice(0, 120),
-          tool_id: request.tool_id, action: request.action, capability_class: "D", payload: { external_id: outcome.external_id }
+          tool_id: request.tool_id, action: request.action, capability_class: "D",
+          payload: { external_id: outcome.external_id, ...(audit.policy_decision_id !== undefined ? { policy_decision_id: audit.policy_decision_id } : {}) }
         })
       ).catch(() => undefined);
       this.setHealth("class_d_notifier", "degraded", (err as Error).message.slice(0, 60));
     }
+    try { request.onClassDNotification?.({ notified, error: notifyError }); } catch { /* en observatør kan aldri bryte kjeden */ }
     return result.ok ? { ...result, notified } : result;
   }
 
@@ -1334,6 +1466,22 @@ export class ToolGateway {
   }
 
   /**
+   * WP-N1: betjenes kallet av en SKYMODELL (eller en ukjent modell)? `false` uten modell (eierens ruter, `/control`, eier-godkjente bekreftelser) og for en lokal modell; `true` for sky og alt ukjent (fail-closed):
+   * en `servingModel` uten gyldig leverandørnavn, et gateway-oppsett uten `servedLocally`, et kast eller en ikke-`true` verdi. Samme regel som `ExecutiveService.isCloudServed` (H1/H2).
+   */
+  private servedByCloud(model: { provider: string; model: string } | undefined, lock: FinanceExecutionLock): boolean {
+    if (model === undefined) return false;
+    if (typeof model !== "object" || model === null || typeof model.provider !== "string" || model.provider.trim() === "") return true;
+    const local = lock.servedLocally;
+    if (typeof local !== "function") return true;
+    try {
+      return local(model) !== true;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * D-219: hvis selve audit-skrivingen her feiler (DB-blipp/RLS-/kontekst-
    * problem), skal ALDRI-avslaget likevel returneres til kalleren som normalt
    * (fail-safe - en policy-avslag skal aldri henge fast på en audit-skrivefeil)
@@ -1345,12 +1493,16 @@ export class ToolGateway {
    */
   private async deny(
     request: { identity: IdentityContext; tool_id: string; action: string },
-    reason: string
+    reason: string,
+    audit: AuditCorrelation = {}
   ): Promise<ToolResult> {
     await withTenantTransaction(this.pool, request.identity.tenant_id, (client) =>
       writeAudit(client, request.identity, {
+        // WP-K (JARVIS-054): også avslag bærer oppgave-/spor-ID og (etter policy) ID-en til avgjørelsen som gikk forut.
+        ...(audit.task_id !== undefined ? { task_id: audit.task_id } : {}), ...(audit.trace_id !== undefined ? { trace_id: audit.trace_id } : {}),
         type: "tool.denied", decision: "DENY", reason,
-        tool_id: request.tool_id, action: request.action
+        tool_id: request.tool_id, action: request.action,
+        ...(audit.policy_decision_id !== undefined ? { payload: { policy_decision_id: audit.policy_decision_id } } : {})
       })
     ).catch((err) => {
       console.error(JSON.stringify({
@@ -1377,13 +1529,24 @@ export class ToolGateway {
   }
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+/**
+ * WP-K (D-471, JARVIS-018): fristen for ett leverandørkall. `run` får et `AbortSignal` som avbrytes når fristen går ut - ETTER at løftet er avvist med `tool_timeout`
+ * (rekkefølgen er bevisst: tidsavbruddet vinner alltid kappløpet, så utfallet klassifiseres som «ukjent» og aldri som en vanlig leverandørfeil som kan prøves på nytt, selv om den
+ * avbrutte forespørselen avviser nesten samtidig). En vellykket retur avbryter ikke noe.
+ */
+async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController();
   let timer: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error("tool_timeout")), ms);
+    timer = setTimeout(() => {
+      const err = new Error("tool_timeout");
+      reject(err);
+      // Review M2: med `JARVIS_TOOL_CALL_ABORT=off` avvises løftet som før WP-K, men forespørselen avbrytes ikke.
+      if (toolCallAbortEnabled()) controller.abort(err);
+    }, ms);
   });
   try {
-    return await Promise.race([promise, timeout]);
+    return await Promise.race([run(controller.signal), timeout]);
   } finally {
     clearTimeout(timer!);
   }

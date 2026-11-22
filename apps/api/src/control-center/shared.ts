@@ -203,17 +203,23 @@ export const CONTROL_CENTER_FLAGS = {
   operations: "JARVIS_CONTROL_CENTER_OPERATIONS",
   value: "JARVIS_CONTROL_CENTER_VALUE",
   privacy: "JARVIS_CONTROL_CENTER_PRIVACY",
-  security: "JARVIS_CONTROL_CENTER_SECURITY"
+  security: "JARVIS_CONTROL_CENTER_SECURITY",
+  // WP-B3 (D-475, EV-22): tilleggssenteret Evolusjon (utenfor masterplanens ti) - samme regler som de andre: AV som standard, kun eksakt «on», og må stå i `SERVICE_ENV.api`.
+  evolution: "JARVIS_CONTROL_CENTER_EVOLUTION"
 } as const;
 
 /**
  * WP-H2: to enkelt-funksjoner kontrollsentrene får bak EGNE flagg (AV som standard, kun eksakt «on»; uten flagg finnes verken knappen eller verktøyet):
  *  - `goldenSuite`: golden-suite-knappen (Sikkerhet-senteret + `executive.run_golden_suite`). Lesende, deterministisk, ingen modell.
  *  - `autonomyRevoke`: tilbakekall av eierens autonomi-binding per domene (Autoritet-senteret + `executive.revoke_autonomy_binding`). Eier-kun, step-up, klasse C.
+ * WP-B3 (D-475, EV-23): en tredje, samme regler:
+ *  - `evolutionApproval`: eierens avgjørelse om et endringsforslag (godkjenn/avvis/utsett) fra Evolusjon-senteret (`executive.record_evolution_decision`). Eier + signert enhet + step-up, klasse C. KUN en registrering i
+ *    revisjonssporet - ingen virkning (selvendring er frosset, D-397). Krever i tillegg at Evolusjon-senteret er slått på og koblet inn (`JARVIS_CONTROL_CENTER_EVOLUTION`).
  */
 export const CONTROL_FEATURE_FLAGS = {
   goldenSuite: "JARVIS_CONTROL_GOLDEN_SUITE",
-  autonomyRevoke: "JARVIS_CONTROL_AUTONOMY_REVOKE"
+  autonomyRevoke: "JARVIS_CONTROL_AUTONOMY_REVOKE",
+  evolutionApproval: "JARVIS_CONTROL_EVOLUTION_APPROVAL"
 } as const;
 
 /**

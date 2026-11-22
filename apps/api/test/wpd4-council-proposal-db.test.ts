@@ -204,7 +204,8 @@ describe("ConfirmationStore.propose - forslagsvei som aldri utfører", () => {
     expect(await store.approveAndTake({ tenant_id: TENANT, person_id: OTHER, device_id: "dev-x" }, res.confirmation_id)).toBeNull();
     expect(await store.approveAndTake({ tenant_id: "tenant-b", person_id: OWNER, device_id: "dev-pc" }, res.confirmation_id)).toBeNull();
     const taken = await store.approveAndTake({ ...who, device_id: "dev-phone" }, res.confirmation_id);
-    expect(taken).toEqual({ confirmation_id: res.confirmation_id, tool_id: "todoist", action: "create_task", parameters: { content: "propose-9" } });
+    // WP-N1 (F2-A1): `approveAndTake` returnerer i tillegg grunnene kortet ble opprettet med (`taint_reasons`).
+    expect(taken).toEqual({ confirmation_id: res.confirmation_id, tool_id: "todoist", action: "create_task", parameters: { content: "propose-9" }, taint_reasons: [COUNCIL_PROPOSAL_TAINT] });
     expect(await store.approveAndTake(who, res.confirmation_id)).toBeNull();
   });
 

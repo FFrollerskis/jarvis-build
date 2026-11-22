@@ -34,6 +34,11 @@ export interface TurnContext {
   limits: SurfaceLimits;
   /** Samlede verktøykall så langt i turen. */
   calls: { total: number };
+  /**
+   * WP-N1 (fiks-runde 1, F-A2): `true` når samtalemotoren har låst turen til SECRET_RESTRICTED (D-378: helse/finans, kun lokal modell) OG begrenset-vakten (WP-N1-flagget) er på. Settes KUN av trusted kode (samtalemotoren,
+   * aldri modellen/verktøyet); `MeshToolExecutor` sender det videre som `restrictedOrigin` til hvert verktøykall, så en bakgrunnsjobb som delegeres fra en LÅST tur kan få leveringen sin lagret begrenset. Utelatt = som før N1.
+   */
+  restricted?: true;
 }
 
 /** Kanaler der selve inputen er upålitelig fra første stund (tale-transkripsjon: STT-feil, omgivelser, andres stemmer). */
@@ -66,6 +71,9 @@ const OPERATIONS_CENTER_INTENT = /(drifts?-?sent(er|re)(t|et)?|driftskontroll|dr
 const VALUE_CENTER_INTENT = /(verdi-?sent(er|re)(t|et)?|verdi-?kontroll|verdiløkke(r|ne)?|spart tid|bruksfrekvens)/i;
 const PRIVACY_CENTER_INTENT = /(personvern-?sent(er|re)(t|et)?|personvernstatus|status (på|for) personvern(et)?|behandlingsoversikt(en)?|\bdpia(-?(er|ene))?\b|databehandler(e|ne)?)/i;
 const SECURITY_CENTER_INTENT = /(sikkerhets-?sent(er|re)(t|et)?|sikkerhetsstatus|status (på|for) sikkerhet(en)?|revisjonslogg(en)?|credential-?hendelser|mistenkelig(e)? (innhold|aktivitet)|eksfiltrer(ing|t)?|injeksjonsforsøk|selvtest(en)?|golden-?suite|gull-?suite)/i;
+// WP-B3 (D-475, EV-22): Evolusjon-senteret (tilleggssenter). BEVISST smalt: kun evolusjons-/endringsregister-/kostmodell-ordene. «hvordan utvikler du deg» og de rene «evolusjon»-ordene hører til hurtigbanen/`get_evolution_report`
+// (EXECUTIVE_SELF_INTENT) og velger IKKE senteret; «endringsforslag» alene er et vanlig ord (avtaler, kontrakter) og står derfor ikke her. Å velge for få er trygt (eieren kan si «evolusjonssenteret»); å velge for mange låser turen lokalt.
+const EVOLUTION_CENTER_INTENT = /(evolusjons-?sent(er|re)(t|et)?|evolusjons-?kontroll|evolusjonsberedskap|evolusjons-?forslag|endringsregister(et)?|kostmodell(en)?|sovende (evolusjons-?)?deler)/i;
 
 /** Intensjons-nøkkelord per handling. Kun handlinger som er tildelt flaten kan velges - dette er IKKE en autorisasjon, bare utvalg. */
 const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
@@ -77,6 +85,7 @@ const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
   "executive.get_value_center": VALUE_CENTER_INTENT,
   "executive.get_privacy_center": PRIVACY_CENTER_INTENT,
   "executive.get_security_center": SECURITY_CENTER_INTENT,
+  "executive.get_evolution_center": EVOLUTION_CENTER_INTENT,
   "email.read_inbox": /(e-?post|\bmail\b|innboks|inbox|melding|brev)/i,
   "calendar.read_events": /(kalender|møte|avtale|timeplan|calendar|schedule|\bi dag\b|dagens|\bi morgen\b)/i,
   "github.read_issues": /(github|issue|repo\b|pull request|\bpr\b|\bbug\b|kodebase)/i,
@@ -246,7 +255,7 @@ const RESTRICTED_TOOL_ID = /^finance(_|$)/;
  * WP-H2 (gjennomgang M2): det samme gjelder Verdi-senteret (AI-kostnad i øre; strengeste regel inntil eieren har avgjort om den kan til sky).
  * (`get_control_center` er ikke på listen: en SKYmodell får ikke finans-senteret via den heller - transporten holder det tilbake ved utførelse og bygger oversikten uten det; en lokal modell får det.)
  */
-const RESTRICTED_TOOL_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center", "executive.get_value_center"]);
+const RESTRICTED_TOOL_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center", "executive.get_value_center", "executive.get_evolution_center"]);
 
 /**
  * Gjennomgang M2: er verktøyet LÅST i utvalget (en tur som velger det blir `SECRET_RESTRICTED`, kun lokal modell)? Brukes av invariant-testen «manifest `restricted` + modellflate => låst eller håndhevet ved utførelse».
@@ -281,7 +290,9 @@ const OVERVIEW_KEYS = new Set(["email.read_inbox", "calendar.read_events", "gith
 // budsjettet før `executive.get_operations_center` kom med).
 const ALWAYS_PRIORITY = [
   "memory.search", "knowledge.search", "email.read_inbox", "calendar.read_events", "github.read_issues", "executive.get_capability_status", "memory.propose",
-  "executive.get_finance_center", "executive.get_memory_center", "executive.get_agent_center", "executive.get_operations_center", "executive.get_value_center", "executive.get_privacy_center", "executive.get_security_center"
+  "executive.get_finance_center", "executive.get_memory_center", "executive.get_agent_center", "executive.get_operations_center", "executive.get_value_center", "executive.get_privacy_center", "executive.get_security_center",
+  // WP-B3 (D-475): tilleggssenteret Evolusjon står sist i samme gruppe (velges kun av sin egen, smale intensjon).
+  "executive.get_evolution_center"
 ];
 
 export interface SurfaceSelection {

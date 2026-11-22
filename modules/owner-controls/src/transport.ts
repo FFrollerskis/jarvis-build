@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { JsonValue } from "@jarvis/contracts";
-import { CONNECTOR_REGISTRY, assertSafeVendorUrl, type ToolDefinition, type ToolGateway, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
+import { CONNECTOR_REGISTRY, assertSafeVendorUrl, invalidateAllAccessTokenCaches, type ToolDefinition, type ToolGateway, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 import type { OwnerControlsService } from "./service.ts";
 
 /**
@@ -132,6 +132,9 @@ export class OwnerControlsTransport implements ToolTransport {
           assertDestinationAllowed(value, this.destinationHostAllowlist);
         }
         await this.gateway.setSecret(credentialRef, value);
+        // WP-K review M3d: access-tokens som ble utstedt med den GAMLE konfigurasjonen (klient-id/-secret/refresh-token) skal ikke leve videre i opptil en time etter at eieren har byttet verdien.
+        // Bevisst HER (eierens skrivevei) og ikke i `ToolGateway.setSecret()`: den kalles også av refresh-token-`persist` etter hver rotasjon.
+        invalidateAllAccessTokenCaches();
         return { data: { connector_id: connectorId, credential_ref: credentialRef, configured: true } as unknown as JsonValue };
       }
       case "test_connector": {
