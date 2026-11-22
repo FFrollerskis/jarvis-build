@@ -46,6 +46,11 @@ export const CONTROL_CENTER_READ_TOOLS: ReadonlyArray<ControlCenterReadTool> = [
   {
     center: "security", action: "get_security_center",
     description: `Les Sikkerhet-kontrollsenteret (UA-11): revisjon (inkl. om append-only-triggeren er intakt), credential- og tilgangshendelser, mistenkelig innhold/eksfiltrering (det som ikke kan telles sies rett ut), det som venter på gjenoppretting og siste golden-suite-kjøring. Aldri innhold eller hemmeligheter. ${COMMON_TAIL}`
+  },
+  {
+    // WP-B3 (D-475, EV-22): tilleggssenter utenfor masterplanens ti.
+    center: "evolution", action: "get_evolution_center",
+    description: `Les Evolusjon-kontrollsenteret (UA-11, EV-22): evolusjonsportene (EV-0…EV-21) i observasjonsmodus, beredskap for de sovende delene (ingenting aktiveres - selvendring er frosset, D-397), endringsregisteret og forslag som venter på deg, og kostmodellen (EV-16: månedsforbruk, prognose og grenser i øre). Kostmodellen er finansavledet (SECRET_RESTRICTED inntil eieren har avgjort noe annet): en skymodell får IKKE rapporten (den holdes tilbake ved utførelse); kun en lokal modell og kontrollsiden får den. ${COMMON_TAIL}`
   }
 ];
 
@@ -60,8 +65,10 @@ export function controlCenterForReadAction(action: string): ControlCenterId | un
  * (`RESTRICTED_TOOL_KEYS`) gjelder bare når `get_finance_center` blir VALGT av utvalget, og `MeshToolExecutor` sjekker bare flate-tildelingen - en skymodell som likevel kaller verktøyet (tom-utvalg-tur,
  * `get_control_center {center: "finance"}`, oversikten) ville derfor fått rapporten. Håndhevingen skjer derfor VED UTFØRELSE, i transporten: ber en skymodell om dette senteret, bygges det ikke engang -
  * svaret er en kort merknad. Lokale modeller og siden (`/control`, ingen modell i løkka) får hele rapporten, inkl. beløp i øre.
+ * WP-H2 la til Verdi (AI-kostnad i øre) og WP-B3 (D-475) Evolusjon (kostmodellen, EV-16) - begge etter STRENGESTE regel inntil eieren har svart (Q-64): hele senteret holdes tilbake, ikke bare kostdelen. (Senteret utelater i tillegg
+ * selv kostdelen når det likevel bygges med `restrictFinance`: andre lag i dybden - se `apps/api/src/control-center/evolution.ts`.)
  */
-export const CLOUD_WITHHELD_CENTERS: readonly ControlCenterId[] = ["finance", "value"];
+export const CLOUD_WITHHELD_CENTERS: readonly ControlCenterId[] = ["finance", "value", "evolution"];
 
 /**
  * Hvorfor et senter holdes tilbake (vises til modellen i «holdt tilbake»-merknaden, uten tall). Verdi-senteret (H2) holdes tilbake HELT fordi verdimålingene inkluderer AI-kostnad i øre (`unit: "ore"`) - strengeste regel
@@ -70,14 +77,16 @@ export const CLOUD_WITHHELD_CENTERS: readonly ControlCenterId[] = ["finance", "v
  */
 const WITHHELD_REASON_NO: Readonly<Partial<Record<ControlCenterId, string>>> = {
   finance: "finansdata er SECRET_RESTRICTED (D-378) og går aldri til en skymodell",
-  value: "verdimålingene inkluderer AI-kostnad i øre, som holdes som finansdata (SECRET_RESTRICTED, D-378) og ikke går til en skymodell inntil eieren har avgjort noe annet"
+  value: "verdimålingene inkluderer AI-kostnad i øre, som holdes som finansdata (SECRET_RESTRICTED, D-378) og ikke går til en skymodell inntil eieren har avgjort noe annet",
+  // WP-B3 (D-475): kostmodellen (EV-16) er månedsforbruk, grenser og prognose i øre - samme strengeste regel som Verdi (Q-64) - og hele senteret holdes tilbake (som Verdi), ikke bare kostdelen.
+  evolution: "kostmodellen (EV-16) viser månedsforbruk, grenser og prognose i øre, som holdes som finansdata (SECRET_RESTRICTED, D-378) og ikke går til en skymodell inntil eieren har avgjort noe annet (Q-64)"
 };
 
 /**
  * Verktøynøklene (`tool_id.action`) som er håndhevet VED UTFØRELSE mot skymodeller (ikke bare ved utvalg). Låst mot manifestets `restricted`-merking av `wph1-restricted-tools-invariant.test.ts`:
  * et verktøy merket `restricted` på en modellflate må enten være låst i utvalget (turen blir lokal) eller stå her.
  */
-export const EXECUTION_GUARDED_RESTRICTED_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center", "executive.get_value_center"]);
+export const EXECUTION_GUARDED_RESTRICTED_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center", "executive.get_value_center", "executive.get_evolution_center"]);
 
 export function isCloudWithheldCenter(center: string): boolean {
   return (CLOUD_WITHHELD_CENTERS as readonly string[]).includes(center);

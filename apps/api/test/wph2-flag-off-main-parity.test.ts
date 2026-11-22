@@ -37,6 +37,9 @@ const sha = (text: string): string => createHash("sha256").update(text).digest("
 const OWNER: IdentityContext = { person_id: "person-owner", tenant_id: "tenant-owner", memory_space_id: "business", session_id: "s-owner", device_id: "dev-owner", channel: "web", auth_strength: "signed" };
 const fakeGw = { list: () => [], health: new Map(), hasSecret: async () => true } as unknown as ToolGateway;
 const NEW_NAMES = ["run_golden_suite", "revoke_autonomy_binding"] as const;
+// WP-B3 (D-475, EV-23): en TREDJE flaggstyrt handling. Opptaket fra main (ec3e684e) har ingen oppføring for den (navnet fantes ikke), så pariteten bevises mot opptakets svar på et UKJENT navn (`totally_unknown_action`):
+// med flagget AV skal ruten svare på `record_evolution_decision` NØYAKTIG som på ethvert annet ukjent navn. Fixturene er ikke regenerert (flagg AV endrer ikke flaten).
+const WPB3_NAMES = ["record_evolution_decision"] as const;
 
 function executiveDefs(options: Parameters<typeof executiveToolDefinitions>[1] = {}): ToolDefinition[] {
   return executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(fakeGw, {})), options);
@@ -105,10 +108,27 @@ describe("1. /executive/mutate med flaggene AV svarer NØYAKTIG som ren main", (
     expect(calls).toBe(0);
   });
 
-  it("main sin allowliste er uendret (13 handlinger) - de to flaggstyrte står i en egen liste og er aldri med uten registrering", () => {
+  it("main sin allowliste er uendret (13 handlinger) - de flaggstyrte (to fra H2 + `record_evolution_decision` fra WP-B3) står i en egen liste og er aldri med uten registrering", () => {
     expect(EXECUTIVE_MUTATE_ACTIONS).toHaveLength(13);
-    expect([...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort()).toEqual([...NEW_NAMES].sort());
-    for (const name of NEW_NAMES) expect(EXECUTIVE_MUTATE_ACTIONS as readonly string[]).not.toContain(name);
+    expect([...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort()).toEqual([...NEW_NAMES, ...WPB3_NAMES].sort());
+    for (const name of [...NEW_NAMES, ...WPB3_NAMES]) expect(EXECUTIVE_MUTATE_ACTIONS as readonly string[]).not.toContain(name);
+  });
+
+  it("WP-B3: `record_evolution_decision` med flagget AV svarer NØYAKTIG som main svarer på et ukjent navn (opptaket for `totally_unknown_action`): 400 action_not_allowed, ingen gateway-kall - også med eierens gyldige grant", async () => {
+    const route = await startRoute(executiveDefs());
+    for (const name of WPB3_NAMES) {
+      expect(await mutate(route, name), name).toEqual(mutateBaseline.responses["totally_unknown_action"]);
+      expect(await mutate(route, name, "BAD"), `${name}/bad grant`).toEqual(mutateBaseline.responses["totally_unknown_action"]);
+    }
+  });
+
+  it("WP-B3 KONTROLL: med `evolutionApproval` (verktøyet registrert) kjenner ruten navnet og når gatewayen (grantet løses nå) - og et ukjent navn er fortsatt 400", async () => {
+    const route = await startRoute(executiveDefs({ evolutionApproval: true }));
+    expect(await mutate(route, "record_evolution_decision")).toEqual({ status: 403, body: { error: "tool_denied", reason: "unknown_tool" }, gateway_calls: 1 });
+    expect((await mutate(route, "record_evolution_decision", "BAD")).status).toBe(403);
+    expect((await mutate(route, "totally_unknown_action")).status).toBe(400);
+    // de to H2-navnene er uberørt av dette flagget
+    for (const name of NEW_NAMES) expect(await mutate(route, name), name).toEqual(mutateBaseline.responses[name]);
   });
 
   it("KONTROLL: med flagget PÅ (verktøyet registrert) kjenner ruten navnet og når gatewayen - kun for det flagget som er på; et ukjent navn er fortsatt 400", async () => {
@@ -140,7 +160,7 @@ describe("2. executive-verktøyene med flaggene AV er identiske med ren main (ha
     expect(off.map(summarize)).toEqual(toolsBaseline.tools);
     const actions = off.map((d) => d.action);
     for (const t of CONTROL_CENTER_READ_TOOLS) expect(actions, t.action).not.toContain(t.action);
-    for (const name of NEW_NAMES) expect(actions, name).not.toContain(name);
+    for (const name of [...NEW_NAMES, ...WPB3_NAMES]) expect(actions, name).not.toContain(name);
     expect(off.find((d) => d.action === "get_control_center")?.rate_limit_per_minute).toBe(30);
   });
 
@@ -148,6 +168,7 @@ describe("2. executive-verktøyene med flaggene AV er identiske med ren main (ha
     const extra = (defs: ToolDefinition[]): string[] => defs.map((d) => d.action).filter((a) => !toolsBaseline.tools.some((t) => t.action === a)).sort();
     expect(extra(executiveDefs({ goldenSuite: true }))).toEqual(["run_golden_suite"]);
     expect(extra(executiveDefs({ autonomyRevoke: true }))).toEqual(["revoke_autonomy_binding"]);
+    expect(extra(executiveDefs({ evolutionApproval: true }))).toEqual(["record_evolution_decision"]);
     for (const t of CONTROL_CENTER_READ_TOOLS) expect(extra(executiveDefs({ controlCenters: [t.center] })), t.center).toEqual([t.action]);
     expect(extra(executiveDefs({ controlCenters: CONTROL_CENTER_READ_TOOLS.map((t) => t.center) }))).toEqual(CONTROL_CENTER_READ_TOOLS.map((t) => t.action).sort());
     expect(executiveDefs({ goldenSuite: true, autonomyRevoke: true }).find((d) => d.action === "get_control_center")?.rate_limit_per_minute).toBe(30);
@@ -169,7 +190,9 @@ function productionSurface(env: Record<string, string | undefined>) {
   const pool = {} as never;
   registerControlCenters(registry, {
     pool, env, toolGateway: { get: () => undefined } as never, ownerControls: {} as never, killSwitch: {} as never,
-    valueReport: async () => ({}) as never, infraStatus: async () => ({}) as never
+    valueReport: async () => ({}) as never, infraStatus: async () => ({}) as never,
+    // WP-B3 (D-475): Evolusjon-senteret registreres kun med evolusjonsrapporten koblet inn (som main.ts gjør)
+    evolutionReport: async () => ({ sections: [] })
   });
   const controlCenters: ControlCenterId[] = controlCentersWithTools(env, registry);
   const defs = firstWaveTools({}, {
@@ -208,7 +231,7 @@ describe("3. verktøyutvalget (hele produksjonsflaten, 95 fraser, begge flater) 
     expect(diffs).toEqual([]);
   });
 
-  it("KONTROLL: med ALLE flagg PÅ endres utvalget for minst 11 av hverdagsfrasene på web-chatten og flaten får de sju verktøyene - sammenligningen over er ikke tom", () => {
+  it("KONTROLL: med ALLE flagg PÅ endres utvalget for minst 11 av hverdagsfrasene på web-chatten og flaten får de åtte verktøyene (syv + Evolusjon, D-475) - sammenligningen over er ikke tom", () => {
     const onKeys = allOn.map(keyOf);
     for (const t of CONTROL_CENTER_READ_TOOLS) expect(onKeys, t.action).toContain(`executive.${t.action}`);
     const changed = selectionBaseline.cases.filter((c) => JSON.stringify(selectionOf(allOn, "web_chat", c)) !== JSON.stringify(c.web_chat));

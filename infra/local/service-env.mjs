@@ -381,7 +381,9 @@ export const SERVICE_ENV = {
     "JARVIS_CONTROL_CENTER_OPERATIONS", "JARVIS_CONTROL_CENTER_VALUE", "JARVIS_CONTROL_CENTER_PRIVACY", "JARVIS_CONTROL_CENTER_SECURITY", "JARVIS_CONTROL_GOLDEN_SUITE", "JARVIS_CONTROL_AUTONOMY_REVOKE",
     // WP-D3 (UA-4 Growth, D-459): skrivehandlinger mot annonse-/analyseplattformene (plattformliste, eierens EGNE konto-/eiendoms-id-er, tillatte kreativ-verter) og eksperimentregisteret. ALLE AV som standard
     // (tom/manglende = ingen verktøy, ingen rute). Api-only (bakgrunnsflaten er read-only). Ingen hemmeligheter - kun flagg og eksakte, ikke-hemmelige id-er; credentials er vault-referansene i CONNECTOR_ENV.
-    "JARVIS_GROWTH_WRITE_PLATFORMS", "JARVIS_GROWTH_WRITE_TARGETS", "JARVIS_GROWTH_CREATIVE_URL_HOSTS", "JARVIS_GROWTH_EXPERIMENTS"],
+    "JARVIS_GROWTH_WRITE_PLATFORMS", "JARVIS_GROWTH_WRITE_TARGETS", "JARVIS_GROWTH_CREATIVE_URL_HOSTS", "JARVIS_GROWTH_EXPERIMENTS",
+    // WP-B3 (D-475, EV-22/EV-23): tilleggssenteret Evolusjon og eierens avgjørelse om et endringsforslag (kun en registrering, ingen virkning). Begge AV som standard; kun eksakt «on», api-only, ingen hemmeligheter.
+    "JARVIS_CONTROL_CENTER_EVOLUTION", "JARVIS_CONTROL_EVOLUTION_APPROVAL"],
   worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...WORKER_CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
     // WP-C1 (D-32 / Q-45a): vertsside job-runner (JARVIS_JOB_RUNNER=host). Socket-katalogen og tokenfilen monteres inn via infra/job-runner/docker-compose.job-runner.yml
     // (valgfri override) - uten den, og med tomme verdier her, feiler hver kodejobb lukket som før.
