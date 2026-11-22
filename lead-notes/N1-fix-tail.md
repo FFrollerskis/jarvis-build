@@ -1,0 +1,7 @@
+
+---
+## Kjøringer og sluttrapport (del 7)
+
+Kjør (som `su postgres`, `--maxWorkers=2`, `timeout -k 5`): (1) alle N1-testfiler (inkl. nye) og alle filer du endrer tester for; (2) ALLE testfiler som leser `main.ts`/`worker-main.ts` (grep etter `main.ts` i testmappene; du lærte i runde 1 at kildetekst-vakter som ua3 og wpf1 låser `main.ts`), `modules/executive/test`, `modules/tool-gateway/test`, `modules/model-gateway/test` og de berørte `apps/api/test`-filene; (3) `pnpm -r run typecheck`, `pnpm lint`, `pnpm check:containment` (exit 0); (4) mutantkjøreren: legg til MINST 10 nye mutanter for den nye koden (nøstet-kall-tilbakehold fjernet/snudd, `withholdFinance` ignorert, predikatet snudd/alltid-lokal/alltid-sky, `restricted_origin` ikke satt/ikke lest/lest med flagg AV, levering lagres umerket, `slo_report`/selvdiagnose-merking fjernet, `lock()` etter jobbstart, kildevakt for stempling) og vis at testene dreper dem (ekvivalente mutanter begrunnes); (5) kjør reviewernes probe-filer du tok inn og bekreft at de er grønne på ny HEAD.
+
+Sluttrapport (SISTE melding, norsk, maks ca. 90 linjer): nye commits (hash + tittel) og ny HEAD; per funn (F-B1, F-B2/F-A1, F-A2, F-A3/F-B3, F-A4, F-A5, F-A6, F-A7, F-A8, F-B4): FIKSET/DELVIS/IKKE (med begrunnelse) + hvilken test som beviser det; testtall (kommando + resultat); mutanttall (nye og totale); hva som er endret i runbooken; nye eller endrede åpne punkter (Q-forslag: oppdater Q-1..Q-8; Q-4 er nå bygget); `NOT VERIFIED`. Husk: ingenting er `VERIFIED` uten kjørt artefakt (NAS, ekte modell = NOT VERIFIED).
