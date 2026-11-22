@@ -34,7 +34,7 @@ let app: pg.Pool;
 let queue: PgTaskQueue;
 const T = "t-n1job";
 const id = (session: string): IdentityContext => ({ person_id: "p-1", tenant_id: T, memory_space_id: "personal", session_id: session, device_id: "d-1", channel: "web", auth_strength: "active" });
-const SESSIONS = ["s-lock", "s-ctrl", "s-off", "s-model", "s-unit"];
+const SESSIONS = ["s-lock", "s-ctrl", "s-off", "s-model", "s-unit", "s-fail", "s-cancel", "s-failctl"];
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-n1job-"));
@@ -133,6 +133,27 @@ async function completeAndSweep(taskId: string, session: string, guardEnabled: b
   return saved;
 }
 
+/** F2-B2: som `completeAndSweep`, men jobben starter fra en tur via motoren og ender som `failed` (feilet i køen) eller `cancelled` (avbrutt før start) i stedet for `completed`. */
+async function startTerminateAndSweep(session: string, request: string, how: "failed" | "cancelled") {
+  const { gateway, submitted } = buildChain();
+  const e = engine([], delegateRun(gateway), true);
+  await e.handle(id(session), request);
+  expect(submitted).toHaveLength(1);
+  const taskId = submitted[0]!.task_id;
+  if (how === "failed") {
+    expect((await queue.claimNext("w-1", 30, ["executive"]))?.task_id).toBe(taskId);
+    expect(await queue.fail(T, taskId, "w-1", "FEILTEKST kunne ikke lese saldoen til lønnen")).toBe("failed");
+  } else {
+    expect(await queue.requestCancel(T, taskId)).toBe("cancelled");
+  }
+  const saved: Array<{ argc: number; opts: unknown }> = [];
+  const store = new MessageStore(app);
+  const spy = { save: (...args: Parameters<MessageStore["save"]>) => { saved.push({ argc: args.length, opts: args[3] }); return store.save(...args); } } as Pick<MessageStore, "save">;
+  const jobs = new ChatJobs(app, { saveMessage: createDeliverySaver(spy, true) });
+  expect(await jobs.sweepDeliveries(id(session))).toBe(1);
+  return saved;
+}
+
 describe("A: ekte Postgres - leveringen fra en LÅST jobbstart lagres begrenset og holdes utenfor skyvarianten", () => {
   const LOCKED_REQUEST = "Lag en grundig oppsummering av alt vi har snakket om den siste uken, uten småprat, og ta med hva som skjedde med lønnen min i bakgrunnen";
 
@@ -175,6 +196,26 @@ describe("A: ekte Postgres - leveringen fra en LÅST jobbstart lagres begrenset 
       const saved = await completeAndSweep(submitted[0]!.task_id, "s-ctrl", true);
       expect(saved).toEqual([{ argc: 3, opts: undefined }]);
       expect((await rows("s-ctrl")).find((r) => r.content.includes("45 000"))!.restricted).toBe(false);
+    } finally { restore(); }
+  });
+
+  it("F2-B2 (reviewer B NF-2): FEILEDE og AVBRUTTE jobber fra en LÅST start leveres også begrenset (feilteksten og tittelen kan gjengi oppgaven) - ikke bare fullførte; en IKKE-låst start gir tre argumenter", async () => {
+    const restore = silence();
+    try {
+      const failed = await startTerminateAndSweep("s-fail", LOCKED_REQUEST, "failed");
+      expect(failed).toEqual([{ argc: 4, opts: { restricted: true } }]);
+      const cancelled = await startTerminateAndSweep("s-cancel", LOCKED_REQUEST, "cancelled");
+      expect(cancelled).toEqual([{ argc: 4, opts: { restricted: true } }]);
+      const control = await startTerminateAndSweep("s-failctl", "list åpne PR-er på tsworkflow/jarvisbuild i bakgrunnen", "failed");
+      expect(control).toEqual([{ argc: 3, opts: undefined }]);
+      // radene: bruker + jobbstart-svar + levering. Låst start: alle tre begrenset; kontroll: ingen.
+      const failedRows = await rows("s-fail");
+      expect(failedRows.map((r) => r.restricted)).toEqual([true, true, true]);
+      expect(failedRows.at(-1)!.content).toContain("feilet: FEILTEKST");
+      const cancelledRows = await rows("s-cancel");
+      expect(cancelledRows.map((r) => r.restricted)).toEqual([true, true, true]);
+      expect(cancelledRows.at(-1)!.content).toContain("ble avbrutt");
+      expect((await rows("s-failctl")).map((r) => r.restricted)).toEqual([false, false, false]);
     } finally { restore(); }
   });
 });
@@ -256,11 +297,15 @@ describe("D: kildevakt - hvem setter `restrictedOrigin` (kun trusted kode)", () 
     expect(mesh).toMatch(/\.\.\.\(this\.turn\?\.restricted === true \? \{ restrictedOrigin: true as const \} : \{\}\)/);
   });
 
-  it("`restricted_origin` skrives kun av TasksDelegateTransport (fra konteksten, aldri fra parametere) og leses kun av ChatJobs.sweepDeliveries (eksakt true)", () => {
+  it("`restricted_origin` skrives kun av TasksDelegateTransport (fra konteksten, aldri fra parametere) og leses kun i ChatJobs (sveipet, tilbakehold i list/get, isRestrictedOrigin) med eksakt true", () => {
     const chatJobs = code(readFileSync(fileURLToPath(new URL("../src/chat-jobs.ts", import.meta.url)), "utf8"));
     expect(chatJobs).toContain("...(context?.restrictedOrigin === true ? { restricted_origin: true } : {})");
     expect(chatJobs).toContain('row.restricted_origin === "true"');
-    expect(chatJobs.match(/restricted_origin/g)).toHaveLength(5); // SQL-kolonne (2), skriving (1), typen (1), lesingen (1)
+    // F2-B1: nøkkelen leses nå også av `ChatJobs.list/get` (tilbakehold ved utførelse) og `isRestrictedOrigin` (hurtigbanen), så antallet pinnes per rolle i stedet for som ett sumtall: ÉN skriving, TO eksakt-«true»-lesinger (`present` og sveipet)
+    // og FIRE SQL-uttrekk (list, get, isRestrictedOrigin, sveipet). En ny skriving eller en ny lesing bryter tallene og må vurderes.
+    expect(chatJobs.match(/restricted_origin:\s*true/g)).toHaveLength(1);
+    expect(chatJobs.match(/restricted_origin === "true"/g)).toHaveLength(2);
+    expect(chatJobs.match(/->>'restricted_origin'/g)).toHaveLength(4);
     const main = readFileSync(fileURLToPath(new URL("../src/main.ts", import.meta.url)), "utf8");
     expect(main).toContain("saveMessage: createDeliverySaver(new MessageStore(pool), restrictedContextGuard.enabled)");
     expect(main).not.toMatch(/saveMessage: \(identity, role, content\) =>/);

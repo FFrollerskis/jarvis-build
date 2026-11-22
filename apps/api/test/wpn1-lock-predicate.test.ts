@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_PROFILES } from "@jarvis/model-gateway";
-import { FINANCE_EXECUTION_LOCK, financeLockServedLocally } from "../src/restricted-context-guard.ts";
+import { FINANCE_EXECUTION_LOCK, financeLockServedLocally, withholdsRestrictedJobFromCloud } from "../src/restricted-context-guard.ts";
 
 /**
  * WP-N1 (fiks-runde 1, F-A1/F-B2): lokalitetsprediktatet til utførelseslåsen ligger i `restricted-context-guard.ts` (flyttet ut av `main.ts`) og KJØRES her mot det ekte leverandørregisteret. Før dette sto det inline i `main.ts`
@@ -43,5 +43,37 @@ describe("FINANCE_EXECUTION_LOCK er det main.ts gir ToolGateway", () => {
   it("er nøyaktig prediktatet over (ingen ekstra valg som kan gjøre låsen svakere)", () => {
     expect(Object.keys(FINANCE_EXECUTION_LOCK)).toEqual(["servedLocally"]);
     expect(FINANCE_EXECUTION_LOCK.servedLocally).toBe(financeLockServedLocally);
+  });
+});
+
+describe("withholdsRestrictedJobFromCloud (fiks-runde 2, F2-B1): tilbakehold av tittel/resultat/feil fra en jobb startet fra en LÅST tur", () => {
+  it("uten modell i løkka (eierens egne ruter og kall uten servingModel) holdes ingenting tilbake", () => {
+    expect(withholdsRestrictedJobFromCloud(undefined)).toBe(false);
+  });
+
+  it("lokale leverandører (local_llm, gemma_local, ollama, scripted) får alt; hver skyleverandør i registeret holdes tilbake", () => {
+    for (const provider of LOCAL) expect(withholdsRestrictedJobFromCloud(model(provider)), provider).toBe(false);
+    for (const provider of CLOUD) expect(withholdsRestrictedJobFromCloud(model(provider)), provider).toBe(true);
+  });
+
+  it("følger registerets `locality` for HVER profil og er det eksakte motsatte av utførelseslåsens prediktat (ÉN lokalitetsregel, ingen avvikende kopi)", () => {
+    for (const profile of DEFAULT_PROFILES) {
+      expect(withholdsRestrictedJobFromCloud(model(profile.provider)), profile.provider).toBe(profile.locality !== "local");
+      expect(withholdsRestrictedJobFromCloud(model(profile.provider)), profile.provider).toBe(!financeLockServedLocally(model(profile.provider)));
+    }
+  });
+
+  it("fail-closed: tom, blank, ukjent, STORE BOKSTAVER, mellomrom rundt, feil type på leverandøren og en modell som ikke er et objekt holdes tilbake", () => {
+    for (const provider of ["", " ", "   ", "\t", "ukjent", "unknown", "GEMMA_LOCAL", "Gemma_Local", "gemma_local ", " gemma_local", "ollama\n", "local", "gemma", undefined, null, 7, {}, [], true]) {
+      expect(withholdsRestrictedJobFromCloud(model(provider)), JSON.stringify(provider)).toBe(true);
+    }
+    for (const notAModel of [null, "anthropic", "gemma_local", 7, true, [], () => undefined, {}]) {
+      expect(withholdsRestrictedJobFromCloud(notAModel as never), JSON.stringify(notAModel)).toBe(true);
+    }
+  });
+
+  it("modellnavnet påvirker ikke utfallet (kun leverandøren, stemplet av adapteren, avgjør)", () => {
+    expect(withholdsRestrictedJobFromCloud({ provider: "anthropic", model: "gemma3:4b" })).toBe(true);
+    expect(withholdsRestrictedJobFromCloud({ provider: "gemma_local", model: "claude-sonnet-5-5" })).toBe(false);
   });
 });
