@@ -88,6 +88,13 @@ describe("ingen direkte flaggavlesing utenfor parseren", () => {
     expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ financeExecutionLock: \{ servedLocally: /);
     expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ restrictedContextGuard: true \} : \{\}\)/); // og til samtalemotoren
   });
+
+  it("F-B1: executive-tjenesten får `withholdFinanceFromCloud` KUN når flagget er på (betinget spredning: AV = feltet settes ikke), og ingen annen kode setter det", () => {
+    const main = read("apps/api/src/main.ts");
+    expect(main.match(/withholdFinanceFromCloud/g)).toHaveLength(1);
+    expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ withholdFinanceFromCloud: true \} : \{\}\)/);
+    expect(read("apps/api/src/worker-main.ts")).not.toContain("withholdFinanceFromCloud"); // worker: flagget er api-only
+  });
 });
 
 describe("hurtigbane-tabellen dekker hver intensjon eksplisitt", () => {

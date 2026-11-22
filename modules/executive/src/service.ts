@@ -120,6 +120,12 @@ export interface ExecutiveServiceOptions {
    */
   servedLocally?: (model: { provider: string; model: string }) => boolean;
   /**
+   * WP-N1 (review B, F-B1): hold nøstede finansavlesninger (`get_control_surface_status`/`get_delegation_board` -> `finance.get_kill_switch`) tilbake fra skymodeller. `ToolGateway`-utførelseslåsen ser dem ikke (nøstede kall bærer
+   * ingen `servingModel`), så holdes de tilbake HER, med samme lokalitetsregel som resten av klassen (`isCloudServed`: sky og alt ukjent nektes; lokal modell og siden/ruten uten modell får svaret). Settes kun når begrenset-vakten
+   * (WP-N1-flagget) er på i `apps/api`; utelatt = identisk med før N1.
+   */
+  withholdFinanceFromCloud?: boolean;
+  /**
    * WP-H0 (JARVIS-087): avbryt en bakgrunnsjobb/agent fra kontrollsenteret. Den EKSISTERENDE kanselleringsveien (`TaskService.cancel`: klasse B-policy, `requestCancel`, revisjon `task.cancelled`) injiseres fra
    * `apps/api`; executive-laget har ingen egen kanselleringslogikk. Uten denne avvises handlingen (`executive_tasks_not_configured`).
    */
@@ -411,13 +417,16 @@ export class ExecutiveService {
    * ALDRI `KillSwitch`/`OwnerControls`/`DomainPauseRegistry` direkte, og
    * fabrikkerer/eskalerer ALDRI identiteten den fikk fra kalleren.
    */
-  async getControlSurfaceStatus(identity: IdentityContext): Promise<ControlSurfaceStatus> {
+  async getControlSurfaceStatus(identity: IdentityContext, options: { withholdFinance?: boolean } = {}): Promise<ControlSurfaceStatus> {
+    // WP-N1 (review B, F-B1): nøstet finansavlesning - ToolGateway-låsen ser den ikke (ingen servingModel på nøstede kall), så den hoppes over HER for en skymodell (kallet gjøres ikke i det hele tatt).
+    const withholdFinance = options.withholdFinance === true;
     const [ownerControl, pauseState, financeKillSwitch] = await Promise.all([
       requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
       requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state"),
-      requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
+      withholdFinance ? Promise.resolve(null) : requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
     ]);
-    return { owner_control: ownerControl, situation_domain_pauses: pauseState, finance_kill_switch: financeKillSwitch };
+    // `null` betyr ellers «aldri en rad» (se `ControlSurfaceStatus`): en holdt-tilbake avlesning får derfor et eksplisitt merke, slik at modellen aldri leser `null` som «ingen nødbryter».
+    return { owner_control: ownerControl, situation_domain_pauses: pauseState, finance_kill_switch: financeKillSwitch, ...(withholdFinance ? { finance_kill_switch_withheld: true as const } : {}) };
   }
 
   /**
@@ -427,17 +436,19 @@ export class ExecutiveService {
    * over - INGEN egen tilstand, INGEN direkte `SituationEngine`/
    * `OwnerControls`-tilgang fra denne pakken.
    */
-  async getDelegationBoard(identity: IdentityContext): Promise<DelegationBoard> {
+  async getDelegationBoard(identity: IdentityContext, options: { withholdFinance?: boolean } = {}): Promise<DelegationBoard> {
+    const withholdFinance = options.withholdFinance === true; // WP-N1 (review B, F-B1): se `getControlSurfaceStatus`.
     const [autonomyDomains, ownerControl, financeKillSwitch] = await Promise.all([
       requireData<SituationAutonomyPolicy[]>(this.gateway, identity, "situations", "list_autonomy_policies"),
       requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
-      requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
+      withholdFinance ? Promise.resolve(null) : requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
     ]);
     return {
       autonomy_domains: autonomyDomains,
       frozen_connectors: ownerControl.frozen_connectors,
       revoked_credentials: ownerControl.revoked_credentials,
-      finance_kill_switch: financeKillSwitch
+      finance_kill_switch: financeKillSwitch,
+      ...(withholdFinance ? { finance_kill_switch_withheld: true as const } : {})
     };
   }
 
@@ -584,6 +595,11 @@ export class ExecutiveService {
     const registry = this.options.controlCenters;
     if (registry) return registry.overview(identity, options);
     return composeControlCenterOverview([], new Date());
+  }
+
+  /** WP-N1 (review B): skal nøstede finansavlesninger holdes tilbake? Kun med begrenset-vakten PÅ (`withholdFinanceFromCloud`, satt fra main.ts) OG en skymodell/ukjent modell. Flagg AV = alltid `false` (identisk med main). */
+  withholdsFinanceFromCloud(model: { provider: string; model: string } | undefined): boolean {
+    return this.options.withholdFinanceFromCloud === true && this.isCloudServed(model);
   }
 
   /** Gjennomgang M2: betjenes kallet av en SKYmodell? `false` uten modell (siden/ruten) og for en lokal modell; `true` for sky og alt ukjent (fail-closed). */

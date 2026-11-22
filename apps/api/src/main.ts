@@ -1169,6 +1169,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         // Gjennomgang M2: finansdata er SECRET_RESTRICTED (D-378) - en SKYmodell får aldri finans-senteret (holdes tilbake ved utførelse i executive-transporten, uansett hvilke verktøy turens utvalg valgte); en lokal modell
         // og siden får det. Lokalitet kommer fra leverandørregisteret (SAMME `servedByCloudModel` som chattens verktøyskjerm); ukjent leverandør regnes som sky (fail-closed).
         servedLocally: (model) => !servedByCloudModel({ provider: model.provider }),
+        // WP-N1 (review B, F-B1): nøstede finansavlesninger (`get_control_surface_status`/`get_delegation_board` -> `finance.get_kill_switch`) holdes tilbake fra skymodeller KUN med vakten på (flagg AV: feltet settes ikke = identisk med main).
+        ...(restrictedContextGuard.enabled ? { withholdFinanceFromCloud: true } : {}),
         // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling bruker den EKSISTERENDE kanselleringsveien (samme `taskService` som chatens «avbryt jobb <id>»).
         tasks: { cancel: (identity, taskId) => taskService.cancel(identity, taskId) },
         // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.

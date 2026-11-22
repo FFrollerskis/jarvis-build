@@ -102,11 +102,17 @@ export class ExecutiveTransport implements ToolTransport {
         return toolResultToTransportResult(result);
       }
       case "get_control_surface_status": {
-        const status = await this.service.getControlSurfaceStatus(identity);
+        // WP-N1 (review B, F-B1): det NØSTEDE `finance.get_kill_switch`-kallet har ingen `servingModel` (ToolGateway-låsen ser det ikke), så en skymodell får finans-nødbryteren her. Holdes tilbake for sky når begrenset-vakten er på;
+        // ellers (vakten AV, lokal modell, eier-rute uten modell) er kallet NØYAKTIG som før N1 (ingen ekstra argument).
+        const status = this.service.withholdsFinanceFromCloud(context?.servingModel)
+          ? await this.service.getControlSurfaceStatus(identity, { withholdFinance: true })
+          : await this.service.getControlSurfaceStatus(identity);
         return { data: status as unknown as JsonValue };
       }
       case "get_delegation_board": {
-        const board = await this.service.getDelegationBoard(identity);
+        const board = this.service.withholdsFinanceFromCloud(context?.servingModel)
+          ? await this.service.getDelegationBoard(identity, { withholdFinance: true })
+          : await this.service.getDelegationBoard(identity);
         return { data: board as unknown as JsonValue };
       }
       case "get_capability_status": {
