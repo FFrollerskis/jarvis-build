@@ -161,6 +161,21 @@ describe("A: tasks.get_task_status holder tittel/resultat/feil fra en LÅST jobb
     } finally { restore(); }
   });
 
+  it("eierens egne ruter (`ChatJobs.list/get` uten valg, som `POST /chat/jobs`) får det gamle viewet - de åtte feltene, uten `restricted` og `withheld` - også for en LÅST jobb (R3-1: ingen nye felt der)", async () => {
+    const restore = silence();
+    try {
+      const { gateway, submitted } = chain(true);
+      const taskId = await start(gateway, submitted, { restricted: true });
+      await complete(taskId, SECRET_TEXT);
+      const owner = new ChatJobs(app, { saveMessage: async () => undefined });
+      const job = await owner.get(identity("s-tool"), taskId);
+      expect(Object.keys(job!).sort()).toEqual(["created_at", "delivered", "error", "finished_at", "result_text", "status", "task_id", "title"]);
+      expect(job).toMatchObject({ title: SECRET_TITLE, result_text: SECRET_TEXT });
+      const listed = (await owner.list(identity("s-tool"), 10)).find((j) => j.task_id === taskId)!;
+      expect(listed).toEqual(job);
+    } finally { restore(); }
+  });
+
   it("en jobb startet fra en IKKE-låst tur er uendret også for en skymodell (kun restricted_origin holdes tilbake)", async () => {
     const restore = silence();
     try {
