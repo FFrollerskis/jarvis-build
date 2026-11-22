@@ -141,6 +141,27 @@ describe("A2: samme lekkasje med PRODUKSJONENS verktøyutvalg (ikke den faste ve
   });
 });
 
+describe("A3: en LÅST tur gir executoren et turbilde med `restricted: true` (F-A2: modelldrevet delegering av bakgrunnsjobber)", () => {
+  it("låst verktøytur (finansutvalg uten stikkord): executorFor får et turbilde med restricted:true; en ikke-låst skytur og flagg AV gir aldri det", async () => {
+    const locked = await run({ text: LOCK_ASK });
+    expect(locked.gateway[0]!.api).toBe("completeWithTools");
+    expect(locked.tool_turn_restricted).toBeGreaterThanOrEqual(1);
+    const cloud = await run({ text: CLOUD_ASK });
+    expect(cloud.gateway[0]!.preference![0]).toBe("anthropic");
+    expect(cloud.tool_turn_restricted).toBeUndefined(); // en trygg skytur er ikke låst
+    const offLocked = await off({ text: LOCK_ASK });
+    expect(offLocked.gateway[0]!.sensitivity).toBe("SECRET_RESTRICTED");
+    expect(offLocked.tool_turn_restricted).toBeUndefined(); // flagg AV: turbildet er uendret
+  });
+
+  it("tilbakefall: skyvarianten (trygg, ikke låst: første executor-bilde uten lås) feiler og den lokale reserven svarer med hele historikken - da er turen låst og executoren får restricted-turbildet fra da av", async () => {
+    const first = await run({ text: LOCK_ASK });
+    const second = await run({ text: CLOUD_ASK, prior: first.rows_after, failures: [{ kind: "provider", provider: "anthropic", errKind: "timeout" }] });
+    expect(second.gateway).toHaveLength(2);
+    expect(second.tool_turn_restricted).toBe(1); // KUN det andre (lokale) kallet fikk det låste turbildet; skyvariantens kall var ikke låst
+  });
+});
+
 describe("B: hvert lagringssted merkes riktig", () => {
   it("verktøyutvalg-lås (D-381), tekst, minne (helse-rom og «special»), og en merket rad i konteksten låser og merker turen - hver på sin egen grunn", async () => {
     const cases: Array<[string, Omit<Scenario, "id">, string]> = [
@@ -387,5 +408,30 @@ describe("E: smitten (kjent begrensning) er målt, og strukturvaktene mot nye la
     // conversation.ts: brukermeldingen + saveAssistant (to grener); chat-jobs.ts: sveipet kaller saveMessage uten/med merke (to grener). main.ts lagrer leveringen via `createDeliverySaver` (restricted-context-guard.ts, testet i wpn1-job-delivery.test.ts).
     expect(hits.map((h) => h.split(":")[0])).toEqual(["apps/api/src/conversation.ts", "apps/api/src/conversation.ts", "apps/api/src/conversation.ts", "apps/api/src/chat-jobs.ts", "apps/api/src/chat-jobs.ts"]);
     expect(readFileSync(join(root, "apps/api/src/main.ts"), "utf8")).toContain("saveMessage: createDeliverySaver(new MessageStore(pool), restrictedContextGuard.enabled)");
+  });
+});
+
+/**
+ * F-A5 (reviewer A, X01): «smitte» er NØDVENDIG taint-propagering, ikke en finurlighet. T2 er en ren oppfølging som låses KUN av et arvet merke (det lokale svaret kan gjengi merket innhold uten stikkord). Merkes T2 ikke, har T1s merke gled ut av det
+ * nylige vinduet når T4 går til sky, og T2s svar (utledet fra begrenset innhold) sendes til skymodellen. Testen feiler derfor mot alternativ (b) «ikke merk turer låst kun av arvet merke» - semantikken er bevisst BEHOLDT (alternativ (a)).
+ */
+describe("F: smitte er nødvendig taint-propagering (alternativ (b) lekker)", () => {
+  const last = (rows: Row[]): number => rows.length - 1;
+  it("T1 (verktøylås) -> T2 (minne-oppfølging, kun arvet merke) -> T3 (skyvariant) -> T4 (skytur): T2s svar når aldri skyen", async () => {
+    const t1 = await run({ text: LOCK_ASK });
+    expect(t1.logs).toContain("n1_restricted_turn_locked");
+    const rows1 = t1.rows_after.map((r, i) => (i === last(t1.rows_after) ? { ...r, content: "TOK-A1 uten stikkord" } : r));
+    const t2 = await run({ text: ASKS["memory"]!, prior: rows1 });
+    expect(t2.gateway[0]!.sensitivity).toBe("SECRET_RESTRICTED"); // lokal: kun arvet merke
+    expect(t2.gateway[0]!.preference![0]).toBe("gemma_local");
+    const rows2 = t2.rows_after.map((r, i) => (i === last(t2.rows_after) ? { ...r, content: "TOK-A2 utledet fra begrenset innhold" } : r));
+    const t3 = await run({ text: ASKS["github"]!, prior: rows2 });
+    expect(t3.gateway[0]!.preference![0]).toBe("anthropic");
+    expect(text(t3)).not.toContain("TOK-A");
+    const t4 = await run({ text: ASKS["email"]!, prior: t3.rows_after });
+    expect(t4.gateway[0]!.preference![0]).toBe("anthropic");
+    expect(text(t4)).not.toContain("TOK-A1");
+    expect(text(t4)).not.toContain("TOK-A2");
+    expect(text(t4)).not.toContain(ASKS["memory"]!);
   });
 });

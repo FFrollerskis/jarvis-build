@@ -15,6 +15,16 @@ const ENGINE = [
 ];
 const GATEWAY = ["modules/tool-gateway/test/wpn1-finance-execution-lock.test.ts"];
 const STORE_TESTS = ["modules/core/test/wpn1-messages-restricted.test.ts"];
+const NEST = ["apps/api/test/wpn1-nested-finance-lock.test.ts"];
+const PRED = ["apps/api/test/wpn1-lock-predicate.test.ts", "apps/api/test/wpn1-nested-finance-lock.test.ts"];
+const DELIV = ["apps/api/test/wpn1-job-delivery.test.ts"];
+const FAST = ["apps/api/test/wpn1-council-fast.test.ts"];
+const EXEC_SVC = "modules/executive/src/service.ts";
+const EXEC_TR = "modules/executive/src/transport.ts";
+const CJ = "apps/api/src/chat-jobs.ts";
+const MESH = "modules/tool-gateway/src/mesh-bridge.ts";
+const MAIN = "apps/api/src/main.ts";
+const TTR = "apps/api/src/tool-turn-route.ts";
 const CONV = "apps/api/src/conversation.ts";
 const GUARD = "apps/api/src/restricted-context-guard.ts";
 const SENS = "modules/model-gateway/src/content-sensitivity.ts";
@@ -58,7 +68,7 @@ export const MUTANTS = [
   ["M36", "navnerom-mønsteret svekket", MAN, "const FINANCIAL_NAMESPACES = /^(finance|finance_[a-z]+)$/;", "const FINANCIAL_NAMESPACES = /^(finance)$/;", GATEWAY],
   ["M40", "markRestricted uten sesjonsavgrensning", STORE, "WHERE message_id = $1 AND tenant_id = $2 AND session_id = $3 AND restricted = false", "WHERE message_id = $1 AND tenant_id = $2 AND ($3::text IS NOT NULL) AND restricted = false", STORE_TESTS],
   ["M41", "markRestricted ikke idempotent", STORE, "AND session_id = $3 AND restricted = false`", "AND session_id = $3`", STORE_TESTS],
-  ["M42", "save ignorerer {restricted: true}", STORE, "if (opts.restricted === true) {", "if (false && opts.restricted === true) {", STORE_TESTS],
+  ["M42", "save ignorerer {restricted: true}", STORE, "if (restricted) {", "if (false && restricted) {", STORE_TESTS],
   ["M43", "history() returnerer ikke restricted", STORE, "SELECT message_id, role, content, created_at, restricted FROM messages", "SELECT message_id, role, content, created_at, false AS restricted FROM messages", STORE_TESTS],
   ["M44", "enveis-triggeren fjernet fra migrasjonen", MIG, "CREATE TRIGGER messages_restricted_monotonic\n  BEFORE UPDATE ON messages\n  FOR EACH ROW EXECUTE FUNCTION messages_restricted_monotonic();", "", STORE_TESTS],
   ["M45", "kolonne-nivå UPDATE utvidet til hele tabellen", MIG, "GRANT UPDATE (restricted) ON messages TO jarvis_app;", "GRANT UPDATE ON messages TO jarvis_app;", STORE_TESTS],
@@ -70,6 +80,38 @@ export const MUTANTS = [
   ["M52", "main.ts gir motoren vakten ubetinget", "apps/api/src/main.ts", "...(restrictedContextGuard.enabled ? { restrictedContextGuard: true } : {}),", "...{ restrictedContextGuard: true },", ENGINE],
   ["M53", "parseren godtar også «true»", GUARD, 'return { enabled: env[RESTRICTED_CONTEXT_GUARD_FLAG] === "on" };', 'return { enabled: env[RESTRICTED_CONTEXT_GUARD_FLAG] === "on" || env[RESTRICTED_CONTEXT_GUARD_FLAG] === "true" };', ENGINE],
   ["M54", "flagget fjernet fra SERVICE_ENV.api", "infra/local/service-env.mjs", '    "JARVIS_RESTRICTED_CONTEXT_GUARD"],', "    ],", ENGINE],
+  // ---- Fiks-runde 1 (F-B1, F-B2/F-A1, F-A2, F-A3, F-A4, F-A5, F-A6b, F-A8, F-B4): mutanter for den NYE koden ----
+  ["M60", "F-B1: statusavlesningen ignorerer withholdFinance (nøstet finance-kall gjøres alltid)", EXEC_SVC, 'requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state"),\n      withholdFinance ? Promise.resolve(null) :', 'requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state"),\n      false ? Promise.resolve(null) :', NEST],
+  ["M61", "F-B1: delegeringstavlen ignorerer withholdFinance", EXEC_SVC, 'requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),\n      withholdFinance ? Promise.resolve(null) :', 'requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),\n      false ? Promise.resolve(null) :', NEST],
+  ["M62", "F-B1: transporten sender ikke withholdFinance for statusen", EXEC_TR, "? await this.service.getControlSurfaceStatus(identity, { withholdFinance: true })", "? await this.service.getControlSurfaceStatus(identity)", NEST],
+  ["M63", "F-B1: transporten sender ikke withholdFinance for tavlen", EXEC_TR, "? await this.service.getDelegationBoard(identity, { withholdFinance: true })", "? await this.service.getDelegationBoard(identity)", NEST],
+  ["M64", "F-B1: withholdsFinanceFromCloud er alltid false", EXEC_SVC, "return this.options.withholdFinanceFromCloud === true && this.isCloudServed(model);", "return false;", NEST],
+  ["M65", "F-B1: withholdsFinanceFromCloud invertert (lokal holdes tilbake, sky slipper)", EXEC_SVC, "return this.options.withholdFinanceFromCloud === true && this.isCloudServed(model);", "return this.options.withholdFinanceFromCloud === true && !this.isCloudServed(model);", NEST],
+  ["M66", "F-B1: withholdsFinanceFromCloud ignorerer valget (alltid på for sky, også med vakten AV)", EXEC_SVC, "return this.options.withholdFinanceFromCloud === true && this.isCloudServed(model);", "return this.isCloudServed(model);", NEST],
+  ["M67", "F-B1: «holdt tilbake»-merket fjernet (null ser ut som «ingen nødbryter»)", EXEC_SVC, "finance_kill_switch: financeKillSwitch, ...(withholdFinance ? { finance_kill_switch_withheld: true as const } : {}) };", "finance_kill_switch: financeKillSwitch };", NEST],
+  ["M68", "F-B2: lokalitetsprediktatet invertert", GUARD, "return !servedByCloudModel({ provider: model.provider });", "return servedByCloudModel({ provider: model.provider });", PRED],
+  ["M69", "F-B2: lokalitetsprediktatet alltid lokal (låsen inert)", GUARD, "return !servedByCloudModel({ provider: model.provider });", "return true;", PRED],
+  ["M70", "F-B2: lokalitetsprediktatet alltid sky", GUARD, "return !servedByCloudModel({ provider: model.provider });", "return false;", PRED],
+  ["M71", "F-A2: restricted_origin skrives aldri i jobbkontrakten", CJ, "...(context?.restrictedOrigin === true ? { restricted_origin: true } : {})", "", DELIV],
+  ["M72", "F-A2: sveipet leser aldri restricted_origin", CJ, 'if (row.restricted_origin === "true") await this.options.saveMessage(', 'if (false && row.restricted_origin === "true") await this.options.saveMessage(', DELIV],
+  ["M73", "F-A2: leveringslagringen ignorerer vakten (flagg AV lagrer begrenset)", GUARD, "guardEnabled && opts?.restricted === true ? store.save(", "opts?.restricted === true ? store.save(", DELIV],
+  ["M74", "F-A2: gatewayen videreformidler ikke restrictedOrigin til transporten", GW, "...(request.restrictedOrigin === true ? { restrictedOrigin: true as const } : {}),", "", DELIV],
+  ["M75", "F-A2: MeshToolExecutor videreformidler ikke turbildets restricted", MESH, "...(this.turn?.restricted === true ? { restrictedOrigin: true as const } : {})", "", DELIV],
+  ["M76", "F-A2: motoren gir executoren et ulåst turbilde i en låst tur", CONV, "marker?.locked === true ? { ...turn, restricted: true as const } : turn", "turn", ENGINE],
+  ["M77", "F-A2: hurtigbanen sender ikke restricted til delegateBackground.run", CONV, "...(cloud.restricted === true ? { restricted: true as const } : {}) }).catch(() => null)", " }).catch(() => null)", FAST],
+  ["M78", "F-A6b: hurtigbanen låser ETTER jobbstarten", CONV, 'if (marker && cloud.restricted === true) await marker.lock(["fast_intent:delegate_background"]);\n        const started = this.deps.delegateBackground\n          ? await this.deps.delegateBackground.run(identity, intent.prompt, { cloudAllowed: cloud.allowed, ...(cloud.restricted === true ? { restricted: true as const } : {}) }).catch(() => null)\n          : null;', 'const started = this.deps.delegateBackground\n          ? await this.deps.delegateBackground.run(identity, intent.prompt, { cloudAllowed: cloud.allowed, ...(cloud.restricted === true ? { restricted: true as const } : {}) }).catch(() => null)\n          : null;\n        if (marker && cloud.restricted === true) await marker.lock(["fast_intent:delegate_background"]);', FAST],
+  ["M79", "F-A4: slo_report merkes ikke", GUARD, "  slo_report: true,", "  slo_report: false,", ENGINE],
+  ["M80", "F-A4: self_diagnosis merkes ikke", GUARD, "  self_diagnosis: true,", "  self_diagnosis: false,", ENGINE],
+  ["M81", "F-A4: system_status merkes ikke", GUARD, "  system_status: true,", "  system_status: false,", ENGINE],
+  ["M82", "F-B4/I2: save normaliserer fail-open (kun eksakt true er begrenset)", STORE, "const restricted = opts?.restricted !== undefined && opts.restricted !== false;", "const restricted = opts?.restricted === true;", [...STORE_TESTS, "modules/core/test/wpn1-message-store-sql.test.ts"]],
+  ["M83", "F-A8: servingModel stemples ikke av MeshToolExecutor", MESH, "servingModel: { provider: call.provider, model: call.model },", "", ["apps/api/test/wpn1-stamping-structure.test.ts", ...GATEWAY]],
+  ["M84", "F-A2: main.ts gir leveringslagringen vakten ubetinget", MAIN, "createDeliverySaver(new MessageStore(pool), restrictedContextGuard.enabled)", "createDeliverySaver(new MessageStore(pool), true)", DELIV],
+  ["M85", "F-B1: main.ts gir executive-tjenesten withholdFinanceFromCloud ubetinget", MAIN, "...(restrictedContextGuard.enabled ? { withholdFinanceFromCloud: true } : {}),", "withholdFinanceFromCloud: true,", ENGINE],
+  ["M86", "F-B2: main.ts gir gatewayen en svak inline-lås i stedet for FINANCE_EXECUTION_LOCK", MAIN, "{ financeExecutionLock: FINANCE_EXECUTION_LOCK }", "{ financeExecutionLock: { servedLocally: () => true } }", ENGINE],
+  ["M87", "F-A6b: kost-/selvdiagnose-rapportene låses ETTER at intensjonen er kjørt", CONV, "if (marker && FAST_INTENT_RESTRICTED[intent.kind]) await marker.lock([`fast_intent:${intent.kind}`]);\n      const result = await this.handleFastIntent(identity, intent, text, surface, provider, marker);", "const result = await this.handleFastIntent(identity, intent, text, surface, provider, marker);\n      if (marker && FAST_INTENT_RESTRICTED[intent.kind]) await marker.lock([`fast_intent:${intent.kind}`]);", FAST],
+  ["M88", "F-A5: history:restricted-merknaden lover usann varighet («til emnet er borte»)", TTR, '? " Samtalen holdes lokal så lenge en begrenset melding er blant de siste meldingene."', '? " Dette varer til emnet ikke lenger er blant de siste meldingene."', FAST],
+  ["M89", "F-A2: restricted levering lagres uten merke (tre argumenter)", CJ, 'await this.options.saveMessage({ ...base, session_id: sessionId }, "assistant", text, { restricted: true });', 'await this.options.saveMessage({ ...base, session_id: sessionId }, "assistant", text);', DELIV],
+  ["M90", "F-A5/X01: turer låst KUN av et arvet merke (history:restricted) merkes ikke (alternativ (b) lekker)", CONV, 'if (marker && primaryView.sensitivityDecision.sensitivity === "SECRET_RESTRICTED") await marker.lock(primaryView.sensitivityDecision.reasons);', 'if (marker && primaryView.sensitivityDecision.sensitivity === "SECRET_RESTRICTED" && primaryView.sensitivityDecision.reasons.some((r) => r !== "history:restricted")) await marker.lock(primaryView.sensitivityDecision.reasons);', ENGINE],
   // Ekvivalent (dybdeforsvar): `withholdSensitiveMessages` tar allerede ALLE merkede rader, så belt-og-seler-sjekken i `cloudVariantFor` kan ikke observeres utenfra.
   ["M48", "[ekvivalent] cloudVariantFor uten belt-og-seler-sjekken", CONV, "if (this.deps.restrictedContextGuard === true && cleanHistory.some((m) => m.restricted === true)) return undefined;", "", ENGINE, true]
 ];
@@ -100,7 +142,10 @@ for (const [id, description, file, oldText, newText, tests, equivalent] of MUTAN
     const proc = runAs
       ? spawnSync("su", [runAs, "-s", "/bin/bash", "-c", `export HOME=/tmp/pg-home npm_config_manage_package_manager_versions=false PATH=${process.env["PATH"]} NODE_OPTIONS=--max-old-space-size=2048; cd ${ROOT} && timeout -k 5 600 ${vitest}`], { encoding: "utf8" })
       : spawnSync("bash", ["-c", `timeout -k 5 600 ${vitest}`], { encoding: "utf8", env });
-    status = proc.status === 0 ? "SURVIVED" : "KILLED";
+    // Fiks-runde 1: skill assertion-drap (minst én test feilet) fra tekniske brudd (kompilering/innlasting/tidsavbrudd uten en feilet test) - kun det første er et ekte drap.
+    const output = `${proc.stdout ?? ""}\n${proc.stderr ?? ""}`;
+    const testFailed = /Tests\s+(?:\d+ passed \| )?\d+ failed/.test(output) || /AssertionError/.test(output);
+    status = proc.status === 0 ? "SURVIVED" : testFailed ? "KILLED" : "TECHNICAL";
   } finally {
     writeFileSync(path, original);
   }
@@ -109,5 +154,5 @@ for (const [id, description, file, oldText, newText, tests, equivalent] of MUTAN
 }
 const killed = results.filter((r) => r.status === "KILLED").length;
 const survivors = results.filter((r) => r.status === "SURVIVED");
-console.log(`\nTOTALT ${results.length}  DREPT ${killed}  OVERLEVDE ${JSON.stringify(survivors.map((r) => r.id))}  UGYLDIGE ${JSON.stringify(results.filter((r) => r.status === "INVALID").map((r) => r.id))}`);
-process.exit(results.some((r) => r.status === "INVALID" || (r.status === "SURVIVED" && !r.equivalent) || r.status === "ERROR") ? 1 : 0);
+console.log(`\nTOTALT ${results.length}  DREPT (assertion) ${killed}  TEKNISKE BRUDD ${JSON.stringify(results.filter((r) => r.status === "TECHNICAL").map((r) => r.id))}  OVERLEVDE ${JSON.stringify(survivors.map((r) => r.id))}  UGYLDIGE ${JSON.stringify(results.filter((r) => r.status === "INVALID").map((r) => r.id))}`);
+process.exit(results.some((r) => r.status === "INVALID" || r.status === "TECHNICAL" || (r.status === "SURVIVED" && !r.equivalent) || r.status === "ERROR") ? 1 : 0);

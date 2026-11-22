@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { classifyContentSensitivity, MemoryTraceSink, type AiCouncil, type ModelGateway } from "@jarvis/model-gateway";
+import { classifyContentSensitivity, MemoryTraceSink, type AiCouncil, type CompleteInput, type ModelGateway } from "@jarvis/model-gateway";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import { ConversationEngine } from "../src/conversation.ts";
 import { localOnlyNote } from "../src/tool-turn-route.ts";
@@ -186,5 +186,38 @@ describe("D: localOnlyNote for `history:restricted` (T03/T04, F-A5)", () => {
     const combined = localOnlyNote(["text:finance", "history:restricted"]);
     expect(combined).toContain("de siste meldingene hørte til en tur som ble holdt lokalt");
     expect(combined).toContain("Samtalen holdes lokal så lenge en begrenset melding er blant de siste meldingene.");
+  });
+});
+
+// --------------------------------------------------------------------------------------------- E. rå restricted-verdier
+describe("E: kun eksakt `true` er et merke på lesesiden - også i motoren (reviewer A, odd-proben)", () => {
+  async function turnWith(restrictedValue: unknown): Promise<{ sensitivity: string | undefined; marks: number }> {
+    const rows = [
+      { message_id: "a", role: "user", content: "hva heter hunden til naboen", created_at: "t", restricted: restrictedValue },
+      { message_id: "b", role: "assistant", content: "Det vet jeg ikke.", created_at: "t", restricted: restrictedValue }
+    ];
+    const calls: CompleteInput[] = [];
+    let marks = 0;
+    const messages = {
+      save: async () => "new-1",
+      markRestricted: async () => { marks += 1; return true; },
+      history: async () => [...rows, { message_id: "c", role: "user", content: "hva synes du om været", created_at: "t", restricted: false }]
+    };
+    const serve = async (input: CompleteInput) => { calls.push(input); return { text: "ok", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" }; };
+    const engine = new ConversationEngine({
+      messages: messages as never, context: { build: async () => ({ history: await messages.history(), open_tasks: [] }) } as never,
+      gateway: { complete: serve, stream: serve, completeWithTools: serve } as unknown as ModelGateway,
+      tasks: {} as unknown as TaskService, worker: {} as unknown as InProcessWorker, trace: new MemoryTraceSink(), restrictedContextGuard: true
+    } as never);
+    const restore = quiet();
+    try { await engine.handle(identity, "hva synes du om været"); } finally { restore(); }
+    return { sensitivity: calls[0]?.sensitivity, marks };
+  }
+
+  it("kontroll: eksakt true løfter turen og merker den; alt annet (streng, tall, null, objekt ...) er IKKE et merke", async () => {
+    expect(await turnWith(true)).toEqual({ sensitivity: "SECRET_RESTRICTED", marks: 1 });
+    for (const value of ["true", "t", 1, "on", {}, [], null, undefined, "false", 0, false]) {
+      expect(await turnWith(value), JSON.stringify(value)).toEqual({ sensitivity: "PUBLIC_OR_LOW_SENSITIVITY", marks: 0 });
+    }
   });
 });
