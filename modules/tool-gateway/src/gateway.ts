@@ -6,6 +6,7 @@ import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
 import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal, toolCallAbortEnabled } from "./call-signal.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, ownerStepUpDenial, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isIndeterminateTransportError, transportErrorKind } from "./transport-errors.ts";
+import { isFinancialNamespace } from "./tool-manifest.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
 /**
@@ -577,9 +578,29 @@ export interface CredentialBinding {
   internalRefs: ReadonlySet<string>;
 }
 
+/**
+ * WP-N1 (Q-64 pkt 3, K6): UTFØRELSESLÅS for finansverktøyene (`finance`, `finance_*`, se `isFinancialNamespace`). Finansdata er SECRET_RESTRICTED (D-378: kun lokal modell). De eksisterende finansverktøyene hadde bare en
+ * UTVALGSLÅS (en tur som VELGER dem blir låst lokalt), men `MeshToolExecutor` sjekker bare flate-tildelingen: en skymodell som likevel kaller et ikke-valgt `finance_*`-verktøy (hallusinert eller injisert kall) omgikk den.
+ * Når dette valget er satt, nektes kall der `servingModel` (stemplet av adapteren, aldri fra parametere) er en SKYMODELL ELLER en ukjent modell - FØR policy og transport (ingenting hentes, ingenting utføres), med en vanlig
+ * `tool.denied`-revisjonsrad (årsakskode, aldri innhold). Uten `servingModel` (eierens egne HTTP-ruter, `/control`, eier-godkjente bekreftelser: ingen modell i løkka) er oppførselen uendret, og en LOKAL modell får
+ * hele resultatet (D-378 pkt 2). Uten valget (flagg AV) er gatewayen identisk med main.
+ */
+export interface FinanceExecutionLock {
+  /**
+   * Er modellen som betjener kallet LOKAL? I drift: leverandørregisterets `locality` (`!servedByCloudModel`, apps/api). FAIL-CLOSED: utelatt, et kast, en ikke-`true` verdi eller en `servingModel` uten gyldig leverandørnavn
+   * regnes som SKY.
+   */
+  servedLocally?: (model: { provider: string; model: string }) => boolean;
+}
+
+/** WP-N1: årsakskoden for en finansnektelse (revisjonsraden og modellens forklaring, `tool-failure.ts`). Ingen tall, id-er eller leverandørnavn. */
+export const FINANCE_WITHHELD_REASON = "finance_withheld_from_cloud_model";
+
 export interface ToolGatewayOptions {
   classDPipeline?: ClassDPipelineOptions;
   credentialBinding?: CredentialBinding;
+  /** WP-N1 (K6): utførelseslås for finansverktøyene mot skymodeller. Utelatt = av (identisk med main). */
+  financeExecutionLock?: FinanceExecutionLock;
 }
 
 /** Parameterfelt som er identitet/scope - utledes av den autentiserte identiteten, aldri av en modell- eller klientverdi. */
@@ -768,6 +789,11 @@ export class ToolGateway {
       (request.jobContract.owner_person_id !== request.identity.person_id || request.jobContract.tenant_id !== request.identity.tenant_id)
     ) {
       return deny("job_identity_mismatch");
+    }
+    // WP-N1 (Q-64 pkt 3, K6): utførelseslås for finansverktøyene - TIDLIG (før parametervalidering, policy og transport): en nektet skytur verken bruker en policy-avgjørelse, henter noe eller får tilbakemelding om
+    // parametre, og låsen er uavhengig av hva kallet inneholder. Revisjonsraden bærer kun årsakskoden.
+    if (this.options?.financeExecutionLock !== undefined && isFinancialNamespace(request.tool_id) && this.servedByCloud(request.servingModel, this.options.financeExecutionLock)) {
+      return deny(FINANCE_WITHHELD_REASON);
     }
     const input = definition.input_schema.safeParse(request.parameters);
     if (!input.success) {
@@ -1427,6 +1453,22 @@ export class ToolGateway {
       status: r.status, executed_at: r.executed_at instanceof Date ? r.executed_at.toISOString() : String(r.executed_at),
       recovery: this.get(r.tool_id, r.action)?.rollback_procedure ?? "ukjent verktøy - manuell oppfølging"
     }));
+  }
+
+  /**
+   * WP-N1: betjenes kallet av en SKYMODELL (eller en ukjent modell)? `false` uten modell (eierens ruter, `/control`, eier-godkjente bekreftelser) og for en lokal modell; `true` for sky og alt ukjent (fail-closed):
+   * en `servingModel` uten gyldig leverandørnavn, et gateway-oppsett uten `servedLocally`, et kast eller en ikke-`true` verdi. Samme regel som `ExecutiveService.isCloudServed` (H1/H2).
+   */
+  private servedByCloud(model: { provider: string; model: string } | undefined, lock: FinanceExecutionLock): boolean {
+    if (model === undefined) return false;
+    if (typeof model !== "object" || model === null || typeof model.provider !== "string" || model.provider.trim() === "") return true;
+    const local = lock.servedLocally;
+    if (typeof local !== "function") return true;
+    try {
+      return local(model) !== true;
+    } catch {
+      return true;
+    }
   }
 
   /**

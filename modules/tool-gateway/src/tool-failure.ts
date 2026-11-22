@@ -1,4 +1,4 @@
-import { isUnknownOutcomeReason } from "./gateway.ts";
+import { FINANCE_WITHHELD_REASON, isUnknownOutcomeReason } from "./gateway.ts";
 import { serviceLabel } from "./tool-catalog.ts";
 import type { Surface } from "./tool-manifest.ts";
 
@@ -125,6 +125,14 @@ export function explainToolFailure(category: string, ctx: ToolFailureContext = {
         retry: "with_corrected_parameters", fix_location: "owner_message"
       };
     }
+    case FINANCE_WITHHELD_REASON:
+      // WP-N1 (K6): kort «holdt tilbake»-merknad - ingen tall, id-er, tellinger eller leverandørnavn (heller ikke tjenestenavnet), samme prinsipp som `withheldCenterData` i executive-transporten.
+      return {
+        message:
+          "Finansdata er begrenset og holdes tilbake fra denne modellen fordi den kjører i skyen. Si det kort til Tobias, uten å gjette på innholdet, " +
+          "og at spørsmålet kan stilles til den lokale modellen eller leses på kontrollsiden (/control). Ikke prøv igjen.",
+        retry: "never", fix_location: "owner_message"
+      };
     case "TOOL_CALL_LIMIT":
       return {
         message: "Grensen for verktøykall i denne meldingen er nådd. Svar med det du har, og si at du fortsetter i neste melding om Tobias vil.",

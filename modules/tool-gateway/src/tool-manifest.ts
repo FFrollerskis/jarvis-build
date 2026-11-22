@@ -59,6 +59,14 @@ const JARVIS_CORE_NAMESPACES = new Set([
 ]);
 const FINANCIAL_NAMESPACES = /^(finance|finance_[a-z]+)$/;
 
+/**
+ * WP-N1 (Q-64 pkt 3): er verktøy-id-en et finansnavnerom (`finance`, `finance_*`)? ÉN kilde til sannhet: samme mønster som `inferDataZone`/`inferSensitivity` under. Utførelseslåsen i `ToolGateway.execute()`
+ * bruker denne i stedet for en egen liste, så et nytt `finance_*`-navnerom automatisk er låst også ved utførelse.
+ */
+export function isFinancialNamespace(tool_id: string): boolean {
+  return FINANCIAL_NAMESPACES.test(tool_id);
+}
+
 /** Namerom som ALDRI kan stå på en modellflate, uansett handling (eier-kontroll, penger, infra, selvmodifikasjon, samtykke, styring). */
 export const OWNER_ONLY_NAMESPACES: ReadonlySet<string> = new Set([
   "owner_controls", "self_modification", "docker", "gce", "cloudflare", "langfuse", "infisical", "postgres_ops", "mcp_zapier", "browser", "incidents", "governance", "situations", "consent",

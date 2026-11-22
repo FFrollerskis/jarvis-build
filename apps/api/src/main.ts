@@ -159,6 +159,7 @@ import { CONTROL_FEATURE_FLAGS, controlCentersWithTools, flagOn } from "./contro
 import { createAutonomyAudit } from "./autonomy-audit.ts";
 import { createGoldenSuiteRunner } from "./golden-suite-runner.ts";
 import { servedByCloudModel } from "./cloud-tool-screen.ts";
+import { parseRestrictedContextGuard } from "./restricted-context-guard.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { claudeBudgetBriefSource } from "./claude-budget-surfaces.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
@@ -437,11 +438,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // leverer dekoratøren installasjonstokenet under SAMME ref (`JARVIS_GITHUB_TOKEN`); privatnøkkelen leses fra vaulten ved hver signering.
   const githubAuth = createGitHubAuth({ secrets: baseSecretProvider, env: process.env });
   const readSecretProvider = githubAuth.secretProvider(baseSecretProvider);
+  // WP-N1 (Q-66/JARVIS-101 + Q-64 pkt 3): ÉN flaggavlesing (parseren; kun eksakt «on»). Flagg AV (standard) = verken gatewayen eller samtalemotoren får noe av dette, og begge er identiske med main.
+  const restrictedContextGuard = parseRestrictedContextGuard(process.env);
+  console.log(JSON.stringify({ msg: "restricted_context_guard", enabled: restrictedContextGuard.enabled }));
   // Del 3 (JARVIS-013/043): klasse D-pipelinen er HÅRD i produksjon (nøkkel + full kjede + out-of-band-varsler; varsleren bindes sent under).
   const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
     classDPipeline: { enforce: true },
     // Del 3 (JARVIS-003/005): eier-tilkoblede leverandør-credentials bindes til den autentiserte eieren i eierens tenant.
-    credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
+    credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) },
+    // WP-N1 (K6): utførelseslås for finance/finance_* mot skymodeller. Lokalitet fra leverandørregisteret (SAMME `servedByCloudModel` som chattens verktøyskjerm og Finans-senteret); ukjent leverandør regnes som sky (fail-closed).
+    ...(restrictedContextGuard.enabled ? { financeExecutionLock: { servedLocally: (model: { provider: string; model: string }) => !servedByCloudModel({ provider: model.provider }) } } : {})
   });
   // WP-K (D-471, JARVIS-056): Google-klientens id/secret leses hvelv-først (dashbord-lagret/Infisical) med miljøet som LOGGET-DEPRECATED fallback (dagens NAS-oppsett virker uendret);
   // Drive-registreringssjekken (`driveTransportsIfConfigured()` under) måles hvelv-bevisst ÉN gang her, FØR `firstWaveTools()`. API/worker-parity: samme to linjer i worker-main.ts.

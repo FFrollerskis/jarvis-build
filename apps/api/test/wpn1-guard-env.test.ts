@@ -79,6 +79,14 @@ describe("ingen direkte flaggavlesing utenfor parseren", () => {
     const hits = files.filter((f) => readFileSync(f, "utf8").includes(FLAG)).map((f) => f.slice(ROOT.length));
     expect(hits.sort()).toEqual(["apps/api/src/restricted-context-guard.ts", "infra/local/service-env.mjs"]);
   });
+
+  it("main.ts leser flagget KUN via parseren (ingen process.env[...GUARD] eller bokstavelig navn), og sender den ferdig avgjorte verdien til gatewayen (utførelseslåsen) - kun når flagget er på", () => {
+    const main = read("apps/api/src/main.ts");
+    expect(main).not.toMatch(/process\.env\[\s*["']JARVIS_RESTRICTED/);
+    expect(main).not.toContain(FLAG);
+    expect(main).toContain("parseRestrictedContextGuard(process.env)");
+    expect(main).toMatch(/\.\.\.\(restrictedContextGuard\.enabled \? \{ financeExecutionLock: \{ servedLocally: /);
+  });
 });
 
 describe("hurtigbane-tabellen dekker hver intensjon eksplisitt", () => {
