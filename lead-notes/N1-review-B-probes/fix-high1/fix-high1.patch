@@ -1,0 +1,79 @@
+--- a/modules/executive/src/service.ts	2026-11-22 10:54:51.078142847 +0000
++++ b/modules/executive/src/service.ts	2026-11-22 11:05:13.460442881 +0000
+@@ -119,6 +119,8 @@
+    * Utelatt = ingen modell regnes som lokal, så ethvert kall fra en modell holder finans tilbake. I drift: leverandørregisterets `locality` (`servedByCloudModel`, `apps/api/src/cloud-tool-screen.ts`).
+    */
+   servedLocally?: (model: { provider: string; model: string }) => boolean;
++  /** WP-N1 (review B): hold nøstede finansavlesninger (`get_control_surface_status`/`get_delegation_board` -> `finance.get_kill_switch`) tilbake fra skymodeller. Settes kun når begrenset-vakten (WP-N1-flagget) er på. */
++  withholdFinanceFromCloud?: boolean;
+   /**
+    * WP-H0 (JARVIS-087): avbryt en bakgrunnsjobb/agent fra kontrollsenteret. Den EKSISTERENDE kanselleringsveien (`TaskService.cancel`: klasse B-policy, `requestCancel`, revisjon `task.cancelled`) injiseres fra
+    * `apps/api`; executive-laget har ingen egen kanselleringslogikk. Uten denne avvises handlingen (`executive_tasks_not_configured`).
+@@ -411,11 +413,12 @@
+    * ALDRI `KillSwitch`/`OwnerControls`/`DomainPauseRegistry` direkte, og
+    * fabrikkerer/eskalerer ALDRI identiteten den fikk fra kalleren.
+    */
+-  async getControlSurfaceStatus(identity: IdentityContext): Promise<ControlSurfaceStatus> {
++  async getControlSurfaceStatus(identity: IdentityContext, options: { withholdFinance?: boolean } = {}): Promise<ControlSurfaceStatus> {
+     const [ownerControl, pauseState, financeKillSwitch] = await Promise.all([
+       requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
+       requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state"),
+-      requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
++      // WP-N1 (review B): nøstet finansavlesning - ToolGateway-låsen ser den ikke (ingen servingModel på nøstede kall), så den holdes tilbake HER for en skymodell.
++      options.withholdFinance === true ? Promise.resolve(null) : requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
+     ]);
+     return { owner_control: ownerControl, situation_domain_pauses: pauseState, finance_kill_switch: financeKillSwitch };
+   }
+@@ -427,11 +430,11 @@
+    * over - INGEN egen tilstand, INGEN direkte `SituationEngine`/
+    * `OwnerControls`-tilgang fra denne pakken.
+    */
+-  async getDelegationBoard(identity: IdentityContext): Promise<DelegationBoard> {
++  async getDelegationBoard(identity: IdentityContext, options: { withholdFinance?: boolean } = {}): Promise<DelegationBoard> {
+     const [autonomyDomains, ownerControl, financeKillSwitch] = await Promise.all([
+       requireData<SituationAutonomyPolicy[]>(this.gateway, identity, "situations", "list_autonomy_policies"),
+       requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
+-      requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
++      options.withholdFinance === true ? Promise.resolve(null) : requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
+     ]);
+     return {
+       autonomy_domains: autonomyDomains,
+@@ -586,6 +589,11 @@
+     return composeControlCenterOverview([], new Date());
+   }
+ 
++  /** WP-N1 (review B): skal nøstede finansavlesninger holdes tilbake? Kun med begrenset-vakten PÅ (`withholdFinanceFromCloud`, satt fra main.ts) OG en skymodell/ukjent modell. Flagg AV = alltid `false` (identisk med main). */
++  withholdsFinanceFromCloud(model: { provider: string; model: string } | undefined): boolean {
++    return this.options.withholdFinanceFromCloud === true && this.isCloudServed(model);
++  }
++
+   /** Gjennomgang M2: betjenes kallet av en SKYmodell? `false` uten modell (siden/ruten) og for en lokal modell; `true` for sky og alt ukjent (fail-closed). */
+   isCloudServed(model: { provider: string; model: string } | undefined): boolean {
+     if (model === undefined) return false;
+--- a/modules/executive/src/transport.ts	2026-11-22 10:54:51.083828300 +0000
++++ b/modules/executive/src/transport.ts	2026-11-22 10:54:51.117126298 +0000
+@@ -102,11 +102,11 @@
+         return toolResultToTransportResult(result);
+       }
+       case "get_control_surface_status": {
+-        const status = await this.service.getControlSurfaceStatus(identity);
++        const status = await this.service.getControlSurfaceStatus(identity, { withholdFinance: this.service.withholdsFinanceFromCloud(context?.servingModel) });
+         return { data: status as unknown as JsonValue };
+       }
+       case "get_delegation_board": {
+-        const board = await this.service.getDelegationBoard(identity);
++        const board = await this.service.getDelegationBoard(identity, { withholdFinance: this.service.withholdsFinanceFromCloud(context?.servingModel) });
+         return { data: board as unknown as JsonValue };
+       }
+       case "get_capability_status": {
+--- a/apps/api/src/main.ts	2026-11-22 10:54:51.089965380 +0000
++++ b/apps/api/src/main.ts	2026-11-22 10:54:51.118524308 +0000
+@@ -1169,6 +1169,8 @@
+         // Gjennomgang M2: finansdata er SECRET_RESTRICTED (D-378) - en SKYmodell får aldri finans-senteret (holdes tilbake ved utførelse i executive-transporten, uansett hvilke verktøy turens utvalg valgte); en lokal modell
+         // og siden får det. Lokalitet kommer fra leverandørregisteret (SAMME `servedByCloudModel` som chattens verktøyskjerm); ukjent leverandør regnes som sky (fail-closed).
+         servedLocally: (model) => !servedByCloudModel({ provider: model.provider }),
++        // WP-N1 (review B): nøstede finansavlesninger holdes tilbake fra skymodeller KUN med vakten på (flagg AV = identisk med main).
++        withholdFinanceFromCloud: restrictedContextGuard.enabled,
+         // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling bruker den EKSISTERENDE kanselleringsveien (samme `taskService` som chatens «avbryt jobb <id>»).
+         tasks: { cancel: (identity, taskId) => taskService.cancel(identity, taskId) },
+         // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.
