@@ -3,8 +3,9 @@
  *
  * Eieren byttet GitHub-konto 2026-11-22 (D-478): `tsworkflow/jarvisbuild` er frosset og kan ikke lenger skrives til, og koden bor nå i
  * `FFrollerskis/jarvis-build`. Standardverdien her brukes KUN når `JARVIS_GITHUB_REPO` ikke er satt (eller er tom/ugyldig); eierens egen
- * innstilling på NAS-en vinner alltid. Standardverdien gir ingen tilgang til noe: GitHub-kall trenger fortsatt en credential som er
- * utstedt for repoet (JARVIS-117, Q-77 pkt 4 - bare eieren kan utstede den).
+ * innstilling på NAS-en vinner alltid. Standardverdien gir ikke i seg selv noen tilgang: skriving og alt som krever innlogging trenger
+ * fortsatt en credential som er utstedt for repoet (JARVIS-117, Q-77 pkt 4 - bare eieren kan utstede den). Et offentlig repo kan derimot
+ * leses uten credential, så innhold derfra er ubetrodd data (Ingestion Zone, regel 7), aldri instruksjoner.
  *
  * Standarden gjelder GitHub-VERKTØYENE (repolåsen Q-50 B, oppløsning av repo-navn, connector-test, daglig oppsummering, mesh-verktøyet) og selvmodifikasjon.
  * Kodejobber (`JARVIS_GIT_ALLOWED_REPOS`, `modules/tasks/src/git-policy.ts`) og GitHub App-modus har BEVISST INGEN standard: de krever eksplisitt
