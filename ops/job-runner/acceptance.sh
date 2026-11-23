@@ -91,14 +91,14 @@ trim() { local LC_ALL=C v="$1"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[!
 # Sammenligningsnøkkel for et repo-navn: små bokstaver, uten blanke, uten `/` og `.git` på slutten (til fikspunkt). GitHub behandler `eier/repo`, `eier/repo/` og `eier/repo.git` som samme repo,
 # så et alias skal ikke omgå vernet. Samme normalisering som `githubRepoAliasKey` i packages/contracts/src/github-repo.ts.
 alias_key() {
-  local k p
+  local LC_ALL=C k p
   k="$(trim "$(lower "$1")")"
   while :; do p="$k"; k="${k%/}"; k="${k%.git}"; [ "$k" = "$p" ] && break; done
   printf '%s' "$k"
 }
 
 # ACCEPTANCE_REPO slik runneren vil ha den: trimmet og med små bokstaver (runner.allowed_repos og git_credentials MÅ være små bokstaver; GitHub skiller ikke på store/små).
-normalize_repo_arg() { lower "$(trim "$1")"; }
+normalize_repo_arg() { local LC_ALL=C; lower "$(trim "$1")"; }
 
 # .env-filen som leses for JARVIS_GITHUB_REPO: $ACCEPTANCE_ENV_FILE, ellers $ROOT/.env. `ACCEPTANCE_ENV_FILE` kan peke på en annen fil; det påvirker KUN denne grenen, aldri de faste navnene.
 env_file_path() { printf '%s' "${ACCEPTANCE_ENV_FILE:-$ROOT/.env}"; }
@@ -114,7 +114,7 @@ env_file_name_lines() {
 # Verdien til NAME i .env-filen (siste forekomst vinner, som i compose): `NAME=v`, `NAME = v`, `export NAME=v`, med/uten anførselstegn, BOM først i filen, CR og etterfølgende ` # kommentar`.
 # Filen leses med grep og aldri `source`-es. Mangler eller kan ikke filen leses, er svaret tomt (da gjelder bare de faste navnene og miljøet).
 env_file_value() {
-  local name="$1" line="" l bom=$'\xEF\xBB\xBF'
+  local LC_ALL=C name="$1" line="" l bom=$'\xEF\xBB\xBF'   # C-locale: bash-mønstre feiler ellers på ikke-UTF-8 bytes (en latin-1-kommentar på linjen ga tom verdi = vernet falt bort)
   while IFS= read -r l; do
     case "$l" in *=*) ;; *) continue ;; esac
     l="${l#"$bom"}"; l="$(trim "$l")"
@@ -136,7 +136,7 @@ env_file_value() {
 #  - WARN: filen finnes men er ikke en vanlig fil (FIFO, enhet) eller kan ikke leses (rettigheter).
 #  - FATAL: en linje som starter med NAME er ikke på formen `[export ]NAME=verdi` (f.eks. YAML-kolon `NAME: v`), eller verdien inneholder `$` (compose-interpolasjon `${X}` som vi ikke kan løse opp).
 env_file_check() {
-  local name="$1" file l v
+  local LC_ALL=C name="$1" file l v
   file="$(env_file_path)"
   if [ -e "$file" ] && { [ ! -f "$file" ] || [ ! -r "$file" ]; }; then echo "WARN: kan ikke lese $file (ikke en vanlig fil, eller ingen lesetilgang): $name derfra er IKKE sjekket mot produksjonsvernet"; return 0; fi
   while IFS= read -r l; do
@@ -151,10 +151,22 @@ env_file_check() {
   return 0
 }
 
+# Tolker meldingene fra env_file_check: `WARN:` gir en ADVARSEL (fortsett), `FATAL:` avbryter (returnerer 2). C-locale: stien i meldingen kan inneholde ikke-UTF-8 bytes.
+env_check_report() {
+  local LC_ALL=C envline
+  while IFS= read -r envline; do
+    case "$envline" in
+      WARN:*) echo "ADVARSEL: ${envline#WARN: }" >&2 ;;
+      FATAL:*) echo "${envline#FATAL: } - avbryter" >&2; return 2 ;;
+    esac
+  done <<< "$1"
+  return 0
+}
+
 # Er $1 et produksjonsrepo? Skriver årsaken til stdout og returnerer 0 hvis ja; 1 hvis nei. Produksjon er (a) de faste navnene i PRODUCTION_REPOS (kan ikke overstyres), (b) JARVIS_GITHUB_REPO i miljøet du kjører fra
 # og (c) JARVIS_GITHUB_REPO i .env (slik compose leser den). Et navn som normaliseres til tomt regnes aldri som treff (det avvises tidligere av kalleren).
 production_repo_reason() {
-  local key listed configured
+  local LC_ALL=C key listed configured
   key="$(alias_key "$1")"
   [ -n "$key" ] || return 1
   for listed in "${PRODUCTION_REPOS[@]}"; do
@@ -625,14 +637,8 @@ main() {
   # D-479 (kontobytte, D-478): produksjon er PRODUCTION_REPOS (det nåværende kanoniske repoet, det tidligere navnet på det og det gamle frosne repoet; holdt i takt med kontrakten av en test) OG JARVIS_GITHUB_REPO
   # (fra miljøet du kjører fra, og fra .env - se production_repo_reason). Alle skrivemåter nektes: store/små bokstaver, `.git`, `/` på slutten og blanke. De faste navnene kan ikke overstyres (D-41).
   [ -n "$(alias_key "$REPO")" ] || { echo "ACCEPTANCE_REPO=$REPO er ikke et gyldig repo-navn (forventet eier/repo) - avbryter" >&2; return 2; }
-  local reason envcheck envline
-  envcheck="$(env_file_check JARVIS_GITHUB_REPO)"
-  while IFS= read -r envline; do
-    case "$envline" in
-      WARN:*) echo "ADVARSEL: ${envline#WARN: }" >&2 ;;
-      FATAL:*) echo "${envline#FATAL: } - avbryter" >&2; return 2 ;;
-    esac
-  done <<< "$envcheck"
+  local reason
+  env_check_report "$(env_file_check JARVIS_GITHUB_REPO)" || return 2
   if reason="$(production_repo_reason "$REPO")"; then
     echo "ACCEPTANCE_REPO=$REPO er $reason: akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2
   fi
