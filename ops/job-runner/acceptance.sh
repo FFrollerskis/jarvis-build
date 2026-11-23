@@ -150,7 +150,8 @@ env_file_value() {
 # Første linje (linjenummer til stdout) der en verdi i anførselstegn IKKE avsluttes på samme linje, i en .env-fil; status 3 hvis noen, 0 ellers (annen status = awk mangler eller feilet).
 # Flerlinjede verdier støttes ikke i .env (se .env.example), og compose leser da linjene annerledes enn vi gjør linje for linje: en annen nøkkels flerlinjede verdi kan SKJULE en `NAME=`-linje for compose
 # (siste linje vinner hos oss, men er en del av verdien hos compose) eller AVSLØRE en (`# ...slutt" NAME=prod`: en kommentarlinje for oss, en ny tilordning for compose; reviewer B N2).
-# Liten tokenizer som etterligner compose: hopp blanke (og bytes >= 0x80), `export`, nøkkel og `=`/`:`; en verdi i anførselstegn leses til avsluttende tegn (tilbakestrek-escape); en uanført verdi går ut linjen;
+# Liten tokenizer som etterligner compose: hopp blanke (og bytes >= 0x80), `export`, nøkkel og `=`/`:` (nøkkelen leses bevisst videre enn compose: nøkkeltegn OG alle blanke, også bytes >= 0x80, TAB, VT, FF og CR, så en ikke-ASCII-nøkkel eller en blank midt i nøkkelen ikke skjuler en åpen verdi; reviewer B N5);
+# en verdi i anførselstegn leses til avsluttende tegn, der en tilbakestrek escaper neste tegn (også en tilbakestrek: `"C:\\dir\\"` er avsluttet; reviewer B N6); en uanført verdi går ut linjen;
 # etter en avsluttet verdi fortsetter tokenizeren (ny tilordning på samme linje). awk kalles med LC_ALL=C og bare POSIX-funksjoner.
 env_file_unterminated_quote() {
   LC_ALL=C awk '
@@ -165,19 +166,22 @@ env_file_unterminated_quote() {
         if (i > n || substr(s, i, 1) == "#") break
         if (substr(s, i, 6) == "export" && isws(substr(s, i + 6, 1))) { i += 6; continue }
         j = i
-        while (j <= n && iskey(substr(s, j, 1))) j++
-        if (j == i) break
+        while (j <= n && (iskey(substr(s, j, 1)) || isws(substr(s, j, 1)))) j++
         i = j
-        while (i <= n && isws(substr(s, i, 1))) i++
         c = substr(s, i, 1)
         if (c != "=" && c != ":") break
         i++
         while (i <= n && isws(substr(s, i, 1))) i++
         c = substr(s, i, 1)
         if (c == "\"" || c == "\047") {
-          q = c; i++
-          while (i <= n && !(substr(s, i, 1) == q && substr(s, i - 1, 1) != "\\")) i++
-          if (i > n) { found = NR; exit }
+          q = c; i++; closed = 0
+          while (i <= n) {
+            ch = substr(s, i, 1)
+            if (ch == "\\") { i += 2; continue }
+            if (ch == q) { closed = 1; break }
+            i++
+          }
+          if (!closed) { found = NR; exit }
           i++
           continue
         }
