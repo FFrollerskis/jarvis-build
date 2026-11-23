@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CANONICAL_GITHUB_REPO } from "@jarvis/contracts";
 import {
   CHAT_ACT_TIER,
   CHAT_READ_TIER,
@@ -15,7 +16,7 @@ import {
 
 /**
  * Q-50 B (D-450, Tobias 2026-10-09: «Ja til alle Q»): modellstyrte GitHub-kall (chat og delegerte jobber, begge via `MeshToolExecutor`) er låst til eierens konfigurerte repo
- * (`JARVIS_GITHUB_REPO`, ellers `tsworkflow/jarvisbuild`). `JARVIS_GITHUB_ALLOW_OTHER_REPOS=true` åpner (D-41: eieren mister ingen kapabilitet, bare standarden endres).
+ * (`JARVIS_GITHUB_REPO`, ellers `CANONICAL_GITHUB_REPO`, D-479). `JARVIS_GITHUB_ALLOW_OTHER_REPOS=true` åpner (D-41: eieren mister ingen kapabilitet, bare standarden endres).
  */
 const OWNER_REPO = { JARVIS_GITHUB_REPO: "acme/app" } as const;
 
@@ -33,12 +34,12 @@ describe("githubRepoLockViolation", () => {
     expect(githubRepoLockViolation("read_issues", "acme/app-two", OWNER_REPO)).toEqual({ requested: "acme/app-two", allowed: "acme/app" });
   });
 
-  it("uten JARVIS_GITHUB_REPO (eller ugyldig verdi) er standardrepoet tsworkflow/jarvisbuild det tillatte", () => {
+  it("uten JARVIS_GITHUB_REPO (eller ugyldig verdi) er standardrepoet (CANONICAL_GITHUB_REPO, D-479) det tillatte", () => {
     expect(githubRepoLockViolation("list_branches", undefined, {})).toBeNull();
-    expect(githubRepoLockViolation("list_branches", "tsworkflow/jarvisbuild", {})).toBeNull();
+    expect(githubRepoLockViolation("list_branches", CANONICAL_GITHUB_REPO, {})).toBeNull();
     // Et navn uten `eier/` får eierens eier (D-429), så det er fortsatt et annet repo enn det tillatte.
-    expect(githubRepoLockViolation("list_branches", "ikke et repo", { JARVIS_GITHUB_REPO: "ugyldig verdi" })).toEqual({ requested: "tsworkflow/ikke et repo", allowed: "tsworkflow/jarvisbuild" });
-    expect(githubRepoLockViolation("list_branches", "andre/repo", {})).toEqual({ requested: "andre/repo", allowed: "tsworkflow/jarvisbuild" });
+    expect(githubRepoLockViolation("list_branches", "ikke et repo", { JARVIS_GITHUB_REPO: "ugyldig verdi" })).toEqual({ requested: `${CANONICAL_GITHUB_REPO.split("/")[0]}/ikke et repo`, allowed: CANONICAL_GITHUB_REPO });
+    expect(githubRepoLockViolation("list_branches", "andre/repo", {})).toEqual({ requested: "andre/repo", allowed: CANONICAL_GITHUB_REPO });
   });
 
   it("handlingsnivået er også låst, og et skrivekall uten repo er ikke et brudd (transporten avviser det: github_missing_parameter:repo)", () => {

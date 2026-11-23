@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { CANONICAL_GITHUB_REPO, LEGACY_GITHUB_REPOS } from "../../../packages/contracts/src/github-repo.ts";
 import { createHarness, gitSync, syntheticInstallationToken } from "./support/harness.mjs";
 import { apiRequest, RUNNER_TOKEN } from "./support/harness.mjs";
 import { makeTempDir } from "./support/tmp.mjs";
@@ -110,6 +111,60 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     }
     expect(h.service.manager.activeJobs).toBe(0);
     expect(h.fake.calls.filter((c) => ["create", "start", "exec", "rm"].includes(c.args[0] ?? "")).length).toBe(0);
+  });
+
+  it("D-479 (kontobytte): det NÅVÆRENDE kanoniske repoet og det gamle nektes begge HARDT, også med annen skrivemåte og selv om de står i runner.allowed_repos", async () => {
+    const prods = [CANONICAL_GITHUB_REPO, ...LEGACY_GITHUB_REPOS];
+    // runner.allowed_repos og git_credentials krever små bokstaver (config_invalid:runner.allowed_repos:entry_invalid ellers); ACCEPTANCE_REPO sammenlignes case-uavhengig.
+    const lower = prods.map((s) => s.toLowerCase());
+    const h = await createHarness({ slugs: lower });
+    harnesses.push(h);
+    const config = join(h.root, "job-runner.json");
+    await writeFile(config, JSON.stringify({
+      version: 1,
+      runner: {
+        socket_path: h.socketPath, token_file: h.tokenFile, base_dir: h.baseDir, network: "jarvis-jobs", image: `sha256:${"a".repeat(64)}`,
+        allowed_repos: lower, git_credentials: Object.fromEntries(lower.map((s) => [s, { token_file: join(h.root, `git-token-${s.replace("/", "__")}`) }]))
+      },
+      egress_proxy: { listen_host: "172.30.77.1", listen_port: 3128 }
+    }));
+    for (const slug of prods) {
+      for (const repo of [slug, slug.toUpperCase(), slug.toLowerCase(), `${slug}.git`, `${slug}/`, `${slug.toUpperCase()}.GIT`, `${slug}.git/`]) {
+        const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: repo });
+        expect(r.status, repo).toBe(2);
+        expect(r.stderr, repo).toContain("PRODUKSJONSREPOET");
+      }
+    }
+    expect(h.service.manager.activeJobs).toBe(0);
+    expect(h.fake.calls.filter((c) => ["create", "start", "exec", "rm"].includes(c.args[0] ?? "")).length).toBe(0);
+  });
+
+  it("D-479: eierens konfigurerte JARVIS_GITHUB_REPO (hva det enn er etter et senere kontobytte) nektes også som akseptanserepo; et sandbox-repo passerer vernet", async () => {
+    const { h, config } = await setup();
+    for (const repo of ["acme/prod", "ACME/Prod", "acme/prod.git", "acme/prod/"]) {
+      const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: repo, JARVIS_GITHUB_REPO: "Acme/PROD" });
+      expect(r.status, repo).toBe(2);
+      expect(r.stderr, repo).toContain("PRODUKSJONSREPOET");
+      expect(r.stderr, repo).toContain("JARVIS_GITHUB_REPO");
+    }
+    // Negativ kontroll: et repo som ikke er produksjon (men heller ikke står i allowed_repos) kommer forbi produksjonsvernet og stoppes først av allowed_repos-sjekken.
+    const sandbox = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", JARVIS_GITHUB_REPO: "acme/prod" });
+    expect(sandbox.status).toBe(2);
+    expect(sandbox.stderr).not.toContain("PRODUKSJONSREPOET");
+    expect(sandbox.stderr).toContain("står ikke i runner.allowed_repos");
+    // Tom/uset JARVIS_GITHUB_REPO nekter ingenting ekstra (tom streng må ikke matche et tomt repo-navn).
+    const blank = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", JARVIS_GITHUB_REPO: "" });
+    expect(blank.stderr).not.toContain("PRODUKSJONSREPOET");
+    expect(h.service.manager.activeJobs).toBe(0);
+  });
+
+  it("D-479: nektelisten i scriptet er i takt med kontrakten (hvert kanoniske og gamle repo står i case-etiketten, i små bokstaver)", async () => {
+    const script = await readFile(SCRIPT, "utf8");
+    const labels = /case "\$repo_lc" in\s+([^)]+)\)/.exec(script)?.[1];
+    expect(labels, "fant ikke nektelistens case-etikett").toBeDefined();
+    const listed = (labels ?? "").split("|").map((s) => s.trim());
+    for (const slug of [CANONICAL_GITHUB_REPO, ...LEGACY_GITHUB_REPOS]) expect(listed, slug).toContain(slug.toLowerCase());
+    expect(listed.length).toBe(new Set([CANONICAL_GITHUB_REPO, ...LEGACY_GITHUB_REPOS].map((s) => s.toLowerCase())).size);
   });
 
   it("B-L5: --with-restart krever bekreftelse (ACCEPT_CONFIRM_RESTART=yes, eller RESTART på terminal) - uten den er svaret exit 2 med advarsel, og ingenting røres", async () => {

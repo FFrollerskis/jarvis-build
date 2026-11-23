@@ -5,7 +5,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { IdentityContext, JsonValue } from "@jarvis/contracts";
+import { CANONICAL_GITHUB_REPO, type IdentityContext, type JsonValue } from "@jarvis/contracts";
 import { ConfirmationStore, ContextBuilder, MessageStore, createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
@@ -333,7 +333,7 @@ describe("CouncilProposalGate.submit - bekreftelseskort uten utførelse", () => 
     const actions = offered("opprett en github-issue: feil i innlogging").actions;
     expect(actions.some((a) => a.name === "github__create_issue")).toBe(true);
     expect(await gate.submit(identity, "web_chat", proposalFor("github__create_issue", { repo: "evil/other-repo", title: "x" }, actions))).toEqual({ ok: false, reason: "github_repo_locked" });
-    const ok = await gate.submit(identity, "web_chat", proposalFor("github__create_issue", { repo: "tsworkflow/jarvisbuild", title: "gate-github" }, actions));
+    const ok = await gate.submit(identity, "web_chat", proposalFor("github__create_issue", { repo: CANONICAL_GITHUB_REPO, title: "gate-github" }, actions));
     expect(ok.ok, JSON.stringify(ok)).toBe(true);
   });
 

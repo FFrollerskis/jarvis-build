@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CANONICAL_GITHUB_REPO } from "@jarvis/contracts";
 import type { SecretProvider } from "../src/gateway.ts";
 import { GITHUB_APP_ERROR_HINTS, GITHUB_APP_PRIVATE_KEY_REF } from "../src/github-app-auth.ts";
 import { GITHUB_FULL_CAPABILITY_PERMISSIONS } from "../src/github-token-provider.ts";
@@ -267,7 +268,9 @@ describe("C5: --sandbox-repo NEKTER produksjonsrepoet (review F14) - scriptet sk
       ["store/små bokstaver", "TSWORKFLOW/JarvisBuild", {}],
       ["JARVIS_GIT_ALLOWED_REPOS", "tsworkflow/andre", { JARVIS_GIT_ALLOWED_REPOS: "tsworkflow/jarvisbuild,tsworkflow/andre" }],
       ["repoet connectoren er konfigurert mot, utenfor allowlisten", "tsworkflow/connector-repo", { JARVIS_GITHUB_REPO: "tsworkflow/connector-repo", JARVIS_GIT_ALLOWED_REPOS: "tsworkflow/jarvisbuild" }],
-      ["standardrepoet når JARVIS_GITHUB_REPO peker et annet sted", "tsworkflow/jarvisbuild", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }]
+      ["standardrepoet (CANONICAL_GITHUB_REPO) når JARVIS_GITHUB_REPO peker et annet sted", CANONICAL_GITHUB_REPO, { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
+      ["det gamle, frosne produksjonsrepoet (LEGACY_GITHUB_REPOS, D-479) når JARVIS_GITHUB_REPO peker et annet sted", "tsworkflow/jarvisbuild", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
+      ["det gamle repoet i andre skrivemåter (D-479)", "TSWorkflow/JarvisBuild", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }]
     ];
     for (const [name, sandbox, env] of cases) {
       const fake = await fakeGitHub();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { IdentityContext } from "@jarvis/contracts";
+import { CANONICAL_GITHUB_REPO, type IdentityContext } from "@jarvis/contracts";
 import { CONTROL_ACTION_ALLOWED, CONTROL_ACTION_ENDPOINTS, ControlCenterRegistry, explainControlCenterNo, type ControlCenterReport, type ControlSection } from "@jarvis/executive";
 import type { ToolDefinition } from "@jarvis/tool-gateway";
 import { createAuthorityCenter, summarizeManifest } from "../src/control-center/authority.ts";
@@ -320,7 +320,7 @@ describe("policyer og eksterne begrensninger", () => {
 
   it("GitHub-repo-låsen: standard-repo låst OK; åpnet for andre repo WARN; ugyldig kode-allowlist FAIL; destinasjonsverter listes", async () => {
     const def = await build().run();
-    expect(item(def, "external", "github_repo")).toMatchObject({ status: "OK", facts: { repo: "tsworkflow/jarvisbuild", other_repos_allowed: false } });
+    expect(item(def, "external", "github_repo")).toMatchObject({ status: "OK", facts: { repo: CANONICAL_GITHUB_REPO, other_repos_allowed: false } });
     const custom = await build({ env: { JARVIS_GITHUB_REPO: "eier/mitt-repo", JARVIS_GITHUB_ALLOW_OTHER_REPOS: "true", JARVIS_DESTINATION_HOST_ALLOWLIST: "jira.firma.no, *.grafana.net ,", JARVIS_GIT_ALLOWED_REPOS: "eier/mitt-repo" } }).run();
     expect(item(custom, "external", "github_repo")).toMatchObject({ status: "WARN", facts: { repo: "eier/mitt-repo", other_repos_allowed: true } });
     expect(item(custom, "external", "destination_hosts").facts).toMatchObject({ hosts: 2, list: "jira.firma.no, *.grafana.net" });
