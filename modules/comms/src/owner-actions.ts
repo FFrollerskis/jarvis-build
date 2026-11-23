@@ -93,6 +93,12 @@ function canonicalize(value: unknown, depth: number): string {
   }
 }
 
+/**
+ * Skrivehandlinger hvis virkning er felles for hele utrullingen og IKKE per memory space: Google-kontaktboken er ÉN per utrulling (People API), så samme nøkkel + samme nyttelast fra to rom er SAMME forespørsel (reviewer A funn 2: ellers ble en gjenspilling fra et annet
+ * rom en dobbel opprettelse). Disse bruker `*` som romledd i avtrykket (`*` er ikke et gyldig memory space). Alle andre ikke-journalførte skrivinger har virkning per rom (konto, møte, kontaktlenke) eller er tenant-brede og idempotente (`record_opt_out`: samme rad), og beholder rommet.
+ */
+export const COMMS_ROOM_INDEPENDENT_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete"];
+
 /** Feltnavn som er forespørselens IDENTITET (journalens `request_id`, nøkkelfeltet selv), aldri nyttelast: de teller ikke med i avtrykket. Ingen ikke-journalført handlings skjema godtar dem (låst av testen `payload-fingerprint`). */
 const REQUEST_IDENTITY_FIELDS: readonly string[] = ["request_id", "idempotency_key"];
 
@@ -104,6 +110,9 @@ const REQUEST_IDENTITY_FIELDS: readonly string[] = ["request_id", "idempotency_k
  */
 export function ownerPayloadFingerprint(tenantId: string, memorySpace: string, parameters: Record<string, JsonValue>): string {
   if (typeof parameters !== "object" || parameters === null || Array.isArray(parameters)) throw new TypeError("canonical_payload_parameters_not_an_object");
+  // Reviewer A funn 7: også toppnivået må være et rent objekt (Date, Map, Set og klasseinstanser ville ellers blitt skrevet om av `Object.fromEntries` og gitt samme avtrykk som `{}`); nøstede verdier sjekkes av `canonicalPayloadJson`.
+  const topProto: unknown = Object.getPrototypeOf(parameters);
+  if (topProto !== Object.prototype && topProto !== null) throw new TypeError("canonical_payload_not_plain_object");
   const payload = Object.fromEntries(Object.entries(parameters).filter(([name]) => !REQUEST_IDENTITY_FIELDS.includes(name)));
   const hashed = JSON.stringify(["comms-owner-payload-v2", tenantId, memorySpace, canonicalPayloadJson(payload)]);
   return createHash("sha256").update(hashed, "utf8").digest("hex").slice(0, PAYLOAD_FINGERPRINT_LENGTH);
@@ -188,7 +197,7 @@ export async function executeCommsOwnerAction(
     } else {
       let fingerprint: string;
       try {
-        fingerprint = ownerPayloadFingerprint(identity.tenant_id, identity.memory_space_id, parameters);
+        fingerprint = ownerPayloadFingerprint(identity.tenant_id, COMMS_ROOM_INDEPENDENT_ACTIONS.includes(action) ? "*" : identity.memory_space_id, parameters);
       } catch {
         // Nyttelasten er ikke ren JSON (NaN, for dyp nesting, ...): aldri en stille omskriving til et avtrykk som kunne delt nøkkel med en annen nyttelast.
         return { ok: false, status: "rejected", reason: "invalid_parameters" };
