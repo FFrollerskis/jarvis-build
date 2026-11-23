@@ -103,15 +103,22 @@ normalize_repo_arg() { local LC_ALL=C; lower "$(trim "$1")"; }
 # .env-filen som leses for JARVIS_GITHUB_REPO: $ACCEPTANCE_ENV_FILE, ellers $ROOT/.env. `ACCEPTANCE_ENV_FILE` kan peke på en annen fil; det påvirker KUN denne grenen, aldri de faste navnene.
 env_file_path() { printf '%s' "${ACCEPTANCE_ENV_FILE:-$ROOT/.env}"; }
 
-# Linjer i .env som KAN sette NAME slik compose leser filen: innledende blanke (ASCII, eller en hvilken som helst byte >= 0x80, for compose trimmer også Unicode-blanke som NBSP og U+3000, og BOM),
-# valgfritt `export` + blank, så NAME rett etterfulgt av noe som ikke er en del av et navn. Kommentarlinjer (# først) og andre nøkler (NOT_NAME, NAME_X) er ikke kandidater.
+# Linjer i .env som KAN sette NAME slik compose leser filen. compose er en tokenizer, ikke linjebasert: etter en verdi i anførselstegn kan en NY tilordning stå på samme linje
+# (`A="x" NAME=verdi`; funnet av en tilfeldig differensialfuzz mot docker compose), og innledende blanke kan være Unicode (NBSP, U+3000) eller BOM. Derfor er en kandidat HVER linje der NAME står
+# som et helt navn (ikke etter en navnetegn eller `$`, ikke før en navnetegn), uansett hvor på linjen, med to unntak: rene kommentarlinjer (ASCII-blanke og så `#`) og linjer der alle forekomster er referanser `${NAME...`
+# (bruk av variabelen i en annen verdi). Andre nøkler (NOT_NAME, NAME_X) og `$NAME` er ikke treff. Hver kandidat tolkes så strengt av env_line_value; det som ikke lar seg tolke gir FATAL (aldri en gjetning).
 # grep -a/LC_ALL=C: en fil med NUL-bytes eller ikke-UTF-8 tegn leses fortsatt (ikke «Binary file matches»).
 env_file_candidate_lines() {
-  local LC_ALL=C name="$1" file hi
+  local LC_ALL=C name="$1" file l stripped re
   file="$(env_file_path)"
   [ -f "$file" ] && [ -r "$file" ] || return 0
-  hi=$'\x80'-$'\xff'
-  LC_ALL=C grep -a -E "^([[:space:]]|[${hi}])*(export([[:space:]]|[${hi}])+)?${name}([^A-Za-z0-9_]|$)" "$file" 2>/dev/null || true   # LC_ALL=C også for grep: `local LC_ALL` eksporteres ikke til barneprosesser
+  re="(^|[^A-Za-z0-9_\$])${name}([^A-Za-z0-9_]|\$)"
+  while IFS= read -r l; do
+    case "$l" in "${l%%[![:space:]]*}#"*) continue ;; esac   # ren kommentarlinje
+    stripped="${l//\$\{$name/}"                               # `${NAME...` er bruk av variabelen, ikke en tilordning
+    [[ "$stripped" =~ $re ]] || continue
+    printf '%s\n' "$l"
+  done < <(LC_ALL=C grep -a -E "$re" "$file" 2>/dev/null || true)   # LC_ALL=C også for grep: `local LC_ALL` eksporteres ikke til barneprosesser
 }
 
 # Tolker ÉN kandidatlinje STRENGT (hvitliste): `[export ]NAME[ ]=[ ]verdi` der verdien er tom eller består av bokstaver, tall, `.`, `_`, `-` og `/` (et repo-navn), evt. i enkle eller doble anførselstegn,
