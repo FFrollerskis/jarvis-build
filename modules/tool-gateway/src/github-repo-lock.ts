@@ -1,4 +1,4 @@
-import { CANONICAL_GITHUB_REPO, type JsonValue } from "@jarvis/contracts";
+import { configuredGithubRepoFromEnv, type JsonValue } from "@jarvis/contracts";
 import { resolveGithubRepo } from "./live-transports.ts";
 
 /**
@@ -15,15 +15,13 @@ export interface GithubRepoLockViolation {
   allowed: string;
 }
 
-const DEFAULT_REPO = CANONICAL_GITHUB_REPO;
-
 export function githubReposUnlocked(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
   return (env["JARVIS_GITHUB_ALLOW_OTHER_REPOS"] ?? "").trim().toLowerCase() === "true";
 }
 
+/** Eierens konfigurerte repo (`JARVIS_GITHUB_REPO`) eller `CANONICAL_GITHUB_REPO`; tom/ugyldig verdi gir standarden. Definisjonen ligger i `@jarvis/contracts` (`configuredGithubRepoFromEnv`) så ALLE kallere er enige. */
 export function configuredGithubRepo(env: Readonly<Record<string, string | undefined>> = process.env): string {
-  const raw = (env["JARVIS_GITHUB_REPO"] ?? "").trim();
-  return /^[^/\s]+\/[^/\s]+$/.test(raw) ? raw : DEFAULT_REPO;
+  return configuredGithubRepoFromEnv(env);
 }
 
 /** `null` = kallet er innenfor låsen (eller låsen er av). Ellers repoet modellen ba om og repoet som er tillatt. */
@@ -36,7 +34,8 @@ export function githubRepoLockViolation(
   const allowed = configuredGithubRepo(env);
   let requested: string;
   try {
-    requested = resolveGithubRepo(action, rawRepo, env["JARVIS_GITHUB_REPO"]);
+    // `?? ""`: manglende nøkkel i `env` skal gi standarden, ALDRI falle til `process.env` via default-parameteren i `resolveGithubRepo` (låsen er hermetisk mot `env`-argumentet).
+    requested = resolveGithubRepo(action, rawRepo, env["JARVIS_GITHUB_REPO"] ?? "");
   } catch {
     return null;
   }

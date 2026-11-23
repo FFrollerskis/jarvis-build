@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import { CANONICAL_GITHUB_REPO, type IdentityContext, type JobContract } from "@jarvis/contracts";
+import { configuredGithubRepoFromEnv, type IdentityContext, type JobContract } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import type { SandboxRunner, TaskService } from "@jarvis/tasks";
 import {
@@ -29,7 +29,7 @@ export interface SelfModificationServiceDeps {
   githubClient: SelfModificationGithubClient;
   /** Gjenbruker DEN SAMME `github.create_pr`-veien (klasse C) som UA-5 sin kodejobb-pipeline - INGEN ny PR-opprettelsesmekanisme. */
   prGateway: PrPublishingGateway;
-  /** `owner/repo` - default matcher SAMME repo `connector-registry.ts` sin github-`live_test` allerede antar. */
+  /** `owner/repo` - default er det konfigurerte repoet (`JARVIS_GITHUB_REPO`, ellers `CANONICAL_GITHUB_REPO`; tom/ugyldig verdi gir standarden) - SAMME repo som repolåsen og connectorens `live_test` bruker (D-479). */
   repoSlug?: string;
   baseBranch?: string;
   /** `JARVIS_OWNER_PERSON_ID` - selvendring er en eier-KUN-handling, se `assertOwner()`. */
@@ -166,7 +166,7 @@ export class SelfModificationService {
   private readonly baseBranch: string;
 
   constructor(private readonly deps: SelfModificationServiceDeps) {
-    this.repoSlug = deps.repoSlug ?? process.env["JARVIS_GITHUB_REPO"] ?? CANONICAL_GITHUB_REPO;
+    this.repoSlug = deps.repoSlug ?? configuredGithubRepoFromEnv(process.env);
     this.baseBranch = deps.baseBranch ?? "main";
     // D-409: forbruket telles fra endringsregisteret - et budsjettlås uten register ville aldri se noe forbruk og dermed aldri låse.
     if (deps.budgetLock && !deps.changeLedger) throw new Error("self_modification_budget_lock_requires_change_ledger");

@@ -5,7 +5,7 @@ for (const line of readFileSync(new URL("../../../.env", import.meta.url), "utf8
 }
 import { mkdtemp } from "node:fs/promises"; import { tmpdir } from "node:os"; import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres"; import pg from "pg";
-import { CANONICAL_GITHUB_REPO } from "@jarvis/contracts";
+import { configuredGithubRepoFromEnv } from "@jarvis/contracts";
 import { runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
@@ -36,7 +36,7 @@ out["gmail"] = gmail.ok ? { LIVE: true, messages: ((gmail.data as { messages: un
 const now = new Date();
 const cal = await gw.execute({ identity: owner as never, tool_id: "calendar", action: "read_events", parameters: { from: now.toISOString(), to: new Date(now.getTime() + 86400000).toISOString() } });
 out["calendar"] = cal.ok ? { LIVE: true, events: ((cal.data as { events: unknown[] }).events).length } : { LIVE: false, reason: (cal as { reason: string }).reason };
-const gh = await gw.execute({ identity: owner as never, tool_id: "github", action: "read_issues", parameters: { repo: process.env["JARVIS_GITHUB_REPO"] ?? CANONICAL_GITHUB_REPO } });
+const gh = await gw.execute({ identity: owner as never, tool_id: "github", action: "read_issues", parameters: { repo: configuredGithubRepoFromEnv(process.env) } });
 out["github"] = gh.ok ? { LIVE: true, issues: ((gh.data as { issues: unknown[] }).issues).length } : { LIVE: false, reason: (gh as { reason: string }).reason };
 const tg = await gw.execute({ identity: owner as never, tool_id: "telegram", action: "notify", parameters: { message: "Jarvis live connection verified." } });
 out["telegram"] = tg.ok ? { LIVE: true, message_id: (tg as { external_id?: string }).external_id } : { LIVE: false, reason: (tg as { reason: string }).reason };

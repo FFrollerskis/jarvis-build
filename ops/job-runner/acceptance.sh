@@ -530,13 +530,21 @@ main() {
   for tool in docker curl node; do command -v "$tool" >/dev/null 2>&1 || { echo "mangler $tool - kjør dette på NAS-en" >&2; return 2; }; done
   [ -n "$REPO" ] || { echo "ACCEPTANCE_REPO er påkrevd (et SANDBOX-repo i runner.allowed_repos - aldri produksjonsrepoet)" >&2; return 2; }
   # B-L5: produksjonsrepoet nektes HARDT, uavhengig av runner.allowed_repos (en eier som har lagt det der kan ikke bruke akseptansen mot det: J11 pusher en ekte branch).
-  # D-479 (kontobytte, D-478): nektelisten er det NÅVÆRENDE kanoniske repoet (CANONICAL_GITHUB_REPO i packages/contracts/src/github-repo.ts), det GAMLE frosne repoet (LEGACY_GITHUB_REPOS) og eierens
-  # konfigurerte JARVIS_GITHUB_REPO når den er satt i miljøet - så et senere kontobytte ikke åpner et hull. En drift-test (ops/job-runner/test/acceptance-script.test.mjs) holder listen i takt med kontrakten.
+  # D-479 (kontobytte, D-478): den HARDE nektelisten er det NÅVÆRENDE kanoniske repoet (CANONICAL_GITHUB_REPO i packages/contracts/src/github-repo.ts) og det GAMLE frosne repoet (LEGACY_GITHUB_REPOS); en drift-test
+  # (ops/job-runner/test/acceptance-script.test.mjs) holder listen i takt med kontrakten. I TILLEGG nektes JARVIS_GITHUB_REPO - men BARE når variabelen er EKSPORTERT i shellet du kjører scriptet fra
+  # (scriptet leser ikke .env; compose leser .env selv), så det er et ekstra, ikke det reelle, vernet.
   local repo_lc prod_lc
-  repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
-  prod_lc="$(printf '%s' "${JARVIS_GITHUB_REPO:-}" | tr '[:upper:]' '[:lower:]')"
-  # GitHub behandler `eier/repo`, `eier/repo/` og `eier/repo.git` som samme repo i git-URL-er: alle tre former nektes (et alias skal ikke omgå vernet).
-  for _ in 1 2; do repo_lc="${repo_lc%/}"; repo_lc="${repo_lc%.git}"; prod_lc="${prod_lc%/}"; prod_lc="${prod_lc%.git}"; done
+  # GitHub behandler `eier/repo`, `eier/repo/` og `eier/repo.git` som samme repo i git-URL-er: alle former nektes (et alias skal ikke omgå vernet). Normaliseringen (små bokstaver, trim, strip `/` og `.git` til fikspunkt)
+  # er den samme som `githubRepoAliasKey` i packages/contracts/src/github-repo.ts.
+  alias_key() {
+    local k p
+    k="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
+    while :; do p="$k"; k="${k%/}"; k="${k%.git}"; [ "$k" = "$p" ] && break; done
+    printf '%s' "$k"
+  }
+  repo_lc="$(alias_key "$REPO")"
+  prod_lc="$(alias_key "${JARVIS_GITHUB_REPO:-}")"
   case "$repo_lc" in
     ffrollerskis/jarvis-build|tsworkflow/jarvisbuild) echo "ACCEPTANCE_REPO=$REPO er PRODUKSJONSREPOET: akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2 ;;
   esac

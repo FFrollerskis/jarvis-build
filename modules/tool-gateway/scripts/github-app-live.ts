@@ -28,7 +28,7 @@ import {
   GITHUB_APP_ERROR_HINTS, GITHUB_APP_PRIVATE_KEY_REF, GitHubAppAuth, GitHubAppAuthError, asGitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase,
   parseGitHubAppPrivateKey
 } from "../src/github-app-auth.ts";
-import { LEGACY_GITHUB_REPOS } from "@jarvis/contracts";
+import { LEGACY_GITHUB_REPOS, githubRepoAliasKey } from "@jarvis/contracts";
 import { configuredGithubRepo } from "../src/github-repo-lock.ts";
 import { GITHUB_FULL_CAPABILITY_PERMISSIONS, createGitHubAuth, type GitHubAuth } from "../src/github-token-provider.ts";
 import { GithubTransport } from "../src/live-transports.ts";
@@ -160,8 +160,9 @@ export async function runGitHubAppLive(options: LiveOptions): Promise<LiveResult
   // Review F14: --sandbox-repo SKRIVER (test-gren) og er derfor aldri et produksjonsrepo - D-41: test-/akseptanseløp begrenses til sandbox-ressurser (blast radius). Produksjonsrepoene er
   // allowlisten (JARVIS_GIT_ALLOWED_REPOS / JARVIS_GITHUB_REPO), repoet connectoren er konfigurert mot, og standardrepoet Jarvis alltid regner som eierens (CANONICAL_GITHUB_REPO) samt de gamle, frosne produksjonsrepoene (LEGACY_GITHUB_REPOS, D-479). Ingen overstyring finnes med vilje.
   if (sandboxRepo) {
-    const production = new Set([...settings.repositories, configuredGithubRepo(options.env), configuredGithubRepo({}), ...LEGACY_GITHUB_REPOS].map((r) => r.toLowerCase()));
-    if (production.has(sandboxRepo.toLowerCase())) {
+    // `githubRepoAliasKey`: små bokstaver og uten `.git`-suffiks/`/` på slutten (GitHub behandler dem som samme repo), så et alias ikke omgår vernet.
+    const production = new Set([...settings.repositories, configuredGithubRepo(options.env), configuredGithubRepo({}), ...LEGACY_GITHUB_REPOS].map(githubRepoAliasKey));
+    if (production.has(githubRepoAliasKey(sandboxRepo))) {
       results["app_config"] = "FAIL";
       diagnostics["app_config"] = `--sandbox-repo ${sandboxRepo} er et produksjonsrepo (${[...production].join(", ")}) - bruk et eget TEST-repo App-en er installert på`;
       log(`FEIL: ${diagnostics["app_config"]}. Ingenting er kjørt mot GitHub.`);
