@@ -374,8 +374,8 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     for (const parameters of [a, b, { recipient: "+4790000001", channel: "sms" }]) expect((await post(base, "/comms/action", body(parameters))).status).toBe(200);
     expect(gatewayCalls.map((c) => c.action)).toEqual(["record_opt_out", "record_opt_out", "record_opt_out"]);
     const keys = gatewayCalls.map((c) => c.idempotency_key);
-    expect(keys[0]).toBe(scopedIdempotencyKey(TENANT, "record_opt_out", "idem-oo-0000001", ownerPayloadFingerprint("business", a as Record<string, JsonValue>)));
-    expect(keys[1]).toBe(scopedIdempotencyKey(TENANT, "record_opt_out", "idem-oo-0000001", ownerPayloadFingerprint("business", b as Record<string, JsonValue>)));
+    expect(keys[0]).toBe(scopedIdempotencyKey(TENANT, "record_opt_out", "idem-oo-0000001", ownerPayloadFingerprint(TENANT, "business", a as Record<string, JsonValue>)));
+    expect(keys[1]).toBe(scopedIdempotencyKey(TENANT, "record_opt_out", "idem-oo-0000001", ownerPayloadFingerprint(TENANT, "business", b as Record<string, JsonValue>)));
     expect(keys[0]).not.toBe(keys[1]); // ulik nyttelast: en uavhengig forespørsel (ikke en stille deduplisering)
     expect(keys[2]).toBe(keys[0]); // samme nyttelast i annen rekkefølge: en ekte gjenspilling
     expect(gatewayCalls.every((c) => !("request_id" in c.parameters))).toBe(true);

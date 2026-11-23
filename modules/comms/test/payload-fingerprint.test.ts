@@ -87,16 +87,16 @@ describe("K3: canonicalPayloadJson - deterministisk, nøkkelrekkefølge-uavhengi
 
   it("`{a:1,b:2}` og `{b:2,a:1}` gir SAMME avtrykk og samme tekst - også nøstet og i arrayer av objekter", () => {
     expect(canonicalPayloadJson({ a: 1, b: 2 })).toBe(canonicalPayloadJson({ b: 2, a: 1 }));
-    expect(ownerPayloadFingerprint("business", { a: 1, b: 2 })).toBe(ownerPayloadFingerprint("business", { b: 2, a: 1 }));
+    expect(ownerPayloadFingerprint(TENANT, "business", { a: 1, b: 2 })).toBe(ownerPayloadFingerprint(TENANT, "business", { b: 2, a: 1 }));
     const x = { outer: { p: 1, q: { r: [{ s: 1, t: 2 }, { u: 3, v: 4 }], w: "w" } }, top: true };
     const y = { top: true, outer: { q: { w: "w", r: [{ t: 2, s: 1 }, { v: 4, u: 3 }] }, p: 1 } };
     expect(canonicalPayloadJson(x)).toBe(canonicalPayloadJson(y));
-    expect(ownerPayloadFingerprint("business", x)).toBe(ownerPayloadFingerprint("business", y));
+    expect(ownerPayloadFingerprint(TENANT, "business", x)).toBe(ownerPayloadFingerprint(TENANT, "business", y));
   });
 
   it("rekkefølgen i en array ER nyttelast: `[1,2]` er ikke `[2,1]`", () => {
     expect(canonicalPayloadJson([1, 2])).not.toBe(canonicalPayloadJson([2, 1]));
-    expect(ownerPayloadFingerprint("business", { list: ["a", "b"] })).not.toBe(ownerPayloadFingerprint("business", { list: ["b", "a"] }));
+    expect(ownerPayloadFingerprint(TENANT, "business", { list: ["a", "b"] })).not.toBe(ownerPayloadFingerprint(TENANT, "business", { list: ["b", "a"] }));
   });
 
   it("tall/strenger/null/tomme verdier kolliderer aldri: `1` mot `\"1\"`, `null` mot fraværende, `[]` mot `{}`, `true` mot `\"true\"` m.fl. - både i teksten og i avtrykket", () => {
@@ -106,10 +106,10 @@ describe("K3: canonicalPayloadJson - deterministisk, nøkkelrekkefølge-uavhengi
     ];
     const texts = corpus.map((v) => canonicalPayloadJson(v));
     expect(new Set(texts).size).toBe(corpus.length);
-    const prints = corpus.map((v) => ownerPayloadFingerprint("business", { v }));
+    const prints = corpus.map((v) => ownerPayloadFingerprint(TENANT, "business", { v }));
     expect(new Set(prints).size).toBe(corpus.length);
     // `null` er IKKE en fraværende nøkkel
-    expect(ownerPayloadFingerprint("business", { a: 1, b: null })).not.toBe(ownerPayloadFingerprint("business", { a: 1 }));
+    expect(ownerPayloadFingerprint(TENANT, "business", { a: 1, b: null })).not.toBe(ownerPayloadFingerprint(TENANT, "business", { a: 1 }));
     expect(canonicalPayloadJson({ a: 1, b: null })).not.toBe(canonicalPayloadJson({ a: 1 }));
   });
 
@@ -127,7 +127,7 @@ describe("K3: canonicalPayloadJson - deterministisk, nøkkelrekkefølge-uavhengi
     class Thing { readonly x = 1; }
     const bad: unknown[] = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, undefined, [undefined], { a: [undefined] }, () => 1, Symbol("s"), 10n, new Date(0), new Map(), new Set(), new Thing(), sparse, { a: Number.NaN }, /x/];
     for (const value of bad) expect(() => canonicalPayloadJson(value), String(typeof value)).toThrow();
-    expect(() => ownerPayloadFingerprint("business", { a: Number.NaN })).toThrow("canonical_payload_non_finite_number");
+    expect(() => ownerPayloadFingerprint(TENANT, "business", { a: Number.NaN })).toThrow("canonical_payload_non_finite_number");
     expect(() => canonicalPayloadJson(undefined)).toThrow("canonical_payload_unsupported_type:undefined");
     expect(() => canonicalPayloadJson(10n)).toThrow("canonical_payload_unsupported_type:bigint");
     expect(() => canonicalPayloadJson(new Date(0))).toThrow("canonical_payload_not_plain_object");
@@ -153,7 +153,7 @@ describe("K3: canonicalPayloadJson - deterministisk, nøkkelrekkefølge-uavhengi
     expect(canonicalPayloadJson({ "": 1 })).toBe('{"":1}');
     expect(canonicalPayloadJson({ "a,b": 1 })).not.toBe(canonicalPayloadJson({ a: 1, b: 1 }));
     expect(canonicalPayloadJson({ "a\":1,\"b": 1 })).not.toBe(canonicalPayloadJson({ a: 1, b: 1 }));
-    expect(ownerPayloadFingerprint("business", proto)).not.toBe(ownerPayloadFingerprint("business", { a: 1 }));
+    expect(ownerPayloadFingerprint(TENANT, "business", proto)).not.toBe(ownerPayloadFingerprint(TENANT, "business", { a: 1 }));
     expect(({} as Record<string, unknown>)["polluted"]).toBeUndefined();
   });
 
@@ -196,41 +196,46 @@ describe("K3: canonicalPayloadJson - deterministisk, nøkkelrekkefølge-uavhengi
 describe("ownerPayloadFingerprint - form, frosset oppskrift og hva som teller med", () => {
   it("er 32 små hex-tegn (128 bit); lengden og oppskriften er FROSSET (avtrykket ligger i ledger-nøkler: en endring ville brutt gjenspilling over en utrulling)", () => {
     expect(PAYLOAD_FINGERPRINT_LENGTH).toBe(32);
-    const fp = ownerPayloadFingerprint("business", { channel: "sms", recipient: "+4790000001" });
+    const fp = ownerPayloadFingerprint(TENANT, "business", { channel: "sms", recipient: "+4790000001" });
     expect(fp).toMatch(FP);
-    // oppskriften, uavhengig gjenskapt: SHA-256 over JSON-arrayen [versjon, rom, kanonisk nyttelast], de første 32 hex-tegnene
-    const recipe = createHash("sha256").update(JSON.stringify(["comms-owner-payload-v1", "business", '{"channel":"sms","recipient":"+4790000001"}']), "utf8").digest("hex").slice(0, 32);
+    // oppskriften, uavhengig gjenskapt: SHA-256 over JSON-arrayen [versjon, tenant, rom, kanonisk nyttelast], de første 32 hex-tegnene
+    const recipe = createHash("sha256").update(JSON.stringify(["comms-owner-payload-v2", TENANT, "business", '{"channel":"sms","recipient":"+4790000001"}']), "utf8").digest("hex").slice(0, 32);
     expect(fp).toBe(recipe);
     // gullvektorer (beregnet uavhengig av koden med ren Node): en utilsiktet endring av oppskriften, rekkefølgen eller kuttet feller her
-    expect(fp).toBe("fc287d9f0f634c9591d6a10398692317");
-    expect(ownerPayloadFingerprint("project", { provider: "twilio", channel: "sms", account_ref: "+4791000000" })).toBe("f57b09473b286a980334da742881dce4");
-    expect(ownerPayloadFingerprint("business", {})).toBe("847b2161697615e17171fe06933e6531");
+    expect(fp).toBe("739368ed6023fd41c0bdbe5cc2f40e13");
+    expect(ownerPayloadFingerprint(TENANT, "project", { provider: "twilio", channel: "sms", account_ref: "+4791000000" })).toBe("4d0e9cc2f6ab784d550f3da1847a66fe");
+    expect(ownerPayloadFingerprint(TENANT, "business", {})).toBe("2aa80aa3a5ea5215031635caf0b24cb5");
+    // samme nyttelast i en ANNEN tenant gir et annet avtrykk (reviewer B F3: ingen kobling på tvers av tenants i ledgerens nøkler)
+    expect(ownerPayloadFingerprint("tenant-g1b-annen", "business", { channel: "sms", recipient: "+4790000001" })).toBe("11ce81130794e92bac69fe1054dad724");
   });
 
   it("memory space er med; request_id og idempotency_key (forespørselens identitet) er IKKE med; alle andre felt er det", () => {
     const base = { channel: "sms", recipient: "+4790000001" };
-    const fp = ownerPayloadFingerprint("business", base);
-    expect(ownerPayloadFingerprint("project", base)).not.toBe(fp);
-    expect(ownerPayloadFingerprint("business", { ...base, request_id: "hvilken-som-helst-id-1" })).toBe(fp);
-    expect(ownerPayloadFingerprint("business", { ...base, idempotency_key: "en-annen-nokkel-1" })).toBe(fp);
-    expect(ownerPayloadFingerprint("business", { ...base, request_id: "a-aaaaaaaa", idempotency_key: "b-bbbbbbbb" })).toBe(fp);
+    const fp = ownerPayloadFingerprint(TENANT, "business", base);
+    expect(ownerPayloadFingerprint(TENANT, "project", base)).not.toBe(fp);
+    expect(ownerPayloadFingerprint(TENANT, "business", { ...base, request_id: "hvilken-som-helst-id-1" })).toBe(fp);
+    expect(ownerPayloadFingerprint(TENANT, "business", { ...base, idempotency_key: "en-annen-nokkel-1" })).toBe(fp);
+    expect(ownerPayloadFingerprint(TENANT, "business", { ...base, request_id: "a-aaaaaaaa", idempotency_key: "b-bbbbbbbb" })).toBe(fp);
     for (const extra of [{ source: "owner_recorded" }, { account_ref: "*" }, { Request_Id: "x" }, { requestId: "x" }, { idempotency_keys: "x" }, { "request_id ": "x" }]) {
-      expect(ownerPayloadFingerprint("business", { ...base, ...extra }), JSON.stringify(extra)).not.toBe(fp);
+      expect(ownerPayloadFingerprint(TENANT, "business", { ...base, ...extra }), JSON.stringify(extra)).not.toBe(fp);
     }
-    expect(ownerPayloadFingerprint("business", { ...base, recipient: "+4790000002" })).not.toBe(fp);
-    expect(ownerPayloadFingerprint("business", { ...base, channel: "whatsapp" })).not.toBe(fp);
+    expect(ownerPayloadFingerprint(TENANT, "business", { ...base, recipient: "+4790000002" })).not.toBe(fp);
+    expect(ownerPayloadFingerprint(TENANT, "business", { ...base, channel: "whatsapp" })).not.toBe(fp);
     // kun nivå 1 av nøkkelfeltene hoppes over: et nøstet felt med samme navn er nyttelast
-    expect(ownerPayloadFingerprint("business", { nested: { request_id: "x" } })).not.toBe(ownerPayloadFingerprint("business", { nested: {} }));
+    expect(ownerPayloadFingerprint(TENANT, "business", { nested: { request_id: "x" } })).not.toBe(ownerPayloadFingerprint(TENANT, "business", { nested: {} }));
   });
 
   it("parametre som ikke er et vanlig objekt avvises (array og null ville ellers delt avtrykk med et objekt)", () => {
-    for (const bad of [[], [1], null, "tekst", 5, undefined]) expect(() => ownerPayloadFingerprint("business", bad as never), String(bad)).toThrow("canonical_payload_parameters_not_an_object");
+    for (const bad of [[], [1], null, "tekst", 5, undefined]) expect(() => ownerPayloadFingerprint(TENANT, "business", bad as never), String(bad)).toThrow("canonical_payload_parameters_not_an_object");
   });
 
-  it("skillet mellom rom og nyttelast er entydig (rom `a` + nyttelast `b` er ikke rom `ab`...), og tenant/sesjon er ikke en del av avtrykket", () => {
-    expect(ownerPayloadFingerprint("a", { x: 1 })).not.toBe(ownerPayloadFingerprint("a\u0000", { x: 1 }));
-    expect(ownerPayloadFingerprint('b","{}', {})).not.toBe(ownerPayloadFingerprint("b", {}));
-    expect(ownerPayloadFingerprint.length).toBe(2); // kun (rom, parametre): ingen skjult tilstand
+  it("skillet mellom tenant, rom og nyttelast er entydig (rom `a` + nyttelast `b` er ikke rom `ab`...); tenant ER med, sesjon er det ikke", () => {
+    expect(ownerPayloadFingerprint(TENANT, "a", { x: 1 })).not.toBe(ownerPayloadFingerprint(TENANT, "a\u0000", { x: 1 }));
+    expect(ownerPayloadFingerprint(TENANT, 'b","{}', {})).not.toBe(ownerPayloadFingerprint(TENANT, "b", {}));
+    expect(ownerPayloadFingerprint(TENANT, "a", { x: 1 })).not.toBe(ownerPayloadFingerprint("tenant-g1b-annen", "a", { x: 1 }));
+    expect(ownerPayloadFingerprint("t1", "ab", { x: 1 })).not.toBe(ownerPayloadFingerprint("t1a", "b", { x: 1 }));
+    expect(ownerPayloadFingerprint('t","x', "b", {})).not.toBe(ownerPayloadFingerprint("t", "x\",\"b", {}));
+    expect(ownerPayloadFingerprint.length).toBe(3); // kun (tenant, rom, parametre): ingen skjult tilstand
   });
 });
 
@@ -243,20 +248,20 @@ describe("scopedIdempotencyKey - formen for journalførte (UENDRET) og ikke-jour
   });
 
   it("med avtrykk er formen `<handling>:<tenant-merke>:<avtrykk>:<nøkkel>`; tenant-merket og avtrykket skiller", () => {
-    const fp = ownerPayloadFingerprint("business", { channel: "sms", recipient: "+4790000001" });
+    const fp = ownerPayloadFingerprint(TENANT, "business", { channel: "sms", recipient: "+4790000001" });
     const key = scopedIdempotencyKey(TENANT, "record_opt_out", "abc-12345", fp);
     expect(key).toBe(`record_opt_out:${tag(TENANT)}:${fp}:abc-12345`);
     expect(key).toMatch(/^record_opt_out:[0-9a-f]{8}:[0-9a-f]{32}:abc-12345$/);
     expect(scopedIdempotencyKey("tenant-annen", "record_opt_out", "abc-12345", fp)).not.toBe(key);
     expect(scopedIdempotencyKey(TENANT, "authorize_account", "abc-12345", fp)).not.toBe(key);
     expect(scopedIdempotencyKey(TENANT, "record_opt_out", "abc-12346", fp)).not.toBe(key);
-    expect(scopedIdempotencyKey(TENANT, "record_opt_out", "abc-12345", ownerPayloadFingerprint("business", { channel: "sms", recipient: "+4790000002" }))).not.toBe(key);
+    expect(scopedIdempotencyKey(TENANT, "record_opt_out", "abc-12345", ownerPayloadFingerprint(TENANT, "business", { channel: "sms", recipient: "+4790000002" }))).not.toBe(key);
     expect(scopedIdempotencyKey(TENANT, "record_opt_out", "abc-12345", fp)).not.toBe(scopedIdempotencyKey(TENANT, "record_opt_out", "abc-12345"));
   });
 
   it("injektiv også med en nøkkel som selv ligner på `<avtrykk>:<rest>` (avtrykket har fast lengde, så skillet er entydig)", () => {
-    const a = ownerPayloadFingerprint("business", { x: 1 });
-    const b = ownerPayloadFingerprint("business", { x: 2 });
+    const a = ownerPayloadFingerprint(TENANT, "business", { x: 1 });
+    const b = ownerPayloadFingerprint(TENANT, "business", { x: 2 });
     const keys = new Set<string>();
     for (const [fp, k] of [[a, "nøkkel-1:ekstra"], [b, "nøkkel-1:ekstra"], [a, `${b}:nøkkel-1`], [b, `${a}:nøkkel-1`], [a, "nøkkel-1"], [b, "nøkkel-1"], [a, ""], [b, ""]] as const) keys.add(scopedIdempotencyKey(TENANT, "contacts_create", k, fp));
     expect(keys.size).toBe(8);
@@ -266,7 +271,7 @@ describe("scopedIdempotencyKey - formen for journalførte (UENDRET) og ikke-jour
     const key = keyOfLength(COMMS_IDEMPOTENCY_KEY_MAX_LENGTH);
     expect(COMMS_IDEMPOTENCY_KEY_MAX_LENGTH).toBe(160);
     expect(Math.max(...COMMS_KNOWN_ACTIONS.map((a) => a.length))).toBe(27);
-    const fp = ownerPayloadFingerprint("business", {});
+    const fp = ownerPayloadFingerprint(TENANT, "business", {});
     for (const action of COMMS_JOURNALLED_ACTIONS) {
       const k = scopedIdempotencyKey(TENANT, action, key);
       expect(k.length, action).toBeLessThanOrEqual(197);
@@ -326,7 +331,7 @@ describe("partisjonen journalført / ikke-journalført og tabelltest over ALLE h
       expect(await run(r, action, sample(action), key), action).toMatchObject({ ok: true, deduplicated: false });
       expect(r.requests).toHaveLength(1);
       const req = r.requests[0]!;
-      const expectedFp = ownerPayloadFingerprint("business", sample(action));
+      const expectedFp = ownerPayloadFingerprint(TENANT, "business", sample(action));
       expect(req.idempotency_key, action).toBe(scopedIdempotencyKey(TENANT, action, key, expectedFp));
       expect(req.idempotency_key, action).toMatch(new RegExp(`^${action}:[0-9a-f]{8}:[0-9a-f]{32}:${key}$`));
       expect(req.parameters, action).toEqual(sample(action));
@@ -358,12 +363,12 @@ describe("partisjonen journalført / ikke-journalført og tabelltest over ALLE h
 
   it("ULIKE verdier i hvert eneste felt gir ulikt avtrykk (hvert felt i hvert eksempel er bundet - ingen felt kan endres uten at nøkkelen endres)", async () => {
     for (const action of NON_JOURNALLED) {
-      const base = ownerPayloadFingerprint("business", sample(action));
+      const base = ownerPayloadFingerprint(TENANT, "business", sample(action));
       for (const field of Object.keys(sample(action))) {
         const changed = { ...sample(action), [field]: `${JSON.stringify(sample(action)[field])}-endret` };
-        expect(ownerPayloadFingerprint("business", changed), `${action}.${field}`).not.toBe(base);
+        expect(ownerPayloadFingerprint(TENANT, "business", changed), `${action}.${field}`).not.toBe(base);
         const without = Object.fromEntries(Object.entries(sample(action)).filter(([name]) => name !== field));
-        expect(ownerPayloadFingerprint("business", without), `${action} uten ${field}`).not.toBe(base);
+        expect(ownerPayloadFingerprint(TENANT, "business", without), `${action} uten ${field}`).not.toBe(base);
       }
     }
   });
@@ -483,14 +488,29 @@ describe("K4: nøkkellengde - 159/160 virker, 161 og over gir `idempotency_key_t
     }
   });
 
-  it("handlinger der nøkkelen er VALGFRI godtar fortsatt hvilken som helst kort nøkkel (uendret for allerede-gyldige kall), men aldri en over 160 tegn", async () => {
+  it("handlinger der nøkkelen er VALGFRI: ingen nøkkel er uendret (ingen idempotens), men en OPPGITT nøkkel må ha samme form som en påkrevd (8-160 tegn, `[A-Za-z0-9._:-]`); ellers `idempotency_key_invalid` uten at gatewayen røres (reviewer B F2)", async () => {
     for (const action of NON_JOURNALLED.filter((a) => !REQUIRED_KEY_ACTIONS.includes(a))) {
-      for (const key of ["a", "kort", "", "med mellomrom", "x".repeat(160)]) {
+      // uendret: ingen nøkkel = ingen idempotens-ledd og ingen avvisning
+      const none = recorder();
+      expect(await run(none, action, sample(action)), action).toMatchObject({ ok: true });
+      expect(none.requests, action).toEqual([{ identity: owner(), tool_id: "comms", action, parameters: sample(action) }]);
+      // gyldige nøkler (8 og 160 tegn, tillatt tegnsett) virker som før
+      for (const key of ["abcdefgh", "min-nokkel-12345", "a.b_c:d-e-f-g-h", "x".repeat(160)]) {
         const r = recorder();
         expect(await run(r, action, sample(action), key), `${action}:${key}`).toMatchObject({ ok: true });
         expect(r.requests, `${action}:${key}`).toHaveLength(1);
         expect(r.requests[0]!.idempotency_key!.endsWith(`:${key}`), `${action}:${key}`).toBe(true);
       }
+      // en oppgitt, svak/ugyldig nøkkel avvises (tidligere: `""` ga en stille deduplicated og NUL ga en databasefeil/HTTP 500)
+      for (const bad of ["a", "kort", "x".repeat(7), "", "   ", "med mellomrom", "ok-ok-ok\nnewline", "nul\u0000-nul-nul", "æøå-æøå-æøå", "static key 001"]) {
+        const r = recorder();
+        expect(await run(r, action, sample(action), bad), `${action}:${JSON.stringify(bad)}`).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_invalid" });
+        expect(r.requests, `${action}:${JSON.stringify(bad)}`).toEqual([]);
+        expect(r.funnelCalls, `${action}:${JSON.stringify(bad)}`).toEqual([]);
+      }
+      // lengde over 160 er fortsatt den egne feilen
+      const long = recorder();
+      expect(await run(long, action, sample(action), keyOfLength(161)), action).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_too_long" });
     }
   });
 });
@@ -517,7 +537,7 @@ describe("K6 h: differensial mot main - allerede-gyldige kall endrer seg IKKE (u
         const r = recorder();
         await run(r, action, sample(action), key);
         const req = r.requests[0]!;
-        const fp = ownerPayloadFingerprint("business", sample(action));
+        const fp = ownerPayloadFingerprint(TENANT, "business", sample(action));
         expect(req.idempotency_key!.replace(`:${fp}:`, ":"), `${action}:${key}`).toBe(legacyScoped(TENANT, action, key));
         expect({ ...req, idempotency_key: undefined }, `${action}:${key}`).toEqual({ identity: owner(), tool_id: "comms", action, parameters: sample(action), idempotency_key: undefined });
       }
@@ -547,6 +567,12 @@ describe("K6 h: differensial mot main - allerede-gyldige kall endrer seg IKKE (u
     const r = recorder();
     expect(await run(r, "record_opt_out", sample("record_opt_out"), keyOfLength(500), owner("health"))).toEqual({ ok: false, status: "rejected", reason: "comms_space_not_allowed" });
     expect(await run(r, "nope", {}, keyOfLength(500))).toEqual({ ok: false, status: "rejected", reason: "comms_unknown_action" });
+    // Reviewer B F6 (mutant MS3): rom-porten står FØR handlingskontrollen, og eier-porten FØR begge: health/home/guest + ukjent handling gir romfeilen, og en ikke-eier får alltid `owner_required`.
+    for (const space of ["health", "home", "guest"]) {
+      expect(await run(r, "nope", {}, keyOfLength(500), owner(space)), space).toEqual({ ok: false, status: "rejected", reason: "comms_space_not_allowed" });
+      expect(await run(r, "nope", {}, undefined, owner(space)), space).toEqual({ ok: false, status: "rejected", reason: "comms_space_not_allowed" });
+      expect(await executeCommsOwnerAction(denied, owner(space), { action: "nope", parameters: {} }), space).toEqual({ ok: false, status: "rejected", reason: "owner_required" });
+    }
     expect(r.requests).toEqual([]);
   });
 });
