@@ -223,8 +223,10 @@ describe("felles produksjonsvern for skrivende live-/akseptanse-skript (github-s
     for (const sandbox of ["acme/sandbox", "FFrollerskis/jarvis-sandbox", "ffrollerskis/jarvis-build-test", "tsworkflow/jarvisbuild-test", "owner/repo.github.io", "", ".git", "/"]) {
       expect(isProductionGithubRepo(sandbox, {}), JSON.stringify(sandbox)).toBe(false);
     }
-    // En tom/ugyldig env-verdi gir aldri en tom nøkkel i mengden (da ville et tomt navn «matche»).
-    expect([...productionGithubRepoKeys({ [ENV]: ".git" })].every((key) => key.length > 0)).toBe(true);
+    // En tom/ugyldig env-verdi og ekstra verdier som normaliseres til TOMT gir aldri en tom nøkkel i mengden (da ville et tomt navn «matche»).
+    expect([...productionGithubRepoKeys({ [ENV]: ".git" }, [".git", "/", "", "   "])].every((key) => key.length > 0)).toBe(true);
+    expect(isProductionGithubRepo("", {}, [".git", "/", ""])).toBe(false);
+    expect(isProductionGithubRepo(".git", {}, [".git", "/", ""])).toBe(false);
   });
 
   it("ua5-github-live: repo er PÅKREVD (ingen standard) og produksjonsrepoer nektes; et eget sandbox-repo godtas", () => {

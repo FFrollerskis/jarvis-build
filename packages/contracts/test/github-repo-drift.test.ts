@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,15 +30,45 @@ const ALLOWED: Readonly<Record<string, { reason: string; only?: readonly string[
   "ops/claude-worker/supervisor.config.example.json": { reason: "samme som config.example.json (Q-77 pkt 1c)" }
 };
 
-function walk(dir: string, out: string[]): void {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name)) walk(join(dir, entry.name), out);
-    } else if (entry.isFile() && !BINARY.test(entry.name)) {
-      const path = join(dir, entry.name);
-      if (statSync(path).size <= MAX_BYTES) out.push(path);
-    }
+/** Ignorerte, lokale filer som aldri skal skannes (ikke sporet i git): eierens egen `.env` (kan stå på det gamle repoet inntil den er byttet) og evidensfiler fra akseptanse. Brukes bare av fallbacken uten git. */
+function isLocalOnlyFile(rel: string): boolean {
+  const base = rel.split("/").pop() ?? rel;
+  return (base === ".env" || (base.startsWith(".env.") && base !== ".env.example")) || rel.startsWith("ops/acceptance/out/");
+}
+
+function scannable(path: string): boolean {
+  if (BINARY.test(path)) return false;
+  try {
+    return statSync(path).isFile() && statSync(path).size <= MAX_BYTES;
+  } catch {
+    return false; // sporet, men slettet i arbeidstreet
   }
+}
+
+function inSkippedDir(rel: string): boolean {
+  return rel.split("/").slice(0, -1).some((segment) => SKIP_DIRS.has(segment));
+}
+
+/** Filene vakten skanner: sporede og ikke-ignorerte filer (`git ls-files`), så resultatet ikke avhenger av lokale, git-ignorerte filer (`.env`, `ops/acceptance/out`). Uten git (f.eks. et uttrukket arkiv): katalogvandring uten de lokale filene. */
+function listScannableFiles(): string[] {
+  try {
+    const out = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+    const rels = out.split("\0").filter((p) => p.length > 0 && !inSkippedDir(p));
+    if (rels.length > 0) return rels.map((p) => join(ROOT, p)).filter(scannable);
+  } catch {
+    // ingen git: fall til katalogvandringen under
+  }
+  const found: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) walk(path);
+      } else if (entry.isFile() && !isLocalOnlyFile(relative(ROOT, path).split(sep).join("/"))) found.push(path);
+    }
+  };
+  walk(ROOT);
+  return found.filter(scannable);
 }
 
 /** Treff for det gamle eiernavnet i repo-form: `tsworkflow/` eller det siterte tokenet `"tsworkflow"`/`'tsworkflow'`. Eksportert som funksjon så selve mønsteret kan testes. */
@@ -55,8 +86,7 @@ export function legacyOwnerSlugs(text: string): string[] {
 }
 
 describe("WP-A1: ingen hardkodet gammel repo-eier i kjørbar kode og konfig", () => {
-  const files: string[] = [];
-  walk(ROOT, files);
+  const files = listScannableFiles();
   const rel = (f: string): string => relative(ROOT, f).split(sep).join("/");
 
   it("mønsteret treffer repo-former og ikke e-post eller bundle-id", () => {
@@ -79,6 +109,10 @@ describe("WP-A1: ingen hardkodet gammel repo-eier i kjørbar kode og konfig", ()
     expect(relative.some((p) => !p.includes("/")), "rotfiler skannes").toBe(true);
     expect(relative.some((p) => p.endsWith(".ps1")), ".ps1 skannes").toBe(true);
     expect(relative.some((p) => p.startsWith("docs/")), "docs er historikk og skannes ikke").toBe(false);
+    // Hermetisk: lokale, git-ignorerte filer påvirker ikke vakten (en `.env` på det gamle repoet, evidensfiler fra akseptanse).
+    expect(relative, "eierens egen .env skannes ikke").not.toContain(".env");
+    expect(relative.some((p) => p.startsWith("ops/acceptance/out/")), "evidensfiler fra akseptanse skannes ikke").toBe(false);
+    expect(isLocalOnlyFile(".env") && isLocalOnlyFile(".env.local") && isLocalOnlyFile("ops/acceptance/out/x.md") && !isLocalOnlyFile(".env.example") && !isLocalOnlyFile("ops/job-runner/acceptance.sh")).toBe(true);
   });
 
   it("det gamle eiernavnet i repo-form står kun i tillatelseslisten, og tillatte filer nevner bare de gamle repoene de er tillatt for (ingen NY forekomst skjuler seg i en tillatt fil)", () => {

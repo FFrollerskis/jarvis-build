@@ -229,6 +229,12 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     expect(deny("acme/prod", single).status).toBe(0);
     const unquotedComment = await write("unquoted.env", "JARVIS_GITHUB_REPO=acme/prod # fra eieren\n");
     expect(deny("acme/prod", unquotedComment).status).toBe(0);
+    const bom = await write("bom.env", "\uFEFFJARVIS_GITHUB_REPO=acme/prod\n");
+    expect(deny("acme/prod", bom).status, "BOM først i filen").toBe(0);
+    const spaced = await write("spaced.env", "FOO=1\nJARVIS_GITHUB_REPO = acme/prod\n");
+    expect(deny("acme/prod", spaced).status, "blanke rundt =").toBe(0);
+    const spacedExport = await write("spaced-export.env", "  export   JARVIS_GITHUB_REPO  =  \"acme/prod\"  # kommentar\n");
+    expect(deny("acme/prod", spacedExport).status, "export, blanke og anførselstegn").toBe(0);
     const emptyValue = await write("empty.env", "JARVIS_GITHUB_REPO=\n");
     expect(deny("", emptyValue).status, "tom verdi nekter ikke et tomt navn").toBe(1);
     expect(deny("acme/prod", emptyValue).status).toBe(1);
@@ -240,6 +246,16 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     expect(r.stderr).toContain("PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i .env)");
     const ok = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", ACCEPTANCE_ENV_FILE: plain });
     expect(ok.stderr).not.toContain("PRODUKSJONSREPOET");
+  });
+
+  it("D-479: main() normaliserer ACCEPTANCE_REPO med normalize_repo_arg FØR allowed_repos-sammenligningen (ellers avvises eierens kontonavn med store bokstaver som «ikke i allowed_repos»)", async () => {
+    const script = await readFile(SCRIPT, "utf8");
+    const normalized = script.indexOf('REPO="$(normalize_repo_arg "$REPO")"');
+    const allowedCheck = script.indexOf('case ",$ALLOWED," in');
+    const guard = script.indexOf('production_repo_reason "$REPO"');
+    expect(guard, "vernet kjører først").toBeGreaterThan(-1);
+    expect(normalized, "normaliseringen står i main()").toBeGreaterThan(guard);
+    expect(allowedCheck, "allowed_repos-sjekken står etter normaliseringen").toBeGreaterThan(normalized);
   });
 
   it("D-479: ACCEPTANCE_REPO normaliseres til trimmet små bokstaver for allowed_repos-sammenligningen (eierens kontonavn har store bokstaver); det finnes ingen overstyring av produksjonsvernet", async () => {
