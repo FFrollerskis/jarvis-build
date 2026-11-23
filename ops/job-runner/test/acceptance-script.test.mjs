@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -453,6 +453,21 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
       // omtaler som ikke er en egen tilordning feiler lukket (falsk positiv er bevisst: vernet gjetter ikke)
       ["mention-in-trailing-comment", `A=1 # sett JARVIS_GITHUB_REPO=${P} senere\n`],
       ["mention-in-other-value", "NOTE=bruk JARVIS_GITHUB_REPO her\n"],
+      // reviewer B N2: en annen nøkkels flerlinjede verdi i anførselstegn SKJULER en linje for compose (siste linje vinner hos oss, men er en del av verdien hos compose) eller AVSLØRER en
+      ["multiline-value-hides-assignment", `JARVIS_GITHUB_REPO=${P}\nX="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["multiline-value-reveals-assignment", `X="abc\n# lukker her" JARVIS_GITHUB_REPO=${P}\n`],
+      ["open-quote-on-second-assignment", `A="x" B="abc\nJARVIS_GITHUB_REPO=${P}"\n`],
+      // den andre tilordningen på linjen har det åpne anførselstegnet og skjuler en senere linje (mutant U5: tokenizeren stopper etter den første avsluttede verdien)
+      ["open-quote-on-second-assignment-hides", `JARVIS_GITHUB_REPO=${P}\nA="x" B="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["open-single-quote", `A='abc\nJARVIS_GITHUB_REPO=owner/sandbox\n'\n`],
+      ["escaped-quote-then-eol", `A="a\\"\nJARVIS_GITHUB_REPO=owner/sandbox\n"\n`],
+      ["bom-then-open-quote", `\ufeffA="abc\nJARVIS_GITHUB_REPO=owner/sandbox\n"\n`],
+      ["nbsp-then-open-quote", `\u00a0A="abc\nJARVIS_GITHUB_REPO=owner/sandbox\n"\n`],
+      ["export-then-open-quote", `export A="abc\nJARVIS_GITHUB_REPO=owner/sandbox\n"\n`],
+      ["yaml-colon-open-quote", `A: "abc\nJARVIS_GITHUB_REPO=owner/sandbox\n"\n`],
+      // en gyldig kandidat etterfulgt av en ugyldig må fortsatt gi FATAL (ikke stopp ved den første gyldige), og en uavsluttet `${NAVN`-referanse er ikke en gyldig verdi
+      ["valid-then-invalid", `JARVIS_GITHUB_REPO=${P}\nJARVIS_GITHUB_REPO: x\n`],
+      ["unclosed-brace-reference", `JARVIS_GITHUB_REPO=${P} \${JARVIS_GITHUB_REPO\n`],
     ];
     for (const [name, data] of risky) {
       const f = await write(`risky-${name}.env`, data);
@@ -461,8 +476,29 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
         expect(deny("owner/annet", f, env).status, `${name} ${JSON.stringify(env)}: nekter alt, også et repo som ikke ligner`).toBe(0);
       }
     }
+    // siste tilordning vinner, også når den er tom (compose: en senere tom verdi overstyrer en tidligere; mutant Q15)
+    const emptyLast = await write("empty-last.env", `JARVIS_GITHUB_REPO=${P}\nJARVIS_GITHUB_REPO=\n`);
+    expect(value(emptyLast)).toBe("");
+    expect(deny(P, emptyLast).status).toBe(1);
+    // N3: meldingen oppgir linjenummer, men ALDRI innholdet (linjen kan inneholde en hemmelighet)
+    const secretLine = await write("secret-line.env", `OK=1\nA="hemmelig-verdi-123" JARVIS_GITHUB_REPO=${P}\n`);
+    expect(check(secretLine)).toMatch(/^FATAL: linjen for JARVIS_GITHUB_REPO i .* \(linje 2\) er ikke på formen/);
+    expect(check(secretLine)).not.toContain("hemmelig-verdi-123");
+    const openQuote = await write("open-quote-secret.env", `A=1\nB="hemmelig-verdi-456\nC=2"\n`);
+    expect(check(openQuote)).toMatch(/\(linje 2\)/);
+    expect(check(openQuote)).not.toContain("hemmelig-verdi-456");
+    // awk mangler: vernet gjetter ikke, men feiler lukket
+    const noAwk = join(dir, "bin-uten-awk");
+    await mkdir(noAwk);
+    for (const tool of ["bash", "grep", "date", "dirname", "cat"]) {
+      const real = spawnSync("sh", ["-c", `command -v ${tool}`], { encoding: "utf8", env: { PATH: process.env["PATH"] } }).stdout.trim();
+      if (real) await symlink(real, join(noAwk, tool));
+    }
+    const noAwkRun = spawnSync(join(noAwk, "bash"), ["-c", `source "${SCRIPT}"; env_file_check JARVIS_GITHUB_REPO; production_repo_reason owner/annet >/dev/null; echo " rc=$?"`], { env: { PATH: noAwk, HOME: tmpdir(), LC_ALL: "C", ACCEPTANCE_SOURCE_ONLY: "1", ACCEPTANCE_ENV_FILE: await write("plain-for-noawk.env", `JARVIS_GITHUB_REPO=${P}\n`) }, encoding: "utf8", timeout: 60_000 });
+    expect(noAwkRun.stdout).toMatch(/^FATAL: kunne ikke analysere .* \(awk mangler eller feilet\)/);
+    expect(noAwkRun.stdout, "production_repo_reason nekter også da").toContain("rc=0");
     // (c) ikke-kandidater: andre nøkler, kommentarer og bruk av variabelen i en annen verdi gir ingen melding
-    const notCandidates = await write("not-candidates.env", "# JARVIS_GITHUB_REPO: kommentar\n   # JARVIS_GITHUB_REPO=x\nNOT_JARVIS_GITHUB_REPO=x\nJARVIS_GITHUB_REPO_OLD: y\nXJARVIS_GITHUB_REPO=z\nexportJARVIS_GITHUB_REPO=q\nSOME_URL=https://github.com/${JARVIS_GITHUB_REPO}\nFALLBACK=${JARVIS_GITHUB_REPO:-acme/x}\nBARE=$JARVIS_GITHUB_REPO\nQUOTED=\"a/${JARVIS_GITHUB_REPO}/b\"\n");
+    const notCandidates = await write("not-candidates.env", "# JARVIS_GITHUB_REPO: kommentar\n   # JARVIS_GITHUB_REPO=x\nNOT_JARVIS_GITHUB_REPO=x\nJARVIS_GITHUB_REPO_OLD: y\nXJARVIS_GITHUB_REPO=z\nexportJARVIS_GITHUB_REPO=q\nSOME_URL=https://github.com/${JARVIS_GITHUB_REPO}\nFALLBACK=${JARVIS_GITHUB_REPO:-acme/x}\nBARE=$JARVIS_GITHUB_REPO\nQUOTED=\"a/${JARVIS_GITHUB_REPO}/b\"\nTWO=${JARVIS_GITHUB_REPO}/${JARVIS_GITHUB_REPO}\n");
     expect(check(notCandidates)).toBe("");
     expect(value(notCandidates)).toBe("");
     expect(deny("acme/prod", notCandidates).status).toBe(1);
@@ -495,6 +531,8 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
       ["tilordning etter anførselstegn på samme linje", `A="x" JARVIS_GITHUB_REPO=${P}\n`], ["tilordning rett etter anførselstegn", `A="x"JARVIS_GITHUB_REPO=${P}\n`], ["tilordning etter enkle anførselstegn", `A='x' JARVIS_GITHUB_REPO=${P}\n`],
       ["tilordning etter flerlinjet verdi", `A="x\ny" JARVIS_GITHUB_REPO=${P}\n`], ["tilordning etter tab og CR", `A="x"\t\rJARVIS_GITHUB_REPO=${P}\n`], ["export midt på linjen", `A="x" export JARVIS_GITHUB_REPO=${P}\n`],
       ["søppel-export fulgt av tilordning", `export\texportJARVIS_GITHUB_REPO\t=" ${P}"JARVIS_GITHUB_REPO=${P}\n`],
+      ["flerlinjet verdi skjuler en linje (B N2)", `JARVIS_GITHUB_REPO=${P}\nX="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`], ["flerlinjet verdi avslører en linje (B N2)", `X="abc\n# lukker her" JARVIS_GITHUB_REPO=${P}\n`],
+      ["åpent anførselstegn på andre tilordning", `A="x" B="abc\nJARVIS_GITHUB_REPO=${P}"\n`], ["åpent enkelt anførselstegn", `A='abc\nJARVIS_GITHUB_REPO=${P}\n'\n`], ["export + åpent anførselstegn", `export A="abc\nJARVIS_GITHUB_REPO=${P}\n"\n`], ["åpent anførselstegn på andre tilordning skjuler en senere linje", `JARVIS_GITHUB_REPO=${P}\nA="x" B="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
       ["tom verdi", "JARVIS_GITHUB_REPO=\n"], ["repo-linje etter 2000 linjer", `${Array.from({ length: 2000 }, (_, i) => `K${i}=v${i}`).join("\n")}\nJARVIS_GITHUB_REPO=${P}\n`],
     ];
     let prodCases = 0;
