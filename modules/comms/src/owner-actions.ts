@@ -97,14 +97,15 @@ function canonicalize(value: unknown, depth: number): string {
 const REQUEST_IDENTITY_FIELDS: readonly string[] = ["request_id", "idempotency_key"];
 
 /**
- * Nyttelast-avtrykket (hex, `PAYLOAD_FINGERPRINT_LENGTH` tegn) for en ikke-journalført handling: SHA-256 over memory space og den kanoniske nyttelasten. Memory space er med fordi virkningen er per rom (en konto autoriseres per rom, møter og
- * kontaktlenker ligger per rom), mens ledgeren er tenant-bred: samme nøkkel og nyttelast fra to rom er to forespørsler. Kun handlingens parametre teller (ikke person, sesjon, enhet eller kanal: en gjenspilling etter ny innlogging er samme forespørsel).
- * Avtrykket er en usaltet hash (samme klasse som de øvrige pseudonymene i modulen; JARVIS-112 b), så det er ikke en hemmelighet - kun et skille mellom nyttelaster.
+ * Nyttelast-avtrykket (hex, `PAYLOAD_FINGERPRINT_LENGTH` tegn) for en ikke-journalført handling: SHA-256 over tenant, memory space og den kanoniske nyttelasten. Memory space er med fordi virkningen er per rom (en konto autoriseres per rom, møter og
+ * kontaktlenker ligger per rom), mens ledgeren er tenant-bred: samme nøkkel og nyttelast fra to rom er to forespørsler. TENANT er med (reviewer B F3) så samme nyttelast i to tenants ikke gir samme avtrykk i ledgerens nøkkel (ellers kunne en som leser
+ * databasen eller en sikkerhetskopi koble en nyttelast på tvers av tenants, og en ordlistetabell ville gjelde alle tenants; samme pseudonymkonvensjon som mottaker-hashen). Kun handlingens parametre teller ellers (ikke person, sesjon, enhet eller kanal:
+ * en gjenspilling etter ny innlogging er samme forespørsel). Avtrykket er en usaltet hash (samme klasse som de øvrige pseudonymene i modulen; JARVIS-112 b), så det er ikke en hemmelighet - kun et skille mellom nyttelaster.
  */
-export function ownerPayloadFingerprint(memorySpace: string, parameters: Record<string, JsonValue>): string {
+export function ownerPayloadFingerprint(tenantId: string, memorySpace: string, parameters: Record<string, JsonValue>): string {
   if (typeof parameters !== "object" || parameters === null || Array.isArray(parameters)) throw new TypeError("canonical_payload_parameters_not_an_object");
   const payload = Object.fromEntries(Object.entries(parameters).filter(([name]) => !REQUEST_IDENTITY_FIELDS.includes(name)));
-  const hashed = JSON.stringify(["comms-owner-payload-v1", memorySpace, canonicalPayloadJson(payload)]);
+  const hashed = JSON.stringify(["comms-owner-payload-v2", tenantId, memorySpace, canonicalPayloadJson(payload)]);
   return createHash("sha256").update(hashed, "utf8").digest("hex").slice(0, PAYLOAD_FINGERPRINT_LENGTH);
 }
 
@@ -172,7 +173,11 @@ export async function executeCommsOwnerAction(
   let parameters = input.parameters;
   // JARVIS-112 e (K4): en for lang nøkkel (for ALLE handlinger som tar en nøkkel) er en tydelig feil - aldri avkortet, aldri den misvisende `idempotency_key_required`. Sjekken står FØR kravet om nøkkel.
   if (userKey !== undefined && userKey.length > COMMS_IDEMPOTENCY_KEY_MAX_LENGTH) return { ok: false, status: "rejected", reason: "idempotency_key_too_long" };
-  if ((outbound || COMMS_KEYED_CONTACT_ACTIONS.includes(action)) && (userKey === undefined || !KEY.test(userKey))) return { ok: false, status: "rejected", reason: "idempotency_key_required" };
+  const keyRequired = outbound || COMMS_KEYED_CONTACT_ACTIONS.includes(action);
+  if (keyRequired && (userKey === undefined || !KEY.test(userKey))) return { ok: false, status: "rejected", reason: "idempotency_key_required" };
+  // Reviewer B F2: en OPPGITT nøkkel til en handling der nøkkelen er valgfri må ha samme form som en påkrevd (8-160 tegn, `[A-Za-z0-9._:-]`). En tom eller svak nøkkel ga ellers en stille `deduplicated` (`authorize_account(X, "")`, `revoke_account`,
+  // `authorize_account(X, "")` utførte ikke den andre autoriseringen), og et NUL-tegn ga en ubehandlet databasefeil (HTTP 500). Ingen nøkkel = ingen idempotens (uendret).
+  if (!keyRequired && userKey !== undefined && !KEY.test(userKey)) return { ok: false, status: "rejected", reason: "idempotency_key_invalid" };
   // A-N2: gatewayen og journalen ser kun den SKOPEDE nøkkelen (handling + tenant-merke + brukerens nøkkel).
   // JARVIS-112 a: for IKKE-journalførte handlinger (ingen journal binder nøkkelen til forespørselen) er nyttelast-avtrykket et eget ledd i nøkkelen, så en gjenbrukt nøkkel med ULIK nyttelast aldri gir en stille `ok + deduplicated` uten effekt.
   // Journalførte handlinger får ikke avtrykket: der avvises et avvik som kollisjon (A-M5, under).
@@ -183,7 +188,7 @@ export async function executeCommsOwnerAction(
     } else {
       let fingerprint: string;
       try {
-        fingerprint = ownerPayloadFingerprint(identity.memory_space_id, parameters);
+        fingerprint = ownerPayloadFingerprint(identity.tenant_id, identity.memory_space_id, parameters);
       } catch {
         // Nyttelasten er ikke ren JSON (NaN, for dyp nesting, ...): aldri en stille omskriving til et avtrykk som kunne delt nøkkel med en annen nyttelast.
         return { ok: false, status: "rejected", reason: "invalid_parameters" };
