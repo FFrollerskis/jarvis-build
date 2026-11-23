@@ -275,6 +275,9 @@ describe("C5: --sandbox-repo NEKTER produksjonsrepoet (review F14) - scriptet sk
       ["det kanoniske repoet med .git-suffiks", `${CANONICAL_GITHUB_REPO}.git`, { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
       ["det gamle repoet med store bokstaver og .GIT", "TSWorkflow/JarvisBuild.GIT", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
       ["det gamle repoet med gjentatt .git.git", "tsworkflow/jarvisbuild.git.git", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
+      // Forken het `FFrollerskis/jarvisbuild` før omdøpingen til `jarvis-build` (D-478 pkt 2); GitHub videresender det gamle navnet, så det ER produksjonsrepoet.
+      ["forkets tidligere navn (GitHub videresender det)", "FFrollerskis/jarvisbuild", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
+      ["forkets tidligere navn med .git og store bokstaver", "FFROLLERSKIS/JarvisBuild.GIT", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
       ["JARVIS_GITHUB_REPO med .git-suffiks mot sandbox uten", "tsworkflow/prod-repo", { JARVIS_GITHUB_REPO: "tsworkflow/prod-repo.git" }],
       ["JARVIS_GITHUB_REPO uten suffiks mot sandbox med .git", "tsworkflow/prod-repo.git", { JARVIS_GITHUB_REPO: "tsworkflow/prod-repo" }],
       ["JARVIS_GIT_ALLOWED_REPOS med store bokstaver og .git mot sandbox uten", "tsworkflow/andre", { JARVIS_GIT_ALLOWED_REPOS: "TSWorkflow/Andre.git" }]

@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CANONICAL_GITHUB_REPO, LEGACY_GITHUB_REPOS, type IdentityContext } from "@jarvis/contracts";
+import { CANONICAL_GITHUB_REPO, FORMER_CANONICAL_GITHUB_REPOS, LEGACY_GITHUB_REPOS, PRODUCTION_GITHUB_REPO_NAMES, type IdentityContext } from "@jarvis/contracts";
 import {
   CONNECTOR_REGISTRY,
   buildStatusSource,
   configuredGithubRepo,
   curatedReadOnlyMeshTools,
   githubRepoLockViolation,
+  isProductionGithubRepo,
+  productionGithubRepoKeys,
   resolveGithubRepo,
   type ToolGateway
 } from "../src/index.ts";
+import { resolveLiveRepo } from "../scripts/ua5-github-live.ts";
 
 /**
  * WP-A1 (D-478/D-479, JARVIS-117 a/b): ÉN kilde for det kanoniske GitHub-repoet (`CANONICAL_GITHUB_REPO` i `@jarvis/contracts`). Alle standarder følger den, og
@@ -184,5 +187,59 @@ describe("repolåsen er hermetisk mot `env`-argumentet (process.env lekker ikke 
     expect(githubRepoLockViolation("list_branches", undefined)).toBeNull();
     expect(githubRepoLockViolation("list_branches", "acme/fra-process-env")).toBeNull();
     expect(githubRepoLockViolation("list_branches", CANONICAL_GITHUB_REPO)).toEqual({ requested: CANONICAL_GITHUB_REPO, allowed: "acme/fra-process-env" });
+  });
+});
+
+describe("daglig oppsummering: en GitHub-lesing som feiler er UKJENT, ikke «ingen issues» (D-396-prinsippet)", () => {
+  function gatewayReturning(result: unknown): ToolGateway {
+    return { async execute() { return result; } } as unknown as ToolGateway;
+  }
+
+  it("feilet lesing (credential mangler, Issues av -> 410 m.m.) gir et eget element med repoet og årsaken; vellykket lesing gir ingen slik markering", async () => {
+    const failed = await buildStatusSource(gatewayReturning({ ok: false, reason: "credential_unavailable" }), "/finnes/ikke/PROJECT_STATUS.md").collect(identity);
+    const marker = failed.find((item) => item.ref === "issues-unavailable");
+    expect(marker).toMatchObject({ source: "github", title: "GitHub-issues utilgjengelige", score: 20 });
+    expect(marker?.detail).toContain(CANONICAL_GITHUB_REPO);
+    expect(marker?.detail).toContain("credential_unavailable");
+    expect(marker?.detail).toContain("UKJENT");
+    const ok = await buildStatusSource(gatewayReturning({ ok: true, data: { issues: [] } }), "/finnes/ikke/PROJECT_STATUS.md").collect(identity);
+    expect(ok.find((item) => item.ref === "issues-unavailable")).toBeUndefined();
+    // Uten gateway (ingen GitHub-kilde i det hele tatt) lages ingen markering.
+    const none = await buildStatusSource(null, "/finnes/ikke/PROJECT_STATUS.md").collect(identity);
+    expect(none.find((item) => item.ref === "issues-unavailable")).toBeUndefined();
+  });
+});
+
+describe("felles produksjonsvern for skrivende live-/akseptanse-skript (github-sandbox-guard)", () => {
+  it("de faste produksjonsnavnene, repoet JARVIS_GITHUB_REPO peker på og ekstra allowlist nektes i alle skrivemåter; sandbox-navn som bare ligner nektes ikke", () => {
+    for (const name of PRODUCTION_GITHUB_REPO_NAMES) {
+      for (const variant of [name, name.toUpperCase(), `${name}.git`, `${name}/`, ` ${name} `, `${name}.git.git`, `${name.toUpperCase()}.GIT`]) {
+        expect(isProductionGithubRepo(variant, {}), variant).toBe(true);
+      }
+    }
+    expect(PRODUCTION_GITHUB_REPO_NAMES).toEqual(expect.arrayContaining([CANONICAL_GITHUB_REPO, ...LEGACY_GITHUB_REPOS, ...FORMER_CANONICAL_GITHUB_REPOS]));
+    expect(isProductionGithubRepo("acme/prod", { [ENV]: "Acme/Prod.git" })).toBe(true);
+    expect(isProductionGithubRepo("acme/ekstra", {}, ["ACME/Ekstra"])).toBe(true);
+    for (const sandbox of ["acme/sandbox", "FFrollerskis/jarvis-sandbox", "ffrollerskis/jarvis-build-test", "tsworkflow/jarvisbuild-test", "owner/repo.github.io", "", ".git", "/"]) {
+      expect(isProductionGithubRepo(sandbox, {}), JSON.stringify(sandbox)).toBe(false);
+    }
+    // En tom/ugyldig env-verdi gir aldri en tom nøkkel i mengden (da ville et tomt navn «matche»).
+    expect([...productionGithubRepoKeys({ [ENV]: ".git" })].every((key) => key.length > 0)).toBe(true);
+  });
+
+  it("ua5-github-live: repo er PÅKREVD (ingen standard) og produksjonsrepoer nektes; et eget sandbox-repo godtas", () => {
+    expect(resolveLiveRepo([], {})).toMatchObject({ ok: false });
+    expect(resolveLiveRepo(["  "], {})).toMatchObject({ ok: false });
+    for (const bad of ["ikke-et-repo", "a/b/c", "https://github.com/a/b", "../x/y"]) expect(resolveLiveRepo([bad], {}), bad).toMatchObject({ ok: false });
+    for (const name of PRODUCTION_GITHUB_REPO_NAMES) {
+      for (const variant of [name, name.toUpperCase(), `${name}.git`, `${name}.git.git`]) {
+        const r = resolveLiveRepo([variant], {});
+        expect(r, variant).toMatchObject({ ok: false });
+        expect(r.ok ? "" : r.reason, variant).toContain("produksjonsrepo");
+      }
+    }
+    expect(resolveLiveRepo(["acme/prod"], { [ENV]: "acme/prod" })).toMatchObject({ ok: false });
+    expect(resolveLiveRepo(["acme/andre"], { JARVIS_GIT_ALLOWED_REPOS: "acme/mitt, ACME/Andre.git" })).toMatchObject({ ok: false });
+    expect(resolveLiveRepo(["acme/sandbox"], { [ENV]: "acme/prod", JARVIS_GIT_ALLOWED_REPOS: "acme/prod" })).toEqual({ ok: true, repo: "acme/sandbox" });
   });
 });

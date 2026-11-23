@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { CANONICAL_GITHUB_REPO, LEGACY_GITHUB_REPOS } from "../../../packages/contracts/src/github-repo.ts";
+import { CANONICAL_GITHUB_REPO, FORMER_CANONICAL_GITHUB_REPOS, LEGACY_GITHUB_REPOS, PRODUCTION_GITHUB_REPO_NAMES, githubRepoAliasKey } from "../../../packages/contracts/src/github-repo.ts";
 import { createHarness, gitSync, syntheticInstallationToken } from "./support/harness.mjs";
 import { apiRequest, RUNNER_TOKEN } from "./support/harness.mjs";
 import { makeTempDir } from "./support/tmp.mjs";
@@ -20,7 +20,12 @@ const ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const SCRIPT = join(ROOT, "ops/job-runner/acceptance.sh");
 const baseEnv = { PATH: process.env["PATH"], HOME: tmpdir(), LANG: "C.UTF-8" };
 
-const run = (args, env = {}, input) => spawnSync("bash", [SCRIPT, ...args], { env: { ...baseEnv, ...env }, encoding: "utf8", input, timeout: 60_000 });
+// ACCEPTANCE_ENV_FILE peker på en fil som ikke finnes: produksjonsvernet leser ellers <repo>/.env (hermetiske tester). Tester av .env-lesingen setter den selv.
+const NO_ENV_FILE = join(tmpdir(), "jarvis-acceptance-test-finnes-ikke.env");
+const run = (args, env = {}, input) => spawnSync("bash", [SCRIPT, ...args], { env: { ...baseEnv, ACCEPTANCE_ENV_FILE: NO_ENV_FILE, ...env }, encoding: "utf8", input, timeout: 60_000 });
+/** Kjører bash som laster scriptet (ACCEPTANCE_SOURCE_ONLY=1) og så et lite testprogram; argv til programmet gis som args ($1...). */
+// (argv legges i en array og nullstilles FØR scriptet lastes: scriptets egen argumentløkke avviser ellers dem som «ukjente argumenter».)
+const sourced = (program, args = [], env = {}) => spawnSync("bash", ["-c", `ARGS=("$@"); set --\nset -uo pipefail\nsource "${SCRIPT}"\nset -- "\${ARGS[@]}"\n${program}`, "bash", ...args], { env: { ...baseEnv, ACCEPTANCE_SOURCE_ONLY: "1", ACCEPTANCE_ENV_FILE: NO_ENV_FILE, ...env }, encoding: "utf8", timeout: 60_000 });
 
 let harnesses = [];
 afterEach(async () => { await Promise.all(harnesses.map((h) => h.close())); harnesses = []; });
@@ -113,8 +118,8 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     expect(h.fake.calls.filter((c) => ["create", "start", "exec", "rm"].includes(c.args[0] ?? "")).length).toBe(0);
   });
 
-  it("D-479 (kontobytte): det NÅVÆRENDE kanoniske repoet og det gamle nektes begge HARDT, også med annen skrivemåte og selv om de står i runner.allowed_repos", async () => {
-    const prods = [CANONICAL_GITHUB_REPO, ...LEGACY_GITHUB_REPOS];
+  it("D-479 (kontobytte): det NÅVÆRENDE kanoniske repoet, forkets tidligere navn og det gamle nektes HARDT, også med annen skrivemåte og selv om de står i runner.allowed_repos", async () => {
+    const prods = [...PRODUCTION_GITHUB_REPO_NAMES];
     // runner.allowed_repos og git_credentials krever små bokstaver (config_invalid:runner.allowed_repos:entry_invalid ellers); ACCEPTANCE_REPO sammenlignes case-uavhengig.
     const lower = prods.map((s) => s.toLowerCase());
     const h = await createHarness({ slugs: lower });
@@ -151,7 +156,7 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     for (const configured of [" acme/prod ", "acme/prod.git", "ACME/PROD.GIT/", "acme/prod/"]) {
       const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "acme/prod", JARVIS_GITHUB_REPO: configured });
       expect(r.status, configured).toBe(2);
-      expect(r.stderr, configured).toContain("PRODUKSJONSREPOET (JARVIS_GITHUB_REPO)");
+      expect(r.stderr, configured).toContain("PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i miljøet)");
     }
     // Negativ kontroll: et repo som ikke er produksjon (men heller ikke står i allowed_repos) kommer forbi produksjonsvernet og stoppes først av allowed_repos-sjekken.
     const sandbox = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", JARVIS_GITHUB_REPO: "acme/prod" });
@@ -160,13 +165,16 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     expect(sandbox.stderr).toContain("står ikke i runner.allowed_repos");
     // Tom/uset JARVIS_GITHUB_REPO nekter ingenting ekstra (tom streng må ikke matche et tomt repo-navn).
     for (const blankValue of ["", "   ", ".git", "/"]) {
-      // Verdier som normaliseres til TOM nøkkel nekter ingenting (heller ikke et ACCEPTANCE_REPO som normaliseres til tom nøkkel): stoppes av allowed_repos-sjekken, ikke av produksjonsvernet.
-      for (const repo of ["owner/annet", ".git"]) {
-        const blank = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: repo, JARVIS_GITHUB_REPO: blankValue });
-        expect(blank.status, `${JSON.stringify(blankValue)} / ${repo}`).toBe(2);
-        expect(blank.stderr, `${JSON.stringify(blankValue)} / ${repo}`).not.toContain("PRODUKSJONSREPOET");
-        expect(blank.stderr, `${JSON.stringify(blankValue)} / ${repo}`).toContain("står ikke i runner.allowed_repos");
-      }
+      // Verdier som normaliseres til TOM nøkkel nekter ingenting (en tom nøkkel må aldri matche en tom nøkkel): stoppes av allowed_repos-sjekken, ikke av produksjonsvernet.
+      const blank = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", JARVIS_GITHUB_REPO: blankValue });
+      expect(blank.status, JSON.stringify(blankValue)).toBe(2);
+      expect(blank.stderr, JSON.stringify(blankValue)).not.toContain("PRODUKSJONSREPOET");
+      expect(blank.stderr, JSON.stringify(blankValue)).toContain("står ikke i runner.allowed_repos");
+      // ...og et ACCEPTANCE_REPO som selv normaliseres til tomt navn avvises som ugyldig, fail-closed (aldri «like» et tomt JARVIS_GITHUB_REPO).
+      const emptyRepo = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: ".git", JARVIS_GITHUB_REPO: blankValue });
+      expect(emptyRepo.status, JSON.stringify(blankValue)).toBe(2);
+      expect(emptyRepo.stderr, JSON.stringify(blankValue)).toContain("ikke et gyldig repo-navn");
+      expect(emptyRepo.stderr, JSON.stringify(blankValue)).not.toContain("PRODUKSJONSREPOET");
     }
     // Navn som bare ligner (prefiks/suffiks, `.github.io`, `-sandbox`) er IKKE produksjonsrepoer og skal ikke nektes av vernet.
     for (const similar of ["FFrollerskis/jarvis-build-sandbox", "ffrollerskis/jarvis-build2", "tsworkflow/jarvisbuild.github.io", "tsworkflow/jarvisbuild-test"]) {
@@ -178,13 +186,73 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     expect(h.service.manager.activeJobs).toBe(0);
   });
 
-  it("D-479: nektelisten i scriptet er i takt med kontrakten (hvert kanoniske og gamle repo står i case-etiketten, i små bokstaver)", async () => {
-    const script = await readFile(SCRIPT, "utf8");
-    const labels = /case "\$repo_lc" in\s+([^)]+)\)/.exec(script)?.[1];
-    expect(labels, "fant ikke nektelistens case-etikett").toBeDefined();
-    const listed = (labels ?? "").split("|").map((s) => s.trim());
-    for (const slug of [CANONICAL_GITHUB_REPO, ...LEGACY_GITHUB_REPOS]) expect(listed, slug).toContain(slug.toLowerCase());
-    expect(listed.length).toBe(new Set([CANONICAL_GITHUB_REPO, ...LEGACY_GITHUB_REPOS].map((s) => s.toLowerCase())).size);
+  it("D-479: nektelisten i scriptet (PRODUCTION_REPOS) er i takt med kontrakten: kanonisk, forkets tidligere navn og gamle repo, normalisert (leses ved sourcing, ikke ved å skanne teksten)", () => {
+    const r = sourced('printf "%s\\n" "${PRODUCTION_REPOS[@]}"');
+    expect(r.status, r.stderr).toBe(0);
+    const listed = r.stdout.trim().split("\n");
+    expect(new Set(listed)).toEqual(new Set(PRODUCTION_GITHUB_REPO_NAMES.map(githubRepoAliasKey)));
+    expect(listed.length).toBe(PRODUCTION_GITHUB_REPO_NAMES.length);
+    for (const entry of listed) expect(entry, "listen skal være på normalisert form").toBe(githubRepoAliasKey(entry));
+    expect(PRODUCTION_GITHUB_REPO_NAMES).toEqual(expect.arrayContaining([CANONICAL_GITHUB_REPO, ...LEGACY_GITHUB_REPOS, ...FORMER_CANONICAL_GITHUB_REPOS]));
+  });
+
+  it("D-479: production_repo_reason og alias_key oppfører seg likt som kontrakten (tabell: alle skrivemåter nektes, navn som bare ligner nektes ikke)", () => {
+    const inputs = [
+      ...PRODUCTION_GITHUB_REPO_NAMES.flatMap((n) => [n, n.toUpperCase(), n.toLowerCase(), `${n}.git`, `${n}/`, `${n}.git/`, `${n}.git.git`, `${n}/.git`, ` ${n} `, `\t${n}\r`, `${n.toUpperCase()}.GIT`]),
+      "owner/annet", "owner/repo.github.io", "owner/mitt.git-repo", "owner/gitops", "FFrollerskis/jarvis-build-sandbox", "ffrollerskis/jarvis-build2", "tsworkflow/jarvisbuild-test", "tsworkflow/jarvisbuild.github.io", "ffrollerskis/jarvisbuild-x", ".git", "/", "", "   "
+    ];
+    const r = sourced('for v in "$@"; do if production_repo_reason "$v" >/dev/null; then echo 1; else echo 0; fi; done', inputs);
+    expect(r.status, r.stderr).toBe(0);
+    const verdicts = r.stdout.trim().split("\n");
+    expect(verdicts.length).toBe(inputs.length);
+    const productionKeys = new Set(PRODUCTION_GITHUB_REPO_NAMES.map(githubRepoAliasKey));
+    inputs.forEach((input, i) => expect(verdicts[i], JSON.stringify(input)).toBe(productionKeys.has(githubRepoAliasKey(input)) ? "1" : "0"));
+    // alias_key i bash = githubRepoAliasKey i TypeScript (samme normalisering).
+    const keys = sourced('for v in "$@"; do printf "[%s]\\n" "$(alias_key "$v")"; done', inputs);
+    expect(keys.stdout.trim().split("\n")).toEqual(inputs.map((v) => `[${githubRepoAliasKey(v)}]`));
+  });
+
+  it("D-479: JARVIS_GITHUB_REPO leses også fra .env (ACCEPTANCE_ENV_FILE): siste forekomst vinner, export/anførselstegn/CR/kommentar håndteres, kommenterte og lignende nøkler ignoreres, manglende fil nekter ingenting ekstra", async () => {
+    const dir = await makeTempDir("acc-env");
+    const write = async (name, text) => { const f = join(dir, name); await writeFile(f, text); return f; };
+    const envOf = (f) => ({ ACCEPTANCE_ENV_FILE: f });
+    const deny = (repo, f) => sourced('production_repo_reason "$1"', [repo], envOf(f));
+    const plain = await write("plain.env", "JARVIS_GITHUB_REPO=acme/prod\n");
+    expect(deny("acme/prod", plain).status).toBe(0);
+    expect(deny("acme/prod", plain).stdout).toContain("JARVIS_GITHUB_REPO i .env");
+    expect(deny("ACME/Prod.git", plain).status).toBe(0);
+    expect(deny("acme/annet", plain).status).toBe(1);
+    const messy = await write("messy.env", "FOO=1\r\nJARVIS_GITHUB_REPO=other/first\r\n# JARVIS_GITHUB_REPO=acme/kommentert\nNOT_JARVIS_GITHUB_REPO=acme/lignende\nexport JARVIS_GITHUB_REPO=\"Acme/Prod.git\"  # kommentar\r\n");
+    expect(deny("acme/prod", messy).status, "siste forekomst, export, anførselstegn, CR og kommentar").toBe(0);
+    for (const notProd of ["other/first", "acme/kommentert", "acme/lignende"]) expect(deny(notProd, messy).status, notProd).toBe(1);
+    const single = await write("single.env", "JARVIS_GITHUB_REPO='acme/prod'\n");
+    expect(deny("acme/prod", single).status).toBe(0);
+    const unquotedComment = await write("unquoted.env", "JARVIS_GITHUB_REPO=acme/prod # fra eieren\n");
+    expect(deny("acme/prod", unquotedComment).status).toBe(0);
+    const emptyValue = await write("empty.env", "JARVIS_GITHUB_REPO=\n");
+    expect(deny("", emptyValue).status, "tom verdi nekter ikke et tomt navn").toBe(1);
+    expect(deny("acme/prod", emptyValue).status).toBe(1);
+    expect(deny("acme/prod", join(dir, "finnes-ikke.env")).status, "manglende fil: ingen ekstra nekt").toBe(1);
+    // Hele veien: scriptet nekter før noe annet røres (exit 2) når .env peker på repoet.
+    const { config } = await setup();
+    const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "acme/prod", ACCEPTANCE_ENV_FILE: plain });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i .env)");
+    const ok = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", ACCEPTANCE_ENV_FILE: plain });
+    expect(ok.stderr).not.toContain("PRODUKSJONSREPOET");
+  });
+
+  it("D-479: ACCEPTANCE_REPO normaliseres til trimmet små bokstaver for allowed_repos-sammenligningen (eierens kontonavn har store bokstaver); det finnes ingen overstyring av produksjonsvernet", async () => {
+    const r = sourced('for v in "$@"; do printf "[%s]\\n" "$(normalize_repo_arg "$v")"; done', ["FFrollerskis/Sandbox", "  Owner/Repo\t", "owner/repo"]);
+    expect(r.stdout.trim().split("\n")).toEqual(["[ffrollerskis/sandbox]", "[owner/repo]", "[owner/repo]"]);
+    const { config } = await setup();
+    // Plausible «overstyringer» eksisterer ikke: produksjonsrepoet nektes uansett variabler (en test som feller hvis noen legger til en bakdør).
+    const overrides = { ACCEPT_ALLOW_PROD: "yes", ACCEPTANCE_ALLOW_PRODUCTION: "1", ACCEPT_FORCE: "1", FORCE: "1", ACCEPT_CONFIRM_RESTART: "yes", ACCEPT_SKIP_GUARD: "1", ACCEPTANCE_ALLOW_REPO: CANONICAL_GITHUB_REPO };
+    for (const repo of [CANONICAL_GITHUB_REPO, ...LEGACY_GITHUB_REPOS, ...FORMER_CANONICAL_GITHUB_REPOS]) {
+      const denied = run(["--with-restart"], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: repo, ...overrides });
+      expect(denied.status, repo).toBe(2);
+      expect(denied.stderr, repo).toContain("PRODUKSJONSREPOET");
+    }
   });
 
   it("B-L5: --with-restart krever bekreftelse (ACCEPT_CONFIRM_RESTART=yes, eller RESTART på terminal) - uten den er svaret exit 2 med advarsel, og ingenting røres", async () => {

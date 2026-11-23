@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CANONICAL_GITHUB_REPO, type IdentityContext } from "@jarvis/contracts";
+import { CANONICAL_GITHUB_REPO, LEGACY_GITHUB_REPOS, type IdentityContext } from "@jarvis/contracts";
 import { CONTROL_ACTION_ALLOWED, CONTROL_ACTION_ENDPOINTS, ControlCenterRegistry, explainControlCenterNo, type ControlCenterReport, type ControlSection } from "@jarvis/executive";
 import type { ToolDefinition } from "@jarvis/tool-gateway";
 import { createAuthorityCenter, summarizeManifest } from "../src/control-center/authority.ts";
@@ -139,7 +139,7 @@ describe("seksjonene og eier-/delegert autoritet", () => {
 
   it("enhetsoversikt som ikke kan leses er en egen UKJENT-seksjon (measured:false), og delegat-tellingen blir ukjent (null), ikke 0", async () => {
     // JARVIS_GITHUB_REPO satt: ellers er kodejobb-allowlisten tom (WARN, fail-closed) og ville vært verste status i stedet for den uleste enhetsoversikten
-    const r = await build({ devices: new Error("boom"), env: { JARVIS_GITHUB_REPO: "tsworkflow/jarvisbuild" } }).run();
+    const r = await build({ devices: new Error("boom"), env: { JARVIS_GITHUB_REPO: CANONICAL_GITHUB_REPO } }).run();
     expect(section(r, "devices")).toMatchObject({ status: "UNKNOWN", measured: false });
     expect(item(r, "authority", "delegates").facts).toMatchObject({ other_person_devices: null, other_person_active_grants: null });
     expect(section(r, "authority").status).toBe("UNKNOWN");
@@ -320,7 +320,19 @@ describe("policyer og eksterne begrensninger", () => {
 
   it("GitHub-repo-låsen: standard-repo låst OK; åpnet for andre repo WARN; ugyldig kode-allowlist FAIL; destinasjonsverter listes", async () => {
     const def = await build().run();
-    expect(item(def, "external", "github_repo")).toMatchObject({ status: "OK", facts: { repo: CANONICAL_GITHUB_REPO, other_repos_allowed: false } });
+    expect(item(def, "external", "github_repo")).toMatchObject({ status: "OK", facts: { repo: CANONICAL_GITHUB_REPO, repo_source: "standard", legacy_repo: false, other_repos_allowed: false } });
+    // Tom/ugyldig JARVIS_GITHUB_REPO = standarden; en gyldig verdi kalles «JARVIS_GITHUB_REPO».
+    for (const blank of ["", "   ", "ikke et repo"]) expect(item(await build({ env: { JARVIS_GITHUB_REPO: blank } }).run(), "external", "github_repo"), JSON.stringify(blank)).toMatchObject({ status: "OK", facts: { repo: CANONICAL_GITHUB_REPO, repo_source: "standard" } });
+    expect(item(await build({ env: { JARVIS_GITHUB_REPO: CANONICAL_GITHUB_REPO } }).run(), "external", "github_repo")).toMatchObject({ status: "OK", facts: { repo_source: "JARVIS_GITHUB_REPO", legacy_repo: false } });
+    // D-479: JARVIS_GITHUB_REPO som fortsatt peker på det GAMLE repoet fra før kontobyttet gir WARN (ikke «OK, låst til»), også som alias (store bokstaver, `.git`, `/`).
+    for (const legacy of LEGACY_GITHUB_REPOS.flatMap((l) => [l, l.toUpperCase(), `${l}.git`, ` ${l} `])) {
+      const gammel = item(await build({ env: { JARVIS_GITHUB_REPO: legacy } }).run(), "external", "github_repo");
+      expect(gammel, legacy).toMatchObject({ status: "WARN", facts: { legacy_repo: true, repo_source: "JARVIS_GITHUB_REPO" } });
+      expect(gammel.detail_no, legacy).toContain("GAMLE");
+      expect(gammel.detail_no, legacy).toContain(CANONICAL_GITHUB_REPO);
+    }
+    // En verdi med `/` på slutten er ikke et gyldig `eier/navn` og gir standarden (samme definisjon som låsen), ikke en gammel-repo-advarsel.
+    expect(item(await build({ env: { JARVIS_GITHUB_REPO: `${LEGACY_GITHUB_REPOS[0]}/` } }).run(), "external", "github_repo")).toMatchObject({ status: "OK", facts: { repo: CANONICAL_GITHUB_REPO, repo_source: "standard", legacy_repo: false } });
     const custom = await build({ env: { JARVIS_GITHUB_REPO: "eier/mitt-repo", JARVIS_GITHUB_ALLOW_OTHER_REPOS: "true", JARVIS_DESTINATION_HOST_ALLOWLIST: "jira.firma.no, *.grafana.net ,", JARVIS_GIT_ALLOWED_REPOS: "eier/mitt-repo" } }).run();
     expect(item(custom, "external", "github_repo")).toMatchObject({ status: "WARN", facts: { repo: "eier/mitt-repo", other_repos_allowed: true } });
     expect(item(custom, "external", "destination_hosts").facts).toMatchObject({ hosts: 2, list: "jira.firma.no, *.grafana.net" });
