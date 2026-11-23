@@ -107,18 +107,19 @@ env_file_path() { printf '%s' "${ACCEPTANCE_ENV_FILE:-$ROOT/.env}"; }
 # (`A="x" NAME=verdi`; funnet av en tilfeldig differensialfuzz mot docker compose), og innledende blanke kan være Unicode (NBSP, U+3000) eller BOM. Derfor er en kandidat HVER linje der NAME står
 # som et helt navn (ikke etter en navnetegn eller `$`, ikke før en navnetegn), uansett hvor på linjen, med to unntak: rene kommentarlinjer (ASCII-blanke og så `#`) og linjer der alle forekomster er referanser `${NAME...`
 # (bruk av variabelen i en annen verdi). Andre nøkler (NOT_NAME, NAME_X) og `$NAME` er ikke treff. Hver kandidat tolkes så strengt av env_line_value; det som ikke lar seg tolke gir FATAL (aldri en gjetning).
-# grep -a/LC_ALL=C: en fil med NUL-bytes eller ikke-UTF-8 tegn leses fortsatt (ikke «Binary file matches»).
+# grep -a/LC_ALL=C: en fil med NUL-bytes eller ikke-UTF-8 tegn leses fortsatt (ikke «Binary file matches»). Skriver `LINJENR:linje` (linjenummeret brukes i meldinger; innholdet skrives aldri ut, det kan være en hemmelighet).
 env_file_candidate_lines() {
-  local LC_ALL=C name="$1" file l stripped re
+  local LC_ALL=C name="$1" file l c stripped re
   file="$(env_file_path)"
   [ -f "$file" ] && [ -r "$file" ] || return 0
   re="(^|[^A-Za-z0-9_\$])${name}([^A-Za-z0-9_]|\$)"
-  while IFS= read -r l; do
-    case "$l" in "${l%%[![:space:]]*}#"*) continue ;; esac   # ren kommentarlinje
-    stripped="${l//\$\{$name/}"                               # `${NAME...` er bruk av variabelen, ikke en tilordning
+  while IFS= read -r l; do   # l = LINJENR:linje (grep -n)
+    c="${l#*:}"
+    case "$c" in "${c%%[![:space:]]*}#"*) continue ;; esac   # ren kommentarlinje
+    stripped="${c//\$\{$name/}"                              # `${NAME...` er bruk av variabelen, ikke en tilordning
     [[ "$stripped" =~ $re ]] || continue
     printf '%s\n' "$l"
-  done < <(LC_ALL=C grep -a -E "$re" "$file" 2>/dev/null || true)   # LC_ALL=C også for grep: `local LC_ALL` eksporteres ikke til barneprosesser
+  done < <(LC_ALL=C grep -a -n -E "$re" "$file" 2>/dev/null || true)   # LC_ALL=C også for grep: `local LC_ALL` eksporteres ikke til barneprosesser
 }
 
 # Tolker ÉN kandidatlinje STRENGT (hvitliste): `[export ]NAME[ ]=[ ]verdi` der verdien er tom eller består av bokstaver, tall, `.`, `_`, `-` og `/` (et repo-navn), evt. i enkle eller doble anførselstegn,
@@ -141,23 +142,73 @@ env_line_value() {
 env_file_value() {
   local LC_ALL=C name="$1" l v value=""   # C-locale: bash-mønstre feiler ellers på ikke-UTF-8 bytes (en latin-1-kommentar på linjen ga tom verdi = vernet falt bort)
   while IFS= read -r l; do
-    if v="$(env_line_value "$name" "$l")"; then value="$v"; fi
+    if v="$(env_line_value "$name" "${l#*:}")"; then value="$v"; fi
   done < <(env_file_candidate_lines "$name")
   printf '%s' "$value"
 }
 
-# Kan vi stole på det vi leser fra .env? Skriver `WARN: ...` (fortsett: vernet gjelder da bare de faste navnene og miljøet) eller `FATAL: ...` (avbryt: vi kan ikke tolke linjen, og compose kan gjøre noe annet enn vi gjør):
+# Første linje (linjenummer til stdout) der en verdi i anførselstegn IKKE avsluttes på samme linje, i en .env-fil; status 3 hvis noen, 0 ellers (annen status = awk mangler eller feilet).
+# Flerlinjede verdier støttes ikke i .env (se .env.example), og compose leser da linjene annerledes enn vi gjør linje for linje: en annen nøkkels flerlinjede verdi kan SKJULE en `NAME=`-linje for compose
+# (siste linje vinner hos oss, men er en del av verdien hos compose) eller AVSLØRE en (`# ...slutt" NAME=prod`: en kommentarlinje for oss, en ny tilordning for compose; reviewer B N2).
+# Liten tokenizer som etterligner compose: hopp blanke (og bytes >= 0x80), `export`, nøkkel og `=`/`:`; en verdi i anførselstegn leses til avsluttende tegn (tilbakestrek-escape); en uanført verdi går ut linjen;
+# etter en avsluttet verdi fortsetter tokenizeren (ny tilordning på samme linje). awk kalles med LC_ALL=C og bare POSIX-funksjoner.
+env_file_unterminated_quote() {
+  LC_ALL=C awk '
+    function isws(c) { return c != "" && (index(" \t\r\f\013", c) > 0 || c >= "\200") }
+    function iskey(c) { return c != "" && (c ~ /[A-Za-z0-9_.-]/ || index("[]", c) > 0) }
+    {
+      s = $0
+      if (NR == 1 && substr(s, 1, 3) == "\357\273\277") s = substr(s, 4)
+      n = length(s); i = 1
+      while (i <= n) {
+        while (i <= n && isws(substr(s, i, 1))) i++
+        if (i > n || substr(s, i, 1) == "#") break
+        if (substr(s, i, 6) == "export" && isws(substr(s, i + 6, 1))) { i += 6; continue }
+        j = i
+        while (j <= n && iskey(substr(s, j, 1))) j++
+        if (j == i) break
+        i = j
+        while (i <= n && isws(substr(s, i, 1))) i++
+        c = substr(s, i, 1)
+        if (c != "=" && c != ":") break
+        i++
+        while (i <= n && isws(substr(s, i, 1))) i++
+        c = substr(s, i, 1)
+        if (c == "\"" || c == "\047") {
+          q = c; i++
+          while (i <= n && !(substr(s, i, 1) == q && substr(s, i - 1, 1) != "\\")) i++
+          if (i > n) { found = NR; exit }
+          i++
+          continue
+        }
+        break
+      }
+    }
+    END { if (found) { print found; exit 3 } exit 0 }' "$1" 2>/dev/null
+}
+
+# Kan vi stole på det vi leser fra .env? Skriver `WARN: ...` (fortsett: vernet gjelder da bare de faste navnene og miljøet) eller `FATAL: ...` (avbryt: vi kan ikke tolke filen, og compose kan gjøre noe annet enn vi gjør):
 #  - WARN: filen finnes men er ikke en vanlig fil (FIFO, enhet) eller kan ikke leses (rettigheter).
-#  - FATAL: en kandidatlinje for NAME er ikke en form env_line_value tolker (se der), f.eks. YAML-kolon `NAME: v`, `$`-interpolasjon, escapes eller flerlinjede verdier, Unicode-blanke.
+#  - FATAL: en verdi i anførselstegn går over flere linjer (env_file_unterminated_quote), eller en kandidatlinje for NAME er ikke en form env_line_value tolker (se der), f.eks. YAML-kolon `NAME: v`,
+#    `$`-interpolasjon, escapes, Unicode-blanke, en omtale av navnet utenfor en egen tilordning, eller awk kan ikke kjøres (vi gjetter aldri). Meldingene oppgir linjenummer, aldri innhold.
 env_file_check() {
-  local LC_ALL=C name="$1" file l
+  local LC_ALL=C name="$1" file l n c ln rc
   file="$(env_file_path)"
   if [ -e "$file" ] && { [ ! -f "$file" ] || [ ! -r "$file" ]; }; then echo "WARN: kan ikke lese $file (ikke en vanlig fil, eller ingen lesetilgang): $name derfra er IKKE sjekket mot produksjonsvernet"; return 0; fi
+  if [ -f "$file" ] && [ -r "$file" ]; then
+    ln="$(env_file_unterminated_quote "$file")"; rc=$?
+    case "$rc" in
+      0) ;;
+      3) echo "FATAL: $file har en verdi i anførselstegn som ikke avsluttes på samme linje (linje $ln): flerlinjede verdier støttes ikke i .env, og compose leser da $name annerledes enn vernet - skriv verdien på én linje"; return 0 ;;
+      *) echo "FATAL: kunne ikke analysere $file (awk mangler eller feilet): vernet kan ikke tolke den og gjetter ikke - installer awk eller fjern $name derfra"; return 0 ;;
+    esac
+  fi
   while IFS= read -r l; do
-    env_line_value "$name" "$l" > /dev/null && continue
-    case "${l%%[[:space:]]#*}" in
-      *'$'*) echo "FATAL: $name i $file bruker variabel-interpolasjon (\$): vernet kan ikke tolke verdien - sett en ren verdi (eier/repo) eller fjern linjen" ;;
-      *) echo "FATAL: linjen for $name i $file er ikke på formen $name=verdi (verdi av bokstaver, tall, . _ - /, evt. i anførselstegn og med # kommentar): vernet kan ikke tolke den - rett eller fjern linjen" ;;
+    n="${l%%:*}"; c="${l#*:}"
+    env_line_value "$name" "$c" > /dev/null && continue
+    case "${c%%[[:space:]]#*}" in
+      *'$'*) echo "FATAL: $name i $file (linje $n) bruker variabel-interpolasjon (\$): vernet kan ikke tolke verdien - sett en ren verdi (eier/repo) eller fjern linjen" ;;
+      *) echo "FATAL: linjen for $name i $file (linje $n) er ikke på formen $name=verdi (verdi av bokstaver, tall, . _ - /, evt. i anførselstegn og med # kommentar): vernet kan ikke tolke den - rett eller fjern linjen" ;;
     esac
     return 0
   done < <(env_file_candidate_lines "$name")
