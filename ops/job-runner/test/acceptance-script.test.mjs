@@ -24,6 +24,8 @@ const baseEnv = { PATH: process.env["PATH"], HOME: tmpdir(), LANG: "C.UTF-8" };
 const NO_ENV_FILE = join(tmpdir(), "jarvis-acceptance-test-finnes-ikke.env");
 // Finnes en UTF-8-locale på maskinen? (bash-mønstre oppfører seg annerledes på ugyldige UTF-8-bytes der; testene under dekker det bare hvis locale finnes.)
 const HAS_UTF8_LOCALE = (spawnSync("locale", ["-a"], { encoding: "utf8" }).stdout ?? "").toLowerCase().split("\n").some((l) => l.includes("utf8") || l.includes("utf-8"));
+// Finnes `docker compose` (CLI; trenger ingen daemon for `config`)? Da kan .env-tolkingen testes mot compose selv som orakel.
+const HAS_DOCKER_COMPOSE = spawnSync("docker", ["compose", "version"], { encoding: "utf8", timeout: 20_000 }).status === 0;
 const run = (args, env = {}, input) => spawnSync("bash", [SCRIPT, ...args], { env: { ...baseEnv, ACCEPTANCE_ENV_FILE: NO_ENV_FILE, ...env }, encoding: "utf8", input, timeout: 60_000 });
 /** Kjører bash som laster scriptet (ACCEPTANCE_SOURCE_ONLY=1) og så et lite testprogram; argv til programmet gis som args ($1...). */
 // (argv legges i en array og nullstilles FØR scriptet lastes: scriptets egen argumentløkke avviser ellers dem som «ukjente argumenter».)
@@ -337,10 +339,12 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
       expect(deny("acme/prod", f).stdout, name).toContain("JARVIS_GITHUB_REPO i .env");
       expect(check(f).stdout, `${name}: ingen falsk melding`).toBe("");
     }
-    // ugyldig byte INNE I verdien: en annen streng enn acme/prod, så ingen treff - men heller ingen krasj
+    // ugyldig byte INNE I verdien: ikke en form vernet tolker (hvitliste) -> FATAL, og production_repo_reason nekter (fail-closed), ingen krasj
     const inValue = await write("in-value.env", L1("JARVIS_GITHUB_REPO=acme/pr\xe9d\n"));
     expect(value(inValue).status).toBe(0);
-    expect(deny("acme/prod", inValue).status).toBe(1);
+    expect(check(inValue).stdout).toMatch(/^FATAL: linjen for JARVIS_GITHUB_REPO/);
+    expect(deny("acme/prod", inValue).status, "en .env vernet ikke kan tolke nekter alt").toBe(0);
+    expect(deny("acme/prod", inValue).stdout).toContain("kan ikke tolkes");
     // FATAL oppdages også med latin-1 på linjen (YAML-kolon og interpolasjon)
     for (const [name, data, re] of [
       ["yaml.env", L1("JARVIS_GITHUB_REPO: acme/prod # \xe6\n"), /^FATAL: linjen for JARVIS_GITHUB_REPO/],
@@ -369,6 +373,130 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     expect(e2eNordic.stderr).toContain("avbryter");
     expect(e2eNordic.stderr).not.toContain("står ikke i runner.allowed_repos");
   });
+
+  it("D-479 (reviewer B delta 3): .env tolkes med en STRENG hvitliste - former compose leser annerledes (escapes, flerlinjede verdier, Unicode-blanke, backslash, mellomrom i verdien, YAML-kolon, interpolasjon) gir FATAL og nekter alt, enkle former leses som før", async () => {
+    const dir = await makeTempDir("acc-env-strict");
+    const write = async (name, data) => { const f = join(dir, name); await writeFile(f, data); return f; };
+    const B = (...parts) => Buffer.concat(parts.map((p) => (Buffer.isBuffer(p) ? p : Buffer.from(p, "utf8"))));
+    const value = (f, env = {}) => sourced("env_file_value JARVIS_GITHUB_REPO", [], { ACCEPTANCE_ENV_FILE: f, ...env }).stdout;
+    const deny = (repo, f, env = {}) => sourced('production_repo_reason "$1"', [repo], { ACCEPTANCE_ENV_FILE: f, ...env });
+    const check = (f, env = {}) => sourced("env_file_check JARVIS_GITHUB_REPO", [], { ACCEPTANCE_ENV_FILE: f, ...env }).stdout;
+    const locales = [{ LC_ALL: "C" }, ...(HAS_UTF8_LOCALE ? [{ LC_ALL: "C.UTF-8" }] : [])];
+    const P = "acme/prod";
+    // (a) enkle former: tolkes, nektes som produksjon, ingen melding - i alle locale
+    const simple = [
+      ["plain", `JARVIS_GITHUB_REPO=${P}\n`],
+      ["spaces-around-eq", `JARVIS_GITHUB_REPO = ${P}\n`],
+      ["space-after-eq-quoted", `JARVIS_GITHUB_REPO= "${P}"\n`],
+      ["export", `export JARVIS_GITHUB_REPO=${P}\n`],
+      ["export-tab", `export\tJARVIS_GITHUB_REPO=${P}\n`],
+      ["tab-before-eq", `JARVIS_GITHUB_REPO\t=${P}\n`],
+      ["single-quoted", `JARVIS_GITHUB_REPO='${P}'\n`],
+      ["double-quoted-comment", `JARVIS_GITHUB_REPO="${P}" # kommentar\n`],
+      ["comment-with-dollar", `JARVIS_GITHUB_REPO=${P} # koster $5\n`],
+      ["crlf", `JARVIS_GITHUB_REPO=${P}\r\nB=2\r\n`],
+      ["bom-first", `\ufeffJARVIS_GITHUB_REPO=${P}\n`],
+      ["bom-export", `\ufeffexport JARVIS_GITHUB_REPO=${P}\n`],
+      ["form-feed-lead", `\fJARVIS_GITHUB_REPO=${P}\n`],
+      ["no-final-newline", `JARVIS_GITHUB_REPO=${P}`],
+      ["case-and-git-alias", `JARVIS_GITHUB_REPO=ACME/Prod.git/\n`],
+    ];
+    for (const [name, text] of simple) {
+      const f = await write(`simple-${name}.env`, text);
+      for (const env of locales) {
+        expect(value(f, env), `${name} ${JSON.stringify(env)}: verdi`).toBe(name === "case-and-git-alias" ? "ACME/Prod.git/" : P);
+        expect(check(f, env), `${name} ${JSON.stringify(env)}: ingen melding`).toBe("");
+        expect(deny(P, f, env).status, `${name} ${JSON.stringify(env)}: nektelse`).toBe(0);
+      }
+    }
+    // tom verdi: ingenting å nekte
+    const empty = await write("empty.env", "JARVIS_GITHUB_REPO=\n");
+    expect(value(empty)).toBe("");
+    expect(check(empty)).toBe("");
+    // (b) former reviewer B sin differensialfuzz mot docker compose viste at compose leser som acme/prod mens et løsere vern ikke gjorde: FATAL, og alt nektes (fail-closed)
+    const risky = [
+      ["multiline-double-quote", `JARVIS_GITHUB_REPO="\n${P}"\n`],
+      ["multiline-single-quote", `JARVIS_GITHUB_REPO='\n${P}'\n`],
+      ["escape-n", `JARVIS_GITHUB_REPO="${P}\\n"\n`],
+      ["escape-t", `JARVIS_GITHUB_REPO="${P}\\t"\n`],
+      ["escape-n-first", `JARVIS_GITHUB_REPO="\\n${P}"\n`],
+      ["escape-r", `JARVIS_GITHUB_REPO="${P}\\r"\n`],
+      ["backslash-unquoted", `JARVIS_GITHUB_REPO=${P}\\n\n`],
+      ["quoted-with-spaces", `JARVIS_GITHUB_REPO=" ${P} "\n`],
+      ["nbsp-leading", `\u00a0JARVIS_GITHUB_REPO=${P}\n`],
+      ["ideographic-space-leading", `\u3000JARVIS_GITHUB_REPO=${P}\n`],
+      ["em-space-leading", `\u2003JARVIS_GITHUB_REPO=${P}\n`],
+      ["nel-leading", `\u0085JARVIS_GITHUB_REPO=${P}\n`],
+      ["nbsp-after-eq", `JARVIS_GITHUB_REPO=\u00a0${P}\n`],
+      ["nbsp-before-eq", `JARVIS_GITHUB_REPO\u00a0=${P}\n`],
+      ["nbsp-trailing", `JARVIS_GITHUB_REPO=${P}\u00a0\n`],
+      ["nbsp-after-export", `export\u00a0JARVIS_GITHUB_REPO=${P}\n`],
+      ["yaml-colon", `JARVIS_GITHUB_REPO: ${P}\n`],
+      ["yaml-colon-nospace", `JARVIS_GITHUB_REPO:${P}\n`],
+      ["interpolation", `OWNER=acme\nJARVIS_GITHUB_REPO=\${OWNER}/prod\n`],
+      ["interpolation-default", `JARVIS_GITHUB_REPO=\${UNSETVAR:-${P}}\n`],
+      ["interpolation-bare", `X=${P}\nJARVIS_GITHUB_REPO=$X\n`],
+      ["hash-without-space", `JARVIS_GITHUB_REPO=${P}#c\n`],
+      ["url-form", `JARVIS_GITHUB_REPO=https://github.com/${P}\n`],
+      ["bare-name", `JARVIS_GITHUB_REPO\n`],
+      ["key-with-dot-suffix", `JARVIS_GITHUB_REPO.x=${P}\n`],
+      ["latin1-in-value", B(`JARVIS_GITHUB_REPO=acme/pr`, Buffer.from([0xe9]), "d\n")],
+    ];
+    for (const [name, data] of risky) {
+      const f = await write(`risky-${name}.env`, data);
+      for (const env of locales) {
+        expect(check(f, env), `${name} ${JSON.stringify(env)}: FATAL`).toMatch(/^FATAL: /);
+        expect(deny("owner/annet", f, env).status, `${name} ${JSON.stringify(env)}: nekter alt, også et repo som ikke ligner`).toBe(0);
+      }
+    }
+    // (c) ikke-kandidater: andre nøkler, kommentarer og bruk av variabelen i en annen verdi gir ingen melding
+    const notCandidates = await write("not-candidates.env", "# JARVIS_GITHUB_REPO: kommentar\n   # JARVIS_GITHUB_REPO=x\nNOT_JARVIS_GITHUB_REPO=x\nJARVIS_GITHUB_REPO_OLD: y\nXJARVIS_GITHUB_REPO=z\nexportJARVIS_GITHUB_REPO=q\nSOME_URL=https://github.com/${JARVIS_GITHUB_REPO}\n");
+    expect(check(notCandidates)).toBe("");
+    expect(value(notCandidates)).toBe("");
+    expect(deny("acme/prod", notCandidates).status).toBe(1);
+  });
+
+  it.skipIf(!HAS_DOCKER_COMPOSE)("D-479 (reviewer B delta 3): differensialtest mot ekte `docker compose config` - ALT compose leser som produksjonsrepoet er enten FATAL eller nektet av vernet (ingen fail-open), i C og UTF-8", async () => {
+    const dir = await makeTempDir("acc-env-oracle");
+    await writeFile(join(dir, "compose.yml"), 'services:\n  x:\n    image: busybox\n    environment:\n      JARVIS_GITHUB_REPO: "${JARVIS_GITHUB_REPO-__UNSET__}"\n');
+    const P = "acme/prod";
+    const B = (...parts) => Buffer.concat(parts.map((p) => (Buffer.isBuffer(p) ? p : Buffer.from(p, "utf8"))));
+    const composeValue = (file) => {
+      const r = spawnSync("docker", ["compose", "--env-file", file, "-f", join(dir, "compose.yml"), "config", "--format", "json"], { env: { PATH: process.env["PATH"], HOME: dir }, encoding: "utf8", timeout: 60_000, cwd: dir });
+      if (r.status !== 0) return undefined;   // compose avviser filen selv: ingen utrulling å beskytte
+      try { return JSON.parse(r.stdout).services.x.environment.JARVIS_GITHUB_REPO; } catch { return undefined; }
+    };
+    const isProd = (v) => typeof v === "string" && v.trim().toLowerCase().replace(/(\/|\.git)+$/g, "") === P;
+    const cases = [
+      ["enkel", `JARVIS_GITHUB_REPO=${P}\n`], ["mellomrom rundt =", `JARVIS_GITHUB_REPO = ${P}\n`], ["mellomrom etter = + anførselstegn", `JARVIS_GITHUB_REPO= "${P}"\n`],
+      ["yaml-kolon", `JARVIS_GITHUB_REPO: ${P}\n`], ["yaml-kolon uten mellomrom", `JARVIS_GITHUB_REPO:${P}\n`], ["export", `export JARVIS_GITHUB_REPO=${P}\n`], ["export med tab", `export\tJARVIS_GITHUB_REPO=${P}\n`],
+      ["BOM først", `\ufeffJARVIS_GITHUB_REPO=${P}\n`], ["BOM + export", `\ufeffexport JARVIS_GITHUB_REPO=${P}\n`], ["CRLF", `JARVIS_GITHUB_REPO=${P}\r\nB=2\r\n`], ["anførselstegn + kommentar", `JARVIS_GITHUB_REPO="${P}" # kommentar\n`],
+      ["kommentar med tab", `JARVIS_GITHUB_REPO=${P}\t# c\n`], ["escaped anførselstegn", `JARVIS_GITHUB_REPO="${P}\\"x"\n`], ["prod sist", `JARVIS_GITHUB_REPO=other/x\nJARVIS_GITHUB_REPO=${P}\n`], ["prod først, annen sist", `JARVIS_GITHUB_REPO=${P}\nJARVIS_GITHUB_REPO=other/x\n`],
+      ["interpolasjon", `OWNER=acme\nJARVIS_GITHUB_REPO=\${OWNER}/prod\n`], ["interpolasjon med standardverdi", `JARVIS_GITHUB_REPO=\${UNSETVAR:-${P}}\n`], ["anførselstegn + interpolasjon", `X=${P}\nJARVIS_GITHUB_REPO="\${X}"\n`], ["interpolasjon $X", `X=${P}\nJARVIS_GITHUB_REPO=$X\n`],
+      ["latin-1 på samme linje", B(`JARVIS_GITHUB_REPO=${P} # kommentar `, Buffer.from([0xe6]), "\n")], ["latin-1 på en annen linje", B("# kommentar ", Buffer.from([0xe6]), `\nJARVIS_GITHUB_REPO=${P}\n`)], ["NUL på en annen linje", B("X=a", Buffer.from([0]), `\nJARVIS_GITHUB_REPO=${P}\n`)],
+      ["uten sluttlinje", `JARVIS_GITHUB_REPO=${P}`], ["flerlinjet dobbelt anførselstegn", `JARVIS_GITHUB_REPO="\n${P}"\n`], ["flerlinjet enkelt anførselstegn", `JARVIS_GITHUB_REPO='\n${P}'\n`], ["flerlinjet med repo først", `JARVIS_GITHUB_REPO="${P}\n"\n`],
+      ["escape n", `JARVIS_GITHUB_REPO="${P}\\n"\n`], ["escape t", `JARVIS_GITHUB_REPO="${P}\\t"\n`], ["escape n først", `JARVIS_GITHUB_REPO="\\n${P}"\n`], ["escape r", `JARVIS_GITHUB_REPO="${P}\\r"\n`],
+      ["backslash uanført", `JARVIS_GITHUB_REPO=${P}\\n\n`], ["ledende NBSP", `\u00a0JARVIS_GITHUB_REPO=${P}\n`], ["ledende U+3000", `\u3000JARVIS_GITHUB_REPO=${P}\n`], ["ledende U+2003", `\u2003JARVIS_GITHUB_REPO=${P}\n`], ["ledende form feed", `\fJARVIS_GITHUB_REPO=${P}\n`], ["ledende vertikal tab", `\vJARVIS_GITHUB_REPO=${P}\n`],
+      ["NBSP etter =", `JARVIS_GITHUB_REPO=\u00a0${P}\n`], ["NBSP før =", `JARVIS_GITHUB_REPO\u00a0=${P}\n`], ["NBSP på slutten", `JARVIS_GITHUB_REPO=${P}\u00a0\n`], ["form feed før =", `JARVIS_GITHUB_REPO\f=${P}\n`], ["tab før =", `JARVIS_GITHUB_REPO\t=${P}\n`],
+      ["dollar i kommentar", `JARVIS_GITHUB_REPO=${P} # koster $5\n`], ["dollar i enkle anførselstegn", `JARVIS_GITHUB_REPO='acme/pr$od'\n`], ["verdi med mellomrom i anførselstegn", `JARVIS_GITHUB_REPO=" ${P} "\n`], ["store bokstaver, .git og slash", `JARVIS_GITHUB_REPO=ACME/Prod.git/\n`],
+      ["URL-form", `JARVIS_GITHUB_REPO=https://github.com/${P}\n`], ["export uten mellomrom", `exportJARVIS_GITHUB_REPO=${P}\n`], ["annen nøkkel med samme prefiks", `JARVIS_GITHUB_REPO_OLD=${P}\n`], ["sitert nøkkel", `"JARVIS_GITHUB_REPO"=${P}\n`],
+      ["tom verdi", "JARVIS_GITHUB_REPO=\n"], ["repo-linje etter 2000 linjer", `${Array.from({ length: 2000 }, (_, i) => `K${i}=v${i}`).join("\n")}\nJARVIS_GITHUB_REPO=${P}\n`],
+    ];
+    let prodCases = 0;
+    for (const [name, data] of cases) {
+      const f = join(dir, "case.env");
+      await writeFile(f, data);
+      const v = composeValue(f);
+      if (!isProd(v)) continue;
+      prodCases += 1;
+      for (const env of [{ LC_ALL: "C" }, ...(HAS_UTF8_LOCALE ? [{ LC_ALL: "C.UTF-8" }] : [])]) {
+        const check = sourced("env_file_check JARVIS_GITHUB_REPO", [], { ACCEPTANCE_ENV_FILE: f, ...env }).stdout;
+        const verdict = sourced('production_repo_reason "$1"', [P], { ACCEPTANCE_ENV_FILE: f, ...env }).status;
+        expect(check.startsWith("FATAL") || verdict === 0, `FAIL-OPEN: compose leser ${JSON.stringify(v)} for «${name}» (${JSON.stringify(env)}), men vernet verken avbryter eller nekter`).toBe(true);
+      }
+    }
+    expect(prodCases, "orakelet må faktisk ha sett mange produksjonsverdier").toBeGreaterThan(25);
+  }, 240_000);
 
   it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)("D-479: en ulesbar .env (ingen lesetilgang) gir en advarsel, ikke en stille bortfall (kun som ikke-root)", async () => {
     const dir = await makeTempDir("acc-env3");
