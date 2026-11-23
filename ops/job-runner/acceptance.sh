@@ -100,13 +100,13 @@ alias_key() {
 # ACCEPTANCE_REPO slik runneren vil ha den: trimmet og med små bokstaver (runner.allowed_repos og git_credentials MÅ være små bokstaver; GitHub skiller ikke på store/små).
 normalize_repo_arg() { lower "$(trim "$1")"; }
 
-# Verdien til NAME i .env-filen ($ACCEPTANCE_ENV_FILE, standard $ROOT/.env; siste forekomst vinner, som i compose): `NAME=v`, `export NAME=v`, med/uten anførselstegn, CR og etterfølgende ` # kommentar`.
-# Filen leses med grep og aldri `source`-es. Mangler eller kan ikke filen leses, er svaret tomt (da gjelder bare de faste navnene og miljøet).
+# Verdien til NAME i .env-filen ($ACCEPTANCE_ENV_FILE, standard $ROOT/.env; siste forekomst vinner, som i compose): `NAME=v`, `NAME = v`, `export NAME=v`, med/uten anførselstegn, BOM først i filen, CR og etterfølgende ` # kommentar`.
+# Filen leses med grep og aldri `source`-es. Mangler eller kan ikke filen leses, er svaret tomt (da gjelder bare de faste navnene og miljøet). `ACCEPTANCE_ENV_FILE` kan peke på en annen fil; det påvirker KUN denne grenen (JARVIS_GITHUB_REPO), aldri de faste navnene.
 env_file_value() {
-  local name="$1" file="${ACCEPTANCE_ENV_FILE:-$ROOT/.env}" line
+  local name="$1" file="${ACCEPTANCE_ENV_FILE:-$ROOT/.env}" line bom=$'\xEF\xBB\xBF'
   [ -r "$file" ] || return 0
-  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$file" 2>/dev/null | tail -n 1)" || true
-  line="${line#*=}"; line="${line%$'\r'}"
+  line="$(grep -E "^(${bom})?[[:space:]]*(export[[:space:]]+)?${name}[[:space:]]*=" "$file" 2>/dev/null | tail -n 1)" || true
+  line="${line#*=}"; line="${line%$'\r'}"; line="$(trim "$line")"
   case "$line" in
     \"*) line="${line#\"}"; line="${line%%\"*}" ;;
     \'*) line="${line#\'}"; line="${line%%\'*}" ;;
@@ -115,7 +115,7 @@ env_file_value() {
   printf '%s' "$line"
 }
 
-# Er $1 et produksjonsrepo? Skriver årsaken til stdout og returnerer 0 hvis ja; 1 hvis nei. Produksjon er (a) de faste navnene i PRODUCTION_REPOS, (b) JARVIS_GITHUB_REPO i miljøet du kjører fra
+# Er $1 et produksjonsrepo? Skriver årsaken til stdout og returnerer 0 hvis ja; 1 hvis nei. Produksjon er (a) de faste navnene i PRODUCTION_REPOS (kan ikke overstyres), (b) JARVIS_GITHUB_REPO i miljøet du kjører fra
 # og (c) JARVIS_GITHUB_REPO i .env (slik compose leser den). Et navn som normaliseres til tomt regnes aldri som treff (det avvises tidligere av kalleren).
 production_repo_reason() {
   local key listed configured
@@ -587,7 +587,7 @@ main() {
   [ -n "$REPO" ] || { echo "ACCEPTANCE_REPO er påkrevd (et SANDBOX-repo i runner.allowed_repos - aldri produksjonsrepoet)" >&2; return 2; }
   # B-L5: produksjonsrepoet nektes HARDT, uavhengig av runner.allowed_repos (en eier som har lagt det der kan ikke bruke akseptansen mot det: J11 pusher en ekte branch).
   # D-479 (kontobytte, D-478): produksjon er PRODUCTION_REPOS (det nåværende kanoniske repoet, det tidligere navnet på det og det gamle frosne repoet; holdt i takt med kontrakten av en test) OG JARVIS_GITHUB_REPO
-  # (fra miljøet du kjører fra, og fra .env - se production_repo_reason). Alle skrivemåter nektes: store/små bokstaver, `.git`, `/` på slutten og blanke. Det finnes ingen overstyring (D-41).
+  # (fra miljøet du kjører fra, og fra .env - se production_repo_reason). Alle skrivemåter nektes: store/små bokstaver, `.git`, `/` på slutten og blanke. De faste navnene kan ikke overstyres (D-41).
   [ -n "$(alias_key "$REPO")" ] || { echo "ACCEPTANCE_REPO=$REPO er ikke et gyldig repo-navn (forventet eier/repo) - avbryter" >&2; return 2; }
   local reason
   if reason="$(production_repo_reason "$REPO")"; then

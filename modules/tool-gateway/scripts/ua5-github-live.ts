@@ -21,6 +21,7 @@
 // repo er PÅKREVD og skal være et eget SANDBOX-/test-repo: skriptet har INGEN standard og NEKTER produksjonsrepoet (D-41, D-479): det kanoniske repoet, forkets tidligere navn, det gamle frosne repoet,
 // repoet JARVIS_GITHUB_REPO peker på og JARVIS_GIT_ALLOWED_REPOS, også som `.git`-/`/`-alias og med store bokstaver (se src/github-sandbox-guard.ts). Ingen overstyring finnes med vilje.
 
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { GithubTransport } from "../src/live-transports.ts";
 import { isProductionGithubRepo } from "../src/github-sandbox-guard.ts";
@@ -216,7 +217,16 @@ function printSummary(repo: string): void {
   console.log(`LIVE_PROVIDER_VERIFIED=${!hardFail && !Object.values(results).includes("BLOCKED_NO_CREDENTIALS")}`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/** Kjøres scriptet direkte? `import.meta.url` er realpath, `process.argv[1]` er det som ble skrevet (kan gå via en symlinket mappe): sammenlign mot realpath, ellers blir `main()` en stille no-op med exit 0 (reviewer A delta N2). */
+function isEntryPoint(): boolean {
+  try {
+    return process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   main().catch((err) => {
     console.error("UNEXPECTED_SCRIPT_FAILURE:", sanitize(err));
     process.exitCode = 1;

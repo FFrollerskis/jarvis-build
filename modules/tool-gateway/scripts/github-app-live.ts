@@ -19,7 +19,7 @@
 // Hemmeligheter: tokenet og nøkkelen skrives ALDRI ut; scriptet skanner sin egen utskrift og feiler (`secret_safety`) hvis noe lekker.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -412,7 +412,16 @@ async function main(): Promise<void> {
   process.exitCode = result.exitCode;
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/** Se `ua5-github-live.ts`: `import.meta.url` er realpath, `process.argv[1]` er ikke det (symlinket mappe gir ellers en stille no-op med exit 0). */
+function isEntryPoint(): boolean {
+  try {
+    return process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   main().catch((err) => {
     console.error("UNEXPECTED_SCRIPT_FAILURE:", maskGitHubSecrets(err instanceof Error ? err.message : "unknown").slice(0, 300));
     console.log("GITHUB_APP_LIVE_STATUS=NOT VERIFIED (uventet scriptfeil)");
