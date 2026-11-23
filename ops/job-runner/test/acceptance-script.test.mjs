@@ -441,6 +441,18 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
       ["bare-name", `JARVIS_GITHUB_REPO\n`],
       ["key-with-dot-suffix", `JARVIS_GITHUB_REPO.x=${P}\n`],
       ["latin1-in-value", B(`JARVIS_GITHUB_REPO=acme/pr`, Buffer.from([0xe9]), "d\n")],
+      // compose er en tokenizer: etter en verdi i anførselstegn kan en NY tilordning stå på samme linje (funnet av tilfeldig differensialfuzz mot docker compose)
+      ["glued-after-double-quote", `A="x" JARVIS_GITHUB_REPO=${P}\n`],
+      ["glued-after-quote-no-space", `A="x"JARVIS_GITHUB_REPO=${P}\n`],
+      ["glued-after-single-quote", `A='x' JARVIS_GITHUB_REPO=${P}\n`],
+      ["glued-after-tab-and-cr", `A="x"\t\rJARVIS_GITHUB_REPO=${P}\n`],
+      ["glued-after-multiline-value", `A="x\ny" JARVIS_GITHUB_REPO=${P}\n`],
+      ["glued-export-midline", `A="x" export JARVIS_GITHUB_REPO=${P}\n`],
+      ["glued-after-nbsp", `A="x"\u00a0JARVIS_GITHUB_REPO=${P}\n`],
+      ["glued-after-garbage-export", `export\texportJARVIS_GITHUB_REPO\t=" ${P}"JARVIS_GITHUB_REPO=${P}\n`],
+      // omtaler som ikke er en egen tilordning feiler lukket (falsk positiv er bevisst: vernet gjetter ikke)
+      ["mention-in-trailing-comment", `A=1 # sett JARVIS_GITHUB_REPO=${P} senere\n`],
+      ["mention-in-other-value", "NOTE=bruk JARVIS_GITHUB_REPO her\n"],
     ];
     for (const [name, data] of risky) {
       const f = await write(`risky-${name}.env`, data);
@@ -450,7 +462,7 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
       }
     }
     // (c) ikke-kandidater: andre nøkler, kommentarer og bruk av variabelen i en annen verdi gir ingen melding
-    const notCandidates = await write("not-candidates.env", "# JARVIS_GITHUB_REPO: kommentar\n   # JARVIS_GITHUB_REPO=x\nNOT_JARVIS_GITHUB_REPO=x\nJARVIS_GITHUB_REPO_OLD: y\nXJARVIS_GITHUB_REPO=z\nexportJARVIS_GITHUB_REPO=q\nSOME_URL=https://github.com/${JARVIS_GITHUB_REPO}\n");
+    const notCandidates = await write("not-candidates.env", "# JARVIS_GITHUB_REPO: kommentar\n   # JARVIS_GITHUB_REPO=x\nNOT_JARVIS_GITHUB_REPO=x\nJARVIS_GITHUB_REPO_OLD: y\nXJARVIS_GITHUB_REPO=z\nexportJARVIS_GITHUB_REPO=q\nSOME_URL=https://github.com/${JARVIS_GITHUB_REPO}\nFALLBACK=${JARVIS_GITHUB_REPO:-acme/x}\nBARE=$JARVIS_GITHUB_REPO\nQUOTED=\"a/${JARVIS_GITHUB_REPO}/b\"\n");
     expect(check(notCandidates)).toBe("");
     expect(value(notCandidates)).toBe("");
     expect(deny("acme/prod", notCandidates).status).toBe(1);
@@ -480,6 +492,9 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
       ["NBSP etter =", `JARVIS_GITHUB_REPO=\u00a0${P}\n`], ["NBSP før =", `JARVIS_GITHUB_REPO\u00a0=${P}\n`], ["NBSP på slutten", `JARVIS_GITHUB_REPO=${P}\u00a0\n`], ["form feed før =", `JARVIS_GITHUB_REPO\f=${P}\n`], ["tab før =", `JARVIS_GITHUB_REPO\t=${P}\n`],
       ["dollar i kommentar", `JARVIS_GITHUB_REPO=${P} # koster $5\n`], ["dollar i enkle anførselstegn", `JARVIS_GITHUB_REPO='acme/pr$od'\n`], ["verdi med mellomrom i anførselstegn", `JARVIS_GITHUB_REPO=" ${P} "\n`], ["store bokstaver, .git og slash", `JARVIS_GITHUB_REPO=ACME/Prod.git/\n`],
       ["URL-form", `JARVIS_GITHUB_REPO=https://github.com/${P}\n`], ["export uten mellomrom", `exportJARVIS_GITHUB_REPO=${P}\n`], ["annen nøkkel med samme prefiks", `JARVIS_GITHUB_REPO_OLD=${P}\n`], ["sitert nøkkel", `"JARVIS_GITHUB_REPO"=${P}\n`],
+      ["tilordning etter anførselstegn på samme linje", `A="x" JARVIS_GITHUB_REPO=${P}\n`], ["tilordning rett etter anførselstegn", `A="x"JARVIS_GITHUB_REPO=${P}\n`], ["tilordning etter enkle anførselstegn", `A='x' JARVIS_GITHUB_REPO=${P}\n`],
+      ["tilordning etter flerlinjet verdi", `A="x\ny" JARVIS_GITHUB_REPO=${P}\n`], ["tilordning etter tab og CR", `A="x"\t\rJARVIS_GITHUB_REPO=${P}\n`], ["export midt på linjen", `A="x" export JARVIS_GITHUB_REPO=${P}\n`],
+      ["søppel-export fulgt av tilordning", `export\texportJARVIS_GITHUB_REPO\t=" ${P}"JARVIS_GITHUB_REPO=${P}\n`],
       ["tom verdi", "JARVIS_GITHUB_REPO=\n"], ["repo-linje etter 2000 linjer", `${Array.from({ length: 2000 }, (_, i) => `K${i}=v${i}`).join("\n")}\nJARVIS_GITHUB_REPO=${P}\n`],
     ];
     let prodCases = 0;
