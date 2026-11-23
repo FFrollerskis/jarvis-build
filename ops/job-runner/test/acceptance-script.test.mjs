@@ -286,6 +286,8 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("er ikke på formen JARVIS_GITHUB_REPO=verdi");
     expect(r.stderr).toContain("avbryter");
+    // Avbruddet skjer FØR de senere kontrollene: uten det ville scriptet fortsatt og også endt med exit 2 på allowed_repos-sjekken (mutant M6: FATAL uten return 2)
+    expect(r.stderr, "scriptet skal stoppe før allowed_repos-sjekken").not.toContain("står ikke i runner.allowed_repos");
     const clean = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", ACCEPTANCE_ENV_FILE: await write("e2e-clean.env", "JARVIS_GITHUB_REPO=acme/prod\n") });
     expect(clean.stderr).not.toContain("vernet kan ikke tolke");
     expect(clean.stderr).toContain("står ikke i runner.allowed_repos");
