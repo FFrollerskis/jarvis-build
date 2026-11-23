@@ -343,6 +343,31 @@ describe("B: alle 12 ikke-journalførte skrivehandlinger - gjenspilling er `dedu
     expect(await chain.store.findActiveAccount(TENANT_A, "project", "sms", ref)).toBeNull();
   });
 
+  it("en gjenspilling fra en NY sesjon/enhet (klienten logget inn på nytt) er fortsatt samme forespørsel: `deduplicated`, ingen ny effekt - person, sesjon og enhet er ikke del av nøkkelen", async () => {
+    const n = chain.phone();
+    const k = chain.key("session");
+    const hash = optOutHash(TENANT_A, "sms", n);
+    expect(await chain.act("record_opt_out", { channel: "sms", recipient: n }, k)).toMatchObject({ ok: true, deduplicated: false, data: { created: true } });
+    const reconnected: IdentityContext = { ...chain.owner, session_id: "sess-etter-ny-innlogging", device_id: "dev-ny-enhet", channel: "web" };
+    expect(await chain.act("record_opt_out", { channel: "sms", recipient: n }, k, reconnected)).toMatchObject({ ok: true, deduplicated: true });
+    expect(await scalar("SELECT count(*)::int AS n FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2", [TENANT_A, hash])).toBe(1);
+  });
+
+  it("SAMTIDIGE forespørsler: (K, A) og (K, B) i parallell (12 runder med ekte `Promise.all`) utføres BEGGE; (K, A) to ganger i parallell gir høyst ÉN utføring (aldri to effekter)", async () => {
+    for (let round = 0; round < 12; round += 1) {
+      const k = chain.key(`race-${round}`);
+      const [a, b] = [chain.phone(), chain.phone()];
+      const results = await Promise.all([chain.act("record_opt_out", { channel: "sms", recipient: a }, k), chain.act("record_opt_out", { channel: "sms", recipient: b }, k)]);
+      for (const r of results) expect(r, `runde ${round}: ${JSON.stringify(r)}`).toMatchObject({ ok: true, deduplicated: false });
+      expect(await chain.store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "sms", a)), `runde ${round}: A`).toBe(true);
+      expect(await chain.store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "sms", b)), `runde ${round}: B`).toBe(true);
+      const same = chain.phone();
+      const pair = await Promise.all([chain.act("authorize_account", { channel: "sms", account_ref: same, provider: "twilio" }, k), chain.act("authorize_account", { channel: "sms", account_ref: same, provider: "twilio" }, k)]);
+      expect(pair.filter((r) => r.ok && !r.deduplicated), `runde ${round}: ${JSON.stringify(pair)}`).toHaveLength(1);
+      expect(await scalar("SELECT count(*)::int AS n FROM comms_authorized_accounts WHERE tenant_id = $1 AND account_ref = $2 AND status = 'active'", [TENANT_A, same])).toBe(1);
+    }
+  });
+
   it("`record_opt_out` er tenant-bred: samme nøkkel og nyttelast fra et annet rom utføres på ny og er harmløs (`created: false` - raden finnes), men er aldri en stille ikke-handling", async () => {
     const n = chain.phone();
     const k = chain.key("space-oo");

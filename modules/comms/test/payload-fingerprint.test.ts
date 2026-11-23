@@ -74,9 +74,11 @@ const keyOfLength = (n: number) => "k".repeat(n);
 // ---------------------------------------------------------------------------------------------- K3: kanonisk nyttelast
 describe("K3: canonicalPayloadJson - deterministisk, nøkkelrekkefølge-uavhengig og uten kollisjoner mellom typer", () => {
   it("fast utseende (frosset: avtrykket er lagret i ledger-nøkler): sorterte nøkler på alle nivåer, ingen blanke, arrayer i opprinnelig rekkefølge", () => {
+    expect(() => canonicalPayloadJson({ b: [1, { d: null, c: "x" }], a: true }), "gyldig JSON skal aldri kaste").not.toThrow();
     expect(canonicalPayloadJson({ b: [1, { d: null, c: "x" }], a: true })).toBe('{"a":true,"b":[1,{"c":"x","d":null}]}');
     expect(canonicalPayloadJson({})).toBe("{}");
     expect(canonicalPayloadJson([])).toBe("[]");
+    expect(() => canonicalPayloadJson(null)).not.toThrow();
     expect(canonicalPayloadJson(null)).toBe("null");
     expect(canonicalPayloadJson({ z: 1, a: { y: 2, b: [3, 2, 1] } })).toBe('{"a":{"b":[3,2,1],"y":2},"z":1}');
     expect(canonicalPayloadJson("a\"b\\c\n")).toBe('"a\\"b\\\\c\\n"');
@@ -112,6 +114,7 @@ describe("K3: canonicalPayloadJson - deterministisk, nøkkelrekkefølge-uavhengi
   });
 
   it("`undefined` som objektverdi er fraværende (som i JSON); `-0` er `0`", () => {
+    expect(() => canonicalPayloadJson({ a: 1, b: undefined })).not.toThrow();
     expect(canonicalPayloadJson({ a: 1, b: undefined })).toBe(canonicalPayloadJson({ a: 1 }));
     expect(canonicalPayloadJson({ b: undefined })).toBe("{}");
     expect(canonicalPayloadJson(-0)).toBe(canonicalPayloadJson(0));
@@ -133,6 +136,7 @@ describe("K3: canonicalPayloadJson - deterministisk, nøkkelrekkefølge-uavhengi
 
   it("nesting: 16 nivåer er greit, 17 kaster `canonical_payload_too_deep`; en syklisk struktur gir samme feil (aldri stakkoverflyt)", () => {
     const nest = (levels: number): JsonValue => { let v: JsonValue = "løv"; for (let i = 0; i < levels; i += 1) v = [v]; return v; };
+    expect(() => canonicalPayloadJson(nest(16)), "16 nivåer skal være greit").not.toThrow();
     expect(canonicalPayloadJson(nest(16))).toBe(`${"[".repeat(16)}"løv"${"]".repeat(16)}`);
     expect(() => canonicalPayloadJson(nest(17))).toThrow("canonical_payload_too_deep");
     const cyclic: Record<string, unknown> = {};
