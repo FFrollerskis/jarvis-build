@@ -358,6 +358,12 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
       expect(r.status, `${action} ${length}`).toBe(400);
       expect(r.json, `${action} ${length}`).toMatchObject({ error: "malformed_request", reason: "idempotency_key_too_long" });
     }
+    // WP-G1b (reviewer B F2, reviewer A delta N2): en OPPGITT, ugyldig nøkkel til en handling der nøkkelen er valgfri (tom streng, for kort, tegn utenfor tegnsettet) er 400 `idempotency_key_invalid` på ruten (også for lesinger) - gatewayen røres aldri
+    for (const [action, key] of [["record_opt_out", ""], ["record_opt_out", "abc"], ["authorize_account", "med mellomrom i seg"], ["list_accounts", ""], ["contacts_sync", "\u00e6\u00f8\u00e5-\u00e6\u00f8\u00e5"]] as const) {
+      const r = await post(base, "/comms/action", sendBody({ action, idempotency_key: key, parameters: {} }));
+      expect(r.status, `${action} ${JSON.stringify(key)}`).toBe(400);
+      expect(r.json, `${action} ${JSON.stringify(key)}`).toMatchObject({ error: "malformed_request", reason: "idempotency_key_invalid" });
+    }
     const mismatch = await post(base, "/comms/action", sendBody({ parameters: { ...sendBody().parameters, request_id: "en-annen-id-0001" } }));
     expect(mismatch.status).toBe(400);
     expect(mismatch.json).toMatchObject({ reason: "comms_request_id_mismatch" });

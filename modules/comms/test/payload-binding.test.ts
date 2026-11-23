@@ -345,6 +345,39 @@ describe("B: alle 12 ikke-journalførte skrivehandlinger - gjenspilling er `dedu
     expect(posts()).toBe(2);
   });
 
+  it("`contacts_sync` er rom-AVHENGIG (skriver lenker i Conversation Graph per memory space): samme (K, P) fra `business` og `project` utføres BEGGE og lenker i hvert sitt rom; med `*` som romledd ville project-kallet vært en stille `deduplicated` (reviewer A delta N3)", async () => {
+    const [id1, id2] = [`7${++seq}1`, `7${seq}2`];
+    let call = 0;
+    handler = () => { call += 1; const id = call === 1 ? id1 : id2; return jsonRes({ connections: [person(id, { phoneNumbers: [{ value: `+4796${String(seq).padStart(5, "0")}${call}` }], emailAddresses: [{ value: `s${id}@rooms.example.com` }] })] }); };
+    const p = { page_size: 20 + (seq % 50) };
+    const k = chain.key("rs");
+    expect(await chain.act("contacts_sync", p, k)).toMatchObject({ ok: true, deduplicated: false });
+    expect(await chain.act("contacts_sync", p, k, inSpace("project")), "project er en uavhengig forespørsel").toMatchObject({ ok: true, deduplicated: false });
+    const linksOf = async (id: string) => (await chain.db.admin.query("SELECT memory_space_id, count(*)::int AS n FROM conversation_channel_links WHERE tenant_id = $1 AND external_id = $2 AND status = 'active' GROUP BY memory_space_id", [TENANT_A, `people/c${id}`])).rows;
+    expect(await linksOf(id1)).toEqual([{ memory_space_id: "business", n: 2 }]);
+    expect(await linksOf(id2), "kontakt 2 skal være lenket i project").toEqual([{ memory_space_id: "project", n: 2 }]);
+    expect(calls.filter((c) => c.method === "GET")).toHaveLength(2);
+    // en gjenspilling per rom dedupes
+    expect(await chain.act("contacts_sync", p, k)).toMatchObject({ ok: true, deduplicated: true });
+    expect(await chain.act("contacts_sync", p, k, inSpace("project"))).toMatchObject({ ok: true, deduplicated: true });
+  });
+
+  it("`contacts_unlink` er rom-AVHENGIG: samme (K, {resource_name}) fra `business` og `project` tilbakekaller lenkene i HVERT rom (kontakten har lenker i begge rom)", async () => {
+    const id = `8${++seq}1`;
+    let call = 0;
+    handler = () => { call += 1; return jsonRes({ connections: [person(id, call === 1 ? { emailAddresses: [], phoneNumbers: [{ value: `+4795${String(seq).padStart(6, "0")}` }] } : { phoneNumbers: [], emailAddresses: [{ value: `u${id}@rooms.example.com` }] })] }); };
+    const sync = { page_size: 30 + (seq % 50) };
+    expect(await chain.act("contacts_sync", sync)).toMatchObject({ ok: true });
+    expect(await chain.act("contacts_sync", sync, undefined, inSpace("project"))).toMatchObject({ ok: true });
+    const active = async () => (await chain.db.admin.query("SELECT memory_space_id, count(*)::int AS n FROM conversation_channel_links WHERE tenant_id = $1 AND external_id = $2 AND status = 'active' GROUP BY memory_space_id ORDER BY memory_space_id", [TENANT_A, `people/c${id}`])).rows;
+    expect(await active(), "forutsetning: lenker i begge rom").toEqual([{ memory_space_id: "business", n: 1 }, { memory_space_id: "project", n: 1 }]);
+    const p = { resource_name: `people/c${id}` };
+    const k = chain.key("ru2");
+    expect(await chain.act("contacts_unlink", p, k)).toMatchObject({ ok: true, deduplicated: false });
+    expect(await chain.act("contacts_unlink", p, k, inSpace("project"))).toMatchObject({ ok: true, deduplicated: false });
+    expect(await active(), "alle lenker i begge rom skal være tilbakekalt").toEqual([]);
+  });
+
   it("samme konto i et annet rom: lagret tillater kun ÉN aktiv autorisasjon per konto, så en (K, X) fra `project` gir en TYDELIG feil - aldri et falskt `ok + deduplicated` (som på main) om at kontoen nå er autorisert der", async () => {
     const ref = smsRef();
     const k = chain.key("space-acct");

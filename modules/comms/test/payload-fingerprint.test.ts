@@ -621,6 +621,14 @@ describe("K6 h: differensial mot main - allerede-gyldige kall endrer seg IKKE (u
     const r = recorder();
     expect(await run(r, "record_opt_out", sample("record_opt_out"), keyOfLength(500), owner("health"))).toEqual({ ok: false, status: "rejected", reason: "comms_space_not_allowed" });
     expect(await run(r, "nope", {}, keyOfLength(500))).toEqual({ ok: false, status: "rejected", reason: "comms_unknown_action" });
+    // Reviewer B delta: også en KORT, ugyldig nøkkel (tom, 3 tegn, NUL, etterfølgende mellomrom) skal aldri gi en annen feilkode enn eier-, rom- eller handlingsfeilen (ingen feilkode til en ikke-eier: mutantene som flytter nøkkelformsjekken foran portene skal feile)
+    for (const bad of ["", "abc", "a\u0000bcdefgh", "valid-key-0001 ", "med mellomrom i seg"]) {
+      expect(await executeCommsOwnerAction(denied, owner(), { action: "record_opt_out", parameters: sample("record_opt_out"), idempotency_key: bad }), `ikke-eier ${JSON.stringify(bad)}`).toEqual({ ok: false, status: "rejected", reason: "owner_required" });
+      expect(await executeCommsOwnerAction(denied, owner(), { action: "list_accounts", parameters: {}, idempotency_key: bad }), `ikke-eier lesing ${JSON.stringify(bad)}`).toEqual({ ok: false, status: "rejected", reason: "owner_required" });
+      for (const space of ["health", "home", "guest"]) expect(await run(r, "record_opt_out", sample("record_opt_out"), bad, owner(space)), `${space} ${JSON.stringify(bad)}`).toEqual({ ok: false, status: "rejected", reason: "comms_space_not_allowed" });
+      expect(await run(r, "nope", {}, bad), `ukjent ${JSON.stringify(bad)}`).toEqual({ ok: false, status: "rejected", reason: "comms_unknown_action" });
+      expect(await run(r, "record_opt_out", sample("record_opt_out"), bad), `eier ${JSON.stringify(bad)}`).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_invalid" });
+    }
     // Reviewer B F6 (mutant MS3): rom-porten står FØR handlingskontrollen, og eier-porten FØR begge: health/home/guest + ukjent handling gir romfeilen, og en ikke-eier får alltid `owner_required`.
     for (const space of ["health", "home", "guest"]) {
       expect(await run(r, "nope", {}, keyOfLength(500), owner(space)), space).toEqual({ ok: false, status: "rejected", reason: "comms_space_not_allowed" });
