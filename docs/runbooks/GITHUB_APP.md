@@ -113,8 +113,8 @@ Navn: **`JARVIS_GITHUB_APP_PRIVATE_KEY`**. Verdi: hele PEM-filen.
 ```
 JARVIS_GITHUB_APP_ID=<App ID eller Client ID>
 JARVIS_GITHUB_APP_INSTALLATION_ID=<installasjons-id>
-JARVIS_GITHUB_REPO=tsworkflow/jarvisbuild      # PÅKREVD i App-modus: tokenet utstedes kun for dette repoet
-# JARVIS_GIT_ALLOWED_REPOS=tsworkflow/jarvisbuild,tsworkflow/annet   # valgfritt: flere repoer (har forrang over JARVIS_GITHUB_REPO)
+JARVIS_GITHUB_REPO=FFrollerskis/jarvis-build      # PÅKREVD i App-modus: tokenet utstedes kun for dette repoet (kontobytte D-478: se GITHUB_ACCOUNT_MOVE.md)
+# JARVIS_GIT_ALLOWED_REPOS=FFrollerskis/jarvis-build,FFrollerskis/annet   # valgfritt: flere repoer (har forrang over JARVIS_GITHUB_REPO)
 # JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK=true    # VALGFRITT og kun under overgangen - se under
 ```
 
