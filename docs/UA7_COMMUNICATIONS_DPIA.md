@@ -308,6 +308,7 @@ V2-pushen til eierens egen Telegram - med fast tittel (kanal + maskert avsender)
 | Utgående journal | 400 d (30-1825) | sveip, erasure |
 | Avmeldinger, konto-allowlist | til opphevet/tilbakekalt | kun mottakerens START (samme kanal) / eieren; erasure |
 | Møter, deltakere, forslag | 180 d (30-1825) | sveip, eieren (D), erasure |
+| Idempotensavtrykk (tenant-bundet hash av nyttelasten) i `tool_executions.idempotency_key` for eier-handlinger (WP-G1b, §10.2) | `tool_executions`-retensjonen (minst 30 dager, standard 180; `unverified`/`reserved` slettes aldri) | beskjæring (`073_operational_retention.sql`); IKKE erasure-planen (JARVIS-102-resten, Q-78) |
 | Godtatt møteforpliktelse (oppfølging i Business) | oppfølgingens egen retensjon | Business/erasure - IKKE av møtesveipet |
 
 **Åpne punkter til jurist/eier (ingen er løst av kode):** (1) markedsføringsloven § 15 / Reservasjonsregisteret og samtykkeregister; (2) AI-opplysningsplikt (EU AI Act art. 50, nasjonal gjennomføring); (3) regler for utgående AI-samtaler og opptak; (4) grunnlag og informasjon for møte-/samtale-deltakere; (5) databehandleravtaler, region og vilkår for alle leverandørene i §10.1; (6) om pseudonymiserte mottakere (SHA-256) er tilstrekkelig minimering;
