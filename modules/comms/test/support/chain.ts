@@ -1,10 +1,10 @@
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
-import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
+import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessService } from "@jarvis/business";
 import { ConversationGraphService } from "@jarvis/conversation-graph";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type ClassDNotification, type SecretProvider } from "@jarvis/tool-gateway";
 import {
-  CommsStore, CommsTransport, OutboundFunnel, commsToolDefinitions, executeCommsOwnerAction, parseCommsConfig, type AdapterMap, type CommsConfig, type FunnelContext, type MarketingBasisPort, type OwnerActionResult
+  CommsStore, CommsTransport, GoogleContacts, MeetingService, OutboundFunnel, commsToolDefinitions, executeCommsOwnerAction, parseCommsConfig, type AdapterMap, type CommsConfig, type FunnelContext, type MarketingBasisPort, type OwnerActionResult
 } from "../../src/index.ts";
 import { OWNER, TENANT_A, scriptedAdapter, startCommsDb, type AdapterCall, type CommsDb } from "./harness.ts";
 
@@ -41,6 +41,10 @@ export interface ChainOptions {
   readonly rateLimitPerMinute?: number;
   /** Løfter gatewayens per-verktøy-grense (autorisering/avmelding har 10-20/min) for tester som kjører mange handlinger raskt etter hverandre. */
   readonly lenientToolLimits?: boolean;
+  /**
+   * `contacts`: Google Contacts-verktøyene mot en falsk People API (testen stubber global `fetch`; token-henting er falsk) - `meetings`: møtepipelinen (ekte `MeetingService` mot samme Postgres). Uten dem finnes verktøyene ikke (som flagg AV).
+   * WP-G1b: ble deklarert men aldri koblet; nå brukt av `payload-binding.test.ts` (ikke-journalførte handlinger med ekte ledger).
+   */
   readonly deps?: { contacts?: boolean; meetings?: boolean };
 }
 
@@ -70,7 +74,12 @@ export async function startChain(prefix: string, env: Record<string, string> = {
     classDPipeline: { enforce: true, notifier: { ready: () => true, notify: async (x) => { notifications.push(x); } } },
     credentialBinding: { owner_person_id: OWNER, owner_tenants: [TENANT_A], internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
   });
-  for (const d of commsToolDefinitions({ transport: new CommsTransport({ funnel, store }), store, rateLimitPerMinute: options.rateLimitPerMinute ?? 1000, calls: config.calls, vendorReads: config.vendor_reads })) gateway.register(options.lenientToolLimits === true ? { ...d, rate_limit_per_minute: 1_000_000 } : d);
+  const contacts = options.deps?.contacts === true ? { api: new GoogleContacts(async () => "fake-access-token", { warmupDelayMs: 0 }), graph } : undefined;
+  const meetings = options.deps?.meetings === true ? new MeetingService({ pool: db.app, clock, graph, business: new BusinessService(db.app), retentionDays: 180 }) : undefined;
+  const transport = new CommsTransport({ funnel, store, ...(contacts !== undefined ? { contacts } : {}), ...(meetings !== undefined ? { meetings } : {}) });
+  for (const d of commsToolDefinitions({
+    transport, store, rateLimitPerMinute: options.rateLimitPerMinute ?? 1000, calls: config.calls, vendorReads: config.vendor_reads, ...(contacts !== undefined ? { contacts: true } : {}), ...(meetings !== undefined ? { meetings: true } : {})
+  })) gateway.register(options.lenientToolLimits === true ? { ...d, rate_limit_per_minute: 1_000_000 } : d);
   const owner: IdentityContext = { person_id: OWNER, tenant_id: TENANT_A, memory_space_id: "business", session_id: "sess-chain", device_id: "dev-chain", channel: "api", auth_strength: "signed" };
   const ownerGate = (identity: IdentityContext): boolean => identity.person_id === OWNER && identity.tenant_id === TENANT_A;
   let n = 0;

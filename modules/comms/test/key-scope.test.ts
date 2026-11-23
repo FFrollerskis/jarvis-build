@@ -186,10 +186,10 @@ describe("A-N2: nøkkelen er skopet med handling og tenant", () => {
     expect(scopedIdempotencyKey(TENANT_A, "send", "abc-12345")).toMatch(/^send:[0-9a-f]{8}:abc-12345$/);
   });
 
-  it("en brukernøkkel på 161 tegn avvises (den skopede nøkkelen måtte ellers sprengt journalens 200 tegn); 160 tegn virker", async () => {
+  it("en brukernøkkel på 161 tegn avvises (den skopede nøkkelen måtte ellers sprengt journalens 200 tegn) med den TYDELIGE feilen `idempotency_key_too_long` (WP-G1b, JARVIS-112 e: tidligere den misvisende `idempotency_key_required`); 160 tegn virker", async () => {
     const params = (): Record<string, JsonValue> => ({ channel: "sms", account_ref: "+4791000000", recipient: chain.phone(), purpose: "transactional", text: "Hei, timen din er bekreftet.", ...BASIS });
     const tooLong = await chain.act("send", params(), "x".repeat(161));
-    expect(tooLong).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_required" });
+    expect(tooLong).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_too_long" });
     const max = await chain.act("send", params(), "y".repeat(160));
     expect(max.ok).toBe(true);
   });

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
-  COMMS_KNOWN_ACTIONS, InvalidCommsConfigError, WEBHOOK_MAX_BYTES, scopedIdempotencyKey, type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel, type WebhookRequest, type WebhookResponse
+  COMMS_KNOWN_ACTIONS, InvalidCommsConfigError, WEBHOOK_MAX_BYTES, ownerPayloadFingerprint, scopedIdempotencyKey, type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel, type WebhookRequest, type WebhookResponse
 } from "@jarvis/comms";
 import { buildCommsRuntime } from "../src/comms-wiring.ts";
 import { createApiServer, normalizedRequestPath, type ApiDeps } from "../src/server.ts";
@@ -345,18 +345,45 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
   it("send uten (eller med ugyldig) idempotensnøkkel avvises 400 `idempotency_key_required` før policy og gateway; avvikende request_id avvises", async () => {
     const { outbound, gatewayCalls, funnelCalls } = stubOutbound();
     const base = await listen({ ...authDeps, comms: { outbound } });
-    for (const bad of [undefined, "kort", "har mellomrom i seg", "x".repeat(201)]) {
+    for (const bad of [undefined, "kort", "har mellomrom i seg"]) {
       const body = sendBody();
       if (bad === undefined) delete (body as Record<string, unknown>)["idempotency_key"]; else body.idempotency_key = bad;
       const r = await post(base, "/comms/action", body);
       expect(r.status, String(bad)).toBe(400);
       expect(r.json).toMatchObject({ error: "malformed_request", reason: "idempotency_key_required" });
     }
+    // WP-G1b (JARVIS-112 e): en for lang nøkkel (over 160 tegn) er en TYDELIG feil på ruten - ikke den misvisende `idempotency_key_required` - også for en handling der nøkkelen er valgfri
+    for (const [action, length] of [["send", 161], ["send", 201], ["record_opt_out", 161], ["authorize_account", 5000], ["list_accounts", 161]] as const) {
+      const r = await post(base, "/comms/action", sendBody({ action, idempotency_key: "x".repeat(length), parameters: {} }));
+      expect(r.status, `${action} ${length}`).toBe(400);
+      expect(r.json, `${action} ${length}`).toMatchObject({ error: "malformed_request", reason: "idempotency_key_too_long" });
+    }
     const mismatch = await post(base, "/comms/action", sendBody({ parameters: { ...sendBody().parameters, request_id: "en-annen-id-0001" } }));
     expect(mismatch.status).toBe(400);
     expect(mismatch.json).toMatchObject({ reason: "comms_request_id_mismatch" });
     expect(gatewayCalls).toEqual([]);
     expect(funnelCalls).toEqual([]);
+  });
+
+  it("WP-G1b (JARVIS-112 a): en IKKE-journalført handling får nyttelast-avtrykket i nøkkelen gatewayen ser - ulik nyttelast med samme nøkkel gir ulik gateway-nøkkel, lik nyttelast (også med annen parameterrekkefølge) gir samme; journalførte er uendret", async () => {
+    const { outbound, gatewayCalls, funnelCalls } = stubOutbound();
+    const base = await listen({ ...authDeps, comms: { outbound } });
+    const body = (parameters: Record<string, unknown>) => ({ grant_token: "owner-signed", action: "record_opt_out", idempotency_key: "idem-oo-0000001", parameters });
+    const a = { channel: "sms", recipient: "+4790000001" };
+    const b = { channel: "sms", recipient: "+4790000002" };
+    for (const parameters of [a, b, { recipient: "+4790000001", channel: "sms" }]) expect((await post(base, "/comms/action", body(parameters))).status).toBe(200);
+    expect(gatewayCalls.map((c) => c.action)).toEqual(["record_opt_out", "record_opt_out", "record_opt_out"]);
+    const keys = gatewayCalls.map((c) => c.idempotency_key);
+    expect(keys[0]).toBe(scopedIdempotencyKey(TENANT, "record_opt_out", "idem-oo-0000001", ownerPayloadFingerprint("business", a as Record<string, JsonValue>)));
+    expect(keys[1]).toBe(scopedIdempotencyKey(TENANT, "record_opt_out", "idem-oo-0000001", ownerPayloadFingerprint("business", b as Record<string, JsonValue>)));
+    expect(keys[0]).not.toBe(keys[1]); // ulik nyttelast: en uavhengig forespørsel (ikke en stille deduplisering)
+    expect(keys[2]).toBe(keys[0]); // samme nyttelast i annen rekkefølge: en ekte gjenspilling
+    expect(gatewayCalls.every((c) => !("request_id" in c.parameters))).toBe(true);
+    expect(funnelCalls).toEqual([]); // trakten/journalen er for utgående handlinger
+    // journalførte: nøkkelen uten avtrykk (A-M5 binder via journalen)
+    const send = await post(base, "/comms/action", sendBody());
+    expect(send.status).toBe(200);
+    expect(gatewayCalls.at(-1)?.idempotency_key).toBe(scopedIdempotencyKey(TENANT, "send", "idem-route-0001"));
   });
 
   it("policyavslag: 403 `comms_policy_denied` med ALLE kodene, regelutfall og journal-id (bevis), uten tekst - gatewayen nås ikke; journalen skrives av trakten", async () => {
