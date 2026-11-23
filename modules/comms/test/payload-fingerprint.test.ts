@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
   COMMS_ADMIN_ACTIONS, COMMS_CONTACT_READ_ACTIONS, COMMS_CONTACT_WRITE_ACTIONS, COMMS_IDEMPOTENCY_KEY_MAX_LENGTH, COMMS_JOURNALLED_ACTIONS, COMMS_KNOWN_ACTIONS, COMMS_MEETING_READ_ACTIONS, COMMS_MEETING_WRITE_ACTIONS,
-  COMMS_OUTBOUND_ACTIONS, COMMS_READ_ACTIONS, COMMS_VENDOR_READ_ACTIONS, PAYLOAD_FINGERPRINT_LENGTH, canonicalPayloadJson, commsToolDefinitions, executeCommsOwnerAction, ownerPayloadFingerprint, scopedIdempotencyKey,
+  COMMS_OUTBOUND_ACTIONS, COMMS_READ_ACTIONS, COMMS_ROOM_INDEPENDENT_ACTIONS, COMMS_VENDOR_READ_ACTIONS, PAYLOAD_FINGERPRINT_LENGTH, canonicalPayloadJson, commsToolDefinitions, executeCommsOwnerAction, ownerPayloadFingerprint, scopedIdempotencyKey,
   type OutboundFunnel, type ReplayState
 } from "../src/index.ts";
 
@@ -66,6 +66,8 @@ const SAMPLES: Readonly<Record<string, Record<string, JsonValue>>> = {
 const ALTERNATIVE: Readonly<Record<string, Record<string, JsonValue>>> = {
   send: { text: "En helt annen melding." }, start_call: { text: "Et helt annet manus." }, edit_message: { text: "En annen rettelse" }, delete_message: { target_message_id: "1731800000.000200" }, add_reaction: { reaction: "heart" }
 };
+/** Romleddet i avtrykket slik koden bruker det: `*` for rom-uavhengige handlinger (Google-kontaktboken er felles), ellers memory space. */
+const spaceFor = (action: string, space = "business"): string => (COMMS_ROOM_INDEPENDENT_ACTIONS.includes(action) ? "*" : space);
 const REQUIRED_KEY_ACTIONS: readonly string[] = [...COMMS_JOURNALLED_ACTIONS, "contacts_create", "contacts_update", "contacts_delete", "meeting_delete"];
 const NON_JOURNALLED = COMMS_KNOWN_ACTIONS.filter((a) => !COMMS_JOURNALLED_ACTIONS.includes(a));
 const sample = (action: string): Record<string, JsonValue> => SAMPLES[action]!;
@@ -229,6 +231,46 @@ describe("ownerPayloadFingerprint - form, frosset oppskrift og hva som teller me
     for (const bad of [[], [1], null, "tekst", 5, undefined]) expect(() => ownerPayloadFingerprint(TENANT, "business", bad as never), String(bad)).toThrow("canonical_payload_parameters_not_an_object");
   });
 
+  it("også toppnivået må være et RENT objekt (reviewer A funn 7): Date, Map, Set og klasseinstanser ville ellers vært skrevet om til `{}` og delt avtrykk; null-prototype er et rent objekt", () => {
+    class Kontakt { given_name = "Ola"; }
+    for (const bad of [new Date(0), new Map([["a", 1]]), new Set([1]), new Kontakt(), new Uint8Array(2)]) {
+      expect(() => ownerPayloadFingerprint(TENANT, "business", bad as never), Object.prototype.toString.call(bad)).toThrow("canonical_payload_not_plain_object");
+    }
+    const bare = Object.assign(Object.create(null) as Record<string, JsonValue>, { a: 1 });
+    expect(ownerPayloadFingerprint(TENANT, "business", bare)).toBe(ownerPayloadFingerprint(TENANT, "business", { a: 1 }));
+  });
+
+  it("ALLE fire rom gir ulike avtrykk for samme nyttelast (mutantene `personal`≡`business` og `shared`≡`project` skal feile; reviewer A funn 3)", () => {
+    const rooms = ["personal", "business", "project", "shared"];
+    const prints = rooms.map((room) => ownerPayloadFingerprint(TENANT, room, { channel: "sms", recipient: "+4790000001" }));
+    expect(new Set(prints).size).toBe(rooms.length);
+  });
+
+  it("nøkkelrekkefølgen er UTF-16-kodeenhetsrekkefølge, ikke locale og ikke case-uavhengig: `B` < `a` < `a\u200b` < `é` (gullvektor; mutantene localeCompare og case-uavhengig sortering skal feile)", () => {
+    const params = { "\u00e9": 4, "a\u200b": 3, a: 2, B: 1 } as Record<string, JsonValue>;
+    expect(canonicalPayloadJson(params)).toBe('{"B":1,"a":2,"a\u200b":3,"\u00e9":4}');
+    expect(ownerPayloadFingerprint(TENANT, "business", params)).toBe("c984ff31fbdc88e5acf0de21260f0c04");
+    // samme nøkler i en annen innsettingsrekkefølge: samme avtrykk
+    expect(ownerPayloadFingerprint(TENANT, "business", { B: 1, a: 2, "a\u200b": 3, "\u00e9": 4 })).toBe("c984ff31fbdc88e5acf0de21260f0c04");
+  });
+
+  it("rom-uavhengige handlinger (Google-kontaktboken er felles for utrullingen: `contacts_create/update/delete`) gir SAMME skopede nøkkel fra alle rom; alle andre ikke-journalførte handlinger gir ULIK nøkkel per rom (reviewer A funn 2)", async () => {
+    expect([...COMMS_ROOM_INDEPENDENT_ACTIONS].sort()).toEqual(["contacts_create", "contacts_delete", "contacts_update"]);
+    for (const action of NON_JOURNALLED) {
+      const business = recorder(); const project = recorder();
+      await run(business, action, sample(action), "rom-nokkel-0001", owner("business"));
+      await run(project, action, sample(action), "rom-nokkel-0001", owner("project"));
+      const a = business.requests[0]!.idempotency_key; const b = project.requests[0]!.idempotency_key;
+      if (COMMS_ROOM_INDEPENDENT_ACTIONS.includes(action)) expect(a, action).toBe(b);
+      else expect(a, action).not.toBe(b);
+    }
+    // avtrykket med `*` som romledd er fortsatt tenant-bundet og nyttelast-bundet
+    const fp = (tenant: string, params: Record<string, JsonValue>) => ownerPayloadFingerprint(tenant, "*", params);
+    expect(fp(TENANT, { given_name: "Ola" })).toBe("a019736a024f105ac8120a279a225e86");
+    expect(fp("tenant-g1b-annen", { given_name: "Ola" })).not.toBe(fp(TENANT, { given_name: "Ola" }));
+    expect(fp(TENANT, { given_name: "Kari" })).not.toBe(fp(TENANT, { given_name: "Ola" }));
+  });
+
   it("skillet mellom tenant, rom og nyttelast er entydig (rom `a` + nyttelast `b` er ikke rom `ab`...); tenant ER med, sesjon er det ikke", () => {
     expect(ownerPayloadFingerprint(TENANT, "a", { x: 1 })).not.toBe(ownerPayloadFingerprint(TENANT, "a\u0000", { x: 1 }));
     expect(ownerPayloadFingerprint(TENANT, 'b","{}', {})).not.toBe(ownerPayloadFingerprint(TENANT, "b", {}));
@@ -331,7 +373,7 @@ describe("partisjonen journalført / ikke-journalført og tabelltest over ALLE h
       expect(await run(r, action, sample(action), key), action).toMatchObject({ ok: true, deduplicated: false });
       expect(r.requests).toHaveLength(1);
       const req = r.requests[0]!;
-      const expectedFp = ownerPayloadFingerprint(TENANT, "business", sample(action));
+      const expectedFp = ownerPayloadFingerprint(TENANT, spaceFor(action), sample(action));
       expect(req.idempotency_key, action).toBe(scopedIdempotencyKey(TENANT, action, key, expectedFp));
       expect(req.idempotency_key, action).toMatch(new RegExp(`^${action}:[0-9a-f]{8}:[0-9a-f]{32}:${key}$`));
       expect(req.parameters, action).toEqual(sample(action));
@@ -355,7 +397,9 @@ describe("partisjonen journalført / ikke-journalført og tabelltest over ALLE h
       expect(await keyFor({ ...sample(action), ekstra_felt: 2 }), `${action}: ulik nyttelast (verdi)`).not.toBe(await keyFor({ ...sample(action), ekstra_felt: 1 }));
       expect(await keyFor(sample(action), "tabell-nokkel-0002"), `${action}: annen nøkkel`).not.toBe(base);
       expect(await keyFor(sample(action), "tabell-nokkel-0001", owner("business", "tenant-annen")), `${action}: annen tenant`).not.toBe(base);
-      expect(await keyFor(sample(action), "tabell-nokkel-0001", owner("project")), `${action}: annet rom`).not.toBe(base);
+      // rom-uavhengige handlinger (Google-kontaktboken) gir SAMME nøkkel fra alle rom; alle andre en annen
+      if (COMMS_ROOM_INDEPENDENT_ACTIONS.includes(action)) expect(await keyFor(sample(action), "tabell-nokkel-0001", owner("project")), `${action}: annet rom (rom-uavhengig)`).toBe(base);
+      else expect(await keyFor(sample(action), "tabell-nokkel-0001", owner("project")), `${action}: annet rom`).not.toBe(base);
       // person/sesjon/enhet er IKKE del av forespørselen: en gjenspilling etter ny innlogging er samme forespørsel
       expect(await keyFor(sample(action), "tabell-nokkel-0001", { ...owner(), session_id: "ny-sesjon", device_id: "ny-enhet", person_id: "annen-person", channel: "web" }), `${action}: sesjon/enhet/person`).toBe(base);
     }
@@ -468,6 +512,16 @@ describe("K4: nøkkellengde - 159/160 virker, 161 og over gir `idempotency_key_t
     }
   });
 
+  it("lengden telles i TEGN, ikke byte: en flerbyte-nøkkel på 100 tegn (200 byte) er IKKE `too_long`, men har ugyldige tegn (`required` / `invalid`); 161 flerbyte-tegn er `too_long` (mutanten som teller byte skal feile; reviewer A funn 3)", async () => {
+    const flerbyte = "\u00e6".repeat(100);
+    for (const action of COMMS_KNOWN_ACTIONS) {
+      const r = recorder();
+      expect(await run(r, action, sample(action), flerbyte), action).toEqual({ ok: false, status: "rejected", reason: REQUIRED_KEY_ACTIONS.includes(action) ? "idempotency_key_required" : "idempotency_key_invalid" });
+      expect(await run(r, action, sample(action), "\u00e6".repeat(161)), action).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_too_long" });
+      expect(r.requests, action).toEqual([]);
+    }
+  });
+
   it("lengden sjekkes FØRST: en 161-tegns nøkkel med ugyldige tegn er likevel `too_long` (ikke `required`), og en gyldig kort nøkkel er uberørt", async () => {
     const r = recorder();
     expect(await run(r, "send", sample("send"), `${"a b ".repeat(41)}`)).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_too_long" });
@@ -502,7 +556,7 @@ describe("K4: nøkkellengde - 159/160 virker, 161 og over gir `idempotency_key_t
         expect(r.requests[0]!.idempotency_key!.endsWith(`:${key}`), `${action}:${key}`).toBe(true);
       }
       // en oppgitt, svak/ugyldig nøkkel avvises (tidligere: `""` ga en stille deduplicated og NUL ga en databasefeil/HTTP 500)
-      for (const bad of ["a", "kort", "x".repeat(7), "", "   ", "med mellomrom", "ok-ok-ok\nnewline", "nul\u0000-nul-nul", "æøå-æøå-æøå", "static key 001"]) {
+      for (const bad of ["a", "kort", "x".repeat(7), "", "   ", "med mellomrom", "ok-ok-ok\nnewline", "nul\u0000-nul-nul", "abc\ud800defgh", "æøå-æøå-æøå", "\u00e6".repeat(100), "static key 001"]) {
         const r = recorder();
         expect(await run(r, action, sample(action), bad), `${action}:${JSON.stringify(bad)}`).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_invalid" });
         expect(r.requests, `${action}:${JSON.stringify(bad)}`).toEqual([]);
@@ -537,7 +591,7 @@ describe("K6 h: differensial mot main - allerede-gyldige kall endrer seg IKKE (u
         const r = recorder();
         await run(r, action, sample(action), key);
         const req = r.requests[0]!;
-        const fp = ownerPayloadFingerprint(TENANT, "business", sample(action));
+        const fp = ownerPayloadFingerprint(TENANT, spaceFor(action), sample(action));
         expect(req.idempotency_key!.replace(`:${fp}:`, ":"), `${action}:${key}`).toBe(legacyScoped(TENANT, action, key));
         expect({ ...req, idempotency_key: undefined }, `${action}:${key}`).toEqual({ identity: owner(), tool_id: "comms", action, parameters: sample(action), idempotency_key: undefined });
       }

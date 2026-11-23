@@ -332,6 +332,19 @@ describe("B: alle 12 ikke-journalførte skrivehandlinger - gjenspilling er `dedu
     expect(ok(await chain.act("meeting_ingest_text", params, k))).toMatchObject({ deduplicated: true, external_id: business.external_id });
   });
 
+  it("Google-kontaktboken er ÉN per utrulling: `contacts_create` K/P fra `project` etter K/P fra `business` er en ekte gjenspilling (`deduplicated`, ÉN opprettelse), ikke en dobbel opprettelse (reviewer A funn 2); ulik nyttelast med samme nøkkel utføres fortsatt", async () => {
+    const p = { given_name: "Rom", family_name: `Rom${uniq()}` };
+    const k = chain.key("space-cc");
+    handler = (c) => (c.method === "POST" ? jsonRes(person(String(700 + seq++))) : new Response("{}", { status: 404 }));
+    const posts = () => calls.filter((c) => c.method === "POST").length;
+    expect(await chain.act("contacts_create", p, k)).toMatchObject({ ok: true, deduplicated: false });
+    expect(await chain.act("contacts_create", p, k, inSpace("project"))).toMatchObject({ ok: true, deduplicated: true });
+    expect(await chain.act("contacts_create", p, k, inSpace("personal"))).toMatchObject({ ok: true, deduplicated: true });
+    expect(posts(), "People API skal kun ha fått ÉN opprettelse").toBe(1);
+    expect(await chain.act("contacts_create", { ...p, family_name: `${p.family_name}-B` }, k, inSpace("project"))).toMatchObject({ ok: true, deduplicated: false });
+    expect(posts()).toBe(2);
+  });
+
   it("samme konto i et annet rom: lagret tillater kun ÉN aktiv autorisasjon per konto, så en (K, X) fra `project` gir en TYDELIG feil - aldri et falskt `ok + deduplicated` (som på main) om at kontoen nå er autorisert der", async () => {
     const ref = smsRef();
     const k = chain.key("space-acct");
@@ -476,6 +489,19 @@ describe("D: nøkkellengde - 159/160 virker uavkortet, 161 gir `idempotency_key_
     for (const length of [161, 200, 201]) expect(await chain.act("send", sendP(), ofLength("len-send", length)), `${length} tegn`).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_too_long" });
     expect(await scalar("SELECT count(*)::int AS n FROM comms_outbound_log WHERE tenant_id = $1", [TENANT_A])).toBe(journalBefore);
     expect(count(chain.twilio, "send")).toBe(sendsBefore);
+  });
+
+  it("en OPPGITT, ugyldig nøkkel til en handling der nøkkelen er valgfri gir `idempotency_key_invalid` uten ledgerrad og uten effekt (tom streng ga før en stille `deduplicated`, NUL en ubehandlet databasefeil; reviewer A funn 1, B F2); ingen nøkkel virker som før", async () => {
+    const before = await scalar("SELECT count(*)::int AS n FROM tool_executions WHERE tenant_id = $1 AND tool_id = 'comms' AND action = 'record_opt_out'", [TENANT_A]);
+    const n = chain.phone();
+    for (const bad of ["", "   ", "abc", "nul\u0000-nul-nul", "abc\ud800defgh", "med mellomrom i seg", "\u00e6".repeat(100)]) {
+      expect(await chain.act("record_opt_out", { channel: "sms", recipient: n }, bad), JSON.stringify(bad)).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_invalid" });
+    }
+    expect(await scalar("SELECT count(*)::int AS n FROM tool_executions WHERE tenant_id = $1 AND tool_id = 'comms' AND action = 'record_opt_out'", [TENANT_A])).toBe(before);
+    expect(await chain.store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "sms", n))).toBe(false);
+    // uten nøkkel: ingen idempotens, uendret
+    expect(await chain.act("record_opt_out", { channel: "sms", recipient: n })).toMatchObject({ ok: true, deduplicated: false });
+    expect(await chain.store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "sms", n))).toBe(true);
   });
 
   it("manglende eller for kort nøkkel er fortsatt `idempotency_key_required` (kun lengde over 160 har egen kode)", async () => {
