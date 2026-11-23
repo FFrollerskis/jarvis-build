@@ -4,8 +4,8 @@
 #
 #   ACCEPTANCE_REPO=<owner/repo> ops/job-runner/acceptance.sh [--with-restart] [--with-ttl] [--dry-run]
 #
-#   ACCEPTANCE_REPO     PÅKREVD (unntatt --dry-run): et SANDBOX-/test-repo som står i runner.allowed_repos. Aldri produksjonsrepoet (tsworkflow/jarvisbuild nektes HARDT,
-#                       også om det står i allowed_repos): publiseringssteget pusher en ekte branch `jarvis/accept-<tid>` dit (blast radius, D-41). Slettes manuelt etterpå.
+#   ACCEPTANCE_REPO     PÅKREVD (unntatt --dry-run): et SANDBOX-/test-repo som står i runner.allowed_repos. Aldri produksjonsrepoet (FFrollerskis/jarvis-build, det gamle tsworkflow/jarvisbuild og eventuelt JARVIS_GITHUB_REPO nektes HARDT,
+#                       også om de står i allowed_repos; D-479): publiseringssteget pusher en ekte branch `jarvis/accept-<tid>` dit (blast radius, D-41). Slettes manuelt etterpå.
 #   --with-restart      sender SIGKILL til jarvis-job-runner og restarter (krever root): bevis for reclaim etter krasj (D-32 port 12). ADVARSEL: dreper den LEVENDE runneren og alle
 #                       jobbene på den. Krever ACCEPT_CONFIRM_RESTART=yes (eller at du skriver RESTART når du blir spurt), og J09 hoppes over hvis andre jobber enn akseptansens egen er aktive.
 #   --with-ttl          venter til en jobb passerer runner.max_job_lifetime_s (bør være lav, f.eks. 60) og ser at den fjernes av TTL-rydderen.
@@ -530,9 +530,19 @@ main() {
   for tool in docker curl node; do command -v "$tool" >/dev/null 2>&1 || { echo "mangler $tool - kjør dette på NAS-en" >&2; return 2; }; done
   [ -n "$REPO" ] || { echo "ACCEPTANCE_REPO er påkrevd (et SANDBOX-repo i runner.allowed_repos - aldri produksjonsrepoet)" >&2; return 2; }
   # B-L5: produksjonsrepoet nektes HARDT, uavhengig av runner.allowed_repos (en eier som har lagt det der kan ikke bruke akseptansen mot det: J11 pusher en ekte branch).
-  case "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" in
-    tsworkflow/jarvisbuild) echo "ACCEPTANCE_REPO=$REPO er PRODUKSJONSREPOET: akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2 ;;
+  # D-479 (kontobytte, D-478): nektelisten er det NÅVÆRENDE kanoniske repoet (CANONICAL_GITHUB_REPO i packages/contracts/src/github-repo.ts), det GAMLE frosne repoet (LEGACY_GITHUB_REPOS) og eierens
+  # konfigurerte JARVIS_GITHUB_REPO når den er satt i miljøet - så et senere kontobytte ikke åpner et hull. En drift-test (ops/job-runner/test/acceptance-script.test.mjs) holder listen i takt med kontrakten.
+  local repo_lc prod_lc
+  repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
+  prod_lc="$(printf '%s' "${JARVIS_GITHUB_REPO:-}" | tr '[:upper:]' '[:lower:]')"
+  # GitHub behandler `eier/repo`, `eier/repo/` og `eier/repo.git` som samme repo i git-URL-er: alle tre former nektes (et alias skal ikke omgå vernet).
+  for _ in 1 2; do repo_lc="${repo_lc%/}"; repo_lc="${repo_lc%.git}"; prod_lc="${prod_lc%/}"; prod_lc="${prod_lc%.git}"; done
+  case "$repo_lc" in
+    ffrollerskis/jarvis-build|tsworkflow/jarvisbuild) echo "ACCEPTANCE_REPO=$REPO er PRODUKSJONSREPOET: akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2 ;;
   esac
+  if [ -n "$prod_lc" ] && [ "$repo_lc" = "$prod_lc" ]; then
+    echo "ACCEPTANCE_REPO=$REPO er PRODUKSJONSREPOET (JARVIS_GITHUB_REPO): akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2
+  fi
   if [ "$WITH_RESTART" = "1" ]; then
     echo "ADVARSEL: --with-restart sender SIGKILL til den LEVENDE jarvis-job-runner og restarter den. Alle jobber på runneren avbrytes." >&2
     if [ "${ACCEPT_CONFIRM_RESTART:-}" != "yes" ]; then

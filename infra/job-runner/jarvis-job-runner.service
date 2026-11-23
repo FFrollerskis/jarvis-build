@@ -6,7 +6,7 @@
 # root-eid og skrivebeskyttet for tjenestebrukeren, slik at en kompromittert prosess ikke kan endre sin egen kode eller policy.
 [Unit]
 Description=Jarvis job-runner (vertsside kodejobb-containere, WP-C1)
-Documentation=https://github.com/tsworkflow/jarvisbuild/blob/main/docs/runbooks/JOB_RUNNER.md
+Documentation=https://github.com/FFrollerskis/jarvis-build/blob/main/docs/runbooks/JOB_RUNNER.md
 After=network-online.target docker.service jarvis-egress-proxy.service
 Wants=network-online.target
 # Hard avhengighet av proxyen: dens ExecStartPre (setup-network.sh) oppretter jobbnettverket OG brannmurreglene. Feiler den, starter runneren IKKE

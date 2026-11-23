@@ -5,7 +5,7 @@
 # setup-network.sh (som root) det interne Docker-nettverket og INPUT-reglene som hindrer jobb-containere i å nå andre tjenester på verten.
 [Unit]
 Description=Jarvis egress-proxy for jobb-containere (WP-C1)
-Documentation=https://github.com/tsworkflow/jarvisbuild/blob/main/docs/runbooks/JOB_RUNNER.md
+Documentation=https://github.com/FFrollerskis/jarvis-build/blob/main/docs/runbooks/JOB_RUNNER.md
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
