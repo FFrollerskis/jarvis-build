@@ -22,6 +22,8 @@ const baseEnv = { PATH: process.env["PATH"], HOME: tmpdir(), LANG: "C.UTF-8" };
 
 // ACCEPTANCE_ENV_FILE peker på en fil som ikke finnes: produksjonsvernet leser ellers <repo>/.env (hermetiske tester). Tester av .env-lesingen setter den selv.
 const NO_ENV_FILE = join(tmpdir(), "jarvis-acceptance-test-finnes-ikke.env");
+// Finnes en UTF-8-locale på maskinen? (bash-mønstre oppfører seg annerledes på ugyldige UTF-8-bytes der; testene under dekker det bare hvis locale finnes.)
+const HAS_UTF8_LOCALE = (spawnSync("locale", ["-a"], { encoding: "utf8" }).stdout ?? "").toLowerCase().split("\n").some((l) => l.includes("utf8") || l.includes("utf-8"));
 const run = (args, env = {}, input) => spawnSync("bash", [SCRIPT, ...args], { env: { ...baseEnv, ACCEPTANCE_ENV_FILE: NO_ENV_FILE, ...env }, encoding: "utf8", input, timeout: 60_000 });
 /** Kjører bash som laster scriptet (ACCEPTANCE_SOURCE_ONLY=1) og så et lite testprogram; argv til programmet gis som args ($1...). */
 // (argv legges i en array og nullstilles FØR scriptet lastes: scriptets egen argumentløkke avviser ellers dem som «ukjente argumenter».)
@@ -310,6 +312,62 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     for (const special of ["/dev/zero", dir]) expect(check(special).stdout, special).toMatch(/^WARN:/);
     // manglende fil: stille (ingen advarsel: det er normalt at `.env` ikke finnes)
     expect(check(join(dir, "finnes-ikke.env")).stdout).toBe("");
+  });
+
+  it.skipIf(!HAS_UTF8_LOCALE)("D-479 (reviewer B delta 2): ikke-UTF-8 bytes PÅ SAMME LINJE som JARVIS_GITHUB_REPO (latin-1-kommentar, latin-1 i verdien) i en UTF-8-locale gir fortsatt riktig verdi og nektelse, og FATAL oppdages også da; vernet faller ikke åpent", async () => {
+    const dir = await makeTempDir("acc-env-latin1");
+    const write = async (name, data) => { const f = join(dir, name); await writeFile(f, data); return f; };
+    const L1 = (text) => Buffer.from(text, "latin1");   // \xe6 \xf8 \xe5 som ENKELT-bytes = ugyldig UTF-8 (en norsk kommentar lagret som latin-1/cp1252)
+    const utf8 = { LC_ALL: "C.UTF-8", LANG: "C.UTF-8" };
+    const value = (f) => sourced("env_file_value JARVIS_GITHUB_REPO", [], { ACCEPTANCE_ENV_FILE: f, ...utf8 });
+    const deny = (repo, f) => sourced('production_repo_reason "$1"', [repo], { ACCEPTANCE_ENV_FILE: f, ...utf8 });
+    const check = (f) => sourced("env_file_check JARVIS_GITHUB_REPO", [], { ACCEPTANCE_ENV_FILE: f, ...utf8 });
+    // verdien leses med ugyldig UTF-8 på samme linje (kommentar), før, etter og i annen eksport-/mellomromsform
+    const sameLine = [
+      ["comment.env", L1("JARVIS_GITHUB_REPO=acme/prod # kommentar \xe6\n")],
+      ["export-quoted.env", L1("export JARVIS_GITHUB_REPO=\"acme/prod\" # prod-repoet v\xe5rt \xf8\n")],
+      ["crlf-tab.env", L1("JARVIS_GITHUB_REPO = acme/prod\t# \xe6\xf8\xe5\r\n")],
+      ["before.env", L1("X=caf\xe9\nJARVIS_GITHUB_REPO=acme/prod\n")],
+      ["after.env", L1("JARVIS_GITHUB_REPO=acme/prod\nX=caf\xe9\n")],
+    ];
+    for (const [name, data] of sameLine) {
+      const f = await write(name, data);
+      expect(value(f).stdout, `${name}: verdien`).toBe("acme/prod");
+      expect(deny("acme/prod", f).status, `${name}: nektelse`).toBe(0);
+      expect(deny("acme/prod", f).stdout, name).toContain("JARVIS_GITHUB_REPO i .env");
+      expect(check(f).stdout, `${name}: ingen falsk melding`).toBe("");
+    }
+    // ugyldig byte INNE I verdien: en annen streng enn acme/prod, så ingen treff - men heller ingen krasj
+    const inValue = await write("in-value.env", L1("JARVIS_GITHUB_REPO=acme/pr\xe9d\n"));
+    expect(value(inValue).status).toBe(0);
+    expect(deny("acme/prod", inValue).status).toBe(1);
+    // FATAL oppdages også med latin-1 på linjen (YAML-kolon og interpolasjon)
+    for (const [name, data, re] of [
+      ["yaml.env", L1("JARVIS_GITHUB_REPO: acme/prod # \xe6\n"), /^FATAL: linjen for JARVIS_GITHUB_REPO/],
+      ["interp.env", L1("JARVIS_GITHUB_REPO=${X} # \xe6\n"), /^FATAL: JARVIS_GITHUB_REPO i .* bruker variabel-interpolasjon/],
+      ["interp-quoted.env", L1("JARVIS_GITHUB_REPO=\"acme/$OWNER\" # caf\xe9\n"), /^FATAL: JARVIS_GITHUB_REPO i .* bruker variabel-interpolasjon/],
+    ]) {
+      expect(check(await write(name, data)).stdout, name).toMatch(re);
+    }
+    // ende-til-ende: hele scriptet nekter acme/prod (aldri produksjon) når .env bare har ugyldig UTF-8 i kommentaren, og avbryter på YAML-kolon med latin-1
+    const { config } = await setup();
+    const e2e = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "acme/prod", ACCEPTANCE_ENV_FILE: await write("e2e-comment.env", L1("JARVIS_GITHUB_REPO=acme/prod # kommentar \xe6\n")), ...utf8 });
+    expect(e2e.status).toBe(2);
+    expect(e2e.stderr).toContain("PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i .env)");
+    const e2eYaml = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", ACCEPTANCE_ENV_FILE: await write("e2e-yaml.env", L1("JARVIS_GITHUB_REPO: acme/prod # \xe6\n")), ...utf8 });
+    expect(e2eYaml.status).toBe(2);
+    expect(e2eYaml.stderr).toContain("er ikke på formen JARVIS_GITHUB_REPO=verdi");
+    expect(e2eYaml.stderr, "stopper før allowed_repos-sjekken").not.toContain("står ikke i runner.allowed_repos");
+    // en sti med norske tegn (gyldig UTF-8) i ACCEPTANCE_ENV_FILE virker også (meldingene bærer stien)
+    const nordic = join(dir, "norsk-sti-\u00e6\u00f8\u00e5");
+    await mkdir(nordic);
+    const nordicFile = join(nordic, ".env");
+    await writeFile(nordicFile, "JARVIS_GITHUB_REPO: acme/prod\n");
+    expect(check(nordicFile).stdout).toMatch(/^FATAL: linjen for JARVIS_GITHUB_REPO i .*norsk-sti-\u00e6\u00f8\u00e5/);
+    const e2eNordic = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", ACCEPTANCE_ENV_FILE: nordicFile, ...utf8 });
+    expect(e2eNordic.status).toBe(2);
+    expect(e2eNordic.stderr).toContain("avbryter");
+    expect(e2eNordic.stderr).not.toContain("står ikke i runner.allowed_repos");
   });
 
   it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)("D-479: en ulesbar .env (ingen lesetilgang) gir en advarsel, ikke en stille bortfall (kun som ikke-root)", async () => {
