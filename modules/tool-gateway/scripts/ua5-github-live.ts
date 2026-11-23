@@ -18,8 +18,9 @@
 // All test-scaffolding (branch + issue) ryddes opp ved slutten, uansett utfall.
 //
 // Kjøres: node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts/ua5-github-live.ts [owner/repo]
-// (default repo: tsworkflow/jarvisbuild - samme repo koden selv bor i)
+// (default repo: CANONICAL_GITHUB_REPO i @jarvis/contracts - samme repo koden selv bor i, D-478/D-479)
 
+import { CANONICAL_GITHUB_REPO } from "@jarvis/contracts";
 import { GithubTransport } from "../src/live-transports.ts";
 
 type Verdict = "PASS" | "FAIL" | "BLOCKED_NO_CREDENTIALS" | "NOT_RUN";
@@ -47,7 +48,7 @@ function log(line: string): void {
 }
 
 async function main(): Promise<void> {
-  const repo = process.argv[2] ?? "tsworkflow/jarvisbuild";
+  const repo = process.argv[2] ?? CANONICAL_GITHUB_REPO;
   const token = process.env["JARVIS_GITHUB_TOKEN"];
   if (!token) {
     for (const key of Object.keys(results)) results[key] = "BLOCKED_NO_CREDENTIALS";

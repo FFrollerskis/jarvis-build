@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import type { IdentityContext, JobContract } from "@jarvis/contracts";
+import { CANONICAL_GITHUB_REPO, type IdentityContext, type JobContract } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import type { SandboxRunner, TaskService } from "@jarvis/tasks";
 import {
@@ -166,7 +166,7 @@ export class SelfModificationService {
   private readonly baseBranch: string;
 
   constructor(private readonly deps: SelfModificationServiceDeps) {
-    this.repoSlug = deps.repoSlug ?? process.env["JARVIS_GITHUB_REPO"] ?? "tsworkflow/jarvisbuild";
+    this.repoSlug = deps.repoSlug ?? process.env["JARVIS_GITHUB_REPO"] ?? CANONICAL_GITHUB_REPO;
     this.baseBranch = deps.baseBranch ?? "main";
     // D-409: forbruket telles fra endringsregisteret - et budsjettlås uten register ville aldri se noe forbruk og dermed aldri låse.
     if (deps.budgetLock && !deps.changeLedger) throw new Error("self_modification_budget_lock_requires_change_ledger");

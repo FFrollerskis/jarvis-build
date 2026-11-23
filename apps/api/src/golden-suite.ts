@@ -1,4 +1,5 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
+import { CANONICAL_GITHUB_REPO } from "@jarvis/contracts";
 import { bindingHash, callFingerprint, delegationRequestVariants, fastRoute, scanForSecrets } from "@jarvis/core";
 import { classifyContentSensitivity, parseRoutingOverride } from "@jarvis/model-gateway";
 import {
@@ -75,7 +76,7 @@ export const GOLDEN: readonly Golden[] = [
   { task: task("cls-ambiguous-measured", "norwegian", "Tvetydige ord (skatt) låser ikke, men telles", "Q-52 A"), check: () => { const d = classifyContentSensitivity({ texts: ["Skatten er forfalt"] }); return d.sensitivity !== "SECRET_RESTRICTED" && (d.ambiguous_terms ?? []).includes("skatt"); } },
   // --- ruting og eierens overstyring (D-106/D-395) -----------------------------------------------------------------------------------------------------------------------------------------
   { task: task("route-local-only-phrase", "security", "«bruk bare lokale modeller» er en eier-instruks som holder turen lokal", "D-106", "policy_bypass"), check: () => { const o = parseRoutingOverride("bruk bare lokale modeller og list PR-er"); return o !== null && (o.mode === "LOCAL" || o.providerPreference?.every((p) => p.startsWith("gemma")) === true); } },
-  { task: task("route-no-override", "reasoning", "En vanlig forespørsel er ingen ruteinstruks", "D-106"), check: () => parseRoutingOverride("list åpne PR-er på tsworkflow/jarvisbuild") === null },
+  { task: task("route-no-override", "reasoning", "En vanlig forespørsel er ingen ruteinstruks", "D-106"), check: () => parseRoutingOverride(`list åpne PR-er på ${CANONICAL_GITHUB_REPO}`) === null },
   // --- hurtigbanen (D-424/EV-1/EV-2/WP-B) -----------------------------------------------------------------------------------------------------------------------------------------------------
   { task: task("fast-status", "tool_use", "«status» er en hurtigkommando uten modell", "CANONICAL_SPEC §4"), check: () => fastRoute("status")?.kind === "system_status" },
   { task: task("fast-delegate-bg", "tool_use", "«… i bakgrunnen» legger eierens egen melding som bakgrunnsjobb", "D-424"), check: () => fastRoute("undersøk GitHub-sakene mine i bakgrunnen og lag en rapport")?.kind === "delegate_background" },
@@ -83,7 +84,7 @@ export const GOLDEN: readonly Golden[] = [
   { task: task("fast-bg-variants", "tool_use", "Frasevariantene for «… i bakgrunnen» dekker midt i en ruteinstruksjon", "D-449 (gjennomgang 4)"), check: () => delegationRequestVariants("bruk i bakgrunnen bare lokale modeller").some((v) => parseRoutingOverride(v) !== null) },
   { task: task("fast-evolution", "tool_use", "«hvordan utvikler du deg» går til evolusjonsportene", "D-452"), check: () => fastRoute("hvordan utvikler du deg")?.kind === "evolution_report" },
   // --- verktøyutvalg (D-381/D-389/D-415/Q-53) ------------------------------------------------------------------------------------------------------------------------------------------------
-  { task: task("tools-github", "tool_use", "«list åpne PR-er» velger GitHub-verktøyene", "D-389"), needsSurface: true, check: (c) => toolIds(c, "list åpne PR-er på tsworkflow/jarvisbuild").ids.has("github") },
+  { task: task("tools-github", "tool_use", "«list åpne PR-er» velger GitHub-verktøyene", "D-389"), needsSurface: true, check: (c) => toolIds(c, `list åpne PR-er på ${CANONICAL_GITHUB_REPO}`).ids.has("github") },
   { task: task("tools-smalltalk-none", "tool_use", "Småprat («hei») får ingen verktøy", "D-415"), needsSurface: true, check: (c) => toolIds(c, "hei").count === 0 },
   { task: task("tools-finance-locks", "security", "Et finansverktøy valgt av meldingen låser turen til lokal modell", "D-381"), needsSurface: true, check: (c) => toolIds(c, "finn alle e-postene fra banken og oppsummer dem").min === "SECRET_RESTRICTED" },
   { task: task("tools-memory-only", "memory", "Uten tjenesteord er kun minne-reserven valgt (forblir lokal)", "Q-53 A"), needsSurface: true, check: (c) => { const t = toolIds(c, "hva synes du om hytta vår"); return t.count > 0 && [...t.ids].every((id) => id === "memory"); } },

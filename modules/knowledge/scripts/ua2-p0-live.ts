@@ -13,7 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
+import { CANONICAL_GITHUB_REPO, type IdentityContext, type MemorySpace } from "@jarvis/contracts";
 import { configFromEnv, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { LocalHashEmbedding, withMemoryTransaction } from "@jarvis/memory";
 import { KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
@@ -468,7 +468,7 @@ async function main(): Promise<void> {
       log("JARVIS_GITHUB_TOKEN mangler -> github_live=SKIPPED_NO_CREDENTIAL (endrer ikke scope)");
       return;
     }
-    const repo = process.env["JARVIS_GITHUB_REPO"] ?? "tsworkflow/jarvisbuild";
+    const repo = process.env["JARVIS_GITHUB_REPO"] ?? CANONICAL_GITHUB_REPO;
     const killSwitch = new KillSwitch();
     const deviceRegistry = new PgDeviceRegistry(pool, ownerTenant);
     await deviceRegistry.refresh().catch(() => undefined);

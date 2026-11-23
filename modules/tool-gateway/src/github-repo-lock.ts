@@ -1,9 +1,9 @@
-import type { JsonValue } from "@jarvis/contracts";
+import { CANONICAL_GITHUB_REPO, type JsonValue } from "@jarvis/contracts";
 import { resolveGithubRepo } from "./live-transports.ts";
 
 /**
  * Q-50 B (D-450, Tobias 2026-10-09: «Ja til alle Q»): GitHub-kall som STYRES AV EN MODELL (chatten og delegerte bakgrunnsjobber, begge via `MeshToolExecutor`) er låst til eierens konfigurerte repo
- * (`JARVIS_GITHUB_REPO`, ellers `tsworkflow/jarvisbuild`). Begrunnelsen er ikke at andre repo er hemmelige, men at en modell som har lest ubetrodd innhold (e-post, issue-tekst, nettsider) ikke skal kunne
+ * (`JARVIS_GITHUB_REPO`, ellers `CANONICAL_GITHUB_REPO` i `@jarvis/contracts`, D-478/D-479). Begrunnelsen er ikke at andre repo er hemmelige, men at en modell som har lest ubetrodd innhold (e-post, issue-tekst, nettsider) ikke skal kunne
  * styres til å lese - eller, via handlingsnivået, skrive til - et annet repo med eierens token (D-429 lot et eksplisitt `eier/navn` gå uendret gjennom). Låsen gjelder ALLE GitHub-handlinger på modellens flate;
  * eierens egen bruk (dashbordet, bekreftede handlinger, direkte kall mot ToolGateway) er uendret.
  *
@@ -15,7 +15,7 @@ export interface GithubRepoLockViolation {
   allowed: string;
 }
 
-const DEFAULT_REPO = "tsworkflow/jarvisbuild";
+const DEFAULT_REPO = CANONICAL_GITHUB_REPO;
 
 export function githubReposUnlocked(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
   return (env["JARVIS_GITHUB_ALLOW_OTHER_REPOS"] ?? "").trim().toLowerCase() === "true";

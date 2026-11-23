@@ -3,6 +3,7 @@ import type pg from "pg";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
 import type { ToolGateway } from "./gateway.ts";
+import { configuredGithubRepo } from "./github-repo-lock.ts";
 
 /**
  * Daily Executive Brief (v4.0 første Daily Value Loop).
@@ -139,7 +140,7 @@ export function buildStatusSource(gateway: ToolGateway | null, statusFile = "doc
       }
       if (gateway) {
         const issues = await gateway.execute({
-          identity, tool_id: "github", action: "read_issues", parameters: { repo: "tsworkflow/jarvisbuild" }
+          identity, tool_id: "github", action: "read_issues", parameters: { repo: configuredGithubRepo() }
         });
         if (issues.ok) {
           const list = ((issues.data as { issues?: JsonValue[] } | undefined)?.issues ?? []) as Array<Record<string, string>>;

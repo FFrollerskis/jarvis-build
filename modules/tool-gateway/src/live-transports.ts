@@ -12,7 +12,7 @@ import {
 import { createHash, createHmac } from "node:crypto";
 import type pg from "pg";
 import { AccessTokenCache, bearerFor, type RefreshedToken, dropboxRefreshExchange, microsoftRefreshExchange, spotifyRefreshExchange } from "./oauth-refresh.ts";
-import type { JsonValue } from "@jarvis/contracts";
+import { CANONICAL_GITHUB_REPO, type JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
 import { createVaultFirstConfigReader, readEnvConfig, type ConfigReader, type VaultFirstConfigReader } from "./oauth-client-config.ts";
 import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
@@ -1704,14 +1704,14 @@ function toPullRequestSummary(pr: {
 /**
  * D-429: repo-oppløsning i trusted kode. Modellen (spesielt en liten lokal) sender ofte bare «jarvisbuild» eller utelater repo - da avvistes
  * kallet før det nådde GitHub, og jobben «svarte» med gjetting. Lese-handlingene faller nå til eierens konfigurerte repo
- * (`JARVIS_GITHUB_REPO`, ellers `tsworkflow/jarvisbuild`) når repo mangler, og et navn uten `eier/` får eierens eier. Et eksplisitt `eier/navn`
+ * (`JARVIS_GITHUB_REPO`, ellers `CANONICAL_GITHUB_REPO`, D-478/D-479) når repo mangler, og et navn uten `eier/` får eierens eier. Et eksplisitt `eier/navn`
  * brukes uendret, og alt går fortsatt gjennom `assertGithubRepoSlug`. Skrive-/kontrollhandlinger får aldri standardrepo ved manglende repo.
  */
 const GITHUB_DEFAULT_REPO_ACTIONS: ReadonlySet<string> = new Set([
   "get_branch", "get_commit", "get_pull_request", "list_branches", "list_pull_requests", "list_workflow_jobs", "list_workflow_runs", "read_repo_meta"
 ]);
 export function resolveGithubRepo(action: string, raw: JsonValue | undefined, configured: string | undefined = process.env["JARVIS_GITHUB_REPO"]): string {
-  const fallback = typeof configured === "string" && /^[^/\s]+\/[^/\s]+$/.test(configured.trim()) ? configured.trim() : "tsworkflow/jarvisbuild";
+  const fallback = typeof configured === "string" && /^[^/\s]+\/[^/\s]+$/.test(configured.trim()) ? configured.trim() : CANONICAL_GITHUB_REPO;
   const value = typeof raw === "string" ? raw.trim() : "";
   if (value.length === 0) {
     if (GITHUB_DEFAULT_REPO_ACTIONS.has(action)) return fallback;
