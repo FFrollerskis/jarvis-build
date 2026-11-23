@@ -3,6 +3,7 @@ import {
   controlAction, controlItem, controlSection, unknownControlSection,
   type ControlAction, type ControlCenterBuildContext, type ControlCenterDefinition, type ControlCenterParts, type ControlItem, type ControlSection, type ControlStatus
 } from "@jarvis/executive";
+import { CANONICAL_GITHUB_REPO, LEGACY_GITHUB_REPOS, githubRepoAliasKey, parseGithubRepoSlug } from "@jarvis/contracts";
 import type { PolicyAuditSinkStats } from "@jarvis/core";
 import { budgetConfigFromEnv } from "@jarvis/model-gateway";
 import { resolveAuthorityMode, type AuthorityConfig, type InfraExecutionGate, type KillSwitch, type OwnerControls, type PolicyAuditStats } from "@jarvis/policy";
@@ -576,10 +577,18 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
       // ---------------------------------------------------------------------------------------------------------------------------------------------
       const externalItems: ControlItem[] = [];
       const unlocked = githubReposUnlocked(deps.env);
+      // D-479 (JARVIS-117): etter kontobyttet (D-478) kan NAS-en fortsatt ha `JARVIS_GITHUB_REPO` på det gamle, frosne repoet; da virker lesing, men nye endringer havner i det nye repoet. Si det, i stedet for «OK».
+      const lockedRepo = configuredGithubRepo(deps.env);
+      const lockedKey = githubRepoAliasKey(lockedRepo);
+      const legacyRepo = LEGACY_GITHUB_REPOS.some((legacy) => githubRepoAliasKey(legacy) === lockedKey);
       externalItems.push(controlItem({
-        id: "github_repo", label: "GitHub-repo-lås (modellflaten)", status: unlocked ? "WARN" : "OK",
-        detail_no: unlocked ? "ÅPEN: modellen kan nå andre GitHub-repo enn det konfigurerte (JARVIS_GITHUB_ALLOW_OTHER_REPOS)." : `Låst til ${configuredGithubRepo(deps.env)}: en modell styrt av ubetrodd innhold kan ikke nå andre repo med ditt token.`,
-        facts: { repo: configuredGithubRepo(deps.env), other_repos_allowed: unlocked }
+        id: "github_repo", label: "GitHub-repo-lås (modellflaten)", status: unlocked || legacyRepo ? "WARN" : "OK",
+        detail_no: unlocked
+          ? "ÅPEN: modellen kan nå andre GitHub-repo enn det konfigurerte (JARVIS_GITHUB_ALLOW_OTHER_REPOS)."
+          : legacyRepo
+            ? `Låst til ${lockedRepo}, som er det GAMLE repoet fra før kontobyttet (D-478) og må regnes som frosset: nye endringer havner i ${CANONICAL_GITHUB_REPO}. Sett JARVIS_GITHUB_REPO til det nye repoet når credentialen for det er på plass (docs/runbooks/GITHUB_ACCOUNT_MOVE.md).`
+            : `Låst til ${lockedRepo}: en modell styrt av ubetrodd innhold kan ikke nå andre repo med ditt token.`,
+        facts: { repo: lockedRepo, repo_source: parseGithubRepoSlug(deps.env["JARVIS_GITHUB_REPO"]) !== null ? "JARVIS_GITHUB_REPO" : "standard", legacy_repo: legacyRepo, other_repos_allowed: unlocked }
       }));
       try {
         const repos = allowedReposFromEnv({ ...deps.env });

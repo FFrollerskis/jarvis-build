@@ -32,6 +32,7 @@ export * from "./mcp-zapier-transport.ts";
 export * from "./browser-transport.ts";
 export * from "./github-rate-limit-controller.ts";
 export * from "./github-repo-lock.ts";
+export * from "./github-sandbox-guard.ts";
 export * from "./github-app-auth.ts";
 export * from "./github-token-provider.ts";
 export * from "./scheduler.ts";

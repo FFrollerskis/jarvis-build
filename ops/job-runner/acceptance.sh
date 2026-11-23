@@ -4,8 +4,9 @@
 #
 #   ACCEPTANCE_REPO=<owner/repo> ops/job-runner/acceptance.sh [--with-restart] [--with-ttl] [--dry-run]
 #
-#   ACCEPTANCE_REPO     PÅKREVD (unntatt --dry-run): et SANDBOX-/test-repo som står i runner.allowed_repos. Aldri produksjonsrepoet (FFrollerskis/jarvis-build, det gamle tsworkflow/jarvisbuild og eventuelt JARVIS_GITHUB_REPO nektes HARDT,
-#                       også om de står i allowed_repos; D-479): publiseringssteget pusher en ekte branch `jarvis/accept-<tid>` dit (blast radius, D-41). Slettes manuelt etterpå.
+#   ACCEPTANCE_REPO     PÅKREVD (unntatt --dry-run): et SANDBOX-/test-repo som står i runner.allowed_repos (små bokstaver; store bokstaver i variabelen gjøres om). Aldri produksjonsrepoet: FFrollerskis/jarvis-build, forkets
+#                       tidligere navn FFrollerskis/jarvisbuild, det gamle tsworkflow/jarvisbuild og JARVIS_GITHUB_REPO (fra miljøet eller .env) nektes HARDT, også som `.git`/`/`-alias og også om de står i allowed_repos
+#                       (D-479): publiseringssteget pusher en ekte branch `jarvis/accept-<tid>` dit (blast radius, D-41). Slettes manuelt etterpå. Samme .env som compose leses (ACCEPTANCE_ENV_FILE, standard <repo>/.env).
 #   --with-restart      sender SIGKILL til jarvis-job-runner og restarter (krever root): bevis for reclaim etter krasj (D-32 port 12). ADVARSEL: dreper den LEVENDE runneren og alle
 #                       jobbene på den. Krever ACCEPT_CONFIRM_RESTART=yes (eller at du skriver RESTART når du blir spurt), og J09 hoppes over hvis andre jobber enn akseptansens egen er aktive.
 #   --with-ttl          venter til en jobb passerer runner.max_job_lifetime_s (bør være lav, f.eks. 60) og ser at den fjernes av TTL-rydderen.
@@ -74,6 +75,60 @@ record() { # id status detail
   case "$status" in PASS) PASS=$((PASS+1));; FAIL) FAIL=$((FAIL+1));; SKIP) SKIP=$((SKIP+1));; MANUELL) MANUAL=$((MANUAL+1));; esac
   ROWS+=("| $id | $status | ${detail//|//} |")
   printf '%-30s %-8s %s\n' "$id" "$status" "$detail"
+}
+
+# --- produksjonsvern (D-479, JARVIS-117 c): ÉN liste og få, rene funksjoner, testet mot kontrakten via ACCEPTANCE_SOURCE_ONLY=1 ---------------------
+# Produksjonsrepoer (små bokstaver, uten `.git` og `/`): det NÅVÆRENDE kanoniske repoet, TIDLIGERE NAVN på det (forken het jarvisbuild før omdøpingen; GitHub videresender det gamle navnet) og det GAMLE frosne repoet.
+# Listen holdes i takt med PRODUCTION_GITHUB_REPO_NAMES i packages/contracts/src/github-repo.ts av en test (ops/job-runner/test/acceptance-script.test.mjs) som leser denne arrayen.
+PRODUCTION_REPOS=(ffrollerskis/jarvis-build ffrollerskis/jarvisbuild tsworkflow/jarvisbuild)
+
+# Små bokstaver uten eksterne programmer og uavhengig av locale (tr_TR gjør `I` til `ı`); vernet skal ikke svikte åpent fordi et verktøy mangler.
+lower() { local LC_ALL=C; printf '%s' "${1,,}"; }
+
+# Trim blanke (inkl. tab og CR) i begge ender.
+trim() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "$v"; }
+
+# Sammenligningsnøkkel for et repo-navn: små bokstaver, uten blanke, uten `/` og `.git` på slutten (til fikspunkt). GitHub behandler `eier/repo`, `eier/repo/` og `eier/repo.git` som samme repo,
+# så et alias skal ikke omgå vernet. Samme normalisering som `githubRepoAliasKey` i packages/contracts/src/github-repo.ts.
+alias_key() {
+  local k p
+  k="$(trim "$(lower "$1")")"
+  while :; do p="$k"; k="${k%/}"; k="${k%.git}"; [ "$k" = "$p" ] && break; done
+  printf '%s' "$k"
+}
+
+# ACCEPTANCE_REPO slik runneren vil ha den: trimmet og med små bokstaver (runner.allowed_repos og git_credentials MÅ være små bokstaver; GitHub skiller ikke på store/små).
+normalize_repo_arg() { lower "$(trim "$1")"; }
+
+# Verdien til NAME i .env-filen ($ACCEPTANCE_ENV_FILE, standard $ROOT/.env; siste forekomst vinner, som i compose): `NAME=v`, `export NAME=v`, med/uten anførselstegn, CR og etterfølgende ` # kommentar`.
+# Filen leses med grep og aldri `source`-es. Mangler eller kan ikke filen leses, er svaret tomt (da gjelder bare de faste navnene og miljøet).
+env_file_value() {
+  local name="$1" file="${ACCEPTANCE_ENV_FILE:-$ROOT/.env}" line
+  [ -r "$file" ] || return 0
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$file" 2>/dev/null | tail -n 1)" || true
+  line="${line#*=}"; line="${line%$'\r'}"
+  case "$line" in
+    \"*) line="${line#\"}"; line="${line%%\"*}" ;;
+    \'*) line="${line#\'}"; line="${line%%\'*}" ;;
+    *) line="${line%%[[:space:]]#*}" ;;
+  esac
+  printf '%s' "$line"
+}
+
+# Er $1 et produksjonsrepo? Skriver årsaken til stdout og returnerer 0 hvis ja; 1 hvis nei. Produksjon er (a) de faste navnene i PRODUCTION_REPOS, (b) JARVIS_GITHUB_REPO i miljøet du kjører fra
+# og (c) JARVIS_GITHUB_REPO i .env (slik compose leser den). Et navn som normaliseres til tomt regnes aldri som treff (det avvises tidligere av kalleren).
+production_repo_reason() {
+  local key listed configured
+  key="$(alias_key "$1")"
+  [ -n "$key" ] || return 1
+  for listed in "${PRODUCTION_REPOS[@]}"; do
+    [ "$key" = "$(alias_key "$listed")" ] && { printf 'PRODUKSJONSREPOET'; return 0; }
+  done
+  configured="$(alias_key "${JARVIS_GITHUB_REPO:-}")"
+  [ -n "$configured" ] && [ "$key" = "$configured" ] && { printf 'PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i miljøet)'; return 0; }
+  configured="$(alias_key "$(env_file_value JARVIS_GITHUB_REPO)")"
+  [ -n "$configured" ] && [ "$key" = "$configured" ] && { printf 'PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i .env)'; return 0; }
+  return 1
 }
 
 # --- små hjelpere (testes isolert via ACCEPTANCE_SOURCE_ONLY=1) ---------------------------------------------------------------------------
@@ -528,29 +583,17 @@ main() {
     return 0
   fi
   for tool in docker curl node; do command -v "$tool" >/dev/null 2>&1 || { echo "mangler $tool - kjør dette på NAS-en" >&2; return 2; }; done
+  REPO="$(trim "$REPO")"
   [ -n "$REPO" ] || { echo "ACCEPTANCE_REPO er påkrevd (et SANDBOX-repo i runner.allowed_repos - aldri produksjonsrepoet)" >&2; return 2; }
   # B-L5: produksjonsrepoet nektes HARDT, uavhengig av runner.allowed_repos (en eier som har lagt det der kan ikke bruke akseptansen mot det: J11 pusher en ekte branch).
-  # D-479 (kontobytte, D-478): den HARDE nektelisten er det NÅVÆRENDE kanoniske repoet (CANONICAL_GITHUB_REPO i packages/contracts/src/github-repo.ts) og det GAMLE frosne repoet (LEGACY_GITHUB_REPOS); en drift-test
-  # (ops/job-runner/test/acceptance-script.test.mjs) holder listen i takt med kontrakten. I TILLEGG nektes JARVIS_GITHUB_REPO - men BARE når variabelen er EKSPORTERT i shellet du kjører scriptet fra
-  # (scriptet leser ikke .env; compose leser .env selv), så det er et ekstra, ikke det reelle, vernet.
-  local repo_lc prod_lc
-  # GitHub behandler `eier/repo`, `eier/repo/` og `eier/repo.git` som samme repo i git-URL-er: alle former nektes (et alias skal ikke omgå vernet). Normaliseringen (små bokstaver, trim, strip `/` og `.git` til fikspunkt)
-  # er den samme som `githubRepoAliasKey` i packages/contracts/src/github-repo.ts.
-  alias_key() {
-    local k p
-    k="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-    k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
-    while :; do p="$k"; k="${k%/}"; k="${k%.git}"; [ "$k" = "$p" ] && break; done
-    printf '%s' "$k"
-  }
-  repo_lc="$(alias_key "$REPO")"
-  prod_lc="$(alias_key "${JARVIS_GITHUB_REPO:-}")"
-  case "$repo_lc" in
-    ffrollerskis/jarvis-build|tsworkflow/jarvisbuild) echo "ACCEPTANCE_REPO=$REPO er PRODUKSJONSREPOET: akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2 ;;
-  esac
-  if [ -n "$prod_lc" ] && [ "$repo_lc" = "$prod_lc" ]; then
-    echo "ACCEPTANCE_REPO=$REPO er PRODUKSJONSREPOET (JARVIS_GITHUB_REPO): akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2
+  # D-479 (kontobytte, D-478): produksjon er PRODUCTION_REPOS (det nåværende kanoniske repoet, det tidligere navnet på det og det gamle frosne repoet; holdt i takt med kontrakten av en test) OG JARVIS_GITHUB_REPO
+  # (fra miljøet du kjører fra, og fra .env - se production_repo_reason). Alle skrivemåter nektes: store/små bokstaver, `.git`, `/` på slutten og blanke. Det finnes ingen overstyring (D-41).
+  [ -n "$(alias_key "$REPO")" ] || { echo "ACCEPTANCE_REPO=$REPO er ikke et gyldig repo-navn (forventet eier/repo) - avbryter" >&2; return 2; }
+  local reason
+  if reason="$(production_repo_reason "$REPO")"; then
+    echo "ACCEPTANCE_REPO=$REPO er $reason: akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2
   fi
+  REPO="$(normalize_repo_arg "$REPO")"   # runner.allowed_repos/git_credentials er små bokstaver; GitHub skiller ikke på store/små
   if [ "$WITH_RESTART" = "1" ]; then
     echo "ADVARSEL: --with-restart sender SIGKILL til den LEVENDE jarvis-job-runner og restarter den. Alle jobber på runneren avbrytes." >&2
     if [ "${ACCEPT_CONFIRM_RESTART:-}" != "yes" ]; then

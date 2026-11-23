@@ -11,12 +11,21 @@
  * `JARVIS_GITHUB_REPO` eller `JARVIS_GIT_ALLOWED_REPOS` og feiler lukket uten (de skriver branches; blast radius).
  *
  * `LEGACY_GITHUB_REPOS` er tidligere produksjonsrepoer. De skal ikke lenger være standard, men vern som nekter «produksjonsrepoet»
- * (f.eks. akseptansescriptet `ops/job-runner/acceptance.sh` og `modules/tool-gateway/scripts/github-app-live.ts`) må fortsatt kjenne dem igjen: en
- * akseptanse skal aldri pushe en ekte branch til et produksjonsrepo, verken det nåværende eller det gamle.
+ * (akseptansescriptet `ops/job-runner/acceptance.sh`, `modules/tool-gateway/scripts/github-app-live.ts` og `ua5-github-live.ts`) må fortsatt kjenne dem igjen: en
+ * akseptanse skal aldri skrive til et produksjonsrepo, verken det nåværende, det gamle eller et tidligere navn på det nåværende (`PRODUCTION_GITHUB_REPO_NAMES`).
  */
 export const CANONICAL_GITHUB_REPO = "FFrollerskis/jarvis-build";
 
 export const LEGACY_GITHUB_REPOS: readonly string[] = ["tsworkflow/jarvisbuild"];
+
+/**
+ * TIDLIGERE NAVN på det kanoniske repoet. Forken het `FFrollerskis/jarvisbuild` før eieren omdøpte den til `jarvis-build` (D-478 pkt 2), og GitHub videresender et gammelt navn til det omdøpte repoet.
+ * Et vern som nekter produksjonsrepoet må derfor også kjenne det gamle navnet: `FFrollerskis/jarvisbuild` ER produksjonsrepoet. (Repolåsen trenger det ikke: den er strengere, og et gammelt navn er et lås-brudd.)
+ */
+export const FORMER_CANONICAL_GITHUB_REPOS: readonly string[] = ["FFrollerskis/jarvisbuild"];
+
+/** Alle repo-navn som regnes som PRODUKSJON i vern som nekter akseptanse-/testskriving: det kanoniske, de gamle frosne og de tidligere navnene på det kanoniske. Sammenlign alltid via `githubRepoAliasKey`. */
+export const PRODUCTION_GITHUB_REPO_NAMES: readonly string[] = [CANONICAL_GITHUB_REPO, ...LEGACY_GITHUB_REPOS, ...FORMER_CANONICAL_GITHUB_REPOS];
 
 const GITHUB_REPO_SLUG = /^[^/\s]+\/[^/\s]+$/;
 
