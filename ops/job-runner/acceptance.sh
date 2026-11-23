@@ -103,51 +103,57 @@ normalize_repo_arg() { local LC_ALL=C; lower "$(trim "$1")"; }
 # .env-filen som leses for JARVIS_GITHUB_REPO: $ACCEPTANCE_ENV_FILE, ellers $ROOT/.env. `ACCEPTANCE_ENV_FILE` kan peke på en annen fil; det påvirker KUN denne grenen, aldri de faste navnene.
 env_file_path() { printf '%s' "${ACCEPTANCE_ENV_FILE:-$ROOT/.env}"; }
 
-# Linjene i .env som starter med NAME (etter blanke, BOM og `export`), kommentarer utelatt. grep -a/LC_ALL=C: en fil med NUL-bytes eller ikke-UTF-8 tegn leses fortsatt (ikke «Binary file matches»).
-env_file_name_lines() {
-  local name="$1" file bom=$'\xEF\xBB\xBF'
+# Linjer i .env som KAN sette NAME slik compose leser filen: innledende blanke (ASCII, eller en hvilken som helst byte >= 0x80, for compose trimmer også Unicode-blanke som NBSP og U+3000, og BOM),
+# valgfritt `export` + blank, så NAME rett etterfulgt av noe som ikke er en del av et navn. Kommentarlinjer (# først) og andre nøkler (NOT_NAME, NAME_X) er ikke kandidater.
+# grep -a/LC_ALL=C: en fil med NUL-bytes eller ikke-UTF-8 tegn leses fortsatt (ikke «Binary file matches»).
+env_file_candidate_lines() {
+  local LC_ALL=C name="$1" file hi
   file="$(env_file_path)"
   [ -f "$file" ] && [ -r "$file" ] || return 0
-  LC_ALL=C grep -a -E "^(${bom})?[[:space:]]*(export[[:space:]]+)?${name}([^A-Za-z0-9_]|$)" "$file" 2>/dev/null || true
+  hi=$'\x80'-$'\xff'
+  LC_ALL=C grep -a -E "^([[:space:]]|[${hi}])*(export([[:space:]]|[${hi}])+)?${name}([^A-Za-z0-9_]|$)" "$file" 2>/dev/null || true   # LC_ALL=C også for grep: `local LC_ALL` eksporteres ikke til barneprosesser
 }
 
-# Verdien til NAME i .env-filen (siste forekomst vinner, som i compose): `NAME=v`, `NAME = v`, `export NAME=v`, med/uten anførselstegn, BOM først i filen, CR og etterfølgende ` # kommentar`.
-# Filen leses med grep og aldri `source`-es. Mangler eller kan ikke filen leses, er svaret tomt (da gjelder bare de faste navnene og miljøet).
+# Tolker ÉN kandidatlinje STRENGT (hvitliste): `[export ]NAME[ ]=[ ]verdi` der verdien er tom eller består av bokstaver, tall, `.`, `_`, `-` og `/` (et repo-navn), evt. i enkle eller doble anførselstegn,
+# og kan følges av ` # kommentar` (hva som helst, også ikke-UTF-8). ALT ANNET (YAML-kolon, escapes og flerlinjede verdier i anførselstegn, `$`-interpolasjon, Unicode-blanke, backslash, mellomrom i verdien ...)
+# er former compose kan tolke annerledes enn vi gjør, og gir status 1 - aldri en gjetning (reviewer B sin differensialfuzz mot docker compose: ni slike former slapp tidligere gjennom vernet).
+# Skriver verdien (uten anførselstegn) og returnerer 0.
+env_line_value() {
+  local LC_ALL=C name="$1" l="$2" bom=$'\xEF\xBB\xBF' re
+  l="${l#"$bom"}"
+  re="^[[:space:]]*(export[[:space:]]+)?${name}[[:space:]]*=[[:space:]]*((\"[A-Za-z0-9._/-]*\")|('[A-Za-z0-9._/-]*')|([A-Za-z0-9._/-]*))([[:space:]]+#.*)?[[:space:]]*\$"
+  [[ "$l" =~ $re ]] || return 1
+  if [ -n "${BASH_REMATCH[3]}" ]; then l="${BASH_REMATCH[3]}"; printf '%s' "${l:1:${#l}-2}"
+  elif [ -n "${BASH_REMATCH[4]}" ]; then l="${BASH_REMATCH[4]}"; printf '%s' "${l:1:${#l}-2}"
+  else printf '%s' "${BASH_REMATCH[5]}"; fi
+  return 0
+}
+
+# Verdien til NAME i .env-filen (siste tolkbare forekomst vinner, som i compose): se env_line_value for hvilke former som tolkes. Filen leses med grep og aldri `source`-es.
+# Mangler eller kan ikke filen leses, er svaret tomt (da gjelder bare de faste navnene og miljøet). En linje som ikke kan tolkes hoppes over her og meldes av env_file_check (som main() avbryter på).
 env_file_value() {
-  local LC_ALL=C name="$1" line="" l bom=$'\xEF\xBB\xBF'   # C-locale: bash-mønstre feiler ellers på ikke-UTF-8 bytes (en latin-1-kommentar på linjen ga tom verdi = vernet falt bort)
+  local LC_ALL=C name="$1" l v value=""   # C-locale: bash-mønstre feiler ellers på ikke-UTF-8 bytes (en latin-1-kommentar på linjen ga tom verdi = vernet falt bort)
   while IFS= read -r l; do
-    case "$l" in *=*) ;; *) continue ;; esac
-    l="${l#"$bom"}"; l="$(trim "$l")"
-    case "$l" in export[[:space:]]*) l="$(trim "${l#export}")" ;; esac
-    case "$l" in "$name"*) ;; *) continue ;; esac
-    l="$(trim "${l#"$name"}")"
-    case "$l" in =*) line="${l#=}" ;; *) continue ;; esac   # kun `NAME =`: andre former er uforståelige (se env_file_check)
-  done < <(env_file_name_lines "$name")
-  line="${line%$'\r'}"; line="$(trim "$line")"
-  case "$line" in
-    \"*) line="${line#\"}"; line="${line%%\"*}" ;;
-    \'*) line="${line#\'}"; line="${line%%\'*}" ;;
-    *) line="${line%%[[:space:]]#*}" ;;
-  esac
-  printf '%s' "$(trim "$line")"
+    if v="$(env_line_value "$name" "$l")"; then value="$v"; fi
+  done < <(env_file_candidate_lines "$name")
+  printf '%s' "$value"
 }
 
-# Kan vi stole på det vi leser fra .env? Skriver `WARN: ...` (fortsett: vernet gjelder da bare de faste navnene og miljøet) eller `FATAL: ...` (avbryt: vi kan ikke tolke linjen, og compose ville gjort noe annet enn vi gjør):
+# Kan vi stole på det vi leser fra .env? Skriver `WARN: ...` (fortsett: vernet gjelder da bare de faste navnene og miljøet) eller `FATAL: ...` (avbryt: vi kan ikke tolke linjen, og compose kan gjøre noe annet enn vi gjør):
 #  - WARN: filen finnes men er ikke en vanlig fil (FIFO, enhet) eller kan ikke leses (rettigheter).
-#  - FATAL: en linje som starter med NAME er ikke på formen `[export ]NAME=verdi` (f.eks. YAML-kolon `NAME: v`), eller verdien inneholder `$` (compose-interpolasjon `${X}` som vi ikke kan løse opp).
+#  - FATAL: en kandidatlinje for NAME er ikke en form env_line_value tolker (se der), f.eks. YAML-kolon `NAME: v`, `$`-interpolasjon, escapes eller flerlinjede verdier, Unicode-blanke.
 env_file_check() {
-  local LC_ALL=C name="$1" file l v
+  local LC_ALL=C name="$1" file l
   file="$(env_file_path)"
   if [ -e "$file" ] && { [ ! -f "$file" ] || [ ! -r "$file" ]; }; then echo "WARN: kan ikke lese $file (ikke en vanlig fil, eller ingen lesetilgang): $name derfra er IKKE sjekket mot produksjonsvernet"; return 0; fi
   while IFS= read -r l; do
-    l="$(trim "${l#$'\xEF\xBB\xBF'}")"
-    case "$l" in export[[:space:]]*) l="$(trim "${l#export}")" ;; esac
-    v="$(trim "${l#"$name"}")"
-    case "$v" in
-      =*) v="${v#=}"; case "$v" in *'$'*) echo "FATAL: $name i $file bruker variabel-interpolasjon (\$): vernet kan ikke tolke verdien - sett en ren verdi eller fjern linjen"; return 0 ;; esac ;;
-      *) echo "FATAL: linjen for $name i $file er ikke på formen $name=verdi: vernet kan ikke tolke den - rett eller fjern linjen"; return 0 ;;
+    env_line_value "$name" "$l" > /dev/null && continue
+    case "${l%%[[:space:]]#*}" in
+      *'$'*) echo "FATAL: $name i $file bruker variabel-interpolasjon (\$): vernet kan ikke tolke verdien - sett en ren verdi (eier/repo) eller fjern linjen" ;;
+      *) echo "FATAL: linjen for $name i $file er ikke på formen $name=verdi (verdi av bokstaver, tall, . _ - /, evt. i anførselstegn og med # kommentar): vernet kan ikke tolke den - rett eller fjern linjen" ;;
     esac
-  done < <(env_file_name_lines "$name")
+    return 0
+  done < <(env_file_candidate_lines "$name")
   return 0
 }
 
@@ -174,6 +180,9 @@ production_repo_reason() {
   done
   configured="$(alias_key "${JARVIS_GITHUB_REPO:-}")"
   [ -n "$configured" ] && [ "$key" = "$configured" ] && { printf 'PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i miljøet)'; return 0; }
+  case "$(env_file_check JARVIS_GITHUB_REPO)" in
+    *FATAL:*) printf 'PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i .env kan ikke tolkes: behandles som produksjon)'; return 0 ;;
+  esac
   configured="$(alias_key "$(env_file_value JARVIS_GITHUB_REPO)")"
   [ -n "$configured" ] && [ "$key" = "$configured" ] && { printf 'PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i .env)'; return 0; }
   return 1
