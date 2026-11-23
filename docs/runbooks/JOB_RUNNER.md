@@ -198,7 +198,7 @@ curl -sSI --max-time 10 https://github.com | head -1    # verten må nå github.
 
 ```
 cd /volume1/jarvisbuild-data/jarvisbuild
-export ACCEPTANCE_REPO=tsworkflow/jarvis-d103-acceptance
+export ACCEPTANCE_REPO=<din-konto>/jarvis-d103-acceptance   # et eget SANDBOX-repo under kontoen din (det gamle tsworkflow/jarvis-d103-acceptance er frosset; kontobytte D-478)
 sudo -E ops/job-runner/acceptance.sh                              # J01-J09, J11, J12 (J09/J10/J13 gir SKIP uten flaggene under)
 sudo -E ops/job-runner/acceptance.sh --with-restart --with-ttl    # J09: SIGKILL på runneren + restart. J10: venter på TTL (sett runner.max_job_lifetime_s=60 midlertidig)
 read -rsp "ANTHROPIC_API_KEY (vises ikke): " ANTHROPIC_API_KEY; echo; export ANTHROPIC_API_KEY ACCEPT_LIVE_CLAUDE=1

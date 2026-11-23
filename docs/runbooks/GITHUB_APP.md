@@ -24,7 +24,7 @@ reglene er uendret. Verdien bak `JARVIS_GITHUB_TOKEN` byttes bare ut.
 
 ## Før du begynner
 
-- Du eier kontoen/organisasjonen som har Jarvis-repoet (`tsworkflow/jarvisbuild`), og kan opprette en GitHub App der.
+- Du eier kontoen/organisasjonen som har Jarvis-repoet (`FFrollerskis/jarvis-build` etter kontobyttet D-478; før det `tsworkflow/jarvisbuild`), og kan opprette en GitHub App der.
 - Du har tilgang til Infisical (eller dashbordet) og til `.env` på NAS-en (`/volume1/jarvisbuild-data/jarvisbuild`).
 - Beholder du PAT-en under overgangen: Jarvis bruker den IKKE i App-modus med mindre du eksplisitt slår på fallback (steg 6).
 
@@ -146,12 +146,12 @@ Standardmodus skriver ingenting i noe repo: validerer nøkkelen, leser installas
 repoet ditt, sammenligner rettighetene mot full kapabilitet (manglende = WARN), kaller `GET /rate_limit`, **revokerer** tokenet og skanner egen utskrift etter token/JWT/privatnøkkel.
 
 Vil du også bevise skriving og git: pek på et **TEST-repo** App-en er installert på. Scriptet **nekter produksjonsrepoet** (alt i `JARVIS_GIT_ALLOWED_REPOS`/`JARVIS_GITHUB_REPO` og standardrepoet
-`tsworkflow/jarvisbuild`, uansett skrivemåte) og avslutter med `NOT VERIFIED (--sandbox-repo er et produksjonsrepo)` uten å kontakte GitHub - det finnes ingen overstyring (D-41: akseptanseløp begrenses til
+`FFrollerskis/jarvis-build` og det gamle frosne `tsworkflow/jarvisbuild`, uansett skrivemåte) og avslutter med `NOT VERIFIED (--sandbox-repo er et produksjonsrepo)` uten å kontakte GitHub - det finnes ingen overstyring (D-41: akseptanseløp begrenses til
 sandbox-ressurser). Legg derfor et eget, tomt test-repo til i installasjonen (Configure -> Repository access) FØR du kjører dette, og fjern det igjen etterpå. Sandbox-tokenet utstedes av en egen klient som
 KUN kan utstede for test-repoet:
 
 ```
-node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts/github-app-live.ts --key-file ./nokkel.pem --sandbox-repo tsworkflow/test-repo
+node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts/github-app-live.ts --key-file ./nokkel.pem --sandbox-repo <din-konto>/test-repo
 ```
 
 Det lager én kjøre-unik gren `jarvis-app-live-<tid>` (aldri main/master/production), leser repo/grener/PR-er/workflow-kjøringer, kjører `git ls-remote` (tokenet går kun via git-prosessens
