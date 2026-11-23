@@ -109,6 +109,13 @@ describe("kallere som tidligere hadde repoet hardkodet eller sin egen standard (
     expect(await run()).toBe("acme/app");
     process.env[ENV] = "ikke et repo";
     expect(await run()).toBe(CANONICAL_GITHUB_REPO);
+    // Compose setter variabelen TOM som standard (`JARVIS_GITHUB_REPO: ${JARVIS_GITHUB_REPO:-}`): tom/blank verdi skal gi standarden, aldri et tomt repo (JARVIS-117 a).
+    for (const blank of ["", "   "]) {
+      process.env[ENV] = blank;
+      expect(await run(), JSON.stringify(blank)).toBe(CANONICAL_GITHUB_REPO);
+    }
+    process.env[ENV] = "  acme/app \n";
+    expect(await run()).toBe("acme/app");
     // Samme repo som låsen tillater: daglig oppsummering og modellflaten kan ikke peke ulike steder.
     process.env[ENV] = "acme/app";
     expect(githubRepoLockViolation("read_issues", await run() as string, process.env)).toBeNull();
@@ -119,10 +126,63 @@ describe("kallere som tidligere hadde repoet hardkodet eller sin egen standard (
     expect(github?.live_test?.tool_id).toBe("github");
     const mesh = curatedReadOnlyMeshTools().find((t) => t.def.name === "read_github_issues");
     expect(mesh?.tool_id).toBe("github");
-    for (const [env, expected] of [[undefined, CANONICAL_GITHUB_REPO], ["acme/app", "acme/app"], ["ugyldig verdi", CANONICAL_GITHUB_REPO]] as const) {
+    const table: ReadonlyArray<readonly [string | undefined, string]> = [
+      [undefined, CANONICAL_GITHUB_REPO], ["", CANONICAL_GITHUB_REPO], ["   ", CANONICAL_GITHUB_REPO],
+      ["acme/app", "acme/app"], ["  acme/app ", "acme/app"],
+      ["ugyldig verdi", CANONICAL_GITHUB_REPO], ["https://github.com/acme/app", CANONICAL_GITHUB_REPO]
+    ];
+    for (const [env, expected] of table) {
       if (env === undefined) delete process.env[ENV]; else process.env[ENV] = env;
-      expect(github?.live_test?.parameters(identity), String(env)).toEqual({ repo: expected });
-      expect(mesh?.parameters?.({}), String(env)).toEqual({ repo: expected });
+      expect(github?.live_test?.parameters(identity), JSON.stringify(env)).toEqual({ repo: expected });
+      expect(mesh?.parameters?.({}), JSON.stringify(env)).toEqual({ repo: expected });
     }
+  });
+});
+
+describe("én definisjon av «konfigurert repo»: oppløsning, lås, connector-test og mesh-verktøy er enige for HVER verdi av JARVIS_GITHUB_REPO", () => {
+  const VALUES: ReadonlyArray<string | undefined> = [
+    undefined, "", "   ", "\t", "acme/app", "  acme/app  ", "Acme/App", "acme/app.git", "acme/app/", "ugyldig", "a/b/c",
+    "https://github.com/acme/app", "acme /app", "/app", "acme/", LEGACY_GITHUB_REPOS[0], CANONICAL_GITHUB_REPO
+  ];
+
+  it("hver verdi gir samme repo overalt (uten at låsen flagger en lese-handling uten repo)", () => {
+    const github = CONNECTOR_REGISTRY.find((c) => c.id === "github");
+    const mesh = curatedReadOnlyMeshTools().find((t) => t.def.name === "read_github_issues");
+    for (const value of VALUES) {
+      const label = JSON.stringify(value);
+      if (value === undefined) delete process.env[ENV]; else process.env[ENV] = value;
+      const env: Record<string, string | undefined> = value === undefined ? {} : { [ENV]: value };
+      const expected = configuredGithubRepo(env);
+      expect(resolveGithubRepo("list_pull_requests", undefined), `${label} (standardparameter = process.env)`).toBe(expected);
+      expect(resolveGithubRepo("list_pull_requests", undefined, value), `${label} (eksplisitt)`).toBe(expected);
+      expect(githubRepoLockViolation("list_pull_requests", undefined, env), label).toBeNull();
+      expect(githubRepoLockViolation("list_pull_requests", expected, env), label).toBeNull();
+      expect(github?.live_test?.parameters(identity), label).toEqual({ repo: expected });
+      expect(mesh?.parameters?.({}), label).toEqual({ repo: expected });
+    }
+  });
+});
+
+describe("repolåsen er hermetisk mot `env`-argumentet (process.env lekker ikke inn)", () => {
+  const UNLOCK = "JARVIS_GITHUB_ALLOW_OTHER_REPOS";
+  let savedUnlock: string | undefined;
+  beforeEach(() => { savedUnlock = process.env[UNLOCK]; delete process.env[UNLOCK]; });
+  afterEach(() => { if (savedUnlock === undefined) delete process.env[UNLOCK]; else process.env[UNLOCK] = savedUnlock; });
+
+  it("et env-argument uten JARVIS_GITHUB_REPO betyr standarden, ikke process.env; et env-argument MED nøkkelen vinner over process.env; uten argument gjelder process.env", () => {
+    process.env[ENV] = "acme/fra-process-env";
+    // `{}`: tillatt repo = standarden, og en lese-handling uten repo løses til standarden (før rettingen falt oppløsningen til process.env og ga et falskt brudd).
+    expect(githubRepoLockViolation("list_branches", undefined, {})).toBeNull();
+    expect(githubRepoLockViolation("list_branches", CANONICAL_GITHUB_REPO, {})).toBeNull();
+    expect(githubRepoLockViolation("list_branches", "acme/fra-process-env", {})).toEqual({ requested: "acme/fra-process-env", allowed: CANONICAL_GITHUB_REPO });
+    // Tom nøkkel i argumentet er også «standarden».
+    expect(githubRepoLockViolation("list_branches", undefined, { [ENV]: "" })).toBeNull();
+    // Nøkkel i argumentet vinner over process.env.
+    expect(githubRepoLockViolation("list_branches", undefined, { [ENV]: "acme/eksplisitt" })).toBeNull();
+    expect(githubRepoLockViolation("list_branches", "acme/fra-process-env", { [ENV]: "acme/eksplisitt" })).toEqual({ requested: "acme/fra-process-env", allowed: "acme/eksplisitt" });
+    // Uten argument (standard = process.env) gjelder process.env, på begge sider av sammenligningen.
+    expect(githubRepoLockViolation("list_branches", undefined)).toBeNull();
+    expect(githubRepoLockViolation("list_branches", "acme/fra-process-env")).toBeNull();
+    expect(githubRepoLockViolation("list_branches", CANONICAL_GITHUB_REPO)).toEqual({ requested: CANONICAL_GITHUB_REPO, allowed: "acme/fra-process-env" });
   });
 });

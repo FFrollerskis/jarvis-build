@@ -270,7 +270,14 @@ describe("C5: --sandbox-repo NEKTER produksjonsrepoet (review F14) - scriptet sk
       ["repoet connectoren er konfigurert mot, utenfor allowlisten", "tsworkflow/connector-repo", { JARVIS_GITHUB_REPO: "tsworkflow/connector-repo", JARVIS_GIT_ALLOWED_REPOS: "tsworkflow/jarvisbuild" }],
       ["standardrepoet (CANONICAL_GITHUB_REPO) når JARVIS_GITHUB_REPO peker et annet sted", CANONICAL_GITHUB_REPO, { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
       ["det gamle, frosne produksjonsrepoet (LEGACY_GITHUB_REPOS, D-479) når JARVIS_GITHUB_REPO peker et annet sted", "tsworkflow/jarvisbuild", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
-      ["det gamle repoet i andre skrivemåter (D-479)", "TSWorkflow/JarvisBuild", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }]
+      ["det gamle repoet i andre skrivemåter (D-479)", "TSWorkflow/JarvisBuild", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
+      // GitHub behandler `eier/repo` og `eier/repo.git` som samme repo: et `.git`-alias skal ikke omgå vernet (D-479, githubRepoAliasKey).
+      ["det kanoniske repoet med .git-suffiks", `${CANONICAL_GITHUB_REPO}.git`, { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
+      ["det gamle repoet med store bokstaver og .GIT", "TSWorkflow/JarvisBuild.GIT", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
+      ["det gamle repoet med gjentatt .git.git", "tsworkflow/jarvisbuild.git.git", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }],
+      ["JARVIS_GITHUB_REPO med .git-suffiks mot sandbox uten", "tsworkflow/prod-repo", { JARVIS_GITHUB_REPO: "tsworkflow/prod-repo.git" }],
+      ["JARVIS_GITHUB_REPO uten suffiks mot sandbox med .git", "tsworkflow/prod-repo.git", { JARVIS_GITHUB_REPO: "tsworkflow/prod-repo" }],
+      ["JARVIS_GIT_ALLOWED_REPOS med store bokstaver og .git mot sandbox uten", "tsworkflow/andre", { JARVIS_GIT_ALLOWED_REPOS: "TSWorkflow/Andre.git" }]
     ];
     for (const [name, sandbox, env] of cases) {
       const fake = await fakeGitHub();

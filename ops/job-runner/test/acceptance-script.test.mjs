@@ -129,7 +129,7 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
       egress_proxy: { listen_host: "172.30.77.1", listen_port: 3128 }
     }));
     for (const slug of prods) {
-      for (const repo of [slug, slug.toUpperCase(), slug.toLowerCase(), `${slug}.git`, `${slug}/`, `${slug.toUpperCase()}.GIT`, `${slug}.git/`]) {
+      for (const repo of [slug, slug.toUpperCase(), slug.toLowerCase(), `${slug}.git`, `${slug}/`, `${slug.toUpperCase()}.GIT`, `${slug}.git/`, `${slug}.git.git`, `${slug}/.git`, `${slug}.git/.git/`, ` ${slug} `, `\t${slug}.git\t`]) {
         const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: repo });
         expect(r.status, repo).toBe(2);
         expect(r.stderr, repo).toContain("PRODUKSJONSREPOET");
@@ -141,11 +141,17 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
 
   it("D-479: eierens konfigurerte JARVIS_GITHUB_REPO (hva det enn er etter et senere kontobytte) nektes også som akseptanserepo; et sandbox-repo passerer vernet", async () => {
     const { h, config } = await setup();
-    for (const repo of ["acme/prod", "ACME/Prod", "acme/prod.git", "acme/prod/"]) {
+    for (const repo of ["acme/prod", "ACME/Prod", "acme/prod.git", "acme/prod/", "acme/prod.git.git", " acme/prod "]) {
       const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: repo, JARVIS_GITHUB_REPO: "Acme/PROD" });
       expect(r.status, repo).toBe(2);
       expect(r.stderr, repo).toContain("PRODUKSJONSREPOET");
       expect(r.stderr, repo).toContain("JARVIS_GITHUB_REPO");
+    }
+    // Selve JARVIS_GITHUB_REPO normaliseres på samme måte (blanke rundt, `.git`-suffiks, `/` på slutten): et alias på begge sider treffer fortsatt.
+    for (const configured of [" acme/prod ", "acme/prod.git", "ACME/PROD.GIT/", "acme/prod/"]) {
+      const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "acme/prod", JARVIS_GITHUB_REPO: configured });
+      expect(r.status, configured).toBe(2);
+      expect(r.stderr, configured).toContain("PRODUKSJONSREPOET (JARVIS_GITHUB_REPO)");
     }
     // Negativ kontroll: et repo som ikke er produksjon (men heller ikke står i allowed_repos) kommer forbi produksjonsvernet og stoppes først av allowed_repos-sjekken.
     const sandbox = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", JARVIS_GITHUB_REPO: "acme/prod" });
@@ -153,8 +159,22 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     expect(sandbox.stderr).not.toContain("PRODUKSJONSREPOET");
     expect(sandbox.stderr).toContain("står ikke i runner.allowed_repos");
     // Tom/uset JARVIS_GITHUB_REPO nekter ingenting ekstra (tom streng må ikke matche et tomt repo-navn).
-    const blank = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", JARVIS_GITHUB_REPO: "" });
-    expect(blank.stderr).not.toContain("PRODUKSJONSREPOET");
+    for (const blankValue of ["", "   ", ".git", "/"]) {
+      // Verdier som normaliseres til TOM nøkkel nekter ingenting (heller ikke et ACCEPTANCE_REPO som normaliseres til tom nøkkel): stoppes av allowed_repos-sjekken, ikke av produksjonsvernet.
+      for (const repo of ["owner/annet", ".git"]) {
+        const blank = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: repo, JARVIS_GITHUB_REPO: blankValue });
+        expect(blank.status, `${JSON.stringify(blankValue)} / ${repo}`).toBe(2);
+        expect(blank.stderr, `${JSON.stringify(blankValue)} / ${repo}`).not.toContain("PRODUKSJONSREPOET");
+        expect(blank.stderr, `${JSON.stringify(blankValue)} / ${repo}`).toContain("står ikke i runner.allowed_repos");
+      }
+    }
+    // Navn som bare ligner (prefiks/suffiks, `.github.io`, `-sandbox`) er IKKE produksjonsrepoer og skal ikke nektes av vernet.
+    for (const similar of ["FFrollerskis/jarvis-build-sandbox", "ffrollerskis/jarvis-build2", "tsworkflow/jarvisbuild.github.io", "tsworkflow/jarvisbuild-test"]) {
+      const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: similar, JARVIS_GITHUB_REPO: "acme/prod" });
+      expect(r.status, similar).toBe(2);
+      expect(r.stderr, similar).not.toContain("PRODUKSJONSREPOET");
+      expect(r.stderr, similar).toContain("står ikke i runner.allowed_repos");
+    }
     expect(h.service.manager.activeJobs).toBe(0);
   });
 
