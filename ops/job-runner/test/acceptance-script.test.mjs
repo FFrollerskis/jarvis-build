@@ -225,6 +225,11 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     const messy = await write("messy.env", "FOO=1\r\nJARVIS_GITHUB_REPO=other/first\r\n# JARVIS_GITHUB_REPO=acme/kommentert\nNOT_JARVIS_GITHUB_REPO=acme/lignende\nexport JARVIS_GITHUB_REPO=\"Acme/Prod.git\"  # kommentar\r\n");
     expect(deny("acme/prod", messy).status, "siste forekomst, export, anførselstegn, CR og kommentar").toBe(0);
     for (const notProd of ["other/first", "acme/kommentert", "acme/lignende"]) expect(deny(notProd, messy).status, notProd).toBe(1);
+    // Lignende linjer ETTER den ekte: `tail -n 1` og ^-ankeret skal ikke la dem vinne (reviewer B delta N3, mutant N21)
+    const lookalikesAfter = await write("lookalikes-after.env", "JARVIS_GITHUB_REPO=acme/prod\n# JARVIS_GITHUB_REPO=tsworkflow/jarvisbuild\nNOT_JARVIS_GITHUB_REPO=tsworkflow/jarvisbuild\nJARVIS_GITHUB_REPO_ANNET=tsworkflow/jarvisbuild\nXJARVIS_GITHUB_REPO=tsworkflow/jarvisbuild\n");
+    expect(deny("acme/prod", lookalikesAfter).status, "den ekte linjen vinner over lignende linjer etter den").toBe(0);
+    expect(deny("tsworkflow/jarvisbuild", lookalikesAfter).status, "men det gamle repoet er uansett nektet av de faste navnene").toBe(0);
+    expect(deny("acme/andre", lookalikesAfter).status).toBe(1);
     const single = await write("single.env", "JARVIS_GITHUB_REPO='acme/prod'\n");
     expect(deny("acme/prod", single).status).toBe(0);
     const unquotedComment = await write("unquoted.env", "JARVIS_GITHUB_REPO=acme/prod # fra eieren\n");
@@ -256,6 +261,61 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     expect(guard, "vernet kjører først").toBeGreaterThan(-1);
     expect(normalized, "normaliseringen står i main()").toBeGreaterThan(guard);
     expect(allowedCheck, "allowed_repos-sjekken står etter normaliseringen").toBeGreaterThan(normalized);
+  });
+
+  it("D-479 (reviewer B delta N1/N2): .env-lesingen er fail-closed der compose ville tolket linjen annerledes (YAML-kolon, interpolasjon), tåler NUL og ikke-UTF-8, og hopper over FIFO/ulesbar fil med advarsel i stedet for å henge", async () => {
+    const dir = await makeTempDir("acc-env2");
+    const write = async (name, data) => { const f = join(dir, name); await writeFile(f, data); return f; };
+    const check = (f) => sourced('env_file_check JARVIS_GITHUB_REPO', [], { ACCEPTANCE_ENV_FILE: f });
+    // uforståelige former: FATAL
+    for (const [name, text] of [["yaml.env", "JARVIS_GITHUB_REPO: acme/prod\n"], ["bare.env", "JARVIS_GITHUB_REPO acme/prod\n"], ["export-yaml.env", "export JARVIS_GITHUB_REPO: acme/prod\n"]]) {
+      expect(check(await write(name, text)).stdout, name).toMatch(/^FATAL: linjen for JARVIS_GITHUB_REPO/);
+    }
+    // interpolasjon: FATAL
+    for (const [name, text] of [["interp1.env", "JARVIS_GITHUB_REPO=${PROD_REPO}\n"], ["interp2.env", "JARVIS_GITHUB_REPO=\"acme/$OWNER\"\n"]]) {
+      expect(check(await write(name, text)).stdout, name).toMatch(/^FATAL: JARVIS_GITHUB_REPO i .* bruker variabel-interpolasjon/);
+    }
+    // rene former: ingenting å melde
+    for (const [name, text] of [["ok1.env", "JARVIS_GITHUB_REPO=acme/prod\n"], ["ok2.env", "# JARVIS_GITHUB_REPO: kommentar\nSOME_URL=https://github.com/${JARVIS_GITHUB_REPO}\nJARVIS_GITHUB_REPO_X: y\n"], ["tom.env", ""]]) {
+      expect(check(await write(name, text)).stdout, name).toBe("");
+    }
+    // helt: scriptet avbryter (exit 2) FØR noe røres, og sier hvorfor; en ren fil gjør det ikke
+    const { config } = await setup();
+    const yaml = await write("e2e-yaml.env", "JARVIS_GITHUB_REPO: acme/prod\n");
+    const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", ACCEPTANCE_ENV_FILE: yaml });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("er ikke på formen JARVIS_GITHUB_REPO=verdi");
+    expect(r.stderr).toContain("avbryter");
+    const clean = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", ACCEPTANCE_ENV_FILE: await write("e2e-clean.env", "JARVIS_GITHUB_REPO=acme/prod\n") });
+    expect(clean.stderr).not.toContain("vernet kan ikke tolke");
+    expect(clean.stderr).toContain("står ikke i runner.allowed_repos");
+    // NUL-bytes og ikke-UTF-8 på samme fil: verdien leses fortsatt (grep -a, LC_ALL=C), og vernet nekter repoet
+    const binary = await write("binary.env", Buffer.concat([Buffer.from("FOO=\xff\xfe\x00bar\n", "latin1"), Buffer.from("JARVIS_GITHUB_REPO=acme/prod\n"), Buffer.from("BAR=caf\xe9\n", "latin1")]));
+    expect(sourced('env_file_value JARVIS_GITHUB_REPO', [], { ACCEPTANCE_ENV_FILE: binary }).stdout).toBe("acme/prod");
+    expect(sourced('production_repo_reason "$1"', ["acme/prod"], { ACCEPTANCE_ENV_FILE: binary }).status).toBe(0);
+    // FIFO: ikke en vanlig fil -> advarsel og ingen lesing (ville ellers henge)
+    const fifo = join(dir, "fifo.env");
+    if (spawnSync("mkfifo", [fifo]).status === 0) {
+      const t0 = Date.now();
+      const w = check(fifo);
+      expect(Date.now() - t0, "FIFO skal ikke henge vernet").toBeLessThan(5000);
+      expect(w.stdout).toMatch(/^WARN: kan ikke lese .* IKKE sjekket/);
+      const e2e = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", ACCEPTANCE_ENV_FILE: fifo });
+      expect(e2e.stderr).toContain("ADVARSEL: kan ikke lese");
+      expect(e2e.stderr).toContain("står ikke i runner.allowed_repos");
+    }
+    // /dev/zero og kataloger: ikke vanlige filer
+    for (const special of ["/dev/zero", dir]) expect(check(special).stdout, special).toMatch(/^WARN:/);
+    // manglende fil: stille (ingen advarsel: det er normalt at `.env` ikke finnes)
+    expect(check(join(dir, "finnes-ikke.env")).stdout).toBe("");
+  });
+
+  it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)("D-479: en ulesbar .env (ingen lesetilgang) gir en advarsel, ikke en stille bortfall (kun som ikke-root)", async () => {
+    const dir = await makeTempDir("acc-env3");
+    const f = join(dir, "ulesbar.env");
+    await writeFile(f, "JARVIS_GITHUB_REPO=acme/prod\n");
+    await chmod(f, 0o000);
+    expect(sourced("env_file_check JARVIS_GITHUB_REPO", [], { ACCEPTANCE_ENV_FILE: f }).stdout).toMatch(/^WARN: kan ikke lese/);
   });
 
   it("D-479: ACCEPTANCE_REPO normaliseres til trimmet små bokstaver for allowed_repos-sammenligningen (eierens kontonavn har store bokstaver); det finnes ingen overstyring av produksjonsvernet", async () => {

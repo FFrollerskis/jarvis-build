@@ -8,7 +8,7 @@ import { CANONICAL_GITHUB_REPO, LEGACY_GITHUB_REPOS, githubRepoAliasKey } from "
 /**
  * WP-A1 (D-478/D-479, JARVIS-117): kontobyttet gjorde `tsworkflow/jarvisbuild` til et frosset, skrivebeskyttet repo. Kildekoden skal ikke lenger hardkode det gamle repoet som standard eller som mål (det var slik
  * `daily-brief.ts` og seks standardverdier ble liggende igjen på det gamle repoet). Denne vakten skanner ALLE filer utenom docs/tester/avhengigheter/binærfiler (også `.ps1`, `.html`, `.tsx`, `.cjs`, `*.example`, Dockerfile, `.github`,
- * rotfiler) etter det gamle EIERNAVNET i repo-form: `tsworkflow/` (slug eller URL) og det siterte tokenet `"tsworkflow"` (objektformen `repoOwner`/`trustedAuthor`). `post@tsworkflow.com` og `com.tsworkflow.*` er ikke repo-referanser og treffes ikke.
+ * rotfiler) etter det gamle EIERNAVNET i repo-form: `tsworkflow/` (slug eller URL) og eiernavnet ALENE, også uten anførselstegn (objektformen `repoOwner`/`trustedAuthor`, YAML, sh og ps1). `post@tsworkflow.com` og `com.tsworkflow.*` er ikke repo-referanser og treffes ikke.
  * Nye steder skal bruke `CANONICAL_GITHUB_REPO` (eller `configuredGithubRepoFromEnv`/`configuredGithubRepo()`).
  */
 const ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -18,7 +18,7 @@ const MAX_BYTES = 2_000_000;
 
 /**
  * Bevisst tillatte forekomster (sti fra repo-roten med `/`) med begrunnelse. Legg ALDRI til en sti her uten å forklare hvorfor det gamle eiernavnet må stå der.
- * `only`: filen får kun nevne disse gamle repoene (alias-nøkler) - en NY forekomst (et annet repo under den gamle kontoen, f.eks. `tsworkflow/annet`, eller det siterte tokenet `"tsworkflow"`) feiler selv i en tillatt fil.
+ * `only`: filen får kun nevne disse gamle repoene (alias-nøkler) - en NY forekomst (et annet repo under den gamle kontoen, f.eks. `tsworkflow/annet`, eller eiernavnet alene) feiler selv i en tillatt fil.
  * Uten `only`: hele filen er tillatt (eksempel-konfig og dokumentasjon av kontobyttet).
  */
 const ALLOWED: Readonly<Record<string, { reason: string; only?: readonly string[] }>> = {
@@ -71,12 +71,15 @@ function listScannableFiles(): string[] {
   return found.filter(scannable);
 }
 
-/** Treff for det gamle eiernavnet i repo-form: `tsworkflow/` eller det siterte tokenet `"tsworkflow"`/`'tsworkflow'`. Eksportert som funksjon så selve mønsteret kan testes. */
+/**
+ * Treff for det gamle eiernavnet i repo-form: `tsworkflow/` (slug eller URL) og eiernavnet ALENE (`repoOwner: tsworkflow`, `--owner tsworkflow`, `"tsworkflow"`, `github.com/tsworkflow`), også uten anførselstegn (reviewer B delta: YAML, sh og ps1).
+ * `post@tsworkflow.com` (e-postdomene) og `com.tsworkflow.*` (bundle-id) er ikke repo-referanser og treffes ikke. Eksportert som funksjon så selve mønsteret kan testes.
+ */
 export function legacyOwnerHits(text: string): string[] {
   const lower = text.toLowerCase();
   const hits: string[] = [];
   if (lower.includes("tsworkflow/")) hits.push("tsworkflow/");
-  if (/["']tsworkflow["']/.test(lower)) hits.push('"tsworkflow"');
+  if (/(?<![\w.@-])tsworkflow(?![\w.-]|\/)/.test(lower)) hits.push("tsworkflow (alene)");
   return hits;
 }
 
@@ -92,8 +95,15 @@ describe("WP-A1: ingen hardkodet gammel repo-eier i kjørbar kode og konfig", ()
   it("mønsteret treffer repo-former og ikke e-post eller bundle-id", () => {
     expect(legacyOwnerHits("repo: tsworkflow/jarvisbuild")).toEqual(["tsworkflow/"]);
     expect(legacyOwnerHits("https://github.com/TSWorkflow/x")).toEqual(["tsworkflow/"]);
-    expect(legacyOwnerHits('{"repoOwner": "tsworkflow"}')).toEqual(['"tsworkflow"']);
-    expect(legacyOwnerHits("repoOwner: 'TSWorkflow'")).toEqual(['"tsworkflow"']);
+    expect(legacyOwnerHits('{"repoOwner": "tsworkflow"}')).toEqual(["tsworkflow (alene)"]);
+    expect(legacyOwnerHits("repoOwner: 'TSWorkflow'")).toEqual(["tsworkflow (alene)"]);
+    // uten anførselstegn (YAML, sh, ps1) og som URL-sti
+    expect(legacyOwnerHits("repoOwner: tsworkflow")).toEqual(["tsworkflow (alene)"]);
+    expect(legacyOwnerHits("gh api --owner tsworkflow")).toEqual(["tsworkflow (alene)"]);
+    expect(legacyOwnerHits("$owner = 'tsworkflow'")).toEqual(["tsworkflow (alene)"]);
+    expect(legacyOwnerHits("https://github.com/tsworkflow")).toEqual(["tsworkflow (alene)"]);
+    expect(legacyOwnerHits("owner=tsworkflow\n")).toEqual(["tsworkflow (alene)"]);
+    expect(legacyOwnerHits("tsworkflow/jarvisbuild")).toEqual(["tsworkflow/"]);
     expect(legacyOwnerHits("post@tsworkflow.com")).toEqual([]);
     expect(legacyOwnerHits("com.tsworkflow.jarvis.ios")).toEqual([]);
     expect(legacyOwnerHits(`${CANONICAL_GITHUB_REPO} og FFrollerskis`)).toEqual([]);
@@ -125,7 +135,7 @@ describe("WP-A1: ingen hardkodet gammel repo-eier i kjørbar kode og konfig", ()
         const hits = legacyOwnerHits(text);
         if (hits.length > 0) offenders.push(`${path}: ${hits.join(", ")}`);
       } else if (allowed.only !== undefined) {
-        if (legacyOwnerHits(text).includes('"tsworkflow"')) offenders.push(`${path}: siterte tokenet "tsworkflow" er ikke tillatt her`);
+        if (legacyOwnerHits(text).includes("tsworkflow (alene)")) offenders.push(`${path}: eiernavnet alene (uten /repo) er ikke tillatt her`);
         for (const slug of legacyOwnerSlugs(text)) if (!allowed.only.includes(slug)) offenders.push(`${path}: ${slug} er ikke blant de tillatte (${allowed.only.join(", ")})`);
       }
     }
