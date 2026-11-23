@@ -465,6 +465,16 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
       ["nbsp-then-open-quote", `\u00a0A="abc\nJARVIS_GITHUB_REPO=owner/sandbox\n"\n`],
       ["export-then-open-quote", `export A="abc\nJARVIS_GITHUB_REPO=owner/sandbox\n"\n`],
       ["yaml-colon-open-quote", `A: "abc\nJARVIS_GITHUB_REPO=owner/sandbox\n"\n`],
+      // reviewer B N5: compose godtar nøkler tokenizeren først ikke leste; en åpen flerlinjet verdi på en slik nøkkel skjuler NAME-linjen for compose men ikke for oss
+      ["n5-key-with-e-acute", `JARVIS_GITHUB_REPO=${P}\n\u00e9="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["n5-key-japanese", `JARVIS_GITHUB_REPO=${P}\n\u65e5\u672c="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["n5-key-letter-accent-digit", `JARVIS_GITHUB_REPO=${P}\nK\u00e92="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["n5-key-dots-accent", `JARVIS_GITHUB_REPO=${P}\nA.\u00e9.B="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["n5-export-accent-key", `JARVIS_GITHUB_REPO=${P}\nexport \u00e9="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["n5-tab-in-key", `JARVIS_GITHUB_REPO=${P}\nK\t2="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["n5-vt-in-key", `JARVIS_GITHUB_REPO=${P}\nK\v2="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["n5-ff-in-key", `JARVIS_GITHUB_REPO=${P}\nK\f2="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["n5-cr-in-key", `JARVIS_GITHUB_REPO=${P}\nK\r2="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
       // en gyldig kandidat etterfulgt av en ugyldig må fortsatt gi FATAL (ikke stopp ved den første gyldige), og en uavsluttet `${NAVN`-referanse er ikke en gyldig verdi
       ["valid-then-invalid", `JARVIS_GITHUB_REPO=${P}\nJARVIS_GITHUB_REPO: x\n`],
       ["unclosed-brace-reference", `JARVIS_GITHUB_REPO=${P} \${JARVIS_GITHUB_REPO\n`],
@@ -497,6 +507,11 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     const noAwkRun = spawnSync(join(noAwk, "bash"), ["-c", `source "${SCRIPT}"; env_file_check JARVIS_GITHUB_REPO; production_repo_reason owner/annet >/dev/null; echo " rc=$?"`], { env: { PATH: noAwk, HOME: tmpdir(), LC_ALL: "C", ACCEPTANCE_SOURCE_ONLY: "1", ACCEPTANCE_ENV_FILE: await write("plain-for-noawk.env", `JARVIS_GITHUB_REPO=${P}\n`) }, encoding: "utf8", timeout: 60_000 });
     expect(noAwkRun.stdout).toMatch(/^FATAL: kunne ikke analysere .* \(awk mangler eller feilet\)/);
     expect(noAwkRun.stdout, "production_repo_reason nekter også da").toContain("rc=0");
+    // reviewer B N6: en tilbakestrek escaper neste tegn, også en tilbakestrek; `"C:\\dir\\"` og `"say \"hi\""` er avsluttede enlinjes verdier (ingen falsk positiv), og NAME-linjen leses som vanlig
+    const winPaths = await write("windows-paths.env", `A="C:\\\\dir\\\\"\nB="x\\\\"\nC="say \\"hi\\""\nD='it is fine'\nJARVIS_GITHUB_REPO=${P}\n`);
+    expect(check(winPaths)).toBe("");
+    expect(value(winPaths)).toBe(P);
+    expect(deny(P, winPaths).status).toBe(0);
     // (c) ikke-kandidater: andre nøkler, kommentarer og bruk av variabelen i en annen verdi gir ingen melding
     const notCandidates = await write("not-candidates.env", "# JARVIS_GITHUB_REPO: kommentar\n   # JARVIS_GITHUB_REPO=x\nNOT_JARVIS_GITHUB_REPO=x\nJARVIS_GITHUB_REPO_OLD: y\nXJARVIS_GITHUB_REPO=z\nexportJARVIS_GITHUB_REPO=q\nSOME_URL=https://github.com/${JARVIS_GITHUB_REPO}\nFALLBACK=${JARVIS_GITHUB_REPO:-acme/x}\nBARE=$JARVIS_GITHUB_REPO\nQUOTED=\"a/${JARVIS_GITHUB_REPO}/b\"\nTWO=${JARVIS_GITHUB_REPO}/${JARVIS_GITHUB_REPO}\n");
     expect(check(notCandidates)).toBe("");
@@ -533,6 +548,7 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
       ["søppel-export fulgt av tilordning", `export\texportJARVIS_GITHUB_REPO\t=" ${P}"JARVIS_GITHUB_REPO=${P}\n`],
       ["flerlinjet verdi skjuler en linje (B N2)", `JARVIS_GITHUB_REPO=${P}\nX="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`], ["flerlinjet verdi avslører en linje (B N2)", `X="abc\n# lukker her" JARVIS_GITHUB_REPO=${P}\n`],
       ["åpent anførselstegn på andre tilordning", `A="x" B="abc\nJARVIS_GITHUB_REPO=${P}"\n`], ["åpent enkelt anførselstegn", `A='abc\nJARVIS_GITHUB_REPO=${P}\n'\n`], ["export + åpent anførselstegn", `export A="abc\nJARVIS_GITHUB_REPO=${P}\n"\n`], ["åpent anførselstegn på andre tilordning skjuler en senere linje", `JARVIS_GITHUB_REPO=${P}\nA="x" B="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`],
+      ["åpen flerlinjet verdi på nøkkel med é (B N5)", `JARVIS_GITHUB_REPO=${P}\n\u00e9="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`], ["åpen flerlinjet verdi, TAB i nøkkelen (B N5)", `JARVIS_GITHUB_REPO=${P}\nK\t2="abc\nJARVIS_GITHUB_REPO=owner/sandbox\ndef"\n`], ["avsluttede Windows-stier før NAME (B N6)", `A="C:\\\\dir\\\\"\nJARVIS_GITHUB_REPO=${P}\n`],
       ["tom verdi", "JARVIS_GITHUB_REPO=\n"], ["repo-linje etter 2000 linjer", `${Array.from({ length: 2000 }, (_, i) => `K${i}=v${i}`).join("\n")}\nJARVIS_GITHUB_REPO=${P}\n`],
     ];
     let prodCases = 0;
