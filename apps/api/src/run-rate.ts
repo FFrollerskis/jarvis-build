@@ -3,7 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
-import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { financeWithheldMarker, isFinanceConnectorId, withholdFinanceFromCurrentModel, type ToolDefinition, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 
 /**
  * D-421 (UA0-RUNRATE): run-rate - hva Jarvis faktisk koster (modell per leverandør/formål/dag, prognose for måneden) og hva connectorene koster i
@@ -153,9 +153,18 @@ export class RunRateTransport implements ToolTransport {
     if (!identity) throw new Error("run_rate_missing_invocation_context");
     switch (action) {
       case "get_cost_overview":
+        // WP-N1b (JARVIS-116 a, K2, strengeste regel til Q-64 pkt 1 er besvart): hele rapporten er modellkost i øre (i dag/7/30 døgn, prognose, per leverandør og formål) - holdt tilbake fra sky/ukjent VED UTFØRELSE (sentral lesning).
+        // Lokal modell og eierens ruter får den som før; flagg AV er uendret.
+        if (withholdFinanceFromCurrentModel()) return { data: { ...financeWithheldMarker() } as unknown as JsonValue };
         return { data: (await this.service.report(identity.tenant_id)) as unknown as JsonValue };
       case "list_connector_maintenance": {
         const r = await this.service.report(identity.tenant_id);
+        // WP-N1b (K2): vedlikeholdstid per finanskobling (og begrunnelsene, fritekst) er finansavledet: ut for sky/ukjent, summen bygges på resten
+        if (withholdFinanceFromCurrentModel()) {
+          const by_connector = r.maintenance.by_connector.filter((m) => !isFinanceConnectorId(m.connector_id));
+          const recent = r.maintenance.recent.filter((m) => !isFinanceConnectorId(m.connector_id));
+          return { data: { minutes_30d: by_connector.reduce((a, m) => a + m.minutes, 0), by_connector, recent, ...financeWithheldMarker() } as unknown as JsonValue };
+        }
         return { data: r.maintenance as unknown as JsonValue };
       }
       case "record_connector_maintenance": {
