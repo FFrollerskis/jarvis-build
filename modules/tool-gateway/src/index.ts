@@ -1,5 +1,7 @@
 export * from "./gateway.ts";
 export * from "./call-signal.ts";
+// WP-N1b (K1): modell-stemplet kontekst gjennom nøstede kall (AsyncLocalStorage); skopet SETTES kun av `ToolGateway.execute()`.
+export * from "./model-scope.ts";
 export * from "./transport-errors.ts";
 export * from "./after-accepted-mutation.ts";
 export * from "./class-d-pipeline.ts";

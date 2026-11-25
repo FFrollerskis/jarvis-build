@@ -20,7 +20,7 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import { listConnectorStatus, ownerStepUpDenial, type ConnectorAuthInfo, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { listConnectorStatus, ownerStepUpDenial, withholdFinanceFromCurrentModel, type ConnectorAuthInfo, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import { rankAttentionQueue } from "./ranking.ts";
 import type {
   AttentionItem, AttentionItemDetail, CapabilityStatus, ConnectorStatusReport, ControlSurfaceStatus, DelegationBoard
@@ -418,8 +418,10 @@ export class ExecutiveService {
    * fabrikkerer/eskalerer ALDRI identiteten den fikk fra kalleren.
    */
   async getControlSurfaceStatus(identity: IdentityContext, options: { withholdFinance?: boolean } = {}): Promise<ControlSurfaceStatus> {
-    // WP-N1 (review B, F-B1): nøstet finansavlesning - ToolGateway-låsen ser den ikke (ingen servingModel på nøstede kall), så den hoppes over HER for en skymodell (kallet gjøres ikke i det hele tatt).
-    const withholdFinance = options.withholdFinance === true;
+    // WP-N1 (review B, F-B1): nøstet finansavlesning - ToolGateway-låsen så den ikke (ingen servingModel på nøstede kall), så den hoppes over HER for en skymodell (kallet gjøres ikke i det hele tatt).
+    // WP-N1b (K1): med begrenset-vakten på arver nøstede kall nå modellen (`model-scope.ts`), så gatewayen nekter et nøstet `finance*`-kall sentralt - og denne tjenesten leser den SENTRALE avgjørelsen i stedet for å vente på at
+    // transporten sender et valg: enten det eksplisitte valget (dybdeforsvar, direkte kall) ELLER det sentrale skopet (samme resultat som før, men uten et nektet nøstet kall og uten at hver kaller må huske det).
+    const withholdFinance = options.withholdFinance === true || withholdFinanceFromCurrentModel();
     const [ownerControl, pauseState, financeKillSwitch] = await Promise.all([
       requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
       requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state"),
@@ -437,7 +439,7 @@ export class ExecutiveService {
    * `OwnerControls`-tilgang fra denne pakken.
    */
   async getDelegationBoard(identity: IdentityContext, options: { withholdFinance?: boolean } = {}): Promise<DelegationBoard> {
-    const withholdFinance = options.withholdFinance === true; // WP-N1 (review B, F-B1): se `getControlSurfaceStatus`.
+    const withholdFinance = options.withholdFinance === true || withholdFinanceFromCurrentModel(); // WP-N1 (review B, F-B1) + WP-N1b (K1): se `getControlSurfaceStatus`.
     const [autonomyDomains, ownerControl, financeKillSwitch] = await Promise.all([
       requireData<SituationAutonomyPolicy[]>(this.gateway, identity, "situations", "list_autonomy_policies"),
       requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
