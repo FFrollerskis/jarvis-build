@@ -37,10 +37,14 @@ export interface ParseOutcome {
   readonly ignored: number;
 }
 
-export const MAX_EVENTS_PER_REQUEST = 100;
+/**
+ * K3 (JARVIS-112 d): høyeste antall hendelser en enkelt signert forespørsel BEHANDLES med (`CommsWebhookService`, ikke parseren - parserne returnerer ALLE hendelser og forkaster ingen på antall). Tallet er Metas DOKUMENTERTE
+ * batch-størrelse: «batches of at most 1000 updates» (WhatsApp Business Platform, webhooks / create-webhook-endpoint). UVERIFISERT mot primærkilden i denne økten (`developers.facebook.com` var utenfor nettverkstillatelsen; kun
+ * søkeutdrag - de samme utdragene oppgir inntil 3 MB per forespørsel og at batching ikke er garantert). Før var tallet 100 og resten ble DROPPET STILLE (en STOP som nr. 120 gikk tapt, HTTP 200). Over taket svarer tjenesten nå med en
+ * feilstatus (leverandøren prøver på nytt), aldri 200 med droppede hendelser. Vår egen byte-grense (256 KB, før signaturen) er en egen, uendret avgrensning (se runbook §5).
+ */
+export const MAX_EVENTS_PER_REQUEST = 1000;
 const SAFE_KEY = /^[A-Za-z0-9._:@=+/-]{1,300}$/;
-/** Største leverandør-id vi leser (selve id-en lagres aldri - kun dedupe-nøkkelen). */
-const MAX_PROVIDER_ID = 1000;
 
 /**
  * B-NY (delta-review B): dedupe-nøkkelen for en hendelse. En leverandørs meldings-id er IKKE garantert innenfor vårt trygge tegnsett (`~ % * $` og mellomrom) eller lengdegrensen på 300 - og en hendelse med slik id ble tidligere DROPPET
@@ -57,6 +61,11 @@ function obj(value: unknown): Record<string, unknown> | null {
 }
 const arr = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const str = (value: unknown, max = 500): string | null => (typeof value === "string" && value.length > 0 && value.length <= max ? value : null);
+/**
+ * K3: en leverandørs hendelses-/meldings-id godtas uansett lengde (aldri forkastet, aldri avkortet) - bare dedupe-NØKKELEN lagres (`eventKey`: ren når den er kort og trygg, ellers en SHA-256 av hele id-en). Før ble en meldings-id over 1000 tegn,
+ * en Twilio-SID over 64 og en Slack `event_id` over 100 forkastet, og en STOP med slik id gikk tapt. Kroppen er uansett begrenset (256 KB før signaturen), så id-en kan ikke bli ubegrenset stor.
+ */
+const idStr = (value: unknown): string | null => (typeof value === "string" && value.length > 0 ? value : null);
 const num = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : typeof value === "string" && /^\d{1,16}(\.\d{1,6})?$/.test(value) ? Number(value) : null);
 
 function isoFromSeconds(seconds: number | null): string | null {
@@ -73,8 +82,9 @@ function normalized(channel: Parameters<typeof normalizeChannelIdentifier>[0], r
 }
 
 function finish(events: NormalizedInbound[], ignored: number): ParseOutcome {
+  // Nøkkelen er trygg per konstruksjon (`eventKey` hasher alt uvanlig); filteret er kun et siste sikkerhetsnett. Antallet kuttes IKKE her (K3): taket håndheves av tjenesten, som prioriterer STOP først og svarer med feilstatus over taket.
   const kept = events.filter((e) => SAFE_KEY.test(e.event_key));
-  return { events: kept.slice(0, MAX_EVENTS_PER_REQUEST), ignored: ignored + (events.length - kept.length) + Math.max(0, kept.length - MAX_EVENTS_PER_REQUEST) };
+  return { events: kept, ignored: ignored + (events.length - kept.length) };
 }
 
 // ------------------------------------------------------------------------------------------------ Slack Events API
@@ -89,7 +99,7 @@ export function parseSlackBody(body: unknown): SlackParse {
     return challenge === null ? { events: [], ignored: 1 } : { challenge };
   }
   if (b["type"] !== "event_callback") return { events: [], ignored: 1 };
-  const eventId = str(b["event_id"], 100);
+  const eventId = idStr(b["event_id"]);
   const teamId = str(b["team_id"], 30);
   const ev = obj(b["event"]);
   if (eventId === null || teamId === null || ev === null) return { events: [], ignored: 1 };
@@ -141,7 +151,7 @@ export function parseMetaBody(body: unknown): ParseOutcome {
         if (value === null || phoneNumberId === null) { ignored++; continue; }
         for (const mRaw of arr(value["messages"])) {
           const m = obj(mRaw);
-          const id = str(m?.["id"], MAX_PROVIDER_ID);
+          const id = idStr(m?.["id"]);
           const from = str(m?.["from"], 30);
           const sender = from === null ? null : normalized("whatsapp", from);
           if (m === null || id === null || sender === null) { ignored++; continue; }
@@ -152,7 +162,7 @@ export function parseMetaBody(body: unknown): ParseOutcome {
         }
         for (const sRaw of arr(value["statuses"])) {
           const s = obj(sRaw);
-          const id = str(s?.["id"], MAX_PROVIDER_ID);
+          const id = idStr(s?.["id"]);
           const status = str(s?.["status"], 30);
           if (s === null || id === null || status === null) { ignored++; continue; }
           const recipient = str(s["recipient_id"], 30);
@@ -169,7 +179,7 @@ export function parseMetaBody(body: unknown): ParseOutcome {
         const message = obj(m?.["message"]);
         const accountRef = str(obj(m?.["recipient"])?.["id"], 30) ?? str(entry["id"], 30);
         const senderId = str(obj(m?.["sender"])?.["id"], 30);
-        const mid = str(message?.["mid"], MAX_PROVIDER_ID);
+        const mid = idStr(message?.["mid"]);
         // `is_echo` = vår egen utgående melding speilet tilbake: aldri en innkommende hendelse.
         if (m === null || message === null || accountRef === null || senderId === null || mid === null || message["is_echo"] === true) { ignored++; continue; }
         const sender = normalized(channel, `${accountRef}:${senderId}`);
@@ -189,7 +199,7 @@ export function parseMetaBody(body: unknown): ParseOutcome {
 // ------------------------------------------------------------------------------------------------ Twilio (skjema-kodet)
 export function parseTwilioParams(params: ReadonlyMap<string, readonly string[]>): ParseOutcome {
   const one = (k: string, max = 2000): string | null => str(params.get(k)?.[0], max);
-  const sid = one("MessageSid", 64) ?? one("SmsSid", 64);
+  const sid = idStr(params.get("MessageSid")?.[0]) ?? idStr(params.get("SmsSid")?.[0]);
   const from = one("From", 40);
   const to = one("To", 40);
   const toNumber = to === null ? null : normalizeE164(to);
@@ -209,7 +219,7 @@ export function parseTwilioParams(params: ReadonlyMap<string, readonly string[]>
 export function parseTelnyxBody(body: unknown): ParseOutcome {
   const data = obj(obj(body)?.["data"]);
   const type = str(data?.["event_type"], 80);
-  const id = str(data?.["id"], MAX_PROVIDER_ID);
+  const id = idStr(data?.["id"]);
   const payload = obj(data?.["payload"]);
   if (data === null || type === null || id === null || payload === null) return { events: [], ignored: 1 };
   const occurred = str(data["occurred_at"], 40);
@@ -224,7 +234,7 @@ export function parseTelnyxBody(body: unknown): ParseOutcome {
     return finish([{ provider: "telnyx", channel: "sms", account_ref: toNumber, event_key: eventKey("telnyx", id), kind: "message", sender, reply_to: sender, thread_ref: null, text: typeof payload["text"] === "string" ? (payload["text"] as string).slice(0, 10_000) : null, provider_ts: ts }], 0);
   }
   if (type.startsWith("message.") && payload["direction"] === "outbound") {
-    return finish([{ provider: "telnyx", channel: "sms", account_ref: str(obj(payload["from"])?.["phone_number"], 40) ?? toNumber, event_key: eventKey("telnyx:status", str(payload["id"], MAX_PROVIDER_ID) ?? id, type), kind: "status", sender: null, reply_to: null, thread_ref: null, text: null, provider_ts: ts }], 0);
+    return finish([{ provider: "telnyx", channel: "sms", account_ref: str(obj(payload["from"])?.["phone_number"], 40) ?? toNumber, event_key: eventKey("telnyx:status", idStr(payload["id"]) ?? id, type), kind: "status", sender: null, reply_to: null, thread_ref: null, text: null, provider_ts: ts }], 0);
   }
   return { events: [], ignored: 1 };
 }

@@ -41,8 +41,10 @@ describe("parserne: en hendelse forkastes aldri på grunn av id-en (ren tolkning
     }
     expect(new Set(keys).size).toBe(odd.length);
     expect(parseMetaBody(waBody(odd[0]!, "STOPP")).events[0]!.event_key).toBe(keys[0]); // stabil: dedupe virker
-    // en id over grensen vi leser (1000) er fortsatt avvist (ikke en gyldig leverandør-id)
-    expect(parseMetaBody(waBody("y".repeat(1001), "STOPP")).ignored).toBe(1);
+    // WP-G1c K3: grensen på 1000 tegn er FJERNET - en id over den forkastes ikke lenger (en STOP med slik id ble tapt), men gir en stabil hash-nøkkel av HELE id-en (se `stop-start-order.test.ts`/`batch-cap.test.ts`).
+    const huge = parseMetaBody(waBody("y".repeat(1001), "STOPP"));
+    expect(huge.ignored).toBe(0);
+    expect(huge.events[0]!.event_key).toMatch(/^wa:msg:sha256:[0-9a-f]{64}$/);
   });
 
   it("samme regel for statusvarsel, Messenger/Instagram (`mid.$…`), Twilio og Telnyx", () => {

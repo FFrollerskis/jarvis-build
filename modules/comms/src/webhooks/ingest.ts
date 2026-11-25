@@ -5,9 +5,9 @@ import { scanForSecrets } from "@jarvis/core";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import { optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel } from "../channels.ts";
 import type { CommsConfig, CommsWebhookProvider } from "../config.ts";
-import { OPT_KEYWORD_CHANNELS, parseOptKeyword } from "../optout.ts";
+import { OPT_KEYWORD_CHANNELS, parseOptKeyword, type OptKeyword } from "../optout.ts";
 import type { Clock, CommsStore, OptEffect } from "../store.ts";
-import { parseMetaBody, parseSlackBody, parseTelnyxBody, parseTwilioParams, type NormalizedInbound, type ParseOutcome } from "./parsers.ts";
+import { MAX_EVENTS_PER_REQUEST, parseMetaBody, parseSlackBody, parseTelnyxBody, parseTwilioParams, type NormalizedInbound, type ParseOutcome } from "./parsers.ts";
 import { secretsEqual, verifyMetaSignature, verifySlackSignature, verifyTelnyxSignature, verifyTwilioSignature } from "./verify.ts";
 
 /**
@@ -45,6 +45,8 @@ export interface WebhookDeps {
   readonly clock: Clock;
   readonly business?: Pick<BusinessService, "recordActivity">;
   readonly warn?: (event: Record<string, unknown>) => void;
+  /** K3: høyeste antall hendelser som behandles per signert forespørsel (standard `MAX_EVENTS_PER_REQUEST` = Metas dokumenterte batch-størrelse). Overskrides den, svarer tjenesten 503 så leverandøren prøver på nytt. Kun testene setter den lavere. */
+  readonly maxEventsPerRequest?: number;
 }
 
 export const WEBHOOK_SECRET_REFS = {
@@ -93,6 +95,16 @@ export interface IngestSummary {
   ignored: number;
   opt_outs: number;
   opt_ins: number;
+  /** K3: hendelser som IKKE ble behandlet fordi forespørselen overskred taket (kun satt ved 503 `batch_over_cap`). */
+  deferred?: number;
+}
+
+/**
+ * Er hendelsen et stopp-/start-ord (en hel melding som er ett av ordene, på en kanal der tekst-STOP tolkes)? Brukes både til prioritering (K3: slike hendelser behandles FØRST) og til selve avmeldingsbehandlingen,
+ * så de aldri kan komme ut av takt.
+ */
+function optKeywordOf(ev: NormalizedInbound): OptKeyword | null {
+  return ev.kind === "message" && ev.reply_to !== null && OPT_KEYWORD_CHANNELS.has(ev.channel) ? parseOptKeyword(ev.text) : null;
 }
 
 const emptySummary = (): IngestSummary => ({ received: 0, inserted: 0, duplicates: 0, ignored: 0, opt_outs: 0, opt_ins: 0 });
@@ -167,9 +179,20 @@ export class CommsWebhookService {
     const summary = emptySummary();
     summary.ignored += outcome.ignored;
     const ingestId = `ingest-${randomUUID()}`;
-    for (const event of outcome.events) {
+    // K3 (JARVIS-112 d): stopp-/start-ord behandles FØRST (de er rettighetsbærende; de beholder sin innbyrdes rekkefølge så en STOP og en START i samme batch aldri bytter plass), deretter resten. Taket gjelder KUN antall hendelser
+    // som behandles; overskrides det, svarer vi med en FEILSTATUS (leverandøren prøver på nytt, dedupe gjør gjentak trygt) - aldri 200 med stille droppede hendelser. Logg: kun årsakskode og antall.
+    const keywordEvents = outcome.events.filter((e) => optKeywordOf(e) !== null);
+    const ordered = [...keywordEvents, ...outcome.events.filter((e) => optKeywordOf(e) === null)];
+    const cap = this.deps.maxEventsPerRequest ?? MAX_EVENTS_PER_REQUEST;
+    const batch = ordered.slice(0, cap);
+    for (const event of batch) {
       summary.received++;
       await this.processEvent(event, ingestId, summary);
+    }
+    const deferred = ordered.length - batch.length;
+    if (deferred > 0) {
+      this.deps.warn?.({ msg: "comms_webhook_batch_over_cap", provider, events: ordered.length, cap, deferred });
+      return { status: 503, body: { error: "batch_over_cap", events: { ...summary, deferred } } };
     }
     return { status: 200, body: { received: true, events: { ...summary } } };
   }
@@ -204,12 +227,13 @@ export class CommsWebhookService {
     const tenantId = config.webhook_tenant_id as string;
     const space: MemorySpace = config.webhook_memory_space;
     const account = await store.findActiveAccount(tenantId, space, ev.channel, ev.account_ref);
-    const keyword = ev.kind === "message" && ev.reply_to !== null && OPT_KEYWORD_CHANNELS.has(ev.channel) ? parseOptKeyword(ev.text) : null;
+    const keyword = optKeywordOf(ev);
     // Kun kontoer eieren har autorisert: en hendelse til en ukjent konto lagres ikke (ingen unødvendige personopplysninger). UNNTAK (A-M7): en STOP registreres ALLTID, også til en ikke-autorisert/tilbakekalt konto - mottakerens
     // rett til å slippe avhenger ikke av at eieren har lagt kontoen i allowlisten (kun pseudonym + hint lagres, aldri tekst).
     if (account === null && keyword !== "stop") { summary.ignored++; return; }
-    // Ferskhet: en hendelse eldre enn dedupe-vinduet (retensjon) kan være en gjenspilling etter at dedupe-raden er slettet.
-    if (ev.provider_ts !== null && clock().getTime() - Date.parse(ev.provider_ts) > config.inbound_retention_days * 86_400_000) { summary.ignored++; return; }
+    // Ferskhet: en hendelse eldre enn dedupe-vinduet (retensjon) kan være en gjenspilling etter at dedupe-raden er slettet. UNNTAK (K3): en STOP forkastes aldri på alder - en gjenspilt gammel STOP er ufarlig (den registrerer en avmelding, den
+    // aldri løfter noe), mens en forsinket levering av en ekte STOP ikke skal forsvinne stille.
+    if (keyword !== "stop" && ev.provider_ts !== null && clock().getTime() - Date.parse(ev.provider_ts) > config.inbound_retention_days * 86_400_000) { summary.ignored++; return; }
 
     const hash = ev.reply_to === null ? null : recipientHash(tenantId, ev.channel, ev.reply_to);
     const hint = ev.reply_to === null ? null : recipientHint(ev.channel, ev.reply_to);
