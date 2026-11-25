@@ -56,8 +56,10 @@ describe("B: createDavRateLimit - grense per prinsipal (JARVIS-113 e/6)", () => 
     expect(denied).toMatchObject({ ok: false, scope: "device" });
     expect((denied as { retry_after_seconds: number }).retry_after_seconds).toBeGreaterThanOrEqual(1);
     expect((denied as { retry_after_seconds: number }).retry_after_seconds).toBeLessThanOrEqual(60);
-    c.advance(59_000);
-    expect(rl.check(who("d-1"), false).ok).toBe(false);
+    c.advance(30_000);
+    expect(rl.check(who("d-1"), false)).toMatchObject({ ok: false, scope: "device", retry_after_seconds: 30 }); // ventetiden teller ned med vinduet
+    c.advance(29_000);
+    expect(rl.check(who("d-1"), false)).toMatchObject({ ok: false, retry_after_seconds: 1 });
     c.advance(1_000);
     expect(rl.check(who("d-1"), false).ok).toBe(true);
   });
