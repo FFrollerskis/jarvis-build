@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_PROFILES } from "@jarvis/model-gateway";
 import { CHAT_READ_TIER_KEYS, SURFACE_TOOL_GRANTS, isFinancialNamespace } from "@jarvis/tool-gateway";
 import { CENTER_ROWS, ROWS } from "./support/n1b-rows.ts";
 
@@ -42,14 +43,32 @@ describe("A: modell-skopet settes ett sted og leses kun av kjente filer", () => 
     expect(countBy(/\brunWithModelScope\s*\(/g, [SCOPE_FILE])).toEqual({ "modules/tool-gateway/src/gateway.ts": 1 });
   });
 
-  it("de SENTRALE LESERNE (`currentModelScope`, `currentServingModel`, `withholdFinanceFromCurrentModel`) brukes kun av gatewayen og de kjente nøstede/begrensede oppslagene - en ny leser må vurderes (aldri i delt arbeid som deles av flere kallere)", () => {
+  it("FIX-4: ALLE forekomster av setteren (import, alias, re-eksport, kall) er pinnet: kun gatewayens import + ett kall; `index.ts` eksporterer den ikke (en alias-import uten ordet `servingModel` ville ellers sluppet forbi kallvakten)", () => {
+    expect(countBy(/\brunWithModelScope\b/g, [SCOPE_FILE])).toEqual({ "modules/tool-gateway/src/gateway.ts": 2 });
+    const index = code(read("modules/tool-gateway/src/index.ts"));
+    expect(index).not.toMatch(/export\s*\*\s*from\s*"\.\/model-scope\.ts"/);
+    expect(index).toMatch(/export\s*\{\s*currentModelScope,\s*currentServingModel,\s*withholdFinanceFromCurrentModel\s*\}\s*from\s*"\.\/model-scope\.ts";/);
+    expect(index).toMatch(/export\s+type\s*\{\s*ModelScope,\s*ScopedServingModel\s*\}\s*from\s*"\.\/model-scope\.ts";/);
+    // ingen `export *` fra pakker/filer som kan eksportere setteren videre, og ingen annen fil importerer fra `model-scope.ts` enn gatewayen (setteren + leseren), leverandør-innpakningen (kun leseren) og indeksen
+    expect(Object.keys(countBy(/model-scope\.ts/g, [SCOPE_FILE])).sort()).toEqual(["modules/tool-gateway/src/finance-withheld.ts", "modules/tool-gateway/src/gateway.ts", "modules/tool-gateway/src/index.ts"]);
+  });
+
+  it("de SENTRALE LESERNE (`currentModelScope`, `currentServingModel`, `withholdFinanceFromCurrentModel`): ALLE forekomster (import, alias, re-eksport, kall) er pinnet per fil - en ny leser, en alias-import eller en ny gjenbruk må vurderes (aldri i delt arbeid som deles av flere kallere)", () => {
+    // FIX-4: pinner navnet (`\bnavn\b`), ikke bare kall (`navn(`): en alias-import (`import { withholdFinanceFromCurrentModel as w }`) har navnet i importsetningen og felles teller også uten et synlig kall
+    expect(countBy(/\b(?:currentModelScope|currentServingModel|withholdFinanceFromCurrentModel)\b/g, [SCOPE_FILE])).toEqual({
+      "apps/api/src/run-rate.ts": 3, // import + `get_cost_overview` (kun merket) og `list_connector_maintenance` (finanskoblinger filtrert i SQL)
+      "modules/business/src/transport.ts": 6, // import + åpne løkker, enkeltoppslag, oppmerksomhetskø, brief (daglig/ukentlig, én avlesning) og kalibreringsrapport
+      "modules/conversation-graph/src/transport.ts": 3, // import + tverr-kanal-kø og identitetsvisning
+      "modules/executive/src/service.ts": 3, // import + K1: nøstede finansavlesninger (`getControlSurfaceStatus`/`getDelegationBoard`)
+      "modules/executive/src/transport.ts": 13, // import + senter-svar, oversikt, kø/enkeltoppslag, kapabilitet/connector, SLO, verdi, selvdiagnose, AI Mesh, evolusjon, driftsbilde (FIX-2)
+      "modules/tool-gateway/src/finance-withheld.ts": 2, // import + `withheldFromCloudTransport` (FIX-6: leverandørsaldo)
+      "modules/tool-gateway/src/gateway.ts": 2, // import + `execute()`: arver et ytre skop
+      "modules/tool-gateway/src/index.ts": 3 // eksporten av de tre leserne (setteren eksporteres ikke, FIX-4)
+    });
+    // og kallene alene (dokumenterer hvor mange avlesninger som faktisk skjer per fil)
     expect(countBy(/\b(?:currentModelScope|currentServingModel|withholdFinanceFromCurrentModel)\s*\(/g, [SCOPE_FILE])).toEqual({
-      "apps/api/src/run-rate.ts": 2, // K2: `get_cost_overview` (kun merket) og `list_connector_maintenance` (finanskoblinger filtrert)
-      "modules/business/src/transport.ts": 5, // K2: åpne løkker, enkeltoppslag, oppmerksomhetskø, brief (daglig/ukentlig, én avlesning) og kalibreringsrapport
-      "modules/conversation-graph/src/transport.ts": 2, // K2: tverr-kanal-kø og identitetsvisning
-      "modules/executive/src/service.ts": 2, // K1: nøstede finansavlesninger (`getControlSurfaceStatus`/`getDelegationBoard`)
-      "modules/executive/src/transport.ts": 11, // K2: senter-svar, oversikt, kø/enkeltoppslag, kapabilitet/connector, SLO, verdi, selvdiagnose, AI Mesh, evolusjon
-      "modules/tool-gateway/src/gateway.ts": 1 // `execute()`: arver et ytre skop
+      "apps/api/src/run-rate.ts": 2, "modules/business/src/transport.ts": 5, "modules/conversation-graph/src/transport.ts": 2, "modules/executive/src/service.ts": 2, "modules/executive/src/transport.ts": 12,
+      "modules/tool-gateway/src/finance-withheld.ts": 1, "modules/tool-gateway/src/gateway.ts": 1
     });
   });
 
@@ -74,15 +93,18 @@ describe("B: ToolGateway.execute() - vakt AV er identisk, et skyskop løsnes ald
   });
 
   it("VAKT AV: uten `financeExecutionLock` går kallet rett til den uendrede kroppen - FØR noe skop leses eller settes", () => {
+    // FIX-9: HELE omslaget står i `try` (en løsrevet `execute` uten `this` avvises i stedet for å kaste synkront); første setning inni er likevel lås-avlesningen og returen av kroppens eget løfte
     const firstStatement = execute.slice(execute.indexOf("{") + 1).trimStart();
-    expect(firstStatement.startsWith("const lock = this.options?.financeExecutionLock;")).toBe(true);
-    expect(execute).toMatch(/if \(lock === undefined\) return this\.executeCall\(request\);\s*try \{/);
+    expect(firstStatement.startsWith("try {")).toBe(true);
+    expect(execute).toMatch(/try \{\s*const lock = this\.options\?\.financeExecutionLock;\s*if \(lock === undefined\) return this\.executeCall\(request\);\s*const ambient = currentModelScope\(\);/);
     expect(execute.indexOf("if (lock === undefined) return this.executeCall(request);")).toBeLessThan(execute.indexOf("currentModelScope()"));
     expect(execute.indexOf("if (lock === undefined) return this.executeCall(request);")).toBeLessThan(execute.indexOf("runWithModelScope("));
   });
 
   it("et skyskop LØSNES aldri: er det ytre kallet sky/ukjent gjelder den modellen, ellers eksplisitt, ellers arvet; vedtaket tas med `servedByCloud` (den ene regelen) eller arves", () => {
-    expect(execute).toContain("const model = ambient?.cloud === true ? ambient.servingModel : (request.servingModel ?? ambient?.servingModel);");
+    // FIX-3: `!== undefined` (ikke `??`): en `null`/uleselig verdi er en MODELL som regnes som sky - ikke «ingen modell»
+    expect(execute).toContain("const model = ambient?.cloud === true ? ambient.servingModel : (request.servingModel !== undefined ? request.servingModel : ambient?.servingModel);");
+    expect(execute).not.toMatch(/request\.servingModel\s*\?\?/);
     expect(execute).toContain("const cloud = ambient?.cloud === true || this.servedByCloud(model, lock);");
     expect(execute).toContain("runWithModelScope({ servingModel: model, cloud }, () => this.executeCall(effective));");
     // ingen ny lokalitetsregel i gatewayen: bare `servedByCloud` (som igjen kun kaller den injiserte `servedLocally`)
@@ -200,10 +222,11 @@ describe("F: K2-klassifiseringen dekker hele modellflaten (ukjent = finans: et n
       read_no_finance: ["list_channel_links", "read_cross_channel_commitments", "read_identity", "read_identity_timeline", "resolve_effective_identity", "resolve_identity"]
     },
     executive: {
-      handled: ["get_ai_mesh_status", "get_attention_item", "get_attention_queue", "get_capability_status", "get_connector_status", "get_control_center", "get_control_surface_status", "get_delegation_board", "get_evolution_report", "get_self_diagnosis", "get_slo_report", "get_value_report"],
-      // WP-H1/H2: finans-/verdi-/evolusjonssenteret holdt tilbake helt, øvrige sentre bygget uten finansavledet tilstand (`restrictFinance`) - uendret av N1b (K1 gir dem bare den arvede modellen)
-      handled_h2: ["get_agent_center", "get_evolution_center", "get_finance_center", "get_memory_center", "get_operations_center", "get_privacy_center", "get_security_center", "get_value_center"],
-      read_no_finance: ["get_infra_status"]
+      // fiks-runde 1: `get_security_center` (FIX-1: frosne koblinger/-credentials) og `get_infra_status` (FIX-2: hendelsestitler) er flyttet hit fra `handled_h2`/`read_no_finance` - begge viste seg å bære finansavledede navn
+      handled: ["get_ai_mesh_status", "get_attention_item", "get_attention_queue", "get_capability_status", "get_connector_status", "get_control_center", "get_control_surface_status", "get_delegation_board", "get_evolution_report", "get_infra_status", "get_security_center", "get_self_diagnosis", "get_slo_report", "get_value_report"],
+      // WP-H1/H2: finans-/verdi-/evolusjonssenteret holdt tilbake helt, øvrige sentre bygget uten finansavledet tilstand (`restrictFinance`) - uendret av N1b (K1 gir dem bare den arvede modellen). Data-sveipet over disse (orakel-testen + sveip med sådd finanstilstand): 0 finansnavn.
+      handled_h2: ["get_agent_center", "get_evolution_center", "get_finance_center", "get_memory_center", "get_operations_center", "get_privacy_center", "get_value_center"],
+      read_no_finance: []
     },
     run_rate: { handled: ["get_cost_overview", "list_connector_maintenance"], handled_h2: [], read_no_finance: [] }
   };
@@ -234,5 +257,37 @@ describe("F: K2-klassifiseringen dekker hele modellflaten (ukjent = finans: et n
     expect(deferred.sort()).toEqual(["growth", "knowledge", "memory"]);
     const readers = Object.keys(countBy(/\b(?:currentModelScope|currentServingModel|withholdFinanceFromCurrentModel)\s*\(/g, [SCOPE_FILE]));
     for (const f of readers) expect(f, "en leser i et deferred-domene").not.toMatch(/^modules\/(growth|knowledge|memory)\//);
+  });
+});
+
+describe("G: ÉN lokalitetsregel (fiks-runde 1, FIX-7/A80): ingen ny leverandør-/lokalitetsliste utenfor `financeLockServedLocally`", () => {
+  /**
+   * Lokalitetsregelen har ÉN definisjon (`financeLockServedLocally` i `restricted-context-guard.ts`, som bygger på leverandørregisterets `locality`). En FJERDE kopi (en liste over lokale leverandørnavn i en tjeneste, f.eks.
+   * `["gemma_local", "ollama"].includes(provider)` i executive) ville kunne avvike fra regelen og gi en annen avgjørelse enn låsen og de sentrale leserne. Vakten pinner HVOR de lokale leverandørnavnene (utledet fra
+   * `DEFAULT_PROFILES` + `local_vision`) står som streng-literal i produksjonskoden: nøyaktig disse filene, med disse antallene. Dukker et navn opp i en ny fil (eller flere ganger i en kjent), feller testen - vurder da om koden
+   * tar en LOKALITETSbeslutning (bruk i så fall `financeLockServedLocally`/`servedByCloud`, aldri en egen liste) før du legger filen inn her.
+   */
+  const ALLOWED: Readonly<Record<string, number>> = {
+    "apps/api/src/chat-candidates.ts": 1, "apps/api/src/control-center/ai.ts": 3, "apps/api/src/conversation.ts": 1, "apps/api/src/evolution-source.ts": 4, "apps/api/src/golden-suite.ts": 1, "apps/api/src/main.ts": 2,
+    "apps/api/src/run-rate.ts": 5, "apps/api/src/self-model-readers.ts": 1, "apps/api/src/vision-runtime.ts": 1, "apps/api/src/worker-main.ts": 1, "modules/executive/src/ai-mesh/report.ts": 1, "modules/memory/src/embedding.ts": 2,
+    "modules/model-gateway/src/capability-registry.ts": 5, "modules/model-gateway/src/council.ts": 3, "modules/model-gateway/src/mesh-smoke.ts": 3, "modules/model-gateway/src/model-gateway.ts": 1,
+    "modules/model-gateway/src/override-parser.ts": 1, "modules/situations/src/assist.ts": 3, "modules/vision/src/classifier.ts": 1,
+    "packages/provider-adapters/src/local-llm.ts": 1, "packages/provider-adapters/src/ollama.ts": 1, "packages/provider-adapters/src/scripted.ts": 1
+  };
+  const localProviders = (): string[] => [...new Set([...DEFAULT_PROFILES.filter((p) => p.locality === "local").map((p) => p.provider), "local_vision"])].sort();
+
+  it("de lokale leverandørnavnene fra modellregisteret er de forventede (endres registeret, må vakten vurderes)", () => {
+    expect(localProviders()).toEqual(["gemma_local", "local_llm", "local_vision", "ollama", "scripted"]);
+  });
+
+  it("leverandørnavnene står som literal kun i den kjente listen filer (en ny provider-/lokalitetsliste, f.eks. i `modules/executive/src/service.ts`, feller testen)", () => {
+    const re = new RegExp(`["'\`](?:${localProviders().join("|")})["'\`]`, "g");
+    expect(countBy(re)).toEqual(ALLOWED);
+  });
+
+  it("de tre kjente lokalitetsavgjørelsene er ÉN funksjon: gatewayen og executive-tjenesten tar `servedLocally` (= `financeLockServedLocally`) som INNDATA - ingen av dem har en leverandørliste", () => {
+    for (const rel of ["modules/tool-gateway/src/gateway.ts", "modules/executive/src/service.ts", "modules/tool-gateway/src/finance-withheld.ts", "modules/business/src/transport.ts", "modules/conversation-graph/src/transport.ts"]) {
+      expect(code(read(rel)), rel).not.toMatch(new RegExp(`["'\`](?:${localProviders().join("|")})["'\`]`));
+    }
   });
 });
