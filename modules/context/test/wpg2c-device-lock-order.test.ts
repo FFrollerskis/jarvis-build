@@ -192,8 +192,8 @@ describe("A2: fjerningen er MIDT I FLUKT (holder sin første enhetsrad) når inn
   for (const [label, authorizingFirst] of [["autoriserende enhet sorterer ETTER den roterte", false], ["autoriserende enhet sorterer FØR den roterte", true]] as const) {
     it(`${label}: fjerningen holder første enhet og venter på X; innrulleringen venter UTEN å holde noe; når X slipper er resultatet fjerning ok + innrullering avvist (nøkkelen er tilbakekalt) - aldri 40P01`, async () => {
       const c = await mkCircle();
+      const hi = await mkKeyed(c, `dev-lo-b-mid-${c.n}`, true); // sorterer SIST, men settes inn FØRST: fysisk (heap-)rekkefølge er motsatt av sortert, så kun `ORDER BY device_id` gir riktig låsrekkefølge
       const lo = await mkKeyed(c, `dev-lo-a-mid-${c.n}`, true); // sorterer først
-      const hi = await mkKeyed(c, `dev-lo-b-mid-${c.n}`, true); // sorterer sist (settes inn etter, så fysisk rekkefølge = sortert: kun ORDER BY skiller riktig fra feil)
       const authorizing = authorizingFirst ? lo : hi;
       const target = authorizingFirst ? hi : lo;
       const { gated, enrollment } = rig();
