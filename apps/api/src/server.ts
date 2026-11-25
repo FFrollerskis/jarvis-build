@@ -2077,6 +2077,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   // WP-G2 (D-464): `/personal/*` finnes KUN når `deps.personal` er satt (minst ett JARVIS_PERSONAL_*-flagg på). Eier-kun og step-up håndheves inni rutene; uten verdien er dette en vanlig 404.
   if (deps.personal !== undefined && url.pathname.startsWith("/personal/")) {
     const personalDeps = deps.personal;
+    // WP-G2c (D-483, JARVIS-113 e/5): ALT under `/personal/` bærer personopplysninger (lokasjon, helse, familie, kalender, økonomi, handlinger). `setHeader` (ikke `json()`-argumentet) slik at også 401/400/413/500 fra grant-/kropp-/feilgrenene
+    // bærer den: ingen nettleser eller mellomliggende cache skal lagre et svar. Kun her (flagg PÅ): uten `deps.personal` er svarene byte-identiske med main.
+    res.setHeader("cache-control", "no-store");
     const handled = await handlePersonalRoute({
       req, res, url, deps: personalDeps,
       authed: (allowedKeys) => authedRequest(req, res, deps, allowedKeys),
