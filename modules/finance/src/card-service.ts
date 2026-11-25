@@ -295,7 +295,7 @@ export class CardService {
       await this.settleFailedSubmit(tenantId, memorySpace, cardId, failureClass, "call").catch((cleanupErr) => {
         console.error(JSON.stringify({ msg: "card_submit_cleanup_failed", card_id: cardId, error: (cleanupErr as Error).message.slice(0, 120) }));
       });
-      if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(cardId, (err instanceof Error ? err.message : String(err)).slice(0, 110), err);
+      if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(cardId, (err instanceof Error ? err.message : String(err)).replace(/^outcome_unknown:/, "").slice(0, 110), err);
       throw err;
     }
 

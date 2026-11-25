@@ -56,6 +56,7 @@ const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
 
 import { financeSignal, isRetrySafe } from "./http.ts";
+import { expectAccessToken, expectArray, expectId, expectRecord, optionalText, readJsonBody, type ResponseContext } from "./provider-response.ts";
 
 export class FikenApiError extends Error {
   constructor(
@@ -119,9 +120,12 @@ async function exchangeFikenAccessToken(refreshToken: string): Promise<{ token: 
     const rawBody = await response.text().catch(() => "");
     throw new FikenApiError(`fiken_auth_failed_${response.status}:${classifyFikenErrorBody(rawBody)}`, response.status, false);
   }
-  const body = (await response.json()) as { access_token: string; expires_in?: number | string };
-  const ttl = Number(body.expires_in);
-  return { token: body.access_token, ttlSeconds: Number.isFinite(ttl) && ttl > 0 ? ttl : FIKEN_TOKEN_DEFAULT_TTL_S };
+  // WP-FIN2 (K7): ugyldig token-svar er en typet feil (aldri `Bearer undefined`, aldri en cachet «undefined»). Token-utvekslingen er ingen pengemutasjon.
+  const ctx: ResponseContext = { operation: "fiken.access_token", mutation: false };
+  const body = expectRecord(await readJsonBody(response, ctx), ctx);
+  const token = expectAccessToken(body, "access_token", ctx);
+  const ttl = Number(body["expires_in"]);
+  return { token, ttlSeconds: Number.isFinite(ttl) && ttl > 0 ? ttl : FIKEN_TOKEN_DEFAULT_TTL_S };
 }
 
 export async function fikenAccessToken(refreshToken: string): Promise<string> {
@@ -194,7 +198,7 @@ export class FikenTransport {
     return fikenAccessToken(this.refreshToken);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, onSuccess?: (response: Response) => Promise<T>): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, onSuccess?: (response: Response) => Promise<T>, operation?: string): Promise<T> {
     const token = await this.accessToken();
     let lastError: FikenApiError | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -211,7 +215,8 @@ export class FikenTransport {
       if (response.ok) {
         if (onSuccess) return onSuccess(response);
         if (response.status === 204) return undefined as T;
-        return (await response.json()) as T;
+        // WP-FIN2 (K7): en uparserbar 2xx-kropp er et ugyldig svar (typet feil for lesing), aldri en rå `SyntaxError`.
+        return (await readJsonBody(response, { operation: operation ?? `fiken.${method.toLowerCase()}_request`, mutation: method.toUpperCase() !== "GET" })) as T;
       }
       const rawBody = await response.text().catch(() => "");
       const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, false);
@@ -224,7 +229,12 @@ export class FikenTransport {
 
   /** Billig helsesjekk-/reachability-probe (Fiken sin egen dokumenterte "hent companySlug"-inngang) - INGEN mutasjon. */
   async listCompanies(): Promise<Array<{ slug: string; name: string }>> {
-    return this.request("GET", "/companies");
+    // WP-FIN2 (K7): svaret må være en liste av selskaper med trygg `slug` (brukes til å adressere alle øvrige kall). Navnet er kun visning (fraværende = tomt).
+    const ctx: ResponseContext = { operation: "fiken.list_companies", mutation: false };
+    return expectArray(await this.request<unknown>("GET", "/companies", undefined, undefined, ctx.operation), ctx).map((item) => {
+      const company = expectRecord(item, ctx, "company");
+      return { slug: expectId(company, "slug", ctx), name: optionalText(company, "name", ctx) ?? "" };
+    });
   }
 
   async listContacts(): Promise<FikenContact[]> {

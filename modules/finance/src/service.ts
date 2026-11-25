@@ -287,6 +287,11 @@ async function readForUpdate(client: pg.PoolClient, tenantId: string, paymentInt
   return (rows[0] as PaymentIntent | undefined) ?? null;
 }
 
+/** WP-FIN2 (K7): detaljen i en `ProviderOutcomeUnknownError` uten et ledende `outcome_unknown:` (en transport kan allerede ha kastet `outcome_unknown:...`) - aldri dobbelt prefiks. */
+function unknownDetail(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).replace(/^outcome_unknown:/, "").slice(0, 110);
+}
+
 /**
  * WP-FIN2 (D-486, K4; JARVIS-072-resten): barne-idempotens. Samme `(tenant, idempotency_key)` med en ANNEN forespørsel er en NY handling, aldri en retry - den eksisterende raden returneres
  * bare når forespørselen er identisk i det som utgjør handlingen: intensjon, beløp, valuta og (kun Stripe-refusjon) `reason`. Samme regel som `createPaymentIntent`
@@ -883,7 +888,7 @@ export class FinanceService {
         await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.onCallError!(client, prepared.plan, failureClass, err)).catch((cleanupErr) => {
           console.error(JSON.stringify({ msg: "finance_submit_cleanup_failed", subject_id: steps.subjectId ?? null, error: (cleanupErr as Error).message.slice(0, 120) }));
         });
-        if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", `${err instanceof Error ? err.message : String(err)}`.slice(0, 110), err);
+        if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", unknownDetail(err), err);
       }
       throw err;
     }
@@ -1001,7 +1006,7 @@ export class FinanceService {
         throw err;
       }
       await this.recordUnknownSubmitOutcome(tenantId, memorySpace, paymentIntentId, plan.idempotentAtProvider, "call");
-      throw new ProviderOutcomeUnknownError(paymentIntentId, (err instanceof Error ? err.message : String(err)).slice(0, 110), err);
+      throw new ProviderOutcomeUnknownError(paymentIntentId, unknownDetail(err), err);
     }
     try {
       return await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
