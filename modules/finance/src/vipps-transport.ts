@@ -78,7 +78,7 @@ const TOKEN_REFRESH_SKEW_MS = 60_000;
 
 import { toOreInteger } from "./ore.ts";
 
-import { financeSignal, isRetrySafe } from "./http.ts";
+import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
 import { expectAccessToken, expectCurrency, expectId, expectMinorUnits, expectRecord, expectStatus, readJsonBody, type ResponseContext } from "./provider-response.ts";
 
 export type VippsEnvironment = "test" | "production";
@@ -96,10 +96,6 @@ export class VippsApiError extends Error {
     super(message);
     this.name = "VippsApiError";
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Tolerant, avkortet (200 tegn) sanering av Vipps sin feilrespons - ALDRI rå kropp/headere logget (samme presedens som Stripe/Fiken sine `classify*ErrorBody`). */
@@ -185,8 +181,7 @@ export class VippsTransport implements VippsPaymentWriter {
     if (this.cachedToken && this.cachedToken.expiresAtMs - TOKEN_REFRESH_SKEW_MS > now) {
       return this.cachedToken.token;
     }
-    const response = await fetch(`${this.baseUrl}/accesstoken/get`, {
-        signal: financeSignal(),
+    const response = await financeFetch(`${this.baseUrl}/accesstoken/get`, {
       method: "POST",
       headers: {
         client_id: this.clientId,
@@ -226,8 +221,7 @@ export class VippsTransport implements VippsPaymentWriter {
     let lastError: VippsApiError | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const accessToken = await this.getAccessToken();
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        signal: financeSignal(),
+      const response = await financeFetch(`${this.baseUrl}${path}`, {
         method,
         headers: {
           authorization: `Bearer ${accessToken}`,
@@ -246,7 +240,7 @@ export class VippsTransport implements VippsPaymentWriter {
       const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, idempotencyKey !== undefined);
       lastError = new VippsApiError(`vipps_api_failed_${response.status}:${classifyVippsErrorBody(rawBody)}`, response.status, retryable);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
-      await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+      await financeBackoff(BASE_BACKOFF_MS * 2 ** (attempt - 1));
     }
     throw lastError ?? new VippsApiError("vipps_api_failed_unknown", 0, false);
   }

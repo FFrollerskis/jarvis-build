@@ -59,7 +59,7 @@ const BASE_BACKOFF_MS = 500;
 
 import { toOreInteger } from "./ore.ts";
 
-import { financeSignal, isRetrySafe } from "./http.ts";
+import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
 import { ProviderResponseInvalidError, expectArray, expectCurrency, expectId, expectMinorUnits, expectRecord, expectStatus, optionalText, readJsonBody, type ResponseContext } from "./provider-response.ts";
 
 export class StripeApiError extends Error {
@@ -73,10 +73,6 @@ export class StripeApiError extends Error {
     super(message);
     this.name = "StripeApiError";
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Tolerant, avkortet (200 tegn) sanering av Stripe sin feilrespons - ALDRI rå kropp/headere logget (samme presedens som `classifyFikenErrorBody`). */
@@ -166,8 +162,8 @@ export class StripeTransport {
   private async request(ctx: ResponseContext, method: string, path: string, form?: Record<string, string | number | boolean | Record<string, string | boolean> | undefined>, idempotencyKey?: string): Promise<unknown> {
     let lastError: StripeApiError | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const response = await fetch(`${STRIPE_API_BASE}${path}`, {
-        signal: financeSignal(),
+      // WP-FIN2 (K2): `financeFetch` kaller `throwIfAborted()` FØR forespørselen og setter taket sammen med gatewayens kallsignal.
+      const response = await financeFetch(`${STRIPE_API_BASE}${path}`, {
         method,
         headers: {
           authorization: `Bearer ${this.secretKey}`,
@@ -186,7 +182,7 @@ export class StripeTransport {
       const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, idempotencyKey !== undefined);
       lastError = new StripeApiError(`stripe_api_failed_${response.status}:${summary}`, response.status, retryable, errorType);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
-      await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+      await financeBackoff(BASE_BACKOFF_MS * 2 ** (attempt - 1));
     }
     throw lastError ?? new StripeApiError("stripe_api_failed_unknown", 0, false, null);
   }

@@ -65,7 +65,7 @@ const BUSINESS_JWT_LIFETIME_SECONDS = 5;
 /** Business-paginering (eier-levert primærkilde): `from_record`/`records_count`, ALDRI et gjettet side-token. */
 const RECORDS_COUNT = 100;
 
-import { financeSignal, isRetrySafe } from "./http.ts";
+import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
 import { parseMinorUnitsStrict } from "./ore.ts";
 import { ProviderResponseInvalidError, expectArray, expectId, expectRecord, expectStatus, type ResponseContext } from "./provider-response.ts";
 
@@ -102,10 +102,6 @@ export class WallesterApiError extends Error {
     super(message);
     this.name = "WallesterApiError";
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Avkortet, token-/nøkkelfri sanering av feilkropp - ALDRI hemmeligheter i meldingen (byggeordrens §23). */
@@ -275,8 +271,7 @@ export class WallesterTransport implements WallesterGateway {
         sign: this.sign,
         nowEpochSeconds: Math.floor(Date.now() / 1000)
       });
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        signal: financeSignal(),
+      const response = await financeFetch(`${this.baseUrl}${path}`, {
         method,
         headers: {
           authorization: `Bearer ${jwt}`,
@@ -298,7 +293,7 @@ export class WallesterTransport implements WallesterGateway {
       const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, false);
       lastError = new WallesterApiError(`wallester_api_failed_${response.status}:${message}`, response.status, retryable);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
-      await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+      await financeBackoff(BASE_BACKOFF_MS * 2 ** (attempt - 1));
     }
     throw lastError ?? new WallesterApiError("wallester_api_failed_unknown", 0, false);
   }
