@@ -2613,10 +2613,12 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("finance_wallester")
     },
     {
-      tool_id: "finance_wallester", action: "submit_card", description: "Send kortutkastet til Wallester (oppretter det REELLE kortet - spend-muliggjørende, kill-switch-gated; idempotent retry kan aldri duplisere)",
+      tool_id: "finance_wallester", action: "submit_card", description: "Send kortutkastet til Wallester (oppretter det REELLE kortet - spend-muliggjørende, kill-switch-gated; Jarvis reserverer innsendingen FØR kallet, og en retry etter ukjent utfall blokkeres til eieren har avstemt hos Wallester)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
+      // WP-FIN2 (D-486, K8): `idempotent_external: false` - Wallesters deduplisering på `external_reference` er `unverified` (transporten sender ingen Idempotency-Key). «Retry duplikerer ikke» er
+      // Jarvis' EGEN garanti (reservasjon i `CardService.submitCard` + flagget `CARD_SUBMIT_OUTCOME_UNKNOWN`), ikke leverandørens - gatewayen skal derfor behandle uavklarte transportfeil som ukjent utfall.
       capability_class: "C", scopes: ["finance.write", "finance.cards"], reversible: false, rollback_procedure: "freeze_card + close_card (kortet kan fryses/lukkes, men utstedelsen har skjedd)",
-      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
       output_trust: "internal", transport: transport("finance_wallester")
     },
     {
