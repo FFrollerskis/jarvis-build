@@ -17,6 +17,14 @@ import { CENTER_ROWS, ROWS } from "./support/n1b-rows.ts";
 let db: H0Db;
 let on: World;
 let off: World;
+/** Verdenen med de EKTE kontrollsentrene (Autoritet, Integrasjoner, AI + de flaggstyrte sentrene) og frosne koblinger/credentials sådd i databasen. */
+let onC: World;
+let offC: World;
+/** Alle flaggstyrte sentre er koblet inn i `centers`-verdenen (slik eieren har dem med flaggene på). */
+const CENTER_FLAGS = {
+  JARVIS_CONTROL_CENTER_MEMORY: "on", JARVIS_CONTROL_CENTER_AGENT: "on", JARVIS_CONTROL_CENTER_OPERATIONS: "on", JARVIS_CONTROL_CENTER_PRIVACY: "on", JARVIS_CONTROL_CENTER_SECURITY: "on"
+};
+const CENTER_TOOLS = ["memory", "agent", "operations", "privacy", "security"] as const;
 
 const MODELS_WITHHELD: Array<[string, ModelArg]> = [["sky", CLOUD], ["ukjent leverandør", UNKNOWN_MODEL], ["blank leverandør", BLANK_MODEL]];
 const MODELS_FULL: Array<[string, ModelArg]> = [["lokal modell", LOCAL], ["eierens rute (ingen modell)", undefined]];
@@ -28,6 +36,12 @@ beforeAll(async () => {
   await seedConversationGraph(db.adminPool);
   on = buildWorld({ pool: db.appPool, guard: true });
   off = buildWorld({ pool: db.appPool, guard: false });
+  await db.adminPool.query("INSERT INTO finance_kill_switch (tenant_id, enabled, enabled_by_person_id, enabled_at, reason) VALUES ($1, true, $2, now(), 'privat')", [TENANT, OWNER]);
+  onC = buildWorld({ pool: db.appPool, guard: true, realCenters: true, centerFlags: CENTER_FLAGS, centerTools: [...CENTER_TOOLS] });
+  offC = buildWorld({ pool: db.appPool, guard: false, realCenters: true, centerFlags: CENTER_FLAGS, centerTools: [...CENTER_TOOLS] });
+  // frosne koblinger og tilbakekalte credentials (eier-kontroll, varig tilstand): to i finansdomenet, én vanlig av hver - Sikkerhet-senteret leser dem
+  for (const c of ["stripe", "finance_vipps", "github"]) await (onC.ownerControls as NonNullable<World["ownerControls"]>).freezeConnectorDurable(c, `begrunnelse-${c}`, OWNER);
+  for (const r of ["JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_GITHUB_TOKEN"]) await (onC.ownerControls as NonNullable<World["ownerControls"]>).revokeCredentialDurable(r, `begrunnelse-${r}`, OWNER);
 }, 240_000);
 
 afterAll(async () => { await db?.stop(); }, 120_000);
@@ -37,7 +51,7 @@ const text = (r: { ok: boolean; reason?: string; data?: unknown }): string => JS
 
 beforeAll(async () => {
   // connector- og helsetilstand for R09/R10, kostnadsrader for R16 og vedlikeholdslogg for R22 (admin-pool: kun testdata)
-  for (const world of [on, off]) {
+  for (const world of [on, off, onC, offC]) {
     world.gateway.register(fakeDef("finance_stripe", "get_balance", { available: 1 }));
     (world.gateway.health as Map<string, unknown>).set("finance_stripe", { state: "auth_failed", at: "2026-11-25T09:00:00.000Z", detail: "N1B-HEALTH-DETAIL" });
     (world.gateway.health as Map<string, unknown>).set("github", { state: "healthy", at: "2026-11-25T09:00:00.000Z" });
@@ -50,20 +64,24 @@ beforeAll(async () => {
 
 describe("K2-tabellen: hver rad - sky/ukjent/blank = tilbakeholdt, lokal og eier = full, flagg AV = som main", () => {
   for (const row of ROWS) {
+    const worldOn = (): World => (row.world === "centers" ? onC : on);
+    const worldOff = (): World => (row.world === "centers" ? offC : off);
     describe(`${row.id} ${row.path}`, () => {
       for (const [label, model] of MODELS_WITHHELD) {
         it(`${label}: ingen finansmarkører, det vanlige innholdet er bevart, og det nøytrale merket står der`, async () => {
-          const r = await run(on.gateway, row.tool, row.action, row.params ?? {}, model);
+          const r = await run(worldOn().gateway, row.tool, row.action, row.params ?? {}, model);
           expect(r.ok, JSON.stringify(r)).toBe(true);
           const t = text(r);
           for (const m of row.finance) expect(t, `lekket: ${m}`).not.toContain(m);
           for (const m of row.keep ?? []) expect(t, `mangler: ${m}`).toContain(m);
           if (row.marker !== undefined) expect(t).toContain(`"${row.marker}":true`);
+          // et enkeltoppslag av et finanselement gir KUN merket: ingen `external_id` (id-en ville ellers følge svaret og revisjonsraden)
+          if (row.single === true) expect(r.external_id, "external_id i et holdt-tilbake enkeltoppslag").toBeUndefined();
         });
       }
       for (const [label, model] of MODELS_FULL) {
         it(`${label}: HELE innholdet (alle finansmarkører og det vanlige), uten «holdt tilbake»-merke`, async () => {
-          const r = await run(on.gateway, row.tool, row.action, row.params ?? {}, model);
+          const r = await run(worldOn().gateway, row.tool, row.action, row.params ?? {}, model);
           expect(r.ok, JSON.stringify(r)).toBe(true);
           const t = text(r);
           for (const m of row.finance) expect(t, `mangler: ${m}`).toContain(m);
@@ -73,7 +91,7 @@ describe("K2-tabellen: hver rad - sky/ukjent/blank = tilbakeholdt, lokal og eier
         });
       }
       it("FLAGG AV (ingen lås, ingen sentral kontekst): en skymodell får alt som før - identisk med main, uten merke", async () => {
-        const r = await run(off.gateway, row.tool, row.action, row.params ?? {}, CLOUD);
+        const r = await run(worldOff().gateway, row.tool, row.action, row.params ?? {}, CLOUD);
         expect(r.ok, JSON.stringify(r)).toBe(true);
         const t = text(r);
         for (const m of row.finance) expect(t, `mangler: ${m}`).toContain(m);
@@ -84,14 +102,6 @@ describe("K2-tabellen: hver rad - sky/ukjent/blank = tilbakeholdt, lokal og eier
 });
 
 describe("K2: kontrollsentrene Autoritet, Integrasjoner og AI (EKTE byggere via registerControlCenters) - holdes tilbake HELT fra sky/ukjent kun med vakten på", () => {
-  let onC: World;
-  let offC: World;
-  beforeAll(async () => {
-    await db.adminPool.query("INSERT INTO finance_kill_switch (tenant_id, enabled, enabled_by_person_id, enabled_at, reason) VALUES ($1, true, $2, now(), 'privat')", [TENANT, OWNER]);
-    onC = buildWorld({ pool: db.appPool, guard: true, realCenters: true });
-    offC = buildWorld({ pool: db.appPool, guard: false, realCenters: true });
-  }, 120_000);
-
   for (const row of CENTER_ROWS) {
     describe(`${row.id} executive.get_control_center {center: ${row.center}}`, () => {
       for (const [label, model] of MODELS_WITHHELD) {
@@ -124,21 +134,22 @@ describe("K2: kontrollsentrene Autoritet, Integrasjoner og AI (EKTE byggere via 
     });
   }
 
-  it("R23 oversikten (get_control_center uten center): skyen får de tre sentrene i `withheld` (ikke bygget, ingen tellinger eller tilstand); lokal modell og eier får alle tre bygget", async () => {
+  it("R23 oversikten (get_control_center uten center): skyen får de tre vakt-styrte sentrene i `withheld` (ikke bygget, ingen tellinger eller tilstand) og de øvrige bygget uten finansavledet tilstand; lokal modell og eier får alle bygget", async () => {
+    const ALL = ["agent", "ai", "authority", "integration", "memory", "operations", "privacy", "security"];
     for (const [label, model] of MODELS_WITHHELD) {
       const r = await run(onC.gateway, "executive", "get_control_center", {}, model);
-      const d = r.data as { centers: unknown[]; withheld?: string[] };
-      expect(d.centers, label).toEqual([]);
+      const d = r.data as { centers: Array<{ center: string }>; withheld?: string[] };
+      expect(d.centers.map((c) => c.center).sort(), label).toEqual(["agent", "memory", "operations", "privacy", "security"]);
       expect([...(d.withheld ?? [])].sort(), label).toEqual(["ai", "authority", "integration"]);
-      for (const m of ["Stripe", "Finans-nødbryter", "77123"]) expect(text(r), `${label}: ${m}`).not.toContain(m);
+      for (const m of ["Stripe", "Finans-nødbryter", "77123", "stripe", "finance_vipps", "JARVIS_VIPPS_CLIENT_SECRET"]) expect(text(r), `${label}: ${m}`).not.toContain(m);
     }
     for (const [label, model] of MODELS_FULL) {
       const d = (await run(onC.gateway, "executive", "get_control_center", {}, model)).data as { centers: Array<{ center: string }>; withheld?: string[] };
-      expect(d.centers.map((c) => c.center).sort(), label).toEqual(["ai", "authority", "integration"]);
+      expect(d.centers.map((c) => c.center).sort(), label).toEqual(ALL);
       expect(d.withheld, label).toBeUndefined();
     }
     const off = (await run(offC.gateway, "executive", "get_control_center", {}, CLOUD)).data as { centers: unknown[]; withheld?: string[] };
-    expect(off.centers.length).toBe(3);
+    expect(off.centers.length).toBe(ALL.length);
     expect(off.withheld).toBeUndefined();
   });
 });
