@@ -2375,6 +2375,9 @@ export class FinanceService {
    * IDENTISK semantikk, ALDRI en ny state-maskin-endring for D-110).
    */
   async cancelVippsPayment(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    // WP-FIN2 (D-486, K1a): credential-oppslaget (kan være et nettverkskall mot Infisical) skjer FØR transaksjonen med `FOR UPDATE`-låsen - tidligere sto det inne i `prepare`, under radlåsen
+    // (funnet av kildevakten `fin2-no-provider-io-in-tx.test.ts`). Manglende credential kastes fortsatt på samme sted som før (etter tilstands-/capture-/nødbryter-sjekkene).
+    const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
     return this.providerCallOutsideLock<{ providerRef: string; transport: VippsPaymentWriter }, unknown, PaymentIntent>(tenantId, memorySpace, {
       prepare: async (client) => {
         const current = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
@@ -2402,7 +2405,6 @@ export class FinanceService {
         }
 
         assertValidPaymentIntentTransition(current.state, "cancelled");
-        const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
         if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
         return { kind: "call", plan: { providerRef: current.provider_ref, transport: this.vippsTransportFactory(credentials) } };
       },
