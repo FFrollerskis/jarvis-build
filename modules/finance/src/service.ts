@@ -287,6 +287,25 @@ async function readForUpdate(client: pg.PoolClient, tenantId: string, paymentInt
   return (rows[0] as PaymentIntent | undefined) ?? null;
 }
 
+/**
+ * WP-FIN2 (D-486, K4; JARVIS-072-resten): barne-idempotens. Samme `(tenant, idempotency_key)` med en ANNEN forespørsel er en NY handling, aldri en retry - den eksisterende raden returneres
+ * bare når forespørselen er identisk i det som utgjør handlingen: intensjon, beløp, valuta og (kun Stripe-refusjon) `reason`. Samme regel som `createPaymentIntent`
+ * (`IdempotencyKeyConflictError`): feilen lister FELTNAVN, aldri verdier. Brukes av begge baner (SELECT før INSERT og `ON CONFLICT DO NOTHING`) i `createStripeRefund`,
+ * `createVippsCapture` og `createVippsRefund`. Rekkefølgen på feltene er fast (`payment_intent_id`, `amount_ore`, `currency`, `reason`).
+ */
+function resolveChildIdempotency<T extends { payment_intent_id: string; amount_ore: number | string; currency: string; reason?: string | null }>(
+  existing: T, requested: { payment_intent_id: string; amount_ore: number; currency: string; reason?: string | null }, idempotencyKey: string
+): T {
+  const mismatched = [
+    existing.payment_intent_id !== requested.payment_intent_id ? "payment_intent_id" : null,
+    Number(existing.amount_ore) !== requested.amount_ore ? "amount_ore" : null,
+    existing.currency !== requested.currency ? "currency" : null,
+    "reason" in requested && (existing.reason ?? null) !== (requested.reason ?? null) ? "reason" : null
+  ].filter((field): field is string => field !== null);
+  if (mismatched.length > 0) throw new IdempotencyKeyConflictError(idempotencyKey, mismatched);
+  return existing;
+}
+
 /** WP-F1: SQL-fragment som fjerner ett avviksflagg fra en jsonb-liste (strenger) - brukes når en innsending ENDELIG fikk et leverandørsvar. */
 const CLEAR_SUBMIT_UNKNOWN_FLAG = "anomaly_flags = anomaly_flags - 'SUBMIT_OUTCOME_UNKNOWN'";
 
@@ -1549,11 +1568,13 @@ export class FinanceService {
     this.validateRefundInput(input);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const intent = await this.requireStripePaymentIntent(client, tenantId, input.payment_intent_id, true);
-      if (intent.state !== "settled") throw new PaymentIntentNotSettledError(input.payment_intent_id, intent.state);
+      // WP-FIN2 (K4): nøkkelen avgjøres FØR tilstandssjekken - en nøkkel som tilhører en annen betaling er en idempotens-konflikt uavhengig av hvilken tilstand denne intensjonen står i.
+      const requested = { payment_intent_id: input.payment_intent_id, amount_ore: input.amount_ore, currency: intent.currency, reason: input.reason ?? null };
 
       const refundId = `fin-rf-${randomUUID()}`;
       const { rows: existingByKey } = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-      if (existingByKey.length > 0) return existingByKey[0] as StripeRefund; // idempotent no-op - SAMME mønster som createPaymentIntent.
+      if (existingByKey.length > 0) return resolveChildIdempotency(existingByKey[0] as StripeRefund, requested, input.idempotency_key); // idempotent no-op KUN for en identisk forespørsel.
+      if (intent.state !== "settled") throw new PaymentIntentNotSettledError(input.payment_intent_id, intent.state);
 
       // Postgres tillater IKKE `FOR UPDATE` sammen med en aggregatfunksjon
       // (`SUM`) - MEN TOCTOU-vinduet er allerede lukket av radlåsen
@@ -1581,8 +1602,9 @@ export class FinanceService {
         [refundId, tenantId, memorySpace, input.payment_intent_id, input.idempotency_key, input.amount_ore, intent.currency, input.reason ?? null, input.owner_person_id ?? null]
       );
       if (rows.length === 0) {
+        // `ON CONFLICT`-banen: et samtidig kall tok nøkkelen mellom SELECT og INSERT - samme sammenligning som over.
         const existing = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-        return existing.rows[0] as StripeRefund;
+        return resolveChildIdempotency(existing.rows[0] as StripeRefund, requested, input.idempotency_key);
       }
       return rows[0] as StripeRefund;
     });
@@ -2164,10 +2186,11 @@ export class FinanceService {
     if (!Number.isInteger(input.amount_ore) || input.amount_ore <= 0) throw new InvalidAmountError(input.amount_ore);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const intent = await this.requireVippsPaymentIntent(client, tenantId, input.payment_intent_id, true);
+      const requested = { payment_intent_id: input.payment_intent_id, amount_ore: input.amount_ore, currency: intent.currency };
 
       const captureId = `fin-vc-${randomUUID()}`;
       const { rows: existingByKey } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-      if (existingByKey.length > 0) return existingByKey[0] as VippsCapture;
+      if (existingByKey.length > 0) return resolveChildIdempotency(existingByKey[0] as VippsCapture, requested, input.idempotency_key); // WP-FIN2 (K4)
 
       // Radlåsen over (`requireVippsPaymentIntent(..., forUpdate=true)`)
       // lukker TOCTOU-vinduet - Postgres tillater IKKE `FOR UPDATE` sammen
@@ -2192,7 +2215,7 @@ export class FinanceService {
       );
       if (rows.length === 0) {
         const existing = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-        return existing.rows[0] as VippsCapture;
+        return resolveChildIdempotency(existing.rows[0] as VippsCapture, requested, input.idempotency_key); // WP-FIN2 (K4): `ON CONFLICT`-banen
       }
       return rows[0] as VippsCapture;
     });
@@ -2407,11 +2430,12 @@ export class FinanceService {
     if (!Number.isInteger(input.amount_ore) || input.amount_ore <= 0) throw new InvalidAmountError(input.amount_ore);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const intent = await this.requireVippsPaymentIntent(client, tenantId, input.payment_intent_id, true);
-      if (intent.state !== "settled") throw new PaymentIntentNotSettledError(input.payment_intent_id, intent.state);
+      const requested = { payment_intent_id: input.payment_intent_id, amount_ore: input.amount_ore, currency: intent.currency };
 
       const refundId = `fin-vr-${randomUUID()}`;
       const { rows: existingByKey } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-      if (existingByKey.length > 0) return existingByKey[0] as VippsRefund;
+      if (existingByKey.length > 0) return resolveChildIdempotency(existingByKey[0] as VippsRefund, requested, input.idempotency_key); // WP-FIN2 (K4)
+      if (intent.state !== "settled") throw new PaymentIntentNotSettledError(input.payment_intent_id, intent.state);
 
       const { rows: aggregateRows } = await client.query(
         `SELECT COALESCE(SUM(amount_ore), 0)::bigint AS total FROM vipps_refunds
@@ -2433,7 +2457,7 @@ export class FinanceService {
       );
       if (rows.length === 0) {
         const existing = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-        return existing.rows[0] as VippsRefund;
+        return resolveChildIdempotency(existing.rows[0] as VippsRefund, requested, input.idempotency_key); // WP-FIN2 (K4): `ON CONFLICT`-banen
       }
       return rows[0] as VippsRefund;
     });
