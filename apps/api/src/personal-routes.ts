@@ -141,7 +141,7 @@ async function handleHealthIngest(ctx: PersonalRouteContext, health: PersonalHea
 // ---------------------------------------------------------------------------------------------------------------------
 export const FAMILY_STATUS: Readonly<Record<FamilyErrorCode, number>> = {
   invalid_input: 400, self_target: 400,
-  shared_space_required: 403, not_a_member: 403, owner_required: 403, role_not_allowed: 403, not_the_invitee: 403, share_required: 403, share_not_allowed: 403, delegation_required: 403, delegation_not_allowed: 403,
+  shared_space_required: 403, not_a_member: 403, owner_required: 403, role_not_allowed: 403, share_required: 403, share_not_allowed: 403, delegation_required: 403, delegation_not_allowed: 403,
   not_found: 404,
   already_member: 409, invitation_pending: 409, invitation_not_pending: 409, invitation_expired: 409, owner_cannot_leave: 409, cannot_remove_owner: 409, circle_not_dedicated: 409, circle_space_missing: 409,
   invitee_not_enrolled: 409, data_tenant_not_member: 409,
