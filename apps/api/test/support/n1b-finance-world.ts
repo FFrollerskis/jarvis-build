@@ -10,7 +10,7 @@ import {
   type ControlCenterRegistry, type ExecutiveServiceOptions, type InfraIncidentItem, type ObservationReader, type ValueMeasurement, type ValueRuntimeFacts
 } from "@jarvis/executive";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
-import { ToolGateway, firstWaveTools, type FinanceExecutionLock, type ToolDefinition, type ToolGatewayOptions } from "@jarvis/tool-gateway";
+import { ToolGateway, firstWaveTools, type FinanceExecutionLock, type ToolDefinition, type ToolGatewayOptions, type ToolTransport } from "@jarvis/tool-gateway";
 import { z } from "zod";
 import { createControlCenterRegistry, registerControlCenters } from "../../src/control-center/register.ts";
 import { FINANCE_EXECUTION_LOCK, financeLockServedLocally } from "../../src/restricted-context-guard.ts";
@@ -210,6 +210,8 @@ export interface WorldOptions {
   centerTools?: Array<"finance" | "memory" | "agent" | "operations" | "value" | "privacy" | "security" | "evolution">;
   /** Ekstra verktøy registrert i gatewayen (f.eks. conversation_graph). */
   extraTools?: ToolDefinition[];
+  /** Leverandørtransporter (nøkkel = verktøy-id) som erstatter «ikke konfigurert»-transporten i `firstWaveTools` (f.eks. en spion for `telnyx`). */
+  transports?: Record<string, ToolTransport>;
 }
 
 /** Bygger en gateway SOM main.ts gjør det: lås + vakt fra SAMME flagg (`guard`). */
@@ -231,7 +233,7 @@ export function buildWorld(options: WorldOptions): World {
   const openLoops = new OpenLoopService(pool);
   const businessTransport = new BusinessTransport(new BusinessService(pool), openLoops, pool, gateway);
   // `conversation_graph` (R21): den EKTE transporten mot den samme poolen (tverr-kanal-lesningene leser `business_open_loops`)
-  for (const tool of firstWaveTools({ business: businessTransport, conversation_graph: new ConversationGraphTransport(new ConversationGraphService(pool)) })) gateway.register(tool);
+  for (const tool of firstWaveTools({ business: businessTransport, conversation_graph: new ConversationGraphTransport(new ConversationGraphService(pool)), ...(options.transports ?? {}) })) gateway.register(tool);
   // finance.get_kill_switch er den NØSTEDE avlesningen executive gjør (ToolGateway-låsen/den sentrale lesningen skal holde den tilbake for sky)
   gateway.register({ ...fakeDef("finance", "get_kill_switch", null), transport: { async invoke() { financeCalls += 1; return { data: { tenant_id: TENANT, enabled: true, enabled_by_person_id: OWNER, reason: FIN.killReason, enabled_at: "2026-11-01T00:00:00Z", disabled_at: null, updated_at: "2026-11-01T00:00:00Z" } as never }; } } });
   gateway.register(fakeDef("owner_controls", "get_control_state", ownerControlState(fin)));

@@ -1,4 +1,6 @@
 import { CONNECTOR_REGISTRY } from "./connector-registry.ts";
+import type { ToolTransport } from "./gateway.ts";
+import { withholdFinanceFromCurrentModel } from "./model-scope.ts";
 import { isFinancialNamespace } from "./tool-manifest.ts";
 
 /**
@@ -64,6 +66,32 @@ export function isFinanceCredentialRef(ref: unknown): boolean {
  */
 export const FINANCE_DERIVED_SITUATION_DOMAINS: ReadonlySet<string> = new Set(["spend"]);
 
+/**
+ * WP-N1b fiks-runde 1 (FIX-2): situasjonsdomenene som holdes tilbake HELT fra oppmerksomhetskøen for sky/ukjent modell: `spend` (finansavledet: begrunnelsen er løkketeksten) og `infra`. En `infra`-situasjon bærer hendelsestittelen i `reason`
+ * (`mapIncidentToCandidate`: «Tilkobling svikter: <tilkobling>», «Bakgrunnsjobben <jobb> ga opp» fra `providerProducer`/`schedulerProducer`) - den kan navngi finanskoblinger og finansjobber, og situasjonsraden har INGEN strukturert kilde
+ * (kun `infra_incident:<id>` og tittelteksten) å bevise ikke-finans mot. En tekstfilter på tittelen er ikke nok (ukjent = finans), så hele domenet holdes tilbake; lokal modell og eier ser alt.
+ */
+export const CLOUD_WITHHELD_ATTENTION_DOMAINS: ReadonlySet<string> = new Set(["spend", "infra"]);
+
+/** Skal situasjoner i dette domenet holdes tilbake fra oppmerksomhetskøen for en sky-/ukjent modell? FAIL-CLOSED: et domene som ikke er en streng regnes som tilbakeholdt. */
+export function isCloudWithheldAttentionDomain(domain: unknown): boolean {
+  return typeof domain !== "string" || CLOUD_WITHHELD_ATTENTION_DOMAINS.has(domain.trim().toLowerCase());
+}
+
 export function isFinanceDerivedSituationDomain(domain: unknown): boolean {
   return typeof domain !== "string" || FINANCE_DERIVED_SITUATION_DOMAINS.has(domain.trim().toLowerCase());
+}
+
+/**
+ * WP-N1b fiks-runde 1 (FIX-6): pakker en LEVERANDØRtransport (uten å endre den) slik at et kall som betjenes av en sky-/ukjent modell får KUN det nøytrale merket og leverandøren ALDRI kalles (ingen forespørsel ut, ingen lesing). Brukes på
+ * leverandørhandlinger hvis svar er en penge-/saldoverdi (`telnyx.get_account_info`: kontoens saldo, `GET /v2/balance`), som er finansavledet metadata (Q-64 pkt 1, strengeste regel). Lokal modell, eierens ruter (ingen modell: `/connectors`-
+ * livetesten bruker nettopp `get_account_info`) og vakten AV (ingen sentral kontekst) gir det ordinære svaret fra leverandøren, uendret. Lesingen er den SENTRALE (`withholdFinanceFromCurrentModel`): per-kall-kode, aldri delt arbeid.
+ */
+export function withheldFromCloudTransport(inner: ToolTransport): ToolTransport {
+  return {
+    async invoke(action, parameters, credential, context, signal) {
+      if (withholdFinanceFromCurrentModel()) return { data: { ...financeWithheldMarker() } as never };
+      return inner.invoke(action, parameters, credential, context, signal);
+    }
+  };
 }
