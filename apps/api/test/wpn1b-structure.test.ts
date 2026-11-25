@@ -291,3 +291,12 @@ describe("G: ÉN lokalitetsregel (fiks-runde 1, FIX-7/A80): ingen ny leverandør
     }
   });
 });
+
+describe("H: ledningen av `financeGuard` (fiks-runde 1, FIX-1): Sikkerhet-senterets strengere filter gjelder KUN med begrenset-vakten på (flagg AV = H2-oppførselen som på main)", () => {
+  it("`main.ts` setter nøkkelen bare under `restrictedContextGuard.enabled`, `register.ts` sender den videre bare når den er eksakt `true`, og kun tre filer nevner den", () => {
+    expect(code(read("apps/api/src/main.ts"))).toContain("...(restrictedContextGuard.enabled ? { financeGuard: true as const } : {})");
+    expect(code(read("apps/api/src/control-center/register.ts"))).toContain("...(wiring.financeGuard === true ? { financeGuard: true } : {}),");
+    expect(code(read("apps/api/src/control-center/security.ts"))).toContain("const strict = restrict && deps.financeGuard === true;");
+    expect(Object.keys(countBy(/\bfinanceGuard\b/g)).sort()).toEqual(["apps/api/src/control-center/register.ts", "apps/api/src/control-center/security.ts", "apps/api/src/main.ts"]);
+  });
+});

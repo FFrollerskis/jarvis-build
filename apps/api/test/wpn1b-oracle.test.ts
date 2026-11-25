@@ -61,6 +61,8 @@ beforeAll(async () => {
   for (const w of [aBase, aCenters, bBase, bCenters]) (w.gateway.health as Map<string, unknown>).set("github", { state: "healthy", at: "2026-11-25T09:00:00.000Z" });
   for (const w of [aBase, aCenters]) (w.gateway.health as Map<string, unknown>).set("finance_stripe", { state: "auth_failed", at: "2026-11-25T09:00:00.000Z", detail: "N1B-HEALTH-DETAIL" });
   await db.adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore, provider, model, purpose, success) VALUES ($1, 'model_call', 77123, 'anthropic', 'claude', 'CHAT', true)", [TENANT]);
+  // globale domenepauser: `spend` (finansavledet) og `pipeline` - Sikkerhet-senteret teller dem
+  await db.adminPool.query("INSERT INTO situation_domain_pauses (domain, reason, paused_by) VALUES ('spend', 'test', $1), ('pipeline', 'test', $1)", [OWNER]);
   for (const [tenant, connector, reason, minutes] of [[TENANT, "stripe", "N1B-VEDLIKEHOLD-STRIPE", 30], [TENANT, "neonomics", "N1B-VEDLIKEHOLD-NEONOMICS", 20], [TENANT, "github", "N1B-VEDLIKEHOLD-GITHUB", 10], [TENANT_B, "github", "N1B-VEDLIKEHOLD-GITHUB", 10]] as const) {
     await db.adminPool.query("INSERT INTO connector_maintenance_log (tenant_id, connector_id, event_kind, minutes, reason, recorded_by) VALUES ($1, $2, 'manual_fix', $3, $4, 'test')", [tenant, connector, minutes, reason]);
   }
@@ -155,6 +157,36 @@ describe("vedlikeholdsloggen (FIX-5): finansrader stjeler ikke plassene i `recen
       expect(full.recent.map((r) => r.connector_id)).toContain("stripe");
       expect(full.minutes_30d).toBe(20 + 50 + 7);
       expect(full.by_connector.map((c) => c.connector_id)).toContain("neonomics");
+    }
+  });
+});
+
+describe("Sikkerhet-senteret (FIX-1): frosne finanskoblinger, tilbakekalte finans-credentials og pausen i `spend`-domenet er ikke med i listene OG ikke i tellingene for sky", () => {
+  type Item = { id: string; detail_no: string; facts: Record<string, unknown> };
+  const items = (r: { data?: unknown }): Item[] => ((r.data as { report: { sections: Array<{ items: Item[] }> } }).report.sections).flatMap((sec) => sec.items);
+  const byId = (xs: Item[], id: string): Item => xs.find((i) => i.id === id) as Item;
+
+  for (const [label, model] of MODELS_CLOUD) {
+    it(`${label}: 1 frossen kobling (github), 1 tilbakekalt credential (JARVIS_GITHUB_TOKEN) og 1 pause (pipeline) - ingen finansnavn i detail_no`, async () => {
+      const r = await run(aCenters.gateway, "executive", "get_control_center", { center: "security" }, model);
+      expect(r.ok).toBe(true);
+      const xs = items(r);
+      expect(byId(xs, "frozen_now").facts["frozen"]).toBe(1);
+      expect(byId(xs, "frozen_now").detail_no).toContain("github");
+      expect(byId(xs, "revoked_now").facts["revoked"]).toBe(1);
+      expect(byId(xs, "revoked_now").detail_no).toContain("JARVIS_GITHUB_TOKEN");
+      expect(byId(xs, "stopped_credentials").facts).toMatchObject({ revoked: 1, frozen: 1 });
+      expect(byId(xs, "paused_domains").facts["paused"]).toBe(1);
+      expect(JSON.stringify(xs)).not.toMatch(/stripe|finance_vipps|JARVIS_VIPPS_CLIENT_SECRET|spend/);
+    });
+  }
+  it("lokal modell og eier: ALT (3 frosne, 2 tilbakekalte, 2 pauser) - kontroll", async () => {
+    for (const m of [LOCAL, undefined]) {
+      const xs = items(await run(aCenters.gateway, "executive", "get_control_center", { center: "security" }, m));
+      expect(byId(xs, "frozen_now").facts["frozen"]).toBe(3);
+      expect(byId(xs, "revoked_now").facts["revoked"]).toBe(2);
+      expect(byId(xs, "paused_domains").facts["paused"]).toBe(2);
+      expect(byId(xs, "frozen_now").detail_no).toContain("stripe");
     }
   });
 });
