@@ -9,7 +9,7 @@ import {
 import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
 import { MEETING_TEXT_MAX_CHARS, type MeetingService } from "./meetings.ts";
 import type { VendorReads } from "./reads.ts";
-import type { CommsStore } from "./store.ts";
+import { validateLiftReason, type CommsStore } from "./store.ts";
 
 /**
  * WP-G1 (D-463): `comms.*`-transporten - tynn limer mellom ToolGateway og `OutboundFunnel`/`CommsStore`. Ingen policy her (den bor i funnelen); transporten bygger KUN den tiltrodde konteksten av `context.identity`
@@ -31,6 +31,12 @@ const Revoke = z.object({ account_id: z.string().min(8).max(80) }).strict();
 export const RecordOptOutSchema = z.object({
   channel: z.enum(COMMS_CHANNELS), account_ref: z.string().min(1).max(200).optional(), recipient: z.string().min(1).max(300), source: z.enum(["owner_recorded", "recipient_request"]).optional()
 }).strict();
+
+/**
+ * K5 (JARVIS-112 f2): eierens angre av en FEILREGISTRERT STOP. `reason` er obligatorisk (3-200 tegn, én linje, uten hemmeligheter - `validateLiftReason`). Samme strenge skjema brukes av preflight/readback (`check_opt_out_target`):
+ * gatewayen kaller den med handlingens egne parametre.
+ */
+export const LiftOwnerOptOutSchema = z.object({ opt_out_id: z.string().min(8).max(80), reason: z.string().min(3).max(200) }).strict();
 
 /** Leverandør-lesing (P1c): strenge, eksakte former - id-er valideres mot leverandørens format FØR noe kall (ingen sti-/spørringsinjeksjon). */
 const AccountRef = z.string().min(1).max(200);
@@ -314,6 +320,18 @@ export class CommsTransport implements ToolTransport {
           source: p.source ?? "owner_recorded", recorded_by: ctx.actor.person_id, session_id: ctx.actor.session_id, ...(ctx.actor.task_id !== undefined ? { task_id: ctx.actor.task_id } : {})
         });
         return { external_id: r.opt_out_id, data: { opt_out_id: r.opt_out_id, created: r.created, scope: "tenant" } };
+      }
+      // K5: fersk, MINIMAL lesing av en AKTIV avmelding (preflight og readback for `lift_owner_opt_out`). `data: null` = finnes ikke eller er allerede opphevet (etterbetingelsen).
+      case "check_opt_out_target": {
+        const p = LiftOwnerOptOutSchema.parse(parameters);
+        if (validateLiftReason(p.reason) === null) throw new Error("comms_invalid_parameters:lift_reason_invalid");
+        return { data: (await store.findOptOutTarget(ctx.tenantId, p.opt_out_id)) as unknown as JsonValue };
+      }
+      // K5: eierens angre. Kun en `owner_recorded`-rad (store + databasetrigger); begrunnelse og hvem/sesjon lagres på raden; opphever kun DEN raden (mottakeren kan fortsatt være avmeldt via en annen aktiv rad).
+      case "lift_owner_opt_out": {
+        const p = LiftOwnerOptOutSchema.parse(parameters);
+        const r = await store.liftOwnerOptOut(ctx.tenantId, p, ctx.actor);
+        return { external_id: p.opt_out_id, data: { opt_out_id: p.opt_out_id, lifted: r.lifted, channel: r.channel, recipient_hint: r.recipient_hint, still_opted_out: r.still_opted_out } };
       }
       default:
         throw new Error(`comms_action_not_implemented:${action}`);

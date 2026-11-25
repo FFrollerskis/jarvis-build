@@ -142,12 +142,17 @@ describe("A-N1: STOP-rader per (kanal, kilde) - en senere STOP absorberes aldri"
 });
 
 describe("A-N5: verktøyteksten for record_opt_out stemmer med koden", () => {
-  it("beskriver en EIERREGISTRERT avmelding som aldri løftes (verken av eieren eller av en START) - ikke «kun mottakerens START»; rollback-teksten sier det samme", () => {
+  it("beskriver en EIERREGISTRERT avmelding som aldri løftes av en START (kun av eierens angre, comms.lift_owner_opt_out, WP-G1c K5) - ikke «kun mottakerens START»; rollback-teksten sier det samme", () => {
     const def = commsToolDefinitions({ transport: {} as never, store: {} as never }).find((d) => d.action === "record_opt_out")!;
     expect(def.description).toContain("EIERREGISTRERT");
     expect(def.description).toContain("ALDRI");
     expect(def.description).not.toContain("kun mottakerens egen START på kanalen");
-    expect(def.rollback_procedure).toContain("verken oppheves av eieren eller av en START");
+    // WP-G1c K5: angre-veien finnes nå (og teksten sier det), men kun for en eierregistrert rad - aldri for mottakerens egne avmeldinger.
+    expect(def.description).toContain("comms.lift_owner_opt_out");
+    expect(def.description).toContain("recipient_request");
+    expect(def.rollback_procedure).toContain("oppheves ikke av noen START");
+    expect(def.rollback_procedure).toContain("comms.lift_owner_opt_out");
+    expect(def.rollback_procedure).not.toContain("verken oppheves av eieren eller av en START");
     expect(def.rollback_procedure).not.toContain("oppheves kun av mottakerens egen START");
     expect(def.reversible).toBe(false);
   });

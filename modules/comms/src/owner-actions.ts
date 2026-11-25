@@ -11,7 +11,10 @@ import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, 
  * ikke ledgeren og journalen komme ut av takt, og en ny nøkkel er ALLTID et nytt forsøk (en brent/feilet forespørsel kan ikke gjenbrukes).
  */
 export const COMMS_OUTBOUND_ACTIONS: readonly string[] = ["send", "edit_message", "delete_message", "add_reaction"];
-export const COMMS_ADMIN_ACTIONS: readonly string[] = ["authorize_account", "revoke_account", "record_opt_out"];
+/**
+ * `lift_owner_opt_out` (K5, JARVIS-112 f2) er klasse D og krever idempotensnøkkel OG step-up (ruten: handlingen står IKKE i `COMMS_STEP_UP_EXEMPT`; gatewayen håndhever det også via `step_up_required`). `record_opt_out` er fortsatt unntatt step-up.
+ */
+export const COMMS_ADMIN_ACTIONS: readonly string[] = ["authorize_account", "revoke_account", "record_opt_out", "lift_owner_opt_out"];
 export const COMMS_READ_ACTIONS: readonly string[] = ["list_inbound", "list_outbound", "list_opt_outs", "list_accounts"];
 export const COMMS_OWNER_ACTIONS: readonly string[] = [...COMMS_OUTBOUND_ACTIONS, ...COMMS_ADMIN_ACTIONS, ...COMMS_READ_ACTIONS];
 /** Handlinger som finnes KUN med sitt eget flagg: `start_call` (JARVIS_COMMS_CALLS, klasse D - idempotensnøkkel + step-up som sending) og leverandør-lesing (JARVIS_COMMS_VENDOR_READS, klasse A). Ruten kjenner navnene, men en handling uten registrert verktøy avvises som ukjent. */
@@ -28,7 +31,7 @@ export const COMMS_CONTACT_WRITE_ACTIONS: readonly string[] = ["contacts_create"
 /** Møtetranskripsjon (JARVIS_COMMS_MEETINGS): lesing uten step-up; skriving med step-up; kun `meeting_delete` (klasse D) krever idempotensnøkkel (ingest er idempotent på innholds-hash). */
 export const COMMS_MEETING_READ_ACTIONS: readonly string[] = ["meeting_list", "meeting_commitments", "meeting_get"];
 export const COMMS_MEETING_WRITE_ACTIONS: readonly string[] = ["meeting_ingest_text", "meeting_decide_commitment", "meeting_confirm_participant", "meeting_delete"];
-const COMMS_KEYED_CONTACT_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete", "meeting_delete"];
+const COMMS_KEYED_CONTACT_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete", "meeting_delete", "lift_owner_opt_out"];
 export const COMMS_KNOWN_ACTIONS: readonly string[] = [...COMMS_OWNER_ACTIONS, ...COMMS_CALL_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_CONTACT_WRITE_ACTIONS, ...COMMS_MEETING_READ_ACTIONS, ...COMMS_MEETING_WRITE_ACTIONS];
 
 /**
@@ -219,6 +222,8 @@ export async function executeCommsOwnerAction(
       const ctx = funnelContext(identity);
       const state = await deps.funnel.replayState(ctx, parsed.value);
       if (state === "collision") return { ok: false, status: "rejected", reason: "idempotency_key_collision" };
+      // K1: pepperen mangler, så fingeravtrykket (HMAC) til den tidligere forespørselen kan ikke sammenlignes - fail-closed, ingenting sendes.
+      if (state === "unavailable") return { ok: false, status: "rejected", reason: "content_hash_key_unavailable" };
       if ((action === "send" || action === "start_call") && state === "none") {
         const ev = await deps.funnel.evaluate(ctx, parsed.value);
         if (!ev.decision.allowed) {

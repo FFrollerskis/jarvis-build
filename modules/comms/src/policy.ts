@@ -1,5 +1,5 @@
 import { containsSecret } from "@jarvis/core";
-import { CHANNEL_PROFILES, CUSTOMER_SERVICE_WINDOW_MS, normalizeRecipient, sha256Hex, type CommsChannel } from "./channels.ts";
+import { CHANNEL_PROFILES, CUSTOMER_SERVICE_WINDOW_MS, normalizeRecipient, type CommsChannel } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
 
 /**
@@ -124,7 +124,11 @@ export interface PolicyDecision {
   /** NØYAKTIG teksten som sendes (AI-opplysningen lagt til). `null` for maler, reaksjoner og slettinger. */
   readonly final_text: string | null;
   readonly disclosure_applied: boolean;
-  readonly content_sha256: string | null;
+  /**
+   * K1: det KANONISKE innholdet policyen vurderte (teksten som sendes, malens kanoniske form, `delete:<id>` ...), `null` når handlingen ikke har noe innhold. Policyen HASHER ALDRI selv: en usaltet SHA-256 av innholdet er ordbok-gjettbar
+   * (JARVIS-112 b). Traktens `evaluate()` beregner HMAC-hashen med den server-side pepperen (`ContentHasher`) og feiler lukket når pepperen mangler. Skal aldri lagres eller logges - kun hashen og lengden.
+   */
+  readonly content_canonical: string | null;
   readonly content_length: number;
   readonly recipient_proof: RecipientProof;
 }
@@ -469,7 +473,7 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     rules,
     final_text: finalText,
     disclosure_applied: disclosureApplied,
-    content_sha256: canonical === null ? null : sha256Hex(canonical),
+    content_canonical: canonical,
     content_length: canonical === null ? 0 : Array.from(canonical).length,
     recipient_proof
   });

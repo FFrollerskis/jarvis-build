@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { normalizeE164 } from "@jarvis/conversation-graph";
 
 /**
@@ -144,6 +144,40 @@ export function recipientHint(channel: CommsChannel, normalizedRecipient: string
 
 export function sha256Hex(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+/**
+ * K1 (JARVIS-112 b): SALTET innholds-hash. Den gamle journal-hashen var et usaltet SHA-256 av meldingsinnholdet - ordbok-gjettbar for korte meldinger («Hei!», «Ja», «Takk»), og journalen er det ENESTE sporet av innholdet. Nå er den en
+ * HMAC-SHA256 med en server-side PEPPER fra den EKSISTERENDE hemmelighetsmekanismen (vault-kjeden `readSecretProvider`, samme som leverandør-credentials; referansen er `COMMS_PEPPER_REF`). Pepperen er aldri i kode, testfiksturer eller
+ * logger (kun en kort feilkode når den mangler), og hver HMAC bruker en nøkkel utledet PER FORMÅL (`PepperPurpose`), så en hash laget for ett formål aldri kan gjenbrukes for et annet - og samme pepper kan gjenbrukes av flere formål senere
+ * (Q-78 pkt 2: pepper for G1b-nyttelastavtrykket) uten at oppskriftene blandes. Mangler pepperen (eller er den for kort), finnes ingen `ContentHasher`, og utsendelse feiler LUKKET (`content_hash_key_unavailable`) - aldri en stille standardverdi.
+ * Rotasjon: en ny pepper gir nye hasher; eldre rader beholder sin versjon (`comms_outbound_log.content_hash_version` = 2 for HMAC, 1 for den gamle usaltede) og en gjenspilling av en forespørsel laget FØR rotasjonen avvises som kollisjon (feil retning: ingen sending).
+ */
+export const COMMS_PEPPER_REF = "JARVIS_COMMS_CONTENT_PEPPER";
+/** Minste pepper-lengde (tegn). `openssl rand -base64 48` gir 64. En kortere verdi regnes som manglende (fail-closed) - en svak pepper er verre enn ingen, fordi den ser ut som beskyttelse. */
+export const PEPPER_MIN_LENGTH = 32;
+export type PepperPurpose = "content" | "request";
+export interface ContentHasher {
+  /** 2 = HMAC-SHA256 med pepper (1 = den gamle, usaltede SHA-256 - finnes kun i eldre rader). */
+  readonly version: 2;
+  /** HMAC-SHA256 (hex) over `data` med en nøkkel utledet av pepperen for dette formålet. */
+  hmac(purpose: PepperPurpose, data: string): string;
+}
+
+export function createContentHasher(pepper: string | null | undefined): ContentHasher | null {
+  if (typeof pepper !== "string") return null;
+  const secret = pepper.trim();
+  if (secret.length < PEPPER_MIN_LENGTH) return null;
+  const keys = new Map<PepperPurpose, Buffer>();
+  const keyFor = (purpose: PepperPurpose): Buffer => {
+    let key = keys.get(purpose);
+    if (key === undefined) {
+      key = createHmac("sha256", secret).update(`jarvis-comms-pepper-v1|${purpose}`, "utf8").digest();
+      keys.set(purpose, key);
+    }
+    return key;
+  };
+  return { version: 2, hmac: (purpose, data) => createHmac("sha256", keyFor(purpose)).update(data, "utf8").digest("hex") };
 }
 
 /** Teknisk leverandør per kanal (SMS avgjøres av kontoens `provider`, se `authorized account`). */

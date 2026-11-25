@@ -34,7 +34,9 @@ describe("A: grunnregler - kanal, konto, mottaker", () => {
     expect(r.allowed).toBe(true);
     expect(r.final_text).toBe(`Hei, møtet er flyttet til 14:00.\n\n${DEFAULT_AI_DISCLOSURE_TEXT}`);
     expect(r.disclosure_applied).toBe(true);
-    expect(r.content_sha256).toMatch(/^[0-9a-f]{64}$/);
+    // K1: policyen hasher ikke selv (en usaltet hash er ordbok-gjettbar); den leverer det kanoniske innholdet, og trakten beregner HMAC-hashen med pepperen (se `content-hash.test.ts`)
+    expect(r.content_canonical).toBe(`Hei, møtet er flyttet til 14:00.\n\n${DEFAULT_AI_DISCLOSURE_TEXT}`);
+    expect(r).not.toHaveProperty("content_sha256");
     expect(r.recipient_proof.method).toBe("identity_link");
   });
 

@@ -5,7 +5,7 @@ import {
   CommsStore, DEFAULT_AI_DISCLOSURE_TEXT, OutboundFunnel, ProviderRejectedError, optOutHash, parseCommsConfig, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, recipientHash,
   type AdapterMap, type FunnelContext, type MarketingBasisPort, type ParsedOutbound
 } from "../src/index.ts";
-import { OWNER, TENANT_A, TENANT_B, scriptedAdapter, startCommsDb, type CommsDb } from "./support/harness.ts";
+import { OWNER, TENANT_A, TENANT_B, scriptedAdapter, startCommsDb, type CommsDb, testContentHasher } from "./support/harness.ts";
 
 /**
  * WP-G1 (P1b/P1c): trakten (policy + journal + adapter) mot EKTE Postgres/RLS med falske adaptere. Bevist: journalføring før/etter, hash i stedet for tekst, gjenspillingsvern etter sendt/ukjent/feilet utfall,
@@ -44,7 +44,7 @@ beforeAll(async () => {
   graph = new ConversationGraphService(db.app);
   business = new BusinessService(db.app);
   const adapters: AdapterMap = { twilio: sms, slack, meta_whatsapp: wa };
-  funnel = new OutboundFunnel({ store, graph, adapters, config, clock, business, marketing });
+  funnel = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters, config, clock, business, marketing });
   for (const [channel, ref, provider] of [["sms", "+4791000000", "twilio"], ["slack", "T0AAAAAAAA", "slack"], ["whatsapp", "109876543210", "meta_whatsapp"]] as const) {
     await store.authorizeAccount(TENANT_A, "business", { channel, account_ref: ref, provider, source: "owner_route" }, ctxA.actor);
   }
@@ -132,7 +132,7 @@ describe("B: utsendelse - journal før/etter, hash i stedet for tekst, AI-opplys
   it("ukjent utfall: journalen står `outcome_unknown`, feilen kastes videre som outcome_unknown:, og et replay sender ALDRI en ny melding", async () => {
     sms.calls.length = 0;
     const flaky = scriptedAdapter("twilio", () => { throw new Error("outcome_unknown:comms_twilio_http_503"); });
-    const f = new OutboundFunnel({ store, graph, adapters: { twilio: flaky }, config, clock, marketing });
+    const f = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters: { twilio: flaky }, config, clock, marketing });
     const parsed = parsedSend({ recipient: await known("+4790000003") });
     await expect(f.send(ctxA, parsed, "t")).rejects.toThrow("outcome_unknown:comms_twilio_http_503");
     expect((await journal(TENANT_A, parsed.request_id))[0]!["status"]).toBe("outcome_unknown");
@@ -145,7 +145,7 @@ describe("B: utsendelse - journal før/etter, hash i stedet for tekst, AI-opplys
 
   it("råe transportfeil etter sending (nullstilt socket) blir også ukjent utfall - aldri `failed`", async () => {
     const reset = scriptedAdapter("twilio", () => { throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) }); });
-    const f = new OutboundFunnel({ store, graph, adapters: { twilio: reset }, config, clock, marketing });
+    const f = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters: { twilio: reset }, config, clock, marketing });
     const parsed = parsedSend({ recipient: await known("+4790000004") });
     await expect(f.send(ctxA, parsed, "t")).rejects.toThrow(/^outcome_unknown:/);
     expect((await journal(TENANT_A, parsed.request_id))[0]!["status"]).toBe("outcome_unknown");
@@ -153,7 +153,7 @@ describe("B: utsendelse - journal før/etter, hash i stedet for tekst, AI-opplys
 
   it("entydig avslag: journalen står `failed`, forespørsels-id-en er brent (ny nøkkel kreves), og en ny nøkkel virker", async () => {
     const rejecting = scriptedAdapter("twilio", () => { throw new ProviderRejectedError("twilio", "21211"); });
-    const f = new OutboundFunnel({ store, graph, adapters: { twilio: rejecting }, config, clock, marketing });
+    const f = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters: { twilio: rejecting }, config, clock, marketing });
     const failedNumber = await known("+4790000005");
     const parsed = parsedSend({ recipient: failedNumber });
     await expect(f.send(ctxA, parsed, "t")).rejects.toThrow("comms_provider_rejected:twilio:21211");
@@ -168,7 +168,7 @@ describe("B: utsendelse - journal før/etter, hash i stedet for tekst, AI-opplys
   it("avslått av policyen (transportnivå): `denied`-rad som bevis, INGEN adapterkall, og id-en er ikke brent", async () => {
     sms.calls.length = 0;
     const parsed = parsedSend({ recipient: await known("+4790000006"), purpose: "marketing", text: "Tilbud! Svar STOPP." });
-    const strict = new OutboundFunnel({ store, graph, adapters: { twilio: sms }, config, clock }); // standard markedsføringsport: uverifisert
+    const strict = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters: { twilio: sms }, config, clock }); // standard markedsføringsport: uverifisert
     await expect(strict.send(ctxA, parsed, "t")).rejects.toThrow("comms_policy_denied:marketing_blocked_reservation_register_unverified");
     expect(sms.calls).toHaveLength(0);
     const rows = await journal(TENANT_A, parsed.request_id);
@@ -218,7 +218,7 @@ describe("C: mottakerens avmelding (STOP) kan ikke omgås", () => {
 
   it("Twilio 21610 fra leverandøren registrerer avmeldingen hos OSS også - neste forsøk avslås av vår egen policy før noe sendes", async () => {
     const unsub = scriptedAdapter("twilio", () => { throw new ProviderRejectedError("twilio", "21610"); });
-    const f = new OutboundFunnel({ store, graph, adapters: { twilio: unsub }, config, clock, marketing });
+    const f = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters: { twilio: unsub }, config, clock, marketing });
     const number = "+4790000102";
     await expect(f.send(ctxA, parsedSend({ recipient: number }), "t")).rejects.toThrow("21610");
     expect(await store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "sms", number))).toBe(true);
@@ -309,7 +309,7 @@ describe("E: redigering, sletting og reaksjon - kun egen melding fra samme konto
     const present = await funnel.checkTarget(ctxA, target, "t");
     expect(present).toMatchObject({ exists: true, allowed: true });
     const gone = scriptedAdapter("slack", (op) => (op === "exists" ? { exists: false } : {}));
-    const f = new OutboundFunnel({ store, graph, adapters: { slack: gone }, config, clock });
+    const f = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters: { slack: gone }, config, clock });
     expect(await f.checkTarget(ctxA, target, "t")).toBeNull();
   });
 });
@@ -345,8 +345,22 @@ describe("F: tenant-isolasjon, minnerom og journalens tilstandsmaskin", () => {
   it("retensjonssveipet sletter kun utløpte rader (og kun for angitt tenant)", async () => {
     const saved = now;
     now = new Date(now.getTime() + 500 * 86_400_000);
+    // WP-G1c K1 (142): databasen avviser sletting av en JOURNALRAD før `retention_until` har gått ut på DATABASENS klokke - en injisert fremtidig appklokke er ikke nok, og sveipet hopper over slike rader i stedet for å feile.
+    const first = await store.purgeExpired(TENANT_A, "business");
+    expect(first.inbound).toBeGreaterThan(0);
+    expect(first.journal, "journalrader som ikke er utløpt på databasens klokke slettes ikke").toBe(0);
+    expect(((await db.admin.query("SELECT count(*)::int AS n FROM comms_outbound_log WHERE tenant_id = $1", [TENANT_A])).rows[0] as { n: number }).n).toBeGreaterThan(0);
+    // frista flyttes tilbake som superbruker (replica-rolle omgår triggerne - appen kan aldri det): NÅ er radene utløpt også for databasen
+    const admin = await db.admin.connect();
+    try {
+      await admin.query("BEGIN");
+      await admin.query("SET LOCAL session_replication_role = replica");
+      await admin.query("UPDATE comms_outbound_log SET retention_until = now() - interval '1 day' WHERE tenant_id = $1", [TENANT_A]);
+      await admin.query("COMMIT");
+    } finally {
+      admin.release();
+    }
     const purged = await store.purgeExpired(TENANT_A, "business");
-    expect(purged.inbound).toBeGreaterThan(0);
     expect(purged.journal).toBeGreaterThan(0);
     expect((await db.admin.query("SELECT count(*)::int AS n FROM comms_inbound_events WHERE tenant_id = $1", [TENANT_B])).rows[0]).toEqual({ n: 1 });
     now = saved;

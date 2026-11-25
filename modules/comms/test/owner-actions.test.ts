@@ -8,7 +8,7 @@ import {
   COMMS_ADMIN_ACTIONS, COMMS_OUTBOUND_ACTIONS, COMMS_OWNER_ACTIONS, COMMS_READ_ACTIONS, CommsStore, CommsTransport, OutboundFunnel, commsToolDefinitions, executeCommsOwnerAction, parseCommsConfig,
   previewCommsSend, scopedIdempotencyKey, type AdapterMap
 } from "../src/index.ts";
-import { OWNER, TENANT_A, scriptedAdapter, startCommsDb, type CommsDb } from "./support/harness.ts";
+import { OWNER, TENANT_A, scriptedAdapter, startCommsDb, type CommsDb, testContentHasher } from "./support/harness.ts";
 
 /**
  * WP-G1 (P1b): eierens handlingsflate (`executeCommsOwnerAction` / `previewCommsSend` - logikken bak `POST /comms/action` og `/comms/preview`) mot den EKSAKTE kjeden i produksjon: ekte ToolGateway (klasse D-pipeline påslått),
@@ -42,7 +42,7 @@ beforeAll(async () => {
   const graph = new ConversationGraphService(db.app);
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms,slack" });
   const adapters: AdapterMap = { twilio: sms, slack };
-  funnel = new OutboundFunnel({ store, graph, adapters, config, clock });
+  funnel = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters, config, clock });
   const killSwitch = new KillSwitch();
   const controls = new OwnerControls(killSwitch);
   const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, controls, authority: { owner_person_id: OWNER, owner_tenants: [TENANT_A] } });

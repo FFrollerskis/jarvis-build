@@ -5,8 +5,8 @@ import { TENANT_A } from "./support/harness.ts";
 import { authorizeAll, startChain, type Chain } from "./support/chain.ts";
 
 /**
- * WP-G1b (reviewer A, funn 3 og 5): (1) DRIFT-VAKT for partisjonen `COMMS_JOURNALLED_ACTIONS`: for ALLE 17 skrivehandlinger mot ekte ToolGateway-ledger og Postgres skrives det en journalrad (`comms_outbound_log`) for NØYAKTIG de fem journalførte,
- * og alle skrivinger har en ledgerrad; (2) nøkkellengdene 159/160/161 for ALLE 17 skrivehandlinger mot ekte ledger (uavkortet nøkkel, ledger høyst 230 og journalens request_id høyst 200 tegn, 161 gir `idempotency_key_too_long` uten ledgerrad).
+ * WP-G1b (reviewer A, funn 3 og 5): (1) DRIFT-VAKT for partisjonen `COMMS_JOURNALLED_ACTIONS`: for ALLE 18 skrivehandlinger mot ekte ToolGateway-ledger og Postgres skrives det en journalrad (`comms_outbound_log`) for NØYAKTIG de fem journalførte,
+ * og alle skrivinger har en ledgerrad; (2) nøkkellengdene 159/160/161 for ALLE 18 skrivehandlinger mot ekte ledger (uavkortet nøkkel, ledger høyst 230 og journalens request_id høyst 200 tegn, 161 gir `idempotency_key_too_long` uten ledgerrad).
  * Testen bruker egne, ferske nyttelaster per handling (`FRESH`) og kun atferd, ingen eksporter som kom med fiksen utover partisjonslisten den vokter.
  */
 let chain: Chain;
@@ -58,6 +58,12 @@ const FRESH: Record<string, () => Promise<Record<string, JsonValue>>> = {
   authorize_account: async () => ({ channel: "sms", account_ref: smsRef(), provider: "twilio" }),
   revoke_account: async () => ({ account_id: String(ok(await chain.act("authorize_account", { channel: "sms", account_ref: smsRef(), provider: "twilio" }, chain.key("pre"))).external_id) }),
   record_opt_out: async () => ({ channel: "sms", recipient: chain.phone() }),
+  lift_owner_opt_out: async () => {
+    const recipient = chain.phone();
+    ok(await chain.act("record_opt_out", { channel: "sms", recipient }, chain.key("pre-opt")));
+    const id = ((await chain.db.admin.query("SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND source = 'owner_recorded' AND status = 'active' ORDER BY created_at DESC LIMIT 1", [TENANT_A])).rows[0] as { opt_out_id: string }).opt_out_id;
+    return { opt_out_id: id, reason: `Feilregistrert ${uniq()}` };
+  },
   contacts_create: async () => { handler = (c) => (c.method === "POST" ? jsonRes(person(String(400 + seq++))) : new Response("{}", { status: 404 })); return { given_name: "Ola", family_name: `F${uniq()}` }; },
   contacts_update: async () => { handler = () => jsonRes(person("41")); return { resource_name: "people/c41", etag: "etag-41", organization: `Org-${uniq()}` }; },
   contacts_delete: async () => { const id = `5${++seq}1`; const gone = new Set<string>(); handler = (c) => { const name = c.url.match(/people\/(c\d+)/)?.[1] ?? ""; if (c.method === "DELETE") { gone.add(name); return new Response(null, { status: 204 }); } return gone.has(name) ? jsonRes({ error: { code: 404, status: "NOT_FOUND" } }, 404) : jsonRes(person(name.slice(1))); }; return { resource_name: `people/c${id}` }; },
@@ -80,7 +86,7 @@ const FRESH: Record<string, () => Promise<Record<string, JsonValue>>> = {
 const WRITES = Object.keys(FRESH);
 
 describe("partisjonen journalført/ikke-journalført er den FAKTISKE (journalrad skrevet <=> i COMMS_JOURNALLED_ACTIONS)", () => {
-  it("alle 17 skrivehandlinger: journalrad skrives for NØYAKTIG de fem journalførte; gateway-klasse, nøkkelkrav og ledger-nøkkel tabelleres", async () => {
+  it("alle 18 skrivehandlinger: journalrad skrives for NØYAKTIG de fem journalførte; gateway-klasse, nøkkelkrav og ledger-nøkkel tabelleres", async () => {
     for (const action of WRITES) {
       const payload = await FRESH[action]!();
       const key = chain.key(`part-${action}`);
@@ -95,12 +101,12 @@ describe("partisjonen journalført/ikke-journalført er den FAKTISKE (journalrad
     }
     // lesehandlinger: ingen ledgerrad (klasse A), ingen journalrad
     for (const action of COMMS_KNOWN_ACTIONS.filter((a) => !WRITES.includes(a))) expect(chain.gateway.get("comms", action)?.capability_class ?? "A", `${action} er klasse A`).toBe("A");
-    expect(COMMS_KNOWN_ACTIONS.length).toBe(32);
-    expect(WRITES.length).toBe(17);
+    expect(COMMS_KNOWN_ACTIONS.length).toBe(33);
+    expect(WRITES.length).toBe(18);
   });
 });
 
-describe("159/160/161 mot EKTE ledger for alle 17 skrivehandlinger (ingen unntak, ingen avkorting, ingen rad ved 161)", () => {
+describe("159/160/161 mot EKTE ledger for alle 18 skrivehandlinger (ingen unntak, ingen avkorting, ingen rad ved 161)", () => {
   for (const action of WRITES) {
     it(`${action}`, async () => {
       for (const length of [159, 160]) {

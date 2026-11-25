@@ -2,8 +2,8 @@
 import type pg from "pg";
 import type { BusinessService } from "@jarvis/business";
 import {
-  CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MeetingService, ReplySweep, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
-  commsAnyEnabled, commsToolDefinitions, parseCommsConfig, retentionTenants, startRetentionSweep, type CommsConfig
+  COMMS_PEPPER_REF, CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MeetingService, ReplySweep, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
+  commsAnyEnabled, commsToolDefinitions, createContentHasher, parseCommsConfig, retentionTenants, startRetentionSweep, type CommsConfig
 } from "@jarvis/comms";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import { AccessTokenCache, googleAccessToken, microsoftRefreshExchange, type ToolDefinition, type ToolGateway } from "@jarvis/tool-gateway";
@@ -59,6 +59,9 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
   const funnel = config.outbound
     ? new OutboundFunnel({
         store, graph: input.graph, config, clock, business: input.business,
+        // K1 (JARVIS-112 b): innholds-hashen i journalen er en HMAC med en server-side pepper fra DEN EKSISTERENDE hemmelighetskjeden (vault først, som leverandør-credentials) - lest på nytt ved hvert kall, så en rotasjon gjelder umiddelbart.
+        // Mangler pepperen (eller er den for kort), feiler ALL utsendelse lukket (`content_hash_key_unavailable`); det finnes ingen standardverdi og verdien logges aldri. Å skaffe pepperen er eierens handling (BLOCKED_EXTERNAL kun for aktivering, se runbook).
+        contentHasher: async () => createContentHasher(await secrets.get(COMMS_PEPPER_REF)),
         adapters: {
           slack: new SlackAdapter(), discord: new DiscordAdapter(), meta_whatsapp: new WhatsAppAdapter(config.graph_api_version),
           // Telnyx har bevisst INGEN `call` (AI-opplysningen kan ikke garanteres som første talte innhold uten call.answered-flyten): samtale via Telnyx feiler lukket (DEFERRED).
@@ -89,6 +92,12 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
   const replySweep = config.reply_sweep ? new ReplySweep({ pool: input.pool, clock, business: input.business, afterHours: config.reply_after_hours, windowDays: config.reply_window_days, ...(input.warn ? { warn: input.warn } : {}) }) : undefined;
   const startSweeps = (tenants: readonly string[], ownerPersonId: string): void => {
     const sweepTenants = retentionTenants(tenants, config.webhook_tenant_id); // kaster hvis webhook-tenanten ikke er en av eierens (fail closed, før noe planlegges)
+    // K1: en tydelig oppstartsvarsel (kun koden og et ja/nei, aldri verdien) når utgående er på men pepperen mangler - utsendelse feiler lukket helt til eieren har lagt den inn (runbook §6, NAS-trinn).
+    if (config.outbound) {
+      void secrets.get(COMMS_PEPPER_REF).then((value) => {
+        if (createContentHasher(value) === null) input.warn?.({ msg: "comms_content_pepper_missing", effect: "outbound_fails_closed" });
+      }).catch(() => input.warn?.({ msg: "comms_content_pepper_check_failed" }));
+    }
     startRetentionSweep({
       tenants: sweepTenants,
       purge: async (tenantId, space) => {

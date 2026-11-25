@@ -5,7 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import type { AdapterSend, AdapterTarget, ChannelAdapter, CommsProvider } from "../../src/index.ts";
+import { createContentHasher, type AdapterSend, type AdapterTarget, type ChannelAdapter, type CommsProvider, type ContentHasher } from "../../src/index.ts";
 
 /** Felles testoppsett: ekte embedded Postgres + migrasjoner, to tenants, en runtime-rolle uten superbruker/BYPASSRLS (RLS gjelder). */
 export interface CommsDb {
@@ -13,6 +13,10 @@ export interface CommsDb {
   readonly app: pg.Pool;
   stop(): Promise<void>;
 }
+
+/** K1: en FALSK pepper for tester (lang nok til å godtas, åpenbart ikke en ekte verdi). Ekte pepper hentes fra vault-kjeden og står aldri i kode. */
+export const TEST_PEPPER = "fake-pepper-for-test-not-real-0000000000000000";
+export const testContentHasher = async (): Promise<ContentHasher | null> => createContentHasher(TEST_PEPPER);
 
 export const TENANT_A = "tenant-g1-a";
 export const TENANT_B = "tenant-g1-b";

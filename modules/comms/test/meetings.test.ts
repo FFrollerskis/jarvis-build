@@ -8,7 +8,7 @@ import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
 import {
   CommsStore, CommsTransport, MeetingService, OutboundFunnel, commsToolDefinitions, executeCommsOwnerAction, explicitDueDate, extractCommitments, ownerPayloadFingerprint, parseCommsConfig, scopedIdempotencyKey, type AudioTranscriber, type MeetingContext
 } from "../src/index.ts";
-import { OWNER, TENANT_A, TENANT_B, startCommsDb, type CommsDb } from "./support/harness.ts";
+import { OWNER, TENANT_A, TENANT_B, startCommsDb, type CommsDb, testContentHasher } from "./support/harness.ts";
 
 /**
  * WP-G1 (P2g): møtetranskripsjon-pipelinen mot ekte Postgres (RLS som app-rolle) og den EKSAKTE ToolGateway-kjeden. Bevist: idempotens på innholds-hash, at transkripsjonsteksten ALDRI lagres, eierens attest er påkrevd,
@@ -43,7 +43,7 @@ beforeAll(async () => {
   business = new BusinessService(db.app);
   const store = new CommsStore(db.app);
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms", JARVIS_COMMS_MEETINGS: "on" });
-  funnel = new OutboundFunnel({ store, graph, adapters: {}, config, clock });
+  funnel = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters: {}, config, clock });
   svc = new MeetingService({ pool: db.app, clock, graph, business, retentionDays: 180 });
   const killSwitch = new KillSwitch();
   const controls = new OwnerControls(killSwitch);

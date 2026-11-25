@@ -7,7 +7,7 @@ import { isCommsChannel } from "./channels.ts";
 import { CONTACTS_CREDENTIAL_REF, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema } from "./contacts.ts";
 import { CallParamsSchema, CheckTargetSchema, DeleteParamsSchema, EditParamsSchema, ReactParamsSchema, SendParamsSchema } from "./funnel.ts";
 import type { CommsStore } from "./store.ts";
-import { MeetingCommitmentsSchema, MeetingConfirmSchema, MeetingDecideSchema, MeetingIngestTextSchema, MeetingListSchema, MeetingRefSchema, RecordOptOutSchema } from "./transport.ts";
+import { LiftOwnerOptOutSchema, MeetingCommitmentsSchema, MeetingConfirmSchema, MeetingDecideSchema, MeetingIngestTextSchema, MeetingListSchema, MeetingRefSchema, RecordOptOutSchema } from "./transport.ts";
 import { GetMessageSchema, ListTemplatesSchema, ListUsersSchema, ReadMessageSchema, ReadThreadSchema } from "./transport.ts";
 
 /**
@@ -56,6 +56,23 @@ function notificationSummary(state: JsonValue | null): string | null {
   const kind = typeof s["kind"] === "string" ? (s["kind"] as string) : "melding";
   const basis = typeof s["purpose_basis"] === "string" ? `, grunnlag: ${s["purpose_basis"] as string}` : "";
   return `${kind} via ${channel} til ${hint} (formål: ${purpose}${basis})`;
+}
+
+/** K5: preflight-validatoren for `lift_owner_opt_out` - målet må finnes (aktivt) OG være eierregistrert. Mottakerens egne avmeldinger (stopp-ord, leverandørfeil, mottakerbedt) kan eieren aldri oppheve. */
+export function optOutLiftValidator(data: JsonValue): string | null {
+  const state = stateOf(data);
+  if (state === null || state["exists"] !== true) return "target_not_found";
+  if (state["liftable_by_owner"] !== true) return `opt_out_not_liftable_by_owner:${typeof state["source"] === "string" ? (state["source"] as string) : "unknown"}`;
+  return null;
+}
+
+/** K5: kort, redigert oppsummering til det umiddelbare eier-varselet (klasse D): kanal og maskert mottaker - aldri begrunnelsen (fritekst fra eieren) og aldri hele mottakeren. */
+function optOutLiftSummary(state: JsonValue | null): string | null {
+  const s = stateOf(state);
+  if (s === null) return null;
+  const hint = typeof s["recipient_hint"] === "string" ? (s["recipient_hint"] as string) : "ukjent";
+  const channel = typeof s["channel"] === "string" ? (s["channel"] as string) : "ukjent kanal";
+  return `eierens angre av en avmelding (${channel}, mottaker ${hint}); begrunnelsen er registrert i avmeldingsregisteret`;
 }
 
 export interface CommsToolDeps {
@@ -145,10 +162,19 @@ export function commsToolDefinitions(deps: CommsToolDeps): ToolDefinition[] {
     },
     {
       ...common, tool_id: "comms", action: "record_opt_out",
-      description: "Registrer en mottakers avmelding (f.eks. at mottakeren ba om å slippe utenfor kanalen). TENANT-BRED: gjelder alle våre kontoer, alle rom og alle kanaler som deler identifikator (telefon = SMS + WhatsApp + samtale). `account_ref` er valgfri (`*` eller en gyldig kontoreferanse; en skrivefeil avvises). Registreringen er EIERREGISTRERT og oppheves ALDRI av noen START (kun avmeldinger som kom fra et stopp-ord eller leverandørfeil løftes av mottakerens egen START, og kun på samme kanal) og ikke av eieren heller: det finnes ingen angrevei i Jarvis for en feilregistrering (eier-angre med bevis er DEFERRED). Én rad per kanal og kilde",
+      description: "Registrer en mottakers avmelding (f.eks. at mottakeren ba om å slippe utenfor kanalen). TENANT-BRED: gjelder alle våre kontoer, alle rom og alle kanaler som deler identifikator (telefon = SMS + WhatsApp + samtale). `account_ref` er valgfri (`*` eller en gyldig kontoreferanse; en skrivefeil avvises). Registreringen er EIERREGISTRERT og oppheves ALDRI av noen START (kun avmeldinger som kom fra et stopp-ord eller leverandørfeil løftes av mottakerens egen START, og kun på samme kanal). Eieren kan angre en FEILREGISTRERING med comms.lift_owner_opt_out (step-up, begrunnelse, revisjonsspor) - men aldri en avmelding mottakeren selv står bak (stopp-ord, leverandørfeil, `recipient_request`). Én rad per kanal og kilde",
       input_schema: cast(RecordOptOutSchema),
-      capability_class: "B", scopes: ["comms.admin"], reversible: false, rollback_procedure: "ingen: en eierregistrert avmelding kan verken oppheves av eieren eller av en START (mottakerens rett går foran; en feilregistrering kan i dag kun rettes utenfor Jarvis - eier-angre med bevis og step-up er DEFERRED)", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      capability_class: "B", scopes: ["comms.admin"], reversible: false, rollback_procedure: "en eierregistrert avmelding oppheves ikke av noen START (mottakerens rett går foran); en FEILREGISTRERING angres av eieren med comms.lift_owner_opt_out (step-up, obligatorisk begrunnelse, revisjonsspor). En avmelding med kilde recipient_request kan ikke angres", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, output_trust: "internal"
+    },
+    read("check_opt_out_target", "Fersk, MINIMAL lesing av en AKTIV avmelding eieren vurderer å oppheve (`{exists, opt_out_id, channel, recipient_hint, source, liftable_by_owner}`; aldri hele mottakeren). `null` = finnes ikke eller er allerede opphevet. Preflight/readback for comms.lift_owner_opt_out", cast(LiftOwnerOptOutSchema)),
+    {
+      ...common, tool_id: "comms", action: "lift_owner_opt_out",
+      description: "Eierens ANGRE av en feilregistrert avmelding (JARVIS-112 f, Q-72 pkt 10): opphever KUN en avmelding eieren selv registrerte (`owner_recorded`) - aldri en mottakerbedt (`recipient_request`) og aldri mottakerens eget stopp-ord eller en leverandørfeil (håndhevet også av databasetriggeren). Krever step-up (signert enhetssesjon fra en eier-kanal; NB: kanalen er klient-påstått inntil WP-S1/JARVIS-111), obligatorisk begrunnelse (3-200 tegn, én linje, uten hemmeligheter) og idempotensnøkkel; begrunnelse, hvem og sesjon lagres på raden og eieren varsles. Opphever kun den ene raden: mottakeren kan fortsatt være avmeldt via en annen aktiv rad (`still_opted_out`)",
+      input_schema: cast(LiftOwnerOptOutSchema), capability_class: "D", scopes: ["comms.admin"], reversible: true,
+      rollback_procedure: "registrer avmeldingen på nytt med comms.record_opt_out (ny, eierregistrert rad; den opphevede raden står igjen som historikk med begrunnelse). Har mottakeren vært kontaktet i mellomtiden, kan en sending ikke trekkes tilbake",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 10, credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, output_trust: "internal",
+      step_up_required: true, preflight_action: "check_opt_out_target", preflight_requires_target: true, preflight_validator: optOutLiftValidator, postcondition_target_absent: true, notification_summary: optOutLiftSummary
     }
   ];
   if (deps.calls === true) {

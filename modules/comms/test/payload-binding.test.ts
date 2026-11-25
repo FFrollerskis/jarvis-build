@@ -161,6 +161,21 @@ const SCENARIOS: readonly Scenario[] = [
     }
   },
   {
+    // WP-G1c K5: eierens angre av en feilregistrert STOP (klasse D). Gjenspilling etter vellykket angre = målet er borte (`preflight_target_not_found`, som meeting_delete/contacts_delete); ulik nyttelast med samme nøkkel UTFØRES.
+    action: "lift_owner_opt_out", replay: "target_gone",
+    async prepare() {
+      const nums = [chain.phone(), chain.phone()];
+      const hashes = nums.map((n) => optOutHash(TENANT_A, "sms", n));
+      for (const n of nums) expect((await chain.act("record_opt_out", { channel: "sms", recipient: n })).ok).toBe(true);
+      const ids = (await Promise.all(hashes.map((h) => chain.db.admin.query("SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 AND source = 'owner_recorded'", [TENANT_A, h])))).map((r) => (r.rows[0] as { opt_out_id: string }).opt_out_id);
+      return {
+        a: { opt_out_id: ids[0]!, reason: "Feilregistrert nummer A" }, b: { opt_out_id: ids[1]!, reason: "Feilregistrert nummer B" },
+        took: async (w) => !(await chain.store.isOptedOut(TENANT_A, hashes[w === "a" ? 0 : 1]!)),
+        effects: () => scalar("SELECT count(*)::int AS n FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = ANY($2) AND status = 'lifted'", [TENANT_A, hashes])
+      };
+    }
+  },
+  {
     action: "contacts_create", replay: "deduplicated",
     async prepare() {
       const m = uniq();
@@ -273,7 +288,7 @@ const SCENARIOS: readonly Scenario[] = [
   }
 ];
 
-describe("B: alle 12 ikke-journalførte skrivehandlinger - gjenspilling er `deduplicated` uten ny effekt; ulik nyttelast med samme nøkkel UTFØRES med synlig effekt", () => {
+describe("B: alle 13 ikke-journalførte skrivehandlinger - gjenspilling er `deduplicated` uten ny effekt; ulik nyttelast med samme nøkkel UTFØRES med synlig effekt", () => {
   for (const scenario of SCENARIOS) {
     it(`${scenario.action}: (K, A) utføres, (K, A) igjen = ingen ny effekt, (K, B) utføres på ekte`, async () => {
       const p = await scenario.prepare();
@@ -303,7 +318,7 @@ describe("B: alle 12 ikke-journalførte skrivehandlinger - gjenspilling er `dedu
 
   it("tabellen er FULLSTENDIG: nøyaktig de registrerte, ikke-journalførte handlingene som ikke er lesing (klasse B/C/D) - ingen handling med nøkkel glipper", () => {
     const mutating = COMMS_KNOWN_ACTIONS.filter((a) => chain.gateway.get("comms", a) !== undefined && !(JOURNALLED as readonly string[]).includes(a) && chain.gateway.get("comms", a)!.capability_class !== "A");
-    expect(mutating.length).toBe(12);
+    expect(mutating.length).toBe(13);
     expect(SCENARIOS.map((s) => s.action).sort()).toEqual([...mutating].sort());
   });
 

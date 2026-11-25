@@ -4,7 +4,7 @@ import type { BusinessService } from "@jarvis/business";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import { afterAcceptedMutation, isIndeterminateTransportError, isOutcomeUnknownMessage } from "@jarvis/tool-gateway";
 import { ProviderRejectedError, type AdapterMap } from "./adapters.ts";
-import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel, type CommsProvider } from "./channels.ts";
+import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel, type CommsProvider, type ContentHasher } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
 import { PURPOSE_BASES, evaluateOutboundPolicy, isRelationshipEvidence, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
 import type { Actor, AuthorizedAccount, BeginResult, Clock, CommsStore, JournalEntryInput, JournalSource } from "./store.ts";
@@ -35,6 +35,11 @@ export interface FunnelDeps {
   readonly config: CommsConfig;
   readonly clock: Clock;
   readonly marketing?: MarketingBasisPort;
+  /**
+   * K1 (JARVIS-112 b): leverer den server-side pepperen som HMAC-hasher innholdet og forespørselens fingeravtrykk (`createContentHasher` over vault-hemmeligheten `COMMS_PEPPER_REF`). PÅKREVD (ingen standardverdi): `null` (manglende eller for kort
+   * pepper) gjør at ALL utsendelse feiler LUKKET (`content_hash_key_unavailable`) - en usaltet hash er aldri et stille alternativ. Kalles ved hver evaluering (rotasjon gjelder umiddelbart); verdien logges aldri.
+   */
+  readonly contentHasher: () => Promise<ContentHasher | null>;
   /** D-121: valgfri tidslinje (en utsendt melding blir en `business_activities`-peker når mottakeren er en løst identitet med lenket kontakt). */
   readonly business?: Pick<BusinessService, "recordActivity">;
   readonly warn?: (event: Record<string, unknown>) => void;
@@ -152,19 +157,29 @@ export function parseCallParams(raw: unknown): ParseResult {
   return build("call", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose, ...basisOf(d) }, { text: d.text, ...(d.recording !== undefined ? { recording: d.recording } : {}) }, {});
 }
 
-/** A-M5: er forespørsels-id-en (idempotensnøkkelen) ubrukt (`none`), en ekte gjenspilling av SAMME forespørsel (`replay`), eller gjenbrukt til en ANNEN forespørsel (`collision`)? */
-export type ReplayState = "none" | "replay" | "collision";
+/** A-M5: er forespørsels-id-en (idempotensnøkkelen) ubrukt (`none`), en ekte gjenspilling av SAMME forespørsel (`replay`), eller gjenbrukt til en ANNEN forespørsel (`collision`)? `unavailable` (K1): pepperen mangler, så et HMAC-avtrykk kan ikke avgjøres (fail-closed). */
+export type ReplayState = "none" | "replay" | "collision" | "unavailable";
 
 /**
  * Fingeravtrykk av HELE forespørselen (handling, kanal, konto, mottaker, formål, grunnlag, innhold, mål, tråd) - alt eieren kan sette bortsett fra selve id-en. Lagres i journalens `before_state` ved forsøket og sammenlignes ved
  * gjenspilling: ledgeren (PK tenant+nøkkel) svarer ellers `ok + deduplicated` på HVA SOM HELST med samme nøkkel, selv om ingenting ble sendt/slettet (A-M5).
  */
-export function requestFingerprint(request: OutboundRequest): string {
+function fingerprintParts(request: OutboundRequest): unknown[] {
   const c = request.content;
-  return sha256Hex(JSON.stringify([
-    "comms-request-v1", request.kind, request.channel, request.account_ref, request.recipient, request.purpose, request.purpose_basis ?? null, request.purpose_basis_note ?? null,
+  return [
+    request.kind, request.channel, request.account_ref, request.recipient, request.purpose, request.purpose_basis ?? null, request.purpose_basis_note ?? null,
     c.text ?? null, c.template ?? null, c.media ?? null, c.reaction ?? null, c.recording ?? null, request.thread_ref ?? null, request.target_message_id ?? null
-  ]));
+  ];
+}
+
+/** K1: fingeravtrykket er nå en HMAC (v2) med server-side pepper - mottaker + tekst gir en ordbok-gjettbar usaltet hash, og fingeravtrykket ligger i journalen like lenge som innholdshashen. Versjonen står i journalens `before_state.v`. */
+export function requestFingerprint(request: OutboundRequest, hasher: ContentHasher): string {
+  return hasher.hmac("request", JSON.stringify(["comms-request-v2", ...fingerprintParts(request)]));
+}
+
+/** v1 (usaltet SHA-256): bevart KUN for å GJENKJENNE rader skrevet før WP-G1c (`before_state.v` = 1 eller manglende), så en gjenspilling av en gammel forespørsel fortsatt avgjøres riktig. Skriver aldri nye avtrykk. */
+export function legacyRequestFingerprint(request: OutboundRequest): string {
+  return sha256Hex(JSON.stringify(["comms-request-v1", ...fingerprintParts(request)]));
 }
 
 export interface Evaluation {
@@ -176,6 +191,10 @@ export interface Evaluation {
   readonly recipient_hint: string;
   readonly state: OutboundPolicyState;
   readonly target_log_id: string | null;
+  /** K1: HMAC-SHA256 av det kanoniske innholdet (`null` når handlingen ikke har innhold, ELLER når pepperen mangler - da er `decision` avslått med `content_hash_key_unavailable`). */
+  readonly content_sha256: string | null;
+  /** K1: HMAC-fingeravtrykket (v2) av hele forespørselen; `null` kun når pepperen mangler. */
+  readonly request_fingerprint: string | null;
 }
 
 export interface ExecResult {
@@ -183,6 +202,8 @@ export interface ExecResult {
   readonly data: Record<string, JsonValue>;
 }
 
+/** K1: avslagskoden når den server-side pepperen mangler. */
+export const KEY_UNAVAILABLE = "content_hash_key_unavailable";
 const SAFE_ERROR = /^[A-Za-z0-9_:.+-]{1,120}$/;
 const safeError = (err: unknown): string => {
   const message = err instanceof Error ? err.message : "";
@@ -200,6 +221,7 @@ export class OutboundFunnel {
   async evaluate(ctx: FunnelContext, parsed: ParsedOutbound): Promise<Evaluation> {
     const { store, config } = this.deps;
     const req = parsed.request;
+    const hasher = await this.hasher();
     const hash = recipientHash(ctx.tenantId, req.channel, req.recipient);
     const hint = recipientHint(req.channel, req.recipient);
     const account = await store.findActiveAccount(ctx.tenantId, ctx.space, req.channel, req.account_ref);
@@ -229,8 +251,26 @@ export class OutboundFunnel {
         : null,
       marketing: { prior_consent: priorConsent, reservation_register: reservation }
     };
-    const decision = evaluateOutboundPolicy(req, state, config, this.deps.clock());
-    return { parsed, decision, account, provider, recipient_hash: hash, recipient_hint: hint, state, target_log_id: targetRow?.log_id ?? null };
+    const decided = evaluateOutboundPolicy(req, state, config, this.deps.clock());
+    // K1: ingen pepper = ingen utsendelse. Reglen legges til som en vanlig avslagsregel (synlig for eieren og i journalens regelutfall) - aldri en stille usaltet hash.
+    const decision: PolicyDecision = hasher !== null ? decided : {
+      ...decided, allowed: false, denial_codes: [...new Set([...decided.denial_codes, KEY_UNAVAILABLE])],
+      rules: [...decided.rules, { rule: "content_hash_key", outcome: "deny", code: KEY_UNAVAILABLE }]
+    };
+    return {
+      parsed, decision, account, provider, recipient_hash: hash, recipient_hint: hint, state, target_log_id: targetRow?.log_id ?? null,
+      content_sha256: hasher === null || decided.content_canonical === null ? null : hasher.hmac("content", decided.content_canonical),
+      request_fingerprint: hasher === null ? null : requestFingerprint(req, hasher)
+    };
+  }
+
+  /** Den server-side pepperen som en HMAC-hasher, eller `null` (manglende/for kort pepper, eller en feil ved oppslag: samme fail-closed utfall; aldri verdien i en feilmelding). */
+  private async hasher(): Promise<ContentHasher | null> {
+    try {
+      return await this.deps.contentHasher();
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -272,7 +312,7 @@ export class OutboundFunnel {
       recipient: { hint: ev.recipient_hint, proof: { method: ev.decision.recipient_proof.method, identity_linked: ev.decision.recipient_proof.identity_id !== null, last_inbound_age_minutes: ev.decision.recipient_proof.last_inbound_age_minutes } },
       // A-M2: eierens erklærte grunnlag (kun den lukkede verdien i revisjonssporet; det frie notatet ligger i journalen, ikke i verktøy-ledgeren).
       purpose_basis: r.purpose_basis ?? null,
-      content: { sha256: ev.decision.content_sha256, length: ev.decision.content_length, ai_disclosure_applied: ev.decision.disclosure_applied },
+      content: { sha256: ev.content_sha256, length: ev.decision.content_length, ai_disclosure_applied: ev.decision.disclosure_applied },
       counters: { recipient_24h: ev.state.sends_last_24h_to_recipient, account_1h: ev.state.sends_last_hour_from_account }
     };
   }
@@ -281,11 +321,11 @@ export class OutboundFunnel {
     const r = ev.parsed.request;
     return {
       request_id: ev.parsed.request_id, kind: r.kind, channel: r.channel, account_ref: r.account_ref, provider: ev.provider, recipient_hash: ev.recipient_hash, recipient_hint: ev.recipient_hint,
-      purpose: r.purpose, rule_evaluation: ev.decision.rules, denial_codes: ev.decision.denial_codes, recipient_proof: ev.decision.recipient_proof, content_sha256: ev.decision.content_sha256,
+      purpose: r.purpose, rule_evaluation: ev.decision.rules, denial_codes: ev.decision.denial_codes, recipient_proof: ev.decision.recipient_proof, content_sha256: ev.content_sha256,
       content_length: ev.decision.content_length, ai_disclosure_applied: ev.decision.disclosure_applied, ...(ev.target_log_id !== null ? { target_log_id: ev.target_log_id } : {}),
       ...(r.thread_ref !== undefined ? { thread_ref: r.thread_ref } : {}), source: ctx.source,
-      // A-M5: fingeravtrykket av forespørselen følger forsøket (journalens `before_state`), så en gjenbrukt nøkkel til en annen forespørsel kan avvises.
-      before_state: { v: 1, request_fingerprint: requestFingerprint(r) }
+      // A-M5: fingeravtrykket av forespørselen følger forsøket (journalens `before_state`), så en gjenbrukt nøkkel til en annen forespørsel kan avvises. K1: v2 = HMAC med pepper (v1 = usaltet, kun eldre rader).
+      before_state: ev.request_fingerprint === null ? { v: 2 } : { v: 2, request_fingerprint: ev.request_fingerprint }
     };
   }
 
@@ -297,7 +337,18 @@ export class OutboundFunnel {
   async replayState(ctx: FunnelContext, parsed: ParsedOutbound): Promise<ReplayState> {
     const prior = await this.deps.store.findAttempt(ctx.tenantId, ctx.space, parsed.request_id);
     if (prior === null) return "none";
-    return prior.request_fingerprint === null || prior.request_fingerprint === requestFingerprint(parsed.request) ? "replay" : "collision";
+    const match = this.fingerprintMatches(prior, parsed.request, await this.hasher());
+    return match === "unknown" ? "unavailable" : match ? "replay" : "collision";
+  }
+
+  /**
+   * Stemmer det lagrede fingeravtrykket med forespørselen? `true` også når raden ikke har noe avtrykk (eldre rad). v2 (HMAC) trenger pepperen: uten den kan vi ikke avgjøre det (`unknown`, fail-closed). v1 (eller uten versjon) sammenlignes med det
+   * gamle, usaltede avtrykket - en gammel rad skal fortsatt gjenkjennes etter overgangen.
+   */
+  private fingerprintMatches(prior: { request_fingerprint: string | null; fingerprint_version: number | null }, req: OutboundRequest, hasher: ContentHasher | null): boolean | "unknown" {
+    if (prior.request_fingerprint === null) return true;
+    if (prior.fingerprint_version === 2) return hasher === null ? "unknown" : prior.request_fingerprint === requestFingerprint(req, hasher);
+    return prior.request_fingerprint === legacyRequestFingerprint(req);
   }
 
   /** A-H2: taket ble nådd UNDER låsen (policyens tørrkjøring så det ikke): avslaget journalføres med regelen som faktisk slo til, så beviset og utfallet stemmer. */
@@ -320,8 +371,10 @@ export class OutboundFunnel {
    * Svaret på en GJENSPILLING (samme forespørsels-id som et ikke-avslått forsøk). Ingen leverandørkall skjer på denne veien: sendt = dedup, feilet = brent id, ellers ukjent/under utførelse. Brukt av BÅDE den tidlige sjekken i `execute`
    * og `beginAttempt`s racevern. Er id-en brukt til en ANNEN forespørsel (A-M5) er det en feil, aldri «dedup».
    */
-  private replayResult(prior: Extract<BeginResult, { kind: "replay" }>, req: OutboundRequest): ExecResult {
-    if (prior.request_fingerprint !== null && prior.request_fingerprint !== requestFingerprint(req)) throw new Error("idempotency_key_collision");
+  private replayResult(prior: Extract<BeginResult, { kind: "replay" }>, req: OutboundRequest, hasher: ContentHasher | null): ExecResult {
+    const match = this.fingerprintMatches(prior, req, hasher);
+    if (match === "unknown") throw new Error(`comms_policy_denied:${KEY_UNAVAILABLE}`);
+    if (!match) throw new Error("idempotency_key_collision");
     if (prior.status === "sent") {
       return { external_id: prior.provider_message_id ?? "replayed", data: { log_id: prior.log_id, status: "sent", deduplicated: true, channel: req.channel, kind: req.kind } };
     }
@@ -334,7 +387,7 @@ export class OutboundFunnel {
     const { store, adapters, config } = this.deps;
     // En GJENSPILLING avgjøres FØR policyen: policyen ville ellers vurdert den mot en tilstand det første forsøket selv har endret (ratetelleren teller forsøket selv) og skrevet en misvisende avslagsrad for en ellers idempotent gjenspilling.
     const prior = await store.findAttempt(ctx.tenantId, ctx.space, parsed.request_id);
-    if (prior !== null) return this.replayResult(prior, parsed.request);
+    if (prior !== null) return this.replayResult(prior, parsed.request, await this.hasher());
     const ev = await this.evaluate(ctx, parsed);
     if (!ev.decision.allowed) {
       await this.recordDenial(ctx, ev);
@@ -352,7 +405,7 @@ export class OutboundFunnel {
       await this.recordDenial(ctx, this.withCapDenial(ev, begin.scope, begin.code));
       throw new Error(`comms_policy_denied:${begin.code}`);
     }
-    if (begin.kind === "replay") return this.replayResult(begin, req); // racevern: et samtidig forsøk med samme id rakk å skrive raden mellom den tidlige sjekken og her
+    if (begin.kind === "replay") return this.replayResult(begin, req, await this.hasher()); // racevern: et samtidig forsøk med samme id rakk å skrive raden mellom den tidlige sjekken og her
     const target = { account_ref: req.account_ref, recipient: req.recipient };
     // A-N3: leverandørens id, satt så snart leverandøren HAR akseptert (utenfor `try`, så et ukjent utfall ETTER aksept kan lagre den for avstemming).
     let providerMessageId: string | undefined;
@@ -385,7 +438,7 @@ export class OutboundFunnel {
       if (req.kind === "message") await this.recordTimeline(ctx, ev, begin.log_id);
       return {
         external_id: acceptedId,
-        data: { log_id: begin.log_id, status: "sent", channel: req.channel, kind: req.kind, content_sha256: ev.decision.content_sha256, ai_disclosure_applied: ev.decision.disclosure_applied, ...(threadRef !== undefined ? { thread_ref: threadRef } : {}) }
+        data: { log_id: begin.log_id, status: "sent", channel: req.channel, kind: req.kind, content_sha256: ev.content_sha256, ai_disclosure_applied: ev.decision.disclosure_applied, ...(threadRef !== undefined ? { thread_ref: threadRef } : {}) }
       };
     } catch (err) {
       const unknown = isOutcomeUnknownMessage(err instanceof Error ? err.message : "") || (!(err instanceof ProviderRejectedError) && isIndeterminateTransportError(err));
