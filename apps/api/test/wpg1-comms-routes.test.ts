@@ -576,7 +576,8 @@ describe("D: oppkoblingen (`buildCommsRuntime`) og kildevakter", () => {
 
   it("comms-wiring.ts: utgående bygges KUN når flagget er på, webhook-tjenesten KUN med minst én leverandør, og alt-AV returnerer før noe konstrueres", () => {
     const wiring = read("../src/comms-wiring.ts");
-    expect(wiring).toMatch(/if \(!commsAnyEnabled\(config\)\) return \{ config, tools: \[\], apiDeps: \(\) => undefined, startSweeps: \(\) => undefined \};/);
+    // WP-G1c (g5): alt-AV-objektet har ett medlem til, `guardLegacyNotifyTransport`, som MÅ være identiteten (samme transport tilbake; låst av `wpg1c-legacy-notify-wiring.test.ts`).
+    expect(wiring).toMatch(/if \(!commsAnyEnabled\(config\)\) return \{ config, tools: \[\], apiDeps: \(\) => undefined, startSweeps: \(\) => undefined, guardLegacyNotifyTransport: \(_toolId, transport\) => transport \};/);
     expect(wiring.indexOf("if (!commsAnyEnabled(config))")).toBeLessThan(wiring.indexOf("new CommsStore("));
     expect(wiring).toMatch(/const funnel = config\.outbound\s*\n\s*\? new OutboundFunnel\(/);
     expect(wiring).toMatch(/const webhookService = config\.webhooks\.size > 0\s*\n\s*\? new CommsWebhookService\(/);

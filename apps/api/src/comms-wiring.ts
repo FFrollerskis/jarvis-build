@@ -3,10 +3,10 @@ import type pg from "pg";
 import type { BusinessService } from "@jarvis/business";
 import {
   COMMS_PEPPER_REF, CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MeetingService, ReplySweep, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
-  commsAnyEnabled, commsToolDefinitions, createContentHasher, parseCommsConfig, retentionTenants, startRetentionSweep, type CommsConfig
+  commsAnyEnabled, commsToolDefinitions, createContentHasher, guardLegacyNotifyTransport, parseCommsConfig, retentionTenants, startRetentionSweep, type CommsConfig
 } from "@jarvis/comms";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
-import { AccessTokenCache, googleAccessToken, microsoftRefreshExchange, type ToolDefinition, type ToolGateway } from "@jarvis/tool-gateway";
+import { AccessTokenCache, googleAccessToken, microsoftRefreshExchange, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
 
 /** Delegerte Graph-scopes for Teams-sending (`ChatMessage.Send`/`ChannelMessage.Send` finnes KUN som delegerte rettigheter - verifisert via søk). Eksakt scope-streng i refresh-forespørselen er UVERIFISERT. */
 const TEAMS_REFRESH_SCOPE = "https://graph.microsoft.com/ChatMessage.Send https://graph.microsoft.com/ChannelMessage.Send offline_access";
@@ -41,11 +41,16 @@ export interface CommsRuntime {
    `JARVIS_COMMS_TENANT_ID` MÅ være en av dem (ellers kastes `InvalidCommsConfigError` og oppstarten stopper: hendelser skrevet dit ville aldri blitt sveipet).
    */
   startSweeps(tenants: readonly string[], ownerPersonId: string): void;
+  /**
+   * WP-G1c (D-481, JARVIS-112 g5): pakker en av de eldre `twilio`/`telnyx`/`whatsapp`/`slack`/`discord`-transportene inn i en STOP-vakt (kun `notify` rørt: avmeldt mottaker = policy-avslag FØR noe sendes; ingen nye tak). Med ALLE comms-flagg AV
+   * returneres transporten uendret (samme objekt): oppførselen er identisk med main. Dekker kun api-prosessen; workeren har egne transporter (se runbook).
+   */
+  guardLegacyNotifyTransport(toolId: string, transport: ToolTransport): ToolTransport;
 }
 
 export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
   const config = parseCommsConfig(input.env);
-  if (!commsAnyEnabled(config)) return { config, tools: [], apiDeps: () => undefined, startSweeps: () => undefined };
+  if (!commsAnyEnabled(config)) return { config, tools: [], apiDeps: () => undefined, startSweeps: () => undefined, guardLegacyNotifyTransport: (_toolId, transport) => transport };
 
   const clock = input.clock ?? (() => new Date());
   const store = new CommsStore(input.pool, clock);
@@ -123,6 +128,9 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
 
   return {
     config, tools, startSweeps,
+    guardLegacyNotifyTransport: (toolId, transport) => guardLegacyNotifyTransport(toolId, transport, {
+      store, extraTenants: () => (config.webhook_tenant_id === null ? [] : [config.webhook_tenant_id]), ...(input.warn ? { warn: input.warn } : {})
+    }),
     apiDeps: (gateway) => ({
       ...(webhookService ? { webhooks: { service: webhookService, providers: config.webhooks } } : {}),
       ...(funnel ? { outbound: { gateway, funnel } } : {})

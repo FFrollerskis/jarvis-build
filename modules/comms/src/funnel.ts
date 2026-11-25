@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { BusinessService } from "@jarvis/business";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
-import { afterAcceptedMutation, isIndeterminateTransportError, isOutcomeUnknownMessage } from "@jarvis/tool-gateway";
+import { PolicyDeniedError, afterAcceptedMutation, isIndeterminateTransportError, isOutcomeUnknownMessage } from "@jarvis/tool-gateway";
 import { ProviderRejectedError, type AdapterMap } from "./adapters.ts";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel, type CommsProvider, type ContentHasher } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
@@ -373,12 +373,13 @@ export class OutboundFunnel {
    */
   private replayResult(prior: Extract<BeginResult, { kind: "replay" }>, req: OutboundRequest, hasher: ContentHasher | null): ExecResult {
     const match = this.fingerprintMatches(prior, req, hasher);
-    if (match === "unknown") throw new Error(`comms_policy_denied:${KEY_UNAVAILABLE}`);
-    if (!match) throw new Error("idempotency_key_collision");
+    // WP-G1c (g4): Jarvis' egne avslag kastes som `PolicyDeniedError` (samme melding som før): de teller ikke mot connector-helse.
+    if (match === "unknown") throw new PolicyDeniedError(`comms_policy_denied:${KEY_UNAVAILABLE}`);
+    if (!match) throw new PolicyDeniedError("idempotency_key_collision");
     if (prior.status === "sent") {
       return { external_id: prior.provider_message_id ?? "replayed", data: { log_id: prior.log_id, status: "sent", deduplicated: true, channel: req.channel, kind: req.kind } };
     }
-    if (prior.status === "failed") throw new Error("comms_request_id_burned_use_a_new_key");
+    if (prior.status === "failed") throw new PolicyDeniedError("comms_request_id_burned_use_a_new_key");
     throw new Error("outcome_unknown:comms_request_in_flight_or_unknown");
   }
 
@@ -391,7 +392,7 @@ export class OutboundFunnel {
     const ev = await this.evaluate(ctx, parsed);
     if (!ev.decision.allowed) {
       await this.recordDenial(ctx, ev);
-      throw new Error(`comms_policy_denied:${ev.decision.denial_codes.slice(0, 4).join(".")}`.slice(0, 120));
+      throw new PolicyDeniedError(`comms_policy_denied:${ev.decision.denial_codes.slice(0, 4).join(".")}`.slice(0, 120));
     }
     const req = parsed.request;
     const adapter = ev.account === null ? undefined : adapters[ev.account.provider];
@@ -403,7 +404,7 @@ export class OutboundFunnel {
     const begin = await store.beginAttempt(ctx.tenantId, ctx.space, this.entry(ctx, ev), ctx.actor, config.log_retention_days, caps);
     if (begin.kind === "cap_exceeded") {
       await this.recordDenial(ctx, this.withCapDenial(ev, begin.scope, begin.code));
-      throw new Error(`comms_policy_denied:${begin.code}`);
+      throw new PolicyDeniedError(`comms_policy_denied:${begin.code}`);
     }
     if (begin.kind === "replay") return this.replayResult(begin, req, await this.hasher()); // racevern: et samtidig forsøk med samme id rakk å skrive raden mellom den tidlige sjekken og her
     const target = { account_ref: req.account_ref, recipient: req.recipient };

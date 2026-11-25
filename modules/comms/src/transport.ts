@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
-import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { PolicyDeniedError, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, isValidAccountRef, normalizeRecipient, optOutHash, recipientHint, type CommsProvider } from "./channels.ts";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import {
@@ -66,7 +66,8 @@ export class CommsTransport implements ToolTransport {
   /** Leverandør-lesing går KUN mot en konto eieren har autorisert, og kun når kontoens leverandør faktisk er den handlingen gjelder (aldri en Telnyx-nøkkel mot Twilio-API-et). */
   private async requireAccount(ctx: FunnelContext, channel: "slack" | "discord" | "whatsapp" | "sms", accountRef: string, provider: CommsProvider): Promise<void> {
     const account = await this.deps.store.findActiveAccount(ctx.tenantId, ctx.space, channel, accountRef);
-    if (account === null) throw new Error("comms_account_not_authorized");
+    // WP-G1c (g4): allowlist-avslag er Jarvis' egen beslutning (ikke en leverandørfeil; teksten inneholder «auth» og ble tidligere regexet som `auth_failed`).
+    if (account === null) throw new PolicyDeniedError("comms_account_not_authorized");
     if (account.provider !== provider) throw new Error("comms_read_not_supported_by_provider");
   }
 
@@ -111,7 +112,7 @@ export class CommsTransport implements ToolTransport {
     const identity = context?.identity;
     if (!identity) throw new Error("comms_missing_invocation_context");
     const space = identity.memory_space_id as MemorySpace;
-    if (!ALLOWED_SPACES.includes(space)) throw new Error("comms_space_not_allowed");
+    if (!ALLOWED_SPACES.includes(space)) throw new PolicyDeniedError("comms_space_not_allowed");
     return {
       tenantId: identity.tenant_id, space,
       actor: { person_id: identity.person_id, session_id: identity.session_id, ...(context.task_id !== undefined ? { task_id: context.task_id } : {}) },

@@ -1,6 +1,7 @@
 export * from "./gateway.ts";
 export * from "./call-signal.ts";
 export * from "./transport-errors.ts";
+export * from "./policy-denied.ts";
 export * from "./after-accepted-mutation.ts";
 export * from "./class-d-pipeline.ts";
 export * from "./finance-class-d.ts";

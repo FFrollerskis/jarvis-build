@@ -6,6 +6,7 @@ import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
 import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal, toolCallAbortEnabled } from "./call-signal.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, ownerStepUpDenial, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isIndeterminateTransportError, transportErrorKind } from "./transport-errors.ts";
+import { isPolicyDenied } from "./policy-denied.ts";
 import { isFinancialNamespace } from "./tool-manifest.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
@@ -1173,9 +1174,12 @@ export class ToolGateway {
       const transportUnknown = !isOutcomeUnknownMessage(raw) && mayDuplicateOnRetry(definition) && isIndeterminateTransportError(err);
       const message = transportUnknown ? `${OUTCOME_UNKNOWN_PREFIX}:transport_${transportErrorKind(err)}` : raw;
       failure = { message, timedOut: isOutcomeUnknownMessage(message) };
-      this.setHealth(request.tool_id,
-        /401|403|auth/.test(raw) ? "auth_failed" : /429|rate/.test(raw) ? "rate_limited" : "unavailable",
-        raw.slice(0, 60));
+      // WP-G1c (JARVIS-112 g4): et typet policy-avslag (`PolicyDeniedError`) er Jarvis' egen beslutning, ikke en leverandørfeil: connector-helsen røres ikke. ALT annet er klassifisert som før.
+      if (!isPolicyDenied(err)) {
+        this.setHealth(request.tool_id,
+          /401|403|auth/.test(raw) ? "auth_failed" : /429|rate/.test(raw) ? "rate_limited" : "unavailable",
+          raw.slice(0, 60));
+      }
     }
 
     let afterState: JsonValue | null = null;
