@@ -814,7 +814,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     evolutionReadiness, ev0Status: () => getLastEv0BootStatus(), evolutionTenantId: owner.tenant_id,
     valueReport: (tenantId) => lateExecutive().getValueReport(tenantId), infraStatus: (tenantId) => lateExecutive().getInfraStatus(tenantId),
     ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
-    ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
+    ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {}),
+    // WP-N1b fiks-runde 1 (FIX-1): Sikkerhet-senteret holder finanskoblinger/-credentials ute for en skymodell KUN med begrenset-vakten på (flagg AV: nøkkelen settes ikke = H2-oppførselen som på main).
+    ...(restrictedContextGuard.enabled ? { financeGuard: true as const } : {})
   });
   // WP-D3 (UA-4 Growth, D-459): skrivehandlinger mot annonse-/analyseplattformene + eksperimentregisteret. ALT er AV som standard: uten `JARVIS_GROWTH_WRITE_PLATFORMS` registreres INGEN skriveverktøy, og uten
   // `JARVIS_GROWTH_EXPERIMENTS=on` ingen eksperimentverktøy - verktøylister, utvalg og rate-grenser er da identiske med main, og `deps.growthWrites` (rutene) finnes ikke (404). Skriving krever dessuten

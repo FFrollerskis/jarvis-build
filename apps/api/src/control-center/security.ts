@@ -5,7 +5,7 @@ import {
   type GoldenSuiteControl, type GoldenSuiteRunResult
 } from "@jarvis/executive";
 import type { KillSwitch, OwnerControls } from "@jarvis/policy";
-import type { ToolGateway } from "@jarvis/tool-gateway";
+import { isFinanceConnectorId, isFinanceCredentialRef, isFinanceDerivedSituationDomain, type ToolGateway } from "@jarvis/tool-gateway";
 import { actionRequiresStepUp } from "../step-up.ts";
 import { readDomainPauses, readFinanceKillSwitch } from "./authority.ts";
 import {
@@ -162,6 +162,11 @@ export interface SecurityCenterDeps {
   /** Frosne connectorer og tilbakekalte credentials (kun referansenavn og tidspunkt, aldri verdier). */
   ownerControls: Pick<OwnerControls, "listFrozenConnectorsDurable" | "listRevokedCredentialsDurable">;
   killSwitch: Pick<KillSwitch, "currentStateDurable">;
+  /**
+   * WP-N1b fiks-runde 1 (FIX-1, kun med begrenset-vakten PÅ; satt fra `main.ts`): et senter bygget for en SKYmodell (`restrictFinance`) holder i tillegg finanskoblinger og finans-credentials (id/referanse og antall) og
+   * pausen i `spend`-domenet ute av de frosne-/tilbakekalte-/pauselistene. Utelatt = nøyaktig H2-oppførselen (main): flagget er prosesskonstant, så avgjørelsen kan ikke avhenge av hvem som bygget først (delt bygging).
+   */
+  financeGuard?: boolean;
   /** Golden-suite-kjøreren. Utelatt = knappen er AV (`JARVIS_CONTROL_GOLDEN_SUITE`): senteret viser da kun at selvtesten ikke er tilgjengelig herfra. */
   goldenSuite?: GoldenSuiteControl;
 }
@@ -182,13 +187,25 @@ export function createSecurityCenter(deps: SecurityCenterDeps): ControlCenterDef
 
       // Gjennomgang M2 (H2): går rapporten til en SKYmodell (`restrictFinance`), leses og vises ingenting fra finansdomenet - hverken finans-nødbryteren, revisjonsrader om finansverktøy eller finans-gjenopprettinger.
       const restrict = ctx.restrictFinance === true;
+      // FIX-1 (fiks-runde 1): med begrenset-vakten PÅ er frosne koblinger/tilbakekalte credentials listet med id/referanse i `detail_no` og telt (`frozen_now`/`revoked_now`/`stopped_credentials`) - finansavledet metadata som aldri skal til en skymodell.
+      // Filteret er FAIL-CLOSED (`isFinanceConnectorId`/`isFinanceCredentialRef`: ukjent = finans) og settes FØR listene brukes, så både navnene og tellingene bygges på resten.
+      const strict = restrict && deps.financeGuard === true;
       const [aggR, triggerR, killR, controlsR, financeR, pausesR] = await Promise.all([
         settle(() => readSecurityAggregates(deps.pool, tenantId, nowMs, { restrictFinance: restrict })),
         settle(() => readAuditTrigger(deps.pool)),
         settle(() => deps.killSwitch.currentStateDurable()),
-        settle(async () => ({ frozen: await deps.ownerControls.listFrozenConnectorsDurable(), revoked: await deps.ownerControls.listRevokedCredentialsDurable() })),
+        settle(async () => {
+          const frozen = await deps.ownerControls.listFrozenConnectorsDurable();
+          const revoked = await deps.ownerControls.listRevokedCredentialsDurable();
+          return strict
+            ? { frozen: frozen.filter((f) => !isFinanceConnectorId(f.connector_id)), revoked: revoked.filter((r) => !isFinanceCredentialRef(r.credential_ref)) }
+            : { frozen, revoked };
+        }),
         restrict ? Promise.resolve(null) : settle(() => readFinanceKillSwitch(deps.pool, tenantId)),
-        settle(() => readDomainPauses(deps.pool))
+        settle(async () => {
+          const pauses = await readDomainPauses(deps.pool);
+          return strict ? pauses.filter((p) => !isFinanceDerivedSituationDomain(p.domain)) : pauses;
+        })
       ]);
 
       const sections: ControlSection[] = [];

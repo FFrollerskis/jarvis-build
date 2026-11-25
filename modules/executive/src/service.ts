@@ -20,7 +20,7 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import { financeWithheldMarker, isFinanceDerivedSituationDomain, listConnectorStatus, ownerStepUpDenial, withholdFinanceFromCurrentModel, type ConnectorAuthInfo, type FinanceWithheldMarker, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { financeWithheldMarker, isCloudWithheldAttentionDomain, listConnectorStatus, ownerStepUpDenial, withholdFinanceFromCurrentModel, type ConnectorAuthInfo, type FinanceWithheldMarker, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import { shapeAutonomyPoliciesForCloud, shapeOwnerControlForCloud, shapePausedDomainsForCloud } from "./finance-withheld.ts";
 import { rankAttentionQueue } from "./ranking.ts";
 import type {
@@ -195,8 +195,9 @@ export class ExecutiveService {
       requireData<SituationNotificationPolicy | null>(this.gateway, identity, "situations", "get_notification_policy")
     ]);
     // WP-N1b (K2): situasjoner i det finansavledede `spend`-domenet (begrunnelsen er løkkens tekst: beløp, leverandør, AI-kost) holdes ute FØR rangeringen - så heller ikke plassering (`rank`) eller antall røper dem.
+    // FIX-2 (fiks-runde 1): også `infra`-domenet (hendelsestitler fra produsentene navngir finanskoblinger/-jobber og kan ikke bevises ufarlige strukturelt): `isCloudWithheldAttentionDomain` = `spend` + `infra`.
     const withholdFinance = options.withholdFinance === true;
-    const financeSituationIds = new Set(withholdFinance ? allSituations.filter((s) => isFinanceDerivedSituationDomain(s.domain)).map((s) => s.situation_id) : []);
+    const financeSituationIds = new Set(withholdFinance ? allSituations.filter((s) => isCloudWithheldAttentionDomain(s.domain)).map((s) => s.situation_id) : []);
     const situations = withholdFinance ? allSituations.filter((s) => !financeSituationIds.has(s.situation_id)) : allSituations;
     const pausedDomains = new Set(pauseState.paused);
     const autonomyBoundDomains = new Set(autonomyPolicies.map((p) => p.domain));

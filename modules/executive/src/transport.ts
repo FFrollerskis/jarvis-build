@@ -54,7 +54,8 @@ export class ExecutiveTransport implements ToolTransport {
       return { data: { found: false, center, summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." } as unknown as JsonValue };
     }
     // `summary_no` og `explanation_no` først: chat-executoren kutter lange svar bakfra, og det er disse modellen skal relayere.
-    return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report } as unknown as JsonValue };
+    // WP-N1b (FIX-1): med vakten PÅ og en sky-/ukjent modell bærer et senter bygget uten finansavledet tilstand (`restrictFinance`) alltid det nøytrale merket (også når ingenting ble fjernet) - skyen kan ikke utlede om noe fantes.
+    return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report, ...(cloud && guarded ? financeWithheldMarker() : {}) } as unknown as JsonValue };
   }
 
   /** Gjennomgang av PR #324 (M3/L4): eier + signert økt-porten for `get_infra_status` - fail-closed også uten register. */
@@ -170,7 +171,7 @@ export class ExecutiveTransport implements ToolTransport {
             ? { withhold: guarded ? [...CLOUD_WITHHELD_CENTERS, ...GUARDED_CLOUD_WITHHELD_CENTERS] : CLOUD_WITHHELD_CENTERS, restrictFinance: true }
             : {});
           const { summary_no, ...rest } = overview;
-          return { data: { summary_no, ...rest } as unknown as JsonValue }; // `summary_no` først (se under)
+          return { data: { summary_no, ...rest, ...(guarded ? financeWithheldMarker() : {}) } as unknown as JsonValue }; // `summary_no` først (se under)
         }
         return this.centerResponse(identity, String(center), context?.servingModel);
       }
@@ -218,6 +219,9 @@ export class ExecutiveTransport implements ToolTransport {
         return { data: report as unknown as JsonValue };
       }
       case "get_infra_status": {
+        // WP-N1b fiks-runde 1 (FIX-2, strengeste regel): hendelsestitlene (`providerProducer`: «Tilkobling svikter: <tilkobling>», `schedulerProducer`: «Bakgrunnsjobben <jobb> ga opp»), repo/gren og produsentenes feiltekster kan navngi
+        // finanskoblinger og finansjobber og kan ikke renses strukturelt - hele driftsbildet holdes tilbake fra sky/ukjent VED UTFØRELSE, FØR kilden leses (lokal modell og eier får det; Drift-senteret viser kun tall).
+        if (withholdFinanceFromCurrentModel()) return { data: { ...financeWithheldMarker() } as unknown as JsonValue };
         // WP-E1: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
         const report = await this.service.getInfraStatus(identity.tenant_id);
         return { data: report as unknown as JsonValue };
