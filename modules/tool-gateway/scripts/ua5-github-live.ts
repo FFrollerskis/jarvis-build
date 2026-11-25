@@ -17,10 +17,15 @@
 // LESE-sidestykker (get_pull_request/list_workflow_runs) verifiseres live.
 // All test-scaffolding (branch + issue) ryddes opp ved slutten, uansett utfall.
 //
-// Kjøres: node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts/ua5-github-live.ts [owner/repo]
-// (default repo: tsworkflow/jarvisbuild - samme repo koden selv bor i)
+// Kjøres: node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts/ua5-github-live.ts <owner/repo>
+// repo er PÅKREVD og skal være et eget SANDBOX-/test-repo: skriptet har INGEN standard og NEKTER produksjonsrepoet (D-41, D-479): det kanoniske repoet, forkets tidligere navn, det gamle frosne repoet,
+// repoet JARVIS_GITHUB_REPO peker på og JARVIS_GIT_ALLOWED_REPOS, også som `.git`-/`/`-alias og med store bokstaver (se src/github-sandbox-guard.ts). Ingen overstyring finnes med vilje.
 
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { GithubTransport } from "../src/live-transports.ts";
+import { isProductionGithubRepo } from "../src/github-sandbox-guard.ts";
+import { assertGithubRepoSlug } from "../src/url-safety.ts";
 
 type Verdict = "PASS" | "FAIL" | "BLOCKED_NO_CREDENTIALS" | "NOT_RUN";
 
@@ -46,8 +51,34 @@ function log(line: string): void {
   console.log(line);
 }
 
+export type LiveRepoResolution = { ok: true; repo: string } | { ok: false; reason: string };
+
+/** Repoet skriptet kjøres mot: PÅKREVD argument (ingen standard), gyldig `eier/repo`, og aldri et produksjonsrepo (D-41 blast radius; D-479). */
+export function resolveLiveRepo(argv: readonly string[], env: Readonly<Record<string, string | undefined>>): LiveRepoResolution {
+  const raw = (argv[0] ?? "").trim();
+  if (raw === "") return { ok: false, reason: "repo mangler: oppgi et eget SANDBOX-/test-repo (<eier>/<repo>). Skriptet oppretter en test-gren og et test-issue og har ingen standard (D-41, D-479)" };
+  let repo: string;
+  try {
+    repo = assertGithubRepoSlug(raw);
+  } catch {
+    return { ok: false, reason: "repo må være `eier/repo` (kun bokstaver, tall, `-`, `_` og `.`)" };
+  }
+  const allowlist = (env["JARVIS_GIT_ALLOWED_REPOS"] ?? "").split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  if (isProductionGithubRepo(repo, env, allowlist)) {
+    return { ok: false, reason: `${repo} er et produksjonsrepo (det kanoniske repoet, et tidligere navn på det, det gamle frosne repoet, JARVIS_GITHUB_REPO eller JARVIS_GIT_ALLOWED_REPOS): bruk et eget SANDBOX-/test-repo. Ingen overstyring finnes (D-41, D-479)` };
+  }
+  return { ok: true, repo };
+}
+
 async function main(): Promise<void> {
-  const repo = process.argv[2] ?? "tsworkflow/jarvisbuild";
+  const resolved = resolveLiveRepo(process.argv.slice(2), process.env);
+  if (!resolved.ok) {
+    log(`FEIL: ${resolved.reason}. Ingenting er kjørt mot GitHub.`);
+    console.log("LIVE_PROVIDER_VERIFIED=false");
+    process.exitCode = 2;
+    return;
+  }
+  const repo = resolved.repo;
   const token = process.env["JARVIS_GITHUB_TOKEN"];
   if (!token) {
     for (const key of Object.keys(results)) results[key] = "BLOCKED_NO_CREDENTIALS";
@@ -186,7 +217,18 @@ function printSummary(repo: string): void {
   console.log(`LIVE_PROVIDER_VERIFIED=${!hardFail && !Object.values(results).includes("BLOCKED_NO_CREDENTIALS")}`);
 }
 
-main().catch((err) => {
-  console.error("UNEXPECTED_SCRIPT_FAILURE:", sanitize(err));
-  process.exitCode = 1;
-});
+/** Kjøres scriptet direkte? `import.meta.url` er realpath, `process.argv[1]` er det som ble skrevet (kan gå via en symlinket mappe): sammenlign mot realpath, ellers blir `main()` en stille no-op med exit 0 (reviewer A delta N2). */
+function isEntryPoint(): boolean {
+  try {
+    return process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  main().catch((err) => {
+    console.error("UNEXPECTED_SCRIPT_FAILURE:", sanitize(err));
+    process.exitCode = 1;
+  });
+}

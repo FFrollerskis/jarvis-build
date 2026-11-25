@@ -19,7 +19,7 @@
 // Hemmeligheter: tokenet og nøkkelen skrives ALDRI ut; scriptet skanner sin egen utskrift og feiler (`secret_safety`) hvis noe lekker.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -28,7 +28,7 @@ import {
   GITHUB_APP_ERROR_HINTS, GITHUB_APP_PRIVATE_KEY_REF, GitHubAppAuth, GitHubAppAuthError, asGitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase,
   parseGitHubAppPrivateKey
 } from "../src/github-app-auth.ts";
-import { configuredGithubRepo } from "../src/github-repo-lock.ts";
+import { isProductionGithubRepo, productionGithubRepoKeys } from "../src/github-sandbox-guard.ts";
 import { GITHUB_FULL_CAPABILITY_PERMISSIONS, createGitHubAuth, type GitHubAuth } from "../src/github-token-provider.ts";
 import { GithubTransport } from "../src/live-transports.ts";
 import { assertGithubRepoSlug, guardedFetch } from "../src/url-safety.ts";
@@ -156,16 +156,14 @@ export async function runGitHubAppLive(options: LiveOptions): Promise<LiveResult
   }
   results["app_config"] = "PASS";
   log(`app_config: app_id=${settings.appId} installation_id=${settings.installationId} repoer=${settings.repositories.join(",")} api_base=${settings.apiBase}`);
-  // Review F14: --sandbox-repo SKRIVER (test-gren) og er derfor aldri et produksjonsrepo - D-41: test-/akseptanseløp begrenses til sandbox-ressurser (blast radius). Produksjonsrepoene er
-  // allowlisten (JARVIS_GIT_ALLOWED_REPOS / JARVIS_GITHUB_REPO), repoet connectoren er konfigurert mot, og standardrepoet Jarvis alltid regner som eierens. Ingen overstyring finnes med vilje.
-  if (sandboxRepo) {
-    const production = new Set([...settings.repositories, configuredGithubRepo(options.env), configuredGithubRepo({})].map((r) => r.toLowerCase()));
-    if (production.has(sandboxRepo.toLowerCase())) {
-      results["app_config"] = "FAIL";
-      diagnostics["app_config"] = `--sandbox-repo ${sandboxRepo} er et produksjonsrepo (${[...production].join(", ")}) - bruk et eget TEST-repo App-en er installert på`;
-      log(`FEIL: ${diagnostics["app_config"]}. Ingenting er kjørt mot GitHub.`);
-      return finish(1, "NOT VERIFIED (--sandbox-repo er et produksjonsrepo)");
-    }
+  // Review F14: --sandbox-repo SKRIVER (test-gren) og er derfor aldri et produksjonsrepo - D-41: test-/akseptanseløp begrenses til sandbox-ressurser (blast radius). Produksjon er allowlisten
+  // (JARVIS_GIT_ALLOWED_REPOS / JARVIS_GITHUB_REPO), repoet connectoren er konfigurert mot og de faste produksjonsnavnene (kanonisk repo, forkets tidligere navn og det gamle frosne repoet; D-479):
+  // se `github-sandbox-guard.ts`. Sammenligning via alias-nøkkel (små bokstaver, uten `.git`/`/` på slutten). Ingen overstyring finnes med vilje.
+  if (sandboxRepo && isProductionGithubRepo(sandboxRepo, options.env, settings.repositories)) {
+    results["app_config"] = "FAIL";
+    diagnostics["app_config"] = `--sandbox-repo ${sandboxRepo} er et produksjonsrepo (${[...productionGithubRepoKeys(options.env, settings.repositories)].join(", ")}) - bruk et eget TEST-repo App-en er installert på`;
+    log(`FEIL: ${diagnostics["app_config"]}. Ingenting er kjørt mot GitHub.`);
+    return finish(1, "NOT VERIFIED (--sandbox-repo er et produksjonsrepo)");
   }
   const app = auth.app;
   if (!app) {
@@ -414,7 +412,16 @@ async function main(): Promise<void> {
   process.exitCode = result.exitCode;
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/** Se `ua5-github-live.ts`: `import.meta.url` er realpath, `process.argv[1]` er ikke det (symlinket mappe gir ellers en stille no-op med exit 0). */
+function isEntryPoint(): boolean {
+  try {
+    return process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   main().catch((err) => {
     console.error("UNEXPECTED_SCRIPT_FAILURE:", maskGitHubSecrets(err instanceof Error ? err.message : "unknown").slice(0, 300));
     console.log("GITHUB_APP_LIVE_STATUS=NOT VERIFIED (uventet scriptfeil)");

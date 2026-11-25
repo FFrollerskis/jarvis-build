@@ -12,7 +12,7 @@ import type { JsonValue } from "@jarvis/contracts";
 export interface KnowledgeRecord {
   /** Kildetype, f.eks. "github" | "filesystem" | "google_drive" | "obsidian". */
   source_type: string;
-  /** Stabil identifikator for KILDEINSTANSEN (f.eks. "github:tsworkflow/jarvisbuild", "fs:docs-root"). */
+  /** Stabil identifikator for KILDEINSTANSEN (f.eks. "github:FFrollerskis/jarvis-build", "fs:docs-root"). */
   source_instance_id: string;
   /** Stabil identifikator INNENFOR kilden (issue-nummer, relativ filsti, Drive file id) - canonical identity for dedupe/rename-toleranse. */
   external_id: string;

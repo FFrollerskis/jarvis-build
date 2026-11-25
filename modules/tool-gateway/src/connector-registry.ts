@@ -1,5 +1,6 @@
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { ToolGateway } from "./gateway.ts";
+import { configuredGithubRepo } from "./github-repo-lock.ts";
 
 /**
  * Task #119 (integrasjons-dashboard, D-211): kanonisk, eier-vendt liste over
@@ -313,7 +314,7 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     // SAMME ref (se `github-token-provider.ts`); privatnøkkelen er en valgfri ref, lagret i vaulten (aldri som compose-env).
     credential_refs: ["JARVIS_GITHUB_TOKEN"],
     optional_credential_refs: ["JARVIS_GITHUB_APP_PRIVATE_KEY"],
-    live_test: { tool_id: "github", action: "read_issues", parameters: () => ({ repo: process.env["JARVIS_GITHUB_REPO"] ?? "tsworkflow/jarvisbuild" }) }
+    live_test: { tool_id: "github", action: "read_issues", parameters: () => ({ repo: configuredGithubRepo() }) }
   },
   {
     id: "google_calendar", display_name: "Google Calendar", category: "tool_gateway",

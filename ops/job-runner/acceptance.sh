@@ -4,8 +4,9 @@
 #
 #   ACCEPTANCE_REPO=<owner/repo> ops/job-runner/acceptance.sh [--with-restart] [--with-ttl] [--dry-run]
 #
-#   ACCEPTANCE_REPO     PÅKREVD (unntatt --dry-run): et SANDBOX-/test-repo som står i runner.allowed_repos. Aldri produksjonsrepoet (tsworkflow/jarvisbuild nektes HARDT,
-#                       også om det står i allowed_repos): publiseringssteget pusher en ekte branch `jarvis/accept-<tid>` dit (blast radius, D-41). Slettes manuelt etterpå.
+#   ACCEPTANCE_REPO     PÅKREVD (unntatt --dry-run): et SANDBOX-/test-repo som står i runner.allowed_repos (små bokstaver; store bokstaver i variabelen gjøres om). Aldri produksjonsrepoet: FFrollerskis/jarvis-build, forkets
+#                       tidligere navn FFrollerskis/jarvisbuild, det gamle tsworkflow/jarvisbuild og JARVIS_GITHUB_REPO (fra miljøet eller .env) nektes HARDT, også som `.git`/`/`-alias og også om de står i allowed_repos
+#                       (D-479): publiseringssteget pusher en ekte branch `jarvis/accept-<tid>` dit (blast radius, D-41). Slettes manuelt etterpå. Samme .env som compose leses (ACCEPTANCE_ENV_FILE, standard <repo>/.env).
 #   --with-restart      sender SIGKILL til jarvis-job-runner og restarter (krever root): bevis for reclaim etter krasj (D-32 port 12). ADVARSEL: dreper den LEVENDE runneren og alle
 #                       jobbene på den. Krever ACCEPT_CONFIRM_RESTART=yes (eller at du skriver RESTART når du blir spurt), og J09 hoppes over hvis andre jobber enn akseptansens egen er aktive.
 #   --with-ttl          venter til en jobb passerer runner.max_job_lifetime_s (bør være lav, f.eks. 60) og ser at den fjernes av TTL-rydderen.
@@ -74,6 +75,179 @@ record() { # id status detail
   case "$status" in PASS) PASS=$((PASS+1));; FAIL) FAIL=$((FAIL+1));; SKIP) SKIP=$((SKIP+1));; MANUELL) MANUAL=$((MANUAL+1));; esac
   ROWS+=("| $id | $status | ${detail//|//} |")
   printf '%-30s %-8s %s\n' "$id" "$status" "$detail"
+}
+
+# --- produksjonsvern (D-479, JARVIS-117 c): ÉN liste og få, rene funksjoner, testet mot kontrakten via ACCEPTANCE_SOURCE_ONLY=1 ---------------------
+# Produksjonsrepoer (små bokstaver, uten `.git` og `/`): det NÅVÆRENDE kanoniske repoet, TIDLIGERE NAVN på det (forken het jarvisbuild før omdøpingen; GitHub videresender det gamle navnet) og det GAMLE frosne repoet.
+# Listen holdes i takt med PRODUCTION_GITHUB_REPO_NAMES i packages/contracts/src/github-repo.ts av en test (ops/job-runner/test/acceptance-script.test.mjs) som leser denne arrayen.
+PRODUCTION_REPOS=(ffrollerskis/jarvis-build ffrollerskis/jarvisbuild tsworkflow/jarvisbuild)
+
+# Små bokstaver uten eksterne programmer og uavhengig av locale (tr_TR gjør `I` til `ı`); vernet skal ikke svikte åpent fordi et verktøy mangler.
+lower() { local LC_ALL=C; printf '%s' "${1,,}"; }
+
+# Trim blanke (inkl. tab og CR) i begge ender (C-locale: kun ASCII-blanke, uavhengig av miljøets locale).
+trim() { local LC_ALL=C v="$1"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "$v"; }
+
+# Sammenligningsnøkkel for et repo-navn: små bokstaver, uten blanke, uten `/` og `.git` på slutten (til fikspunkt). GitHub behandler `eier/repo`, `eier/repo/` og `eier/repo.git` som samme repo,
+# så et alias skal ikke omgå vernet. Samme normalisering som `githubRepoAliasKey` i packages/contracts/src/github-repo.ts.
+alias_key() {
+  local LC_ALL=C k p
+  k="$(trim "$(lower "$1")")"
+  while :; do p="$k"; k="${k%/}"; k="${k%.git}"; [ "$k" = "$p" ] && break; done
+  printf '%s' "$k"
+}
+
+# ACCEPTANCE_REPO slik runneren vil ha den: trimmet og med små bokstaver (runner.allowed_repos og git_credentials MÅ være små bokstaver; GitHub skiller ikke på store/små).
+normalize_repo_arg() { local LC_ALL=C; lower "$(trim "$1")"; }
+
+# .env-filen som leses for JARVIS_GITHUB_REPO: $ACCEPTANCE_ENV_FILE, ellers $ROOT/.env. `ACCEPTANCE_ENV_FILE` kan peke på en annen fil; det påvirker KUN denne grenen, aldri de faste navnene.
+env_file_path() { printf '%s' "${ACCEPTANCE_ENV_FILE:-$ROOT/.env}"; }
+
+# Linjer i .env som KAN sette NAME slik compose leser filen. compose er en tokenizer, ikke linjebasert: etter en verdi i anførselstegn kan en NY tilordning stå på samme linje
+# (`A="x" NAME=verdi`; funnet av en tilfeldig differensialfuzz mot docker compose), og innledende blanke kan være Unicode (NBSP, U+3000) eller BOM. Derfor er en kandidat HVER linje der NAME står
+# som et helt navn (ikke etter en navnetegn eller `$`, ikke før en navnetegn), uansett hvor på linjen, med to unntak: rene kommentarlinjer (ASCII-blanke og så `#`) og linjer der alle forekomster er referanser `${NAME...`
+# (bruk av variabelen i en annen verdi). Andre nøkler (NOT_NAME, NAME_X) og `$NAME` er ikke treff. Hver kandidat tolkes så strengt av env_line_value; det som ikke lar seg tolke gir FATAL (aldri en gjetning).
+# grep -a/LC_ALL=C: en fil med NUL-bytes eller ikke-UTF-8 tegn leses fortsatt (ikke «Binary file matches»). Skriver `LINJENR:linje` (linjenummeret brukes i meldinger; innholdet skrives aldri ut, det kan være en hemmelighet).
+env_file_candidate_lines() {
+  local LC_ALL=C name="$1" file l c stripped re
+  file="$(env_file_path)"
+  [ -f "$file" ] && [ -r "$file" ] || return 0
+  re="(^|[^A-Za-z0-9_\$])${name}([^A-Za-z0-9_]|\$)"
+  while IFS= read -r l; do   # l = LINJENR:linje (grep -n)
+    c="${l#*:}"
+    case "$c" in "${c%%[![:space:]]*}#"*) continue ;; esac   # ren kommentarlinje
+    stripped="${c//\$\{$name/}"                              # `${NAME...` er bruk av variabelen, ikke en tilordning
+    [[ "$stripped" =~ $re ]] || continue
+    printf '%s\n' "$l"
+  done < <(LC_ALL=C grep -a -n -E "$re" "$file" 2>/dev/null || true)   # LC_ALL=C også for grep: `local LC_ALL` eksporteres ikke til barneprosesser
+}
+
+# Tolker ÉN kandidatlinje STRENGT (hvitliste): `[export ]NAME[ ]=[ ]verdi` der verdien er tom eller består av bokstaver, tall, `.`, `_`, `-` og `/` (et repo-navn), evt. i enkle eller doble anførselstegn,
+# og kan følges av ` # kommentar` (hva som helst, også ikke-UTF-8). ALT ANNET (YAML-kolon, escapes og flerlinjede verdier i anførselstegn, `$`-interpolasjon, Unicode-blanke, backslash, mellomrom i verdien ...)
+# er former compose kan tolke annerledes enn vi gjør, og gir status 1 - aldri en gjetning (reviewer B sin differensialfuzz mot docker compose: ni slike former slapp tidligere gjennom vernet).
+# Skriver verdien (uten anførselstegn) og returnerer 0.
+env_line_value() {
+  local LC_ALL=C name="$1" l="$2" bom=$'\xEF\xBB\xBF' re
+  l="${l#"$bom"}"
+  re="^[[:space:]]*(export[[:space:]]+)?${name}[[:space:]]*=[[:space:]]*((\"[A-Za-z0-9._/-]*\")|('[A-Za-z0-9._/-]*')|([A-Za-z0-9._/-]*))([[:space:]]+#.*)?[[:space:]]*\$"
+  [[ "$l" =~ $re ]] || return 1
+  if [ -n "${BASH_REMATCH[3]}" ]; then l="${BASH_REMATCH[3]}"; printf '%s' "${l:1:${#l}-2}"
+  elif [ -n "${BASH_REMATCH[4]}" ]; then l="${BASH_REMATCH[4]}"; printf '%s' "${l:1:${#l}-2}"
+  else printf '%s' "${BASH_REMATCH[5]}"; fi
+  return 0
+}
+
+# Verdien til NAME i .env-filen (siste tolkbare forekomst vinner, som i compose): se env_line_value for hvilke former som tolkes. Filen leses med grep og aldri `source`-es.
+# Mangler eller kan ikke filen leses, er svaret tomt (da gjelder bare de faste navnene og miljøet). En linje som ikke kan tolkes hoppes over her og meldes av env_file_check (som main() avbryter på).
+env_file_value() {
+  local LC_ALL=C name="$1" l v value=""   # C-locale: bash-mønstre feiler ellers på ikke-UTF-8 bytes (en latin-1-kommentar på linjen ga tom verdi = vernet falt bort)
+  while IFS= read -r l; do
+    if v="$(env_line_value "$name" "${l#*:}")"; then value="$v"; fi
+  done < <(env_file_candidate_lines "$name")
+  printf '%s' "$value"
+}
+
+# Første linje (linjenummer til stdout) der en verdi i anførselstegn IKKE avsluttes på samme linje, i en .env-fil; status 3 hvis noen, 0 ellers (annen status = awk mangler eller feilet).
+# Flerlinjede verdier støttes ikke i .env (se .env.example), og compose leser da linjene annerledes enn vi gjør linje for linje: en annen nøkkels flerlinjede verdi kan SKJULE en `NAME=`-linje for compose
+# (siste linje vinner hos oss, men er en del av verdien hos compose) eller AVSLØRE en (`# ...slutt" NAME=prod`: en kommentarlinje for oss, en ny tilordning for compose; reviewer B N2).
+# Liten tokenizer som etterligner compose: hopp blanke (og bytes >= 0x80), `export`, nøkkel og `=`/`:` (nøkkelen leses bevisst videre enn compose: nøkkeltegn OG alle blanke, også bytes >= 0x80, TAB, VT, FF og CR, så en ikke-ASCII-nøkkel eller en blank midt i nøkkelen ikke skjuler en åpen verdi; reviewer B N5);
+# en verdi i anførselstegn leses til avsluttende tegn, der en tilbakestrek escaper neste tegn (også en tilbakestrek: `"C:\\dir\\"` er avsluttet; reviewer B N6); en uanført verdi går ut linjen;
+# etter en avsluttet verdi fortsetter tokenizeren (ny tilordning på samme linje). awk kalles med LC_ALL=C og bare POSIX-funksjoner.
+env_file_unterminated_quote() {
+  LC_ALL=C awk '
+    function isws(c) { return c != "" && (index(" \t\r\f\013", c) > 0 || c >= "\200") }
+    function iskey(c) { return c != "" && (c ~ /[A-Za-z0-9_.-]/ || index("[]", c) > 0) }
+    {
+      s = $0
+      if (NR == 1 && substr(s, 1, 3) == "\357\273\277") s = substr(s, 4)
+      n = length(s); i = 1
+      while (i <= n) {
+        while (i <= n && isws(substr(s, i, 1))) i++
+        if (i > n || substr(s, i, 1) == "#") break
+        if (substr(s, i, 6) == "export" && isws(substr(s, i + 6, 1))) { i += 6; continue }
+        j = i
+        while (j <= n && (iskey(substr(s, j, 1)) || isws(substr(s, j, 1)))) j++
+        i = j
+        c = substr(s, i, 1)
+        if (c != "=" && c != ":") break
+        i++
+        while (i <= n && isws(substr(s, i, 1))) i++
+        c = substr(s, i, 1)
+        if (c == "\"" || c == "\047") {
+          q = c; i++; closed = 0
+          while (i <= n) {
+            ch = substr(s, i, 1)
+            if (ch == "\\") { i += 2; continue }
+            if (ch == q) { closed = 1; break }
+            i++
+          }
+          if (!closed) { found = NR; exit }
+          i++
+          continue
+        }
+        break
+      }
+    }
+    END { if (found) { print found; exit 3 } exit 0 }' "$1" 2>/dev/null
+}
+
+# Kan vi stole på det vi leser fra .env? Skriver `WARN: ...` (fortsett: vernet gjelder da bare de faste navnene og miljøet) eller `FATAL: ...` (avbryt: vi kan ikke tolke filen, og compose kan gjøre noe annet enn vi gjør):
+#  - WARN: filen finnes men er ikke en vanlig fil (FIFO, enhet) eller kan ikke leses (rettigheter).
+#  - FATAL: en verdi i anførselstegn går over flere linjer (env_file_unterminated_quote), eller en kandidatlinje for NAME er ikke en form env_line_value tolker (se der), f.eks. YAML-kolon `NAME: v`,
+#    `$`-interpolasjon, escapes, Unicode-blanke, en omtale av navnet utenfor en egen tilordning, eller awk kan ikke kjøres (vi gjetter aldri). Meldingene oppgir linjenummer, aldri innhold.
+env_file_check() {
+  local LC_ALL=C name="$1" file l n c ln rc
+  file="$(env_file_path)"
+  if [ -e "$file" ] && { [ ! -f "$file" ] || [ ! -r "$file" ]; }; then echo "WARN: kan ikke lese $file (ikke en vanlig fil, eller ingen lesetilgang): $name derfra er IKKE sjekket mot produksjonsvernet"; return 0; fi
+  if [ -f "$file" ] && [ -r "$file" ]; then
+    ln="$(env_file_unterminated_quote "$file")"; rc=$?
+    case "$rc" in
+      0) ;;
+      3) echo "FATAL: $file har en verdi i anførselstegn som ikke avsluttes på samme linje (linje $ln): flerlinjede verdier støttes ikke i .env, og compose leser da $name annerledes enn vernet - skriv verdien på én linje"; return 0 ;;
+      *) echo "FATAL: kunne ikke analysere $file (awk mangler eller feilet): vernet kan ikke tolke den og gjetter ikke - installer awk eller fjern $name derfra"; return 0 ;;
+    esac
+  fi
+  while IFS= read -r l; do
+    n="${l%%:*}"; c="${l#*:}"
+    env_line_value "$name" "$c" > /dev/null && continue
+    case "${c%%[[:space:]]#*}" in
+      *'$'*) echo "FATAL: $name i $file (linje $n) bruker variabel-interpolasjon (\$): vernet kan ikke tolke verdien - sett en ren verdi (eier/repo) eller fjern linjen" ;;
+      *) echo "FATAL: linjen for $name i $file (linje $n) er ikke på formen $name=verdi (verdi av bokstaver, tall, . _ - /, evt. i anførselstegn og med # kommentar): vernet kan ikke tolke den - rett eller fjern linjen" ;;
+    esac
+    return 0
+  done < <(env_file_candidate_lines "$name")
+  return 0
+}
+
+# Tolker meldingene fra env_file_check: `WARN:` gir en ADVARSEL (fortsett), `FATAL:` avbryter (returnerer 2). C-locale: stien i meldingen kan inneholde ikke-UTF-8 bytes.
+env_check_report() {
+  local LC_ALL=C envline
+  while IFS= read -r envline; do
+    case "$envline" in
+      WARN:*) echo "ADVARSEL: ${envline#WARN: }" >&2 ;;
+      FATAL:*) echo "${envline#FATAL: } - avbryter" >&2; return 2 ;;
+    esac
+  done <<< "$1"
+  return 0
+}
+
+# Er $1 et produksjonsrepo? Skriver årsaken til stdout og returnerer 0 hvis ja; 1 hvis nei. Produksjon er (a) de faste navnene i PRODUCTION_REPOS (kan ikke overstyres), (b) JARVIS_GITHUB_REPO i miljøet du kjører fra
+# og (c) JARVIS_GITHUB_REPO i .env (slik compose leser den). Et navn som normaliseres til tomt regnes aldri som treff (det avvises tidligere av kalleren).
+production_repo_reason() {
+  local LC_ALL=C key listed configured
+  key="$(alias_key "$1")"
+  [ -n "$key" ] || return 1
+  for listed in "${PRODUCTION_REPOS[@]}"; do
+    [ "$key" = "$(alias_key "$listed")" ] && { printf 'PRODUKSJONSREPOET'; return 0; }
+  done
+  configured="$(alias_key "${JARVIS_GITHUB_REPO:-}")"
+  [ -n "$configured" ] && [ "$key" = "$configured" ] && { printf 'PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i miljøet)'; return 0; }
+  case "$(env_file_check JARVIS_GITHUB_REPO)" in
+    *FATAL:*) printf 'PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i .env kan ikke tolkes: behandles som produksjon)'; return 0 ;;
+  esac
+  configured="$(alias_key "$(env_file_value JARVIS_GITHUB_REPO)")"
+  [ -n "$configured" ] && [ "$key" = "$configured" ] && { printf 'PRODUKSJONSREPOET (JARVIS_GITHUB_REPO i .env)'; return 0; }
+  return 1
 }
 
 # --- små hjelpere (testes isolert via ACCEPTANCE_SOURCE_ONLY=1) ---------------------------------------------------------------------------
@@ -528,11 +702,18 @@ main() {
     return 0
   fi
   for tool in docker curl node; do command -v "$tool" >/dev/null 2>&1 || { echo "mangler $tool - kjør dette på NAS-en" >&2; return 2; }; done
+  REPO="$(trim "$REPO")"
   [ -n "$REPO" ] || { echo "ACCEPTANCE_REPO er påkrevd (et SANDBOX-repo i runner.allowed_repos - aldri produksjonsrepoet)" >&2; return 2; }
   # B-L5: produksjonsrepoet nektes HARDT, uavhengig av runner.allowed_repos (en eier som har lagt det der kan ikke bruke akseptansen mot det: J11 pusher en ekte branch).
-  case "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" in
-    tsworkflow/jarvisbuild) echo "ACCEPTANCE_REPO=$REPO er PRODUKSJONSREPOET: akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2 ;;
-  esac
+  # D-479 (kontobytte, D-478): produksjon er PRODUCTION_REPOS (det nåværende kanoniske repoet, det tidligere navnet på det og det gamle frosne repoet; holdt i takt med kontrakten av en test) OG JARVIS_GITHUB_REPO
+  # (fra miljøet du kjører fra, og fra .env - se production_repo_reason). Alle skrivemåter nektes: store/små bokstaver, `.git`, `/` på slutten og blanke. De faste navnene kan ikke overstyres (D-41).
+  [ -n "$(alias_key "$REPO")" ] || { echo "ACCEPTANCE_REPO=$REPO er ikke et gyldig repo-navn (forventet eier/repo) - avbryter" >&2; return 2; }
+  local reason
+  env_check_report "$(env_file_check JARVIS_GITHUB_REPO)" || return 2
+  if reason="$(production_repo_reason "$REPO")"; then
+    echo "ACCEPTANCE_REPO=$REPO er $reason: akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2
+  fi
+  REPO="$(normalize_repo_arg "$REPO")"   # runner.allowed_repos/git_credentials er små bokstaver; GitHub skiller ikke på store/små
   if [ "$WITH_RESTART" = "1" ]; then
     echo "ADVARSEL: --with-restart sender SIGKILL til den LEVENDE jarvis-job-runner og restarter den. Alle jobber på runneren avbrytes." >&2
     if [ "${ACCEPT_CONFIRM_RESTART:-}" != "yes" ]; then

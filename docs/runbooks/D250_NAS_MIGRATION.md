@@ -16,7 +16,7 @@ IKKE valgfritt.**
 
 - SSH-tilgang til BEGGE maskiner (PC-en som kjører stacken i dag, og NAS-en).
 - `docker`/`docker compose` (v2) installert og fungerende på NAS-en (bekreftet av Tobias).
-- Git-tilgang til `tsworkflow/jarvisbuild` fra NAS-en (samme måte som på PC-en).
+- Git-tilgang til `FFrollerskis/jarvis-build` fra NAS-en (samme måte som på PC-en; repoet het `tsworkflow/jarvisbuild` før kontobyttet D-478).
 
 ## Trinn 1 - Full backup FØR noe røres
 
@@ -58,7 +58,7 @@ scp jarvis-full-backup-*.sql .env <bruker>@<nas-adresse>:/path/to/jarvisbuild-da
 Via SSH inn på NAS-en:
 
 ```bash
-git clone https://github.com/tsworkflow/jarvisbuild.git
+git clone https://github.com/FFrollerskis/jarvis-build.git jarvisbuild   # mappenavnet jarvisbuild kan beholdes (backup-skript og stier bruker det)
 cd jarvisbuild
 cp /path/to/jarvisbuild-data/.env .
 cp /path/to/jarvisbuild-data/jarvis-full-backup-*.sql .

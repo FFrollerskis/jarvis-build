@@ -14,3 +14,4 @@ export * from "./owner-config.ts";
 export * from "./sweep-failures.ts";
 export * from "./run-correlation.ts";
 export * from "./git-credential.ts";
+export * from "./github-repo.ts";

@@ -263,7 +263,7 @@ export class DeterministicEntityExtractor implements EntityExtractor {
         const at = lower.indexOf(repo, from);
         if (at === -1) break;
         from = at + repo.length;
-        // Ordgrense: tegnet før/etter kan ikke være en del av et lengre navn (`xtsworkflow/jarvisbuild2`).
+        // Ordgrense: tegnet før/etter kan ikke være en del av et lengre navn (`xffrollerskis/jarvis-build2`).
         const before = at === 0 ? "" : (lower[at - 1] as string);
         const after = lower[at + repo.length] ?? "";
         if (/[a-z0-9._/-]/.test(before) || /[a-z0-9_-]/.test(after)) continue;

@@ -3,6 +3,7 @@ import type pg from "pg";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
 import type { ToolGateway } from "./gateway.ts";
+import { configuredGithubRepo } from "./github-repo-lock.ts";
 
 /**
  * Daily Executive Brief (v4.0 første Daily Value Loop).
@@ -138,9 +139,19 @@ export function buildStatusSource(gateway: ToolGateway | null, statusFile = "doc
         });
       }
       if (gateway) {
+        const repo = configuredGithubRepo();
         const issues = await gateway.execute({
-          identity, tool_id: "github", action: "read_issues", parameters: { repo: "tsworkflow/jarvisbuild" }
+          identity, tool_id: "github", action: "read_issues", parameters: { repo }
         });
+        if (!issues.ok) {
+          // «Ukjent ≠ ingen» (som D-396 for statusfilen): en GitHub-lesing som feiler (credential mangler, repoet er ikke tilgjengelig, Issues er AV i repoet -> GitHub svarer 410) skal ikke se ut som «ingen åpne issues».
+          items.push({
+            source: "github", ref: "issues-unavailable",
+            title: "GitHub-issues utilgjengelige", detail: `Kunne ikke lese issues i ${repo} (${issues.reason}) - antall åpne issues er UKJENT`,
+            at: new Date().toISOString(), score: 20,
+            why: "statuskilden kan ikke leses her", action: "sjekk GitHub-connectoren og at Issues er slått på i repoet"
+          });
+        }
         if (issues.ok) {
           const list = ((issues.data as { issues?: JsonValue[] } | undefined)?.issues ?? []) as Array<Record<string, string>>;
           for (const issue of list) {

@@ -7,7 +7,7 @@ import { SURFACE_TOOL_GRANTS, requiresConfirmationWhenTainted, scopeFieldsOf, ty
 import type { TurnContext } from "./turn-context.ts";
 import { CHAT_ACT_TIER_KEYS } from "./chat-act-tier.ts";
 import { explainToolFailure, type ToolFailureContext } from "./tool-failure.ts";
-import { githubRepoLockViolation } from "./github-repo-lock.ts";
+import { configuredGithubRepo, githubRepoLockViolation } from "./github-repo-lock.ts";
 
 /**
  * UA-1 P1A (§13, §16-§17): trusted bro mellom AI Mesh og Tool Gateway.
@@ -71,7 +71,7 @@ const MESH_TOOLS: MeshToolMapping[] = [
     },
     tool_id: "github",
     action: "read_issues",
-    parameters: () => ({ repo: process.env["JARVIS_GITHUB_REPO"] ?? "tsworkflow/jarvisbuild" })
+    parameters: () => ({ repo: configuredGithubRepo() })
   },
   /**
    * D-209 ("Charlie"-selv-bevissthet): eneste sanne kilde for "hva har jeg
