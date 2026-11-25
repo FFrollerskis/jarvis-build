@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  currentModelScope, currentServingModel, detachFromCallSignal, runWithCallSignal, runWithModelScope, withholdFinanceFromCurrentModel
-} from "../src/index.ts";
+import { currentModelScope, currentServingModel, detachFromCallSignal, runWithCallSignal, withholdFinanceFromCurrentModel } from "../src/index.ts";
+// setteren er IKKE offentlig API (fiks-runde 1, FIX-4: `index.ts` eksporterer kun lesere og typer) - testen importerer den direkte fra modulen
+import { runWithModelScope } from "../src/model-scope.ts";
 
 /**
  * WP-N1b (K1): AsyncLocalStorage-hjelperne bak den modell-stemplede konteksten (`model-scope.ts`), uten gateway og uten DB.

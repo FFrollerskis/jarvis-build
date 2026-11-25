@@ -359,3 +359,41 @@ describe("F: den ekte MeshToolExecutor (adapter-stemplet leverandør) gir skopet
     expect(financeCalls).toEqual([]);
   });
 });
+
+describe("G: uleselige `servingModel`-former (fiks-runde 1, FIX-3): ALLE er sky (fail-lukket) - også `null`, som før var «ingen modell» for K2-leserne men sky for finanslåsen", () => {
+  // [navn, verdi, holdes tilbake?]: kun et objekt med en leverandør registrert som lokal er lokal (modellen trenger ikke en gyldig `model`-streng); alt annet er sky
+  const FORMS: Array<[string, unknown, boolean]> = [
+    ["null", null, true], ["tom streng", "", true], ["0", 0, true], ["false", false, true], ["tom liste", [], true], ["tomt objekt", {}, true], ["streng med lokalt navn", "gemma_local", true],
+    ["provider: tall", { provider: 5, model: "x" }, true], ["provider: blank", { provider: "   ", model: "x" }, true], ["provider: STORE bokstaver", { provider: "GEMMA_LOCAL", model: "x" }, true],
+    ["provider: mellomrom foran", { provider: " gemma_local", model: "x" }, true], ["provider: null", { provider: null, model: "x" }, true], ["provider: undefined", { provider: undefined, model: "x" }, true],
+    ["provider: tom", { provider: "", model: "x" }, true], ["sky", CLOUD, true], ["lokal", LOCAL, false], ["lokal uten `model`", { provider: "gemma_local" }, false]
+  ];
+
+  for (const [label, form, withheld] of FORMS) {
+    it(`servingModel = ${label}: K2-leseren sier ${withheld ? "«hold tilbake»" : "«full tilgang»"}, og det nøstede finansoppslaget ${withheld ? "nektes" : "utføres"} (leser og lås er ENIGE)`, async () => {
+      const { gateway, financeCalls, seen } = rig({ lock: LOCK });
+      const r = await call(gateway, `g-${label}`, 1, form as never);
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      const entry = seen.get(`g-${label}`) as Seen;
+      expect(entry.ambientWithheld, "den sentrale lesningen").toBe(withheld);
+      expect(entry.leaf?.ambientWithheld, "bladkallet (nøstet) arver").toBe(withheld);
+      expect(entry.finance, "det nøstede finansoppslaget").toEqual(withheld ? { ok: false, reason: FINANCE_WITHHELD_REASON } : { ok: true });
+      expect(financeCalls.length).toBe(withheld ? 0 : 1);
+    });
+
+    it(`servingModel = ${label}: et DIREKTE finansoppslag med samme verdi ${withheld ? "nektes" : "utføres"} (kontroll: låsen har alltid vært fail-lukket)`, async () => {
+      const { gateway, financeCalls } = rig({ lock: LOCK });
+      const r = await gateway.execute({ identity, tool_id: "finance", action: "get_kill_switch", parameters: {}, idempotency_key: `k-${randomUUID()}`, servingModel: form as never });
+      expect(r.ok, JSON.stringify(r)).toBe(!withheld);
+      expect(financeCalls.length).toBe(withheld ? 0 : 1);
+    });
+  }
+});
+
+describe("H: setteren er IKKE offentlig API (fiks-runde 1, FIX-4): kun lesere og typer eksporteres fra pakken", () => {
+  it("`@jarvis/tool-gateway` eksporterer lesehjelperne, men ikke `runWithModelScope` - en trusted modul kan ikke vaske skopet med `{ cloud: false }` inne i et skykall", async () => {
+    const api = (await import("@jarvis/tool-gateway")) as Record<string, unknown>;
+    for (const reader of ["currentModelScope", "currentServingModel", "withholdFinanceFromCurrentModel"]) expect(typeof api[reader], reader).toBe("function");
+    expect("runWithModelScope" in api, "setteren er offentlig API").toBe(false);
+  });
+});

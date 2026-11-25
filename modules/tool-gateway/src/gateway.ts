@@ -784,11 +784,13 @@ export class ToolGateway {
    *  - Lokalitetsvedtaket (`cloud`) tas HER, ÉN gang, med den ene regelen (`servedByCloud` -> `FinanceExecutionLock.servedLocally`, i drift `financeLockServedLocally`; fail-closed) og ligger i skopet for alle lesere.
    */
   execute(request: ToolExecuteRequest): Promise<ToolResult> {
-    const lock = this.options?.financeExecutionLock;
-    if (lock === undefined) return this.executeCall(request);
+    // Hele omslaget står i `try`: en feil (også en løsrevet `execute` uten `this`) er en AVVISNING som før N1b (`execute` var `async`), aldri et synkront kast. Vakt AV returnerer fortsatt kroppens eget løfte uendret (ingen `await`, ingen ekstra tick).
     try {
+      const lock = this.options?.financeExecutionLock;
+      if (lock === undefined) return this.executeCall(request);
       const ambient = currentModelScope();
-      const model = ambient?.cloud === true ? ambient.servingModel : (request.servingModel ?? ambient?.servingModel);
+      // `!== undefined` (ikke `??`): en `null`/uleselig verdi er IKKE «ingen modell» - den regnes som sky av `servedByCloud` (fail-lukket), akkurat som finanslåsen i `executeCall` alltid har gjort. Kun fraværet av en modell gir arv/full tilgang.
+      const model = ambient?.cloud === true ? ambient.servingModel : (request.servingModel !== undefined ? request.servingModel : ambient?.servingModel);
       if (model === undefined) return this.executeCall(request);
       const cloud = ambient?.cloud === true || this.servedByCloud(model, lock);
       const effective: ToolExecuteRequest = model === request.servingModel ? request : { ...request, servingModel: model };

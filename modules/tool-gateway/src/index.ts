@@ -1,7 +1,9 @@
 export * from "./gateway.ts";
 export * from "./call-signal.ts";
-// WP-N1b (K1): modell-stemplet kontekst gjennom nøstede kall (AsyncLocalStorage); skopet SETTES kun av `ToolGateway.execute()`.
-export * from "./model-scope.ts";
+// WP-N1b (K1): modell-stemplet kontekst gjennom nøstede kall (AsyncLocalStorage); skopet SETTES kun av `ToolGateway.execute()` (importerer setteren direkte fra `./model-scope.ts`).
+// FIX-4 (fiks-runde 1): KUN lesere og typer er offentlig API - setteren (`runWithModelScope`) eksporteres ALDRI herfra, så ingen annen modul kan vaske skopet (`{ cloud: false }`) inne i et skykall.
+export { currentModelScope, currentServingModel, withholdFinanceFromCurrentModel } from "./model-scope.ts";
+export type { ModelScope, ScopedServingModel } from "./model-scope.ts";
 // WP-N1b (K2): felles byggeklosser for tilbakehold av finansAVLEDET innhold (nøytralt merke, finanskoblings-/credential-gjenkjenning, situasjonsdomene).
 export * from "./finance-withheld.ts";
 export * from "./transport-errors.ts";
