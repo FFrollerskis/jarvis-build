@@ -4,7 +4,7 @@ import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { deliverChunkedTextViaTelegramDetailed, type BriefItem, type BriefSource, type ToolGateway } from "@jarvis/tool-gateway";
 import type { OpenLoopService } from "./open-loop-service.ts";
-import type { BusinessDomain } from "./open-loop-types.ts";
+import { NON_FINANCE_LOOP_TYPES, isFinanceDerivedLoopType, type BusinessDomain } from "./open-loop-types.ts";
 
 /**
  * UA-3 next slice (D-53): forretnings-brief. Gjenbruker EKSISTERENDE
@@ -130,12 +130,16 @@ export function renderDomainCoverage(): string {
   return `DATA COVERAGE (${headline})\n${lines.join("\n")}`;
 }
 
-/** Ny BriefSource for eksisterende DailyBrief-motor - aapne loops som brief-punkter. */
-export function businessOpenLoopsSource(openLoops: OpenLoopService, memorySpace: MemorySpace = "business"): BriefSource {
+/**
+ * Ny BriefSource for eksisterende DailyBrief-motor - aapne loops som brief-punkter.
+ * WP-N1b (K2): `excludeFinanceDerived` utelater finansavledede løkketyper (beløp, leverandør, formål i `reason`) - settes av `BusinessTransport` når en sky-/ukjent modell betjener kallet. Uten valget: som før.
+ */
+export function businessOpenLoopsSource(openLoops: OpenLoopService, memorySpace: MemorySpace = "business", options: { excludeFinanceDerived?: boolean } = {}): BriefSource {
   return {
     name: "business-open-loops",
     async collect(identity: IdentityContext): Promise<BriefItem[]> {
-      const loops = await openLoops.listOpenLoops(identity.tenant_id, memorySpace, "open");
+      const all = await openLoops.listOpenLoops(identity.tenant_id, memorySpace, "open");
+      const loops = options.excludeFinanceDerived === true ? all.filter((loop) => !isFinanceDerivedLoopType(loop.loop_type)) : all;
       return loops.map((loop) => {
         const overdue = loop.due_at !== null && new Date(loop.due_at).getTime() < Date.now();
         return {
@@ -166,23 +170,29 @@ export interface WeeklyBriefArtifact {
 
 /** §13 UKENTLIG: hovedendringer/pipeline-bevegelse/uloeste-og-loeste loops/gjentatte problemer -
  * ALT kilde-/state-forankret, aldri LLM-oppfunnet. */
-export async function generateWeeklyBrief(pool: pg.Pool, tenantId: string, memorySpace: MemorySpace = "business"): Promise<WeeklyBriefArtifact> {
+/**
+ * WP-N1b (K2): `excludeFinanceDerived` utelater finansavledede løkketyper FRA SPØRRINGENE (`by_type`, totalene OG `still_open` bygges på resten) - en skymodell skal aldri se antall per finanstype eller en sum som
+ * inkluderer dem. Filteret er en HVITLISTE over kjent ikke-finansielle typer (`NON_FINANCE_LOOP_TYPES`): en ukjent type utelates (fail-closed). Uten valget er SQL-teksten og parametrene NØYAKTIG som før.
+ */
+export async function generateWeeklyBrief(pool: pg.Pool, tenantId: string, memorySpace: MemorySpace = "business", options: { excludeFinanceDerived?: boolean } = {}): Promise<WeeklyBriefArtifact> {
   const periodEnd = new Date();
   const periodStart = new Date(periodEnd.getTime() - 7 * 86_400_000);
+  const exclude = options.excludeFinanceDerived === true;
+  const allowedTypes = [...NON_FINANCE_LOOP_TYPES] as string[];
   return withMemoryTransaction(pool, tenantId, [memorySpace], async (client) => {
     const opened = await client.query(
       `SELECT loop_type, count(*)::int AS n FROM business_open_loops
-       WHERE tenant_id = $1 AND opened_at >= $2 GROUP BY loop_type`,
-      [tenantId, periodStart.toISOString()]
+       WHERE tenant_id = $1 AND opened_at >= $2${exclude ? " AND loop_type = ANY($3::text[])" : ""} GROUP BY loop_type`,
+      exclude ? [tenantId, periodStart.toISOString(), allowedTypes] : [tenantId, periodStart.toISOString()]
     );
     const resolved = await client.query(
       `SELECT loop_type, count(*)::int AS n FROM business_open_loops
-       WHERE tenant_id = $1 AND resolved_at >= $2 GROUP BY loop_type`,
-      [tenantId, periodStart.toISOString()]
+       WHERE tenant_id = $1 AND resolved_at >= $2${exclude ? " AND loop_type = ANY($3::text[])" : ""} GROUP BY loop_type`,
+      exclude ? [tenantId, periodStart.toISOString(), allowedTypes] : [tenantId, periodStart.toISOString()]
     );
     const stillOpen = await client.query(
-      `SELECT count(*)::int AS n FROM business_open_loops WHERE tenant_id = $1 AND status = 'open'`,
-      [tenantId]
+      `SELECT count(*)::int AS n FROM business_open_loops WHERE tenant_id = $1 AND status = 'open'${exclude ? " AND loop_type = ANY($2::text[])" : ""}`,
+      exclude ? [tenantId, allowedTypes] : [tenantId]
     );
     const moved = await client.query(
       `SELECT opportunity_id, title, stage FROM business_opportunities
