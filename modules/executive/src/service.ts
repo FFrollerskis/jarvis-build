@@ -20,7 +20,8 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import { listConnectorStatus, ownerStepUpDenial, withholdFinanceFromCurrentModel, type ConnectorAuthInfo, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { financeWithheldMarker, isFinanceDerivedSituationDomain, listConnectorStatus, ownerStepUpDenial, withholdFinanceFromCurrentModel, type ConnectorAuthInfo, type FinanceWithheldMarker, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { shapeAutonomyPoliciesForCloud, shapeOwnerControlForCloud, shapePausedDomainsForCloud } from "./finance-withheld.ts";
 import { rankAttentionQueue } from "./ranking.ts";
 import type {
   AttentionItem, AttentionItemDetail, CapabilityStatus, ConnectorStatusReport, ControlSurfaceStatus, DelegationBoard
@@ -184,14 +185,19 @@ export class ExecutiveService {
    */
   private async rankedQueueWithSource(
     identity: IdentityContext,
-    filter: AttentionQueueFilter = {}
-  ): Promise<{ items: AttentionItem[]; situationsById: Map<string, Situation> }> {
-    const [situations, pauseState, autonomyPolicies, notificationPolicy] = await Promise.all([
+    filter: AttentionQueueFilter = {},
+    options: { withholdFinance?: boolean } = {}
+  ): Promise<{ items: AttentionItem[]; situationsById: Map<string, Situation>; financeSituationIds: Set<string> }> {
+    const [allSituations, pauseState, autonomyPolicies, notificationPolicy] = await Promise.all([
       requireData<Situation[]>(this.gateway, identity, "situations", "get_queue", filter.domain ? { domain: filter.domain } : {}),
       requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state"),
       requireData<SituationAutonomyPolicy[]>(this.gateway, identity, "situations", "list_autonomy_policies"),
       requireData<SituationNotificationPolicy | null>(this.gateway, identity, "situations", "get_notification_policy")
     ]);
+    // WP-N1b (K2): situasjoner i det finansavledede `spend`-domenet (begrunnelsen er løkkens tekst: beløp, leverandør, AI-kost) holdes ute FØR rangeringen - så heller ikke plassering (`rank`) eller antall røper dem.
+    const withholdFinance = options.withholdFinance === true;
+    const financeSituationIds = new Set(withholdFinance ? allSituations.filter((s) => isFinanceDerivedSituationDomain(s.domain)).map((s) => s.situation_id) : []);
+    const situations = withholdFinance ? allSituations.filter((s) => !financeSituationIds.has(s.situation_id)) : allSituations;
     const pausedDomains = new Set(pauseState.paused);
     const autonomyBoundDomains = new Set(autonomyPolicies.map((p) => p.domain));
     const autonomyEnabledDomains = new Set(autonomyPolicies.filter((p) => p.enabled).map((p) => p.domain));
@@ -202,11 +208,12 @@ export class ExecutiveService {
       autonomyBoundDomains,
       autonomyEnabledDomains
     });
-    return { items, situationsById: new Map(situations.map((s) => [s.situation_id, s])) };
+    return { items, situationsById: new Map(situations.map((s) => [s.situation_id, s])), financeSituationIds };
   }
 
-  async getAttentionQueue(identity: IdentityContext, filter: AttentionQueueFilter = {}): Promise<AttentionItem[]> {
-    return (await this.rankedQueueWithSource(identity, filter)).items;
+  /** `options.withholdFinance` (WP-N1b): uten situasjoner i det finansavledede domenet. Utelatt = som før. */
+  async getAttentionQueue(identity: IdentityContext, filter: AttentionQueueFilter = {}, options: { withholdFinance?: boolean } = {}): Promise<AttentionItem[]> {
+    return (await this.rankedQueueWithSource(identity, filter, options)).items;
   }
 
   /**
@@ -214,8 +221,12 @@ export class ExecutiveService {
    * rangerte posten er allerede fullt forklart (`explanation`/
    * `recommended_next_action`), pluss selve kilde-`Situation`-raden.
    */
-  async getAttentionItem(identity: IdentityContext, situationId: string): Promise<AttentionItemDetail | null> {
-    const { items, situationsById } = await this.rankedQueueWithSource(identity);
+  getAttentionItem(identity: IdentityContext, situationId: string): Promise<AttentionItemDetail | null>;
+  /** WP-N1b (K2): med `withholdFinance` svarer en finansavledet situasjon med KUN det nøytrale merket (aldri begrunnelse, id eller felt); alt annet som før. */
+  getAttentionItem(identity: IdentityContext, situationId: string, options: { withholdFinance?: boolean }): Promise<AttentionItemDetail | FinanceWithheldMarker | null>;
+  async getAttentionItem(identity: IdentityContext, situationId: string, options: { withholdFinance?: boolean } = {}): Promise<AttentionItemDetail | FinanceWithheldMarker | null> {
+    const { items, situationsById, financeSituationIds } = await this.rankedQueueWithSource(identity, {}, options);
+    if (financeSituationIds.has(situationId)) return financeWithheldMarker();
     const item = items.find((i) => i.situation_id === situationId);
     const situation = situationsById.get(situationId);
     if (!item || !situation) return null;
@@ -428,7 +439,14 @@ export class ExecutiveService {
       withholdFinance ? Promise.resolve(null) : requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
     ]);
     // `null` betyr ellers «aldri en rad» (se `ControlSurfaceStatus`): en holdt-tilbake avlesning får derfor et eksplisitt merke, slik at modellen aldri leser `null` som «ingen nødbryter».
-    return { owner_control: ownerControl, situation_domain_pauses: pauseState, finance_kill_switch: financeKillSwitch, ...(withholdFinance ? { finance_kill_switch_withheld: true as const } : {}) };
+    // WP-N1b (K2): i tillegg formes `owner_control` (finanskoblinger/-legitimasjon ut, fritekst-begrunnelser holdt tilbake) og pausene (`spend` ut) når finans holdes tilbake; svaret får det nøytrale merket.
+    if (withholdFinance) {
+      return {
+        owner_control: shapeOwnerControlForCloud(ownerControl), situation_domain_pauses: { ...pauseState, paused: shapePausedDomainsForCloud(pauseState.paused) },
+        finance_kill_switch: financeKillSwitch, finance_kill_switch_withheld: true as const, ...financeWithheldMarker()
+      };
+    }
+    return { owner_control: ownerControl, situation_domain_pauses: pauseState, finance_kill_switch: financeKillSwitch };
   }
 
   /**
@@ -445,12 +463,18 @@ export class ExecutiveService {
       requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
       withholdFinance ? Promise.resolve(null) : requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
     ]);
+    if (withholdFinance) {
+      const shaped = shapeOwnerControlForCloud(ownerControl);
+      return {
+        autonomy_domains: shapeAutonomyPoliciesForCloud(autonomyDomains), frozen_connectors: shaped.frozen_connectors, revoked_credentials: shaped.revoked_credentials,
+        finance_kill_switch: financeKillSwitch, finance_kill_switch_withheld: true as const, ...financeWithheldMarker()
+      };
+    }
     return {
       autonomy_domains: autonomyDomains,
       frozen_connectors: ownerControl.frozen_connectors,
       revoked_credentials: ownerControl.revoked_credentials,
-      finance_kill_switch: financeKillSwitch,
-      ...(withholdFinance ? { finance_kill_switch_withheld: true as const } : {})
+      finance_kill_switch: financeKillSwitch
     };
   }
 
