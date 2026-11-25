@@ -151,6 +151,8 @@ export interface RawHomeEntity {
   entity_id: string;
   state: unknown;
   attributes?: Record<string, unknown> | undefined;
+  /** HA sitt `last_changed`: når tilstandsVERDIEN sist endret seg (ikke attributter). Brukes kun av avstemmingen (WP-G2c) som bevis for at en tilstand IKKE er endret siden en forespørsel. */
+  last_changed?: unknown;
 }
 
 export function normalizeHomeCriticalState(entity: RawHomeEntity): Params {
@@ -158,9 +160,12 @@ export function normalizeHomeCriticalState(entity: RawHomeEntity): Params {
   const domain = entityId.split(".")[0] ?? "";
   const state = stateWordFor(domain, cleanToken(entity.state));
   const attributes = entity.attributes ?? {};
+  // `last_changed` (WP-G2c, avstemming): kun et strengt ISO-tidsstempel (aldri tekst fra utstyret), ellers `null`.
+  const changedMs = parseIsoInstant(cleanToken(entity.last_changed));
   const out: Params = {
     entity_id: entityId, domain, state, settled: !(TRANSITIONAL[domain]?.has(state) ?? false),
-    usable: state !== "unavailable" && !(state === "unknown" && domain !== "scene")
+    usable: state !== "unavailable" && !(state === "unknown" && domain !== "scene"),
+    last_changed: changedMs === null ? null : new Date(changedMs).toISOString()
   };
   switch (domain) {
     case "lock": out["locked"] = state === "locked"; break;

@@ -58,10 +58,10 @@ export class HomeAssistantCriticalTransport implements ToolTransport {
       await response.body?.cancel().catch(() => undefined);
       throw new Error(`home_assistant_error_${response.status}`);
     }
-    const json = (await response.json()) as { entity_id?: unknown; state?: unknown; attributes?: unknown } | null;
+    const json = (await response.json()) as { entity_id?: unknown; state?: unknown; attributes?: unknown; last_changed?: unknown } | null;
     if (json === null || typeof json !== "object" || json.entity_id !== entityId || typeof json.state !== "string") throw new Error("home_assistant_state_malformed");
     const attributes = typeof json.attributes === "object" && json.attributes !== null && !Array.isArray(json.attributes) ? (json.attributes as Record<string, unknown>) : undefined;
-    return normalizeHomeCriticalState({ entity_id: json.entity_id, state: json.state, attributes });
+    return normalizeHomeCriticalState({ entity_id: json.entity_id, state: json.state, attributes, last_changed: json.last_changed });
   }
 
   /** Sender tjenestekallet. FØR sending: vanlig feil. Etter at forespørselen kan ha nådd HA: `outcome_unknown` (5xx, nullstilt/tidsavbrutt, redirect). 4xx = entydig avvist. */

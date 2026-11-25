@@ -10,8 +10,8 @@ import {
   AppleDavClient, FetchDavTransport, PERSONAL_CONFIG_NAMES, parseDavCollections, type DavSendGuard,
   CAR_CRITICAL_OPS, CAR_READ_ACTION, CAR_TOOL_ID, CarTransport, UnconfiguredCarAdapter, carCriticalConfigFromEnv, carCriticalToolDefinitions,
   HOME_CRITICAL_OPS, HOME_CRITICAL_READ_ACTION, HOME_ASSISTANT_TOOL_ID, HomeAssistantCriticalTransport, PERSONAL_FLAG_NAMES, PERSONAL_SECRET_REFS, PersonalActionJournal,
-  executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, homeSettleMsFor, legacyCriticalActionsToDrop, personalActionIndex, personalFlagOn,
-  type CarAdapter, type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ToolDefinition, type ToolGateway
+  executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, homeSettleMsFor, legacyCriticalActionsToDrop, personalActionIndex, personalFlagOn, reconcilePersonalAction,
+  type CarAdapter, type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ReconcileInput, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { familySharedDataReaders, type HealthReadApi, type LocationReadApi } from "./personal-family-readers.ts";
 import type { PersonalDavDeps } from "./personal-dav.ts";
@@ -95,7 +95,13 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
 
   // Eksekutoren bygges ETTER at alle domener har registrert sine handlinger: indeksen er en ferdig bygd Map (en handling som legges til etterpå ville vært ukjent for ruten).
   const executor = { pool, gateway, journal: new PersonalActionJournal(pool), index: personalActionIndex(entries) };
-  const actions = domains.size > 0 ? { executor, domains, run: (identity: IdentityContext, request: ExecutePersonalActionInput) => executePersonalAction(executor, identity, request) } : undefined;
+  const actions = domains.size > 0
+    ? {
+      executor, domains, run: (identity: IdentityContext, request: ExecutePersonalActionInput) => executePersonalAction(executor, identity, request),
+      // WP-G2c (D-483): avstemming av `outcome_unknown` (kun eier-ruten `/personal/actions/reconcile`; leser via lese-handlingen, aldri skrive-verktøyet, aldri en retry).
+      reconcile: (identity: IdentityContext, request: ReconcileInput) => reconcilePersonalAction({ executor, domains }, identity, request)
+    }
+    : undefined;
 
   let family: PersonalFamilyDeps | undefined;
   if (personalFlagOn(env, PERSONAL_FLAG_NAMES.family)) {
