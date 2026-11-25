@@ -314,6 +314,9 @@ function resolveChildIdempotency<T extends { payment_intent_id: string; amount_o
 /** WP-F1: SQL-fragment som fjerner ett avviksflagg fra en jsonb-liste (strenger) - brukes når en innsending ENDELIG fikk et leverandørsvar. */
 const CLEAR_SUBMIT_UNKNOWN_FLAG = "anomaly_flags = anomaly_flags - 'SUBMIT_OUTCOME_UNKNOWN'";
 
+/** WP-FIN2 (K6): årsakskoden i `anomaly_flagged`-hendelsen når Stripe melder `succeeded` for en intensjon Jarvis har som `failed` (kun én gang pr. intensjon). */
+const SUCCEEDED_AFTER_LOCAL_FAILED = "provider_succeeded_after_local_failed";
+
 /**
  * WP-F1 (review M-F1): valg for `submitPaymentIntent`. `duplicateGuard` slår på duplikatvakten INNE i reservasjonstransaksjonen (advisory-lås + ny kandidatspørring, se
  * `lockAndFindUnacknowledgedDuplicate`). `FinanceTransport` (ToolGateway-veien - den ENESTE produksjonsveien til en pengehandling) setter den ALLTID, med de kandidat-id-ene
@@ -1268,6 +1271,7 @@ export class FinanceService {
         // at raden allerede er `settled` - fail-closed: FLAGG, ALDRI
         // overskriv en allerede etablert terminal-tilstand.
         await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", current.payment_intent_id, ["WEBHOOK_STATE_CONFLICT"]);
+        if (current.state === "failed" && targetState === "settled") await this.recordSucceededAfterLocalFailed(client, tenantId, memorySpace, current, outcome, actorPersonId);
         const { rows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, current.payment_intent_id]);
         return { applied: false, reason: "terminal_state_conflict", intent: rows[0] as PaymentIntent };
       }
@@ -1295,6 +1299,29 @@ export class FinanceService {
       });
     }
     return { applied: true, intent: updated };
+  }
+
+  /**
+   * WP-FIN2 (D-486, K6): `payment_intent.payment_failed` gjør intensjonen terminal (`failed`), men Stripe lar objektet stå i `requires_payment_method`, så et senere `succeeded` er normalt - og
+   * da står en BETALT betaling som `failed`. Tilstandsmaskinen er IKKE endret (eierens valg, se Q-forslaget i rapporten/runbooken); her skrives bare en `anomaly_flagged`-hendelse i tillegg til
+   * flagget `WEBHOOK_STATE_CONFLICT`, så avviket synes i betalingens historikk. KUN første gang pr. intensjon (gjentatte hendelser/oppfriskinger støyer ikke), og kun leverandørstatus og
+   * kilde-hendelsens id - aldri beløp, valuta eller feiltekst.
+   */
+  private async recordSucceededAfterLocalFailed(
+    client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, current: PaymentIntent,
+    outcome: { stripeStatus: string; sourceEventId: string | null }, actorPersonId: string | null
+  ): Promise<void> {
+    const { rows } = await client.query(
+      `SELECT 1 FROM payment_intent_events WHERE tenant_id = $1 AND payment_intent_id = $2 AND event_type = 'anomaly_flagged' AND metadata->>'reason' = $3 LIMIT 1`,
+      [tenantId, current.payment_intent_id, SUCCEEDED_AFTER_LOCAL_FAILED]
+    );
+    if (rows.length > 0) return;
+    await insertEvent(client, tenantId, memorySpace, {
+      payment_intent_id: current.payment_intent_id, event_type: "anomaly_flagged",
+      summary: "Stripe melder betalingen som gjennomført, men Jarvis har den som mislykket etter en tidligere payment_failed-hendelse. Tilstanden er IKKE endret (WEBHOOK_STATE_CONFLICT): sjekk Stripe og følg FINANCE_D_CHAIN §11",
+      actor_person_id: actorPersonId,
+      metadata: { anomaly_flags: ["WEBHOOK_STATE_CONFLICT"], reason: SUCCEEDED_AFTER_LOCAL_FAILED, provider_status: outcome.stripeStatus, source_event_id: outcome.sourceEventId }
+    });
   }
 
   private async appendAnomalyFlags(client: pg.PoolClient, table: "payment_intents" | "stripe_refunds", idColumn: string, id: string, flags: readonly (StripeAnomalyType | VippsAnomalyType)[]): Promise<void> {
