@@ -93,9 +93,14 @@ describe("A: handlingslisten og forespørselens form", () => {
   it("sending/redigering/sletting/reaksjon krever idempotensnøkkel av en gyldig form - ellers avvises forespørselen uten journal og uten kall", async () => {
     const before = await journalCount();
     for (const action of COMMS_OUTBOUND_ACTIONS) {
-      for (const bad of [undefined, "", "short", "has space in it", "x".repeat(201), "ok-ok-ok\nnewline"]) {
+      for (const bad of [undefined, "", "short", "has space in it", "ok-ok-ok\nnewline"]) {
         const r = await executeCommsOwnerAction(deps(), owner, { action, parameters: sendParams(), ...(bad !== undefined ? { idempotency_key: bad } : {}) });
         expect(r, `${action}:${String(bad)}`).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_required" });
+      }
+      // WP-G1b (JARVIS-112 e): en for lang nøkkel er en TYDELIG feil, ikke den misvisende `idempotency_key_required` (tidligere ble 161-200 tegn og over meldt slik)
+      for (const length of [161, 200, 201]) {
+        const r = await executeCommsOwnerAction(deps(), owner, { action, parameters: sendParams(), idempotency_key: "x".repeat(length) });
+        expect(r, `${action}:${length} tegn`).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_too_long" });
       }
     }
     expect(await journalCount()).toBe(before);

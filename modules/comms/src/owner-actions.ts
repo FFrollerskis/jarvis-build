@@ -16,6 +16,11 @@ export const COMMS_READ_ACTIONS: readonly string[] = ["list_inbound", "list_outb
 export const COMMS_OWNER_ACTIONS: readonly string[] = [...COMMS_OUTBOUND_ACTIONS, ...COMMS_ADMIN_ACTIONS, ...COMMS_READ_ACTIONS];
 /** Handlinger som finnes KUN med sitt eget flagg: `start_call` (JARVIS_COMMS_CALLS, klasse D - idempotensnøkkel + step-up som sending) og leverandør-lesing (JARVIS_COMMS_VENDOR_READS, klasse A). Ruten kjenner navnene, men en handling uten registrert verktøy avvises som ukjent. */
 export const COMMS_CALL_ACTIONS: readonly string[] = ["start_call"];
+/**
+ * De FEM JOURNALFØRTE utgående handlingene (`comms_outbound_log`): journalen binder idempotensnøkkelen til forespørselens fingeravtrykk (A-M5), så en gjenbrukt nøkkel til en ANNEN forespørsel avvises (`idempotency_key_collision`) FØR gatewayen er nådd.
+ * ALT annet er ikke-journalført: der binder ingenting nøkkelen til nyttelasten, og nyttelast-avtrykket i den skopede nøkkelen (WP-G1b, JARVIS-112 a) er det som hindrer at en gjenbrukt nøkkel gir en stille ikke-handling.
+ */
+export const COMMS_JOURNALLED_ACTIONS: readonly string[] = [...COMMS_OUTBOUND_ACTIONS, ...COMMS_CALL_ACTIONS];
 export const COMMS_VENDOR_READ_ACTIONS: readonly string[] = ["read_thread", "list_users", "get_message", "list_templates", "read_message"];
 /** Google Contacts (JARVIS_COMMS_CONTACTS): lesing (klasse A, uten step-up) og skriving (create/update C, delete D, sync C - step-up; create/update/delete krever idempotensnøkkel). */
 export const COMMS_CONTACT_READ_ACTIONS: readonly string[] = ["contacts_list", "contacts_search", "contacts_get"];
@@ -26,18 +31,91 @@ export const COMMS_MEETING_WRITE_ACTIONS: readonly string[] = ["meeting_ingest_t
 const COMMS_KEYED_CONTACT_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete", "meeting_delete"];
 export const COMMS_KNOWN_ACTIONS: readonly string[] = [...COMMS_OWNER_ACTIONS, ...COMMS_CALL_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_CONTACT_WRITE_ACTIONS, ...COMMS_MEETING_READ_ACTIONS, ...COMMS_MEETING_WRITE_ACTIONS];
 
-/** Brukerens egen nøkkel. Maks 160 tegn: den skopede nøkkelen (handling + tenant-merke + nøkkel, høyst 37 tegn ekstra) må få plass i journalens `request_id` (maks 200 tegn). */
-const KEY = /^[A-Za-z0-9._:-]{8,160}$/;
+/**
+ * Høyeste lengde på brukerens egen nøkkel. En lengre nøkkel er en TYDELIG feil (`idempotency_key_too_long`), aldri avkortet og aldri den misvisende `idempotency_key_required` (JARVIS-112 e). Budsjettet:
+ *  - JOURNALFØRTE handlinger: den skopede nøkkelen (handling + tenant-merke + nøkkel, høyst 37 tegn ekstra) må få plass i journalens `request_id` (CHECK 8-200 tegn): 160 + 37 = 197.
+ *  - IKKE-JOURNALFØRTE handlinger: i tillegg kommer nyttelast-avtrykket (`PAYLOAD_FINGERPRINT_LENGTH` + skilletegn), høyst 230 tegn. Ledgeren (`tool_executions`, PK (tenant_id, idempotency_key)) har INGEN eksplisitt lengdegrense (`text`, og gatewayen
+ *    validerer ikke lengden); den faktiske grensen er btree-tuppelen på 2704 byte, målt til ca. 2650 ukomprimerbare tegn (WP-G1b-proben: 2700 tegn ga et ubehandlet `index row size ... exceeds btree version 4 maximum 2704`-unntak).
+ */
+export const COMMS_IDEMPOTENCY_KEY_MAX_LENGTH = 160;
+const KEY = new RegExp(`^[A-Za-z0-9._:-]{8,${COMMS_IDEMPOTENCY_KEY_MAX_LENGTH}}$`);
+
+/** Lengden (hex-tegn) på nyttelast-avtrykket i den skopede nøkkelen for ikke-journalførte handlinger: 128 bit av SHA-256. */
+export const PAYLOAD_FINGERPRINT_LENGTH = 32;
 
 /**
  * A-N2 (LEDER-AVGJØRELSE, delta-review A): ToolGateway-ledgeren slår opp på (tenant, idempotensnøkkel) ALENE - `tool_id`/`action` sammenlignes ikke (kjent JARVIS-102; den delte gatewayen endres ikke her). Samme brukervalgte nøkkel til to
  * ULIKE handlinger ga derfor `ok + deduplicated` på den andre uten at noe ble utført: `authorize_account(K)` så `send(K)` = ingen sending, `send(K)` så `record_opt_out(K)` = ingen STOP registrert (og alt som mutates via comms: kontakter, møter).
  * Eier-handlingslaget SKOPER derfor nøkkelen FØR den når gatewayen og journalen: `<handling>:<tenant-merke>:<nøkkel>`. Samme nøkkel + SAMME handling er fortsatt samme forespørsel (ekte gjenspilling, A-M5-fingeravtrykket gjelder uendret);
  * samme nøkkel + ANNEN handling er uavhengige forespørsler. Tenant-merket (8 hex av SHA-256 over tenant-id-en) gjør nøkkelen entydig også utenfor de tenant-skopede tabellene (ledgerens PK og journalens unike indeks er allerede per tenant).
+ *
+ * WP-G1b (JARVIS-112 a): for IKKE-journalførte handlinger finnes ingen journal som binder nøkkelen til forespørselen, så samme handling + samme nøkkel + ULIK nyttelast ga fortsatt `ok + deduplicated` uten effekt (`record_opt_out(K, A)` så
+ * `(K, B)` registrerte ikke B; `authorize_account(K, X)` så `(K, Y)` autoriserte ikke Y). Da settes nyttelast-avtrykket (`ownerPayloadFingerprint`) inn som eget ledd: `<handling>:<tenant-merke>:<avtrykk>:<nøkkel>`. Ulik nyttelast = en
+ * uavhengig forespørsel som UTFØRES; lik nyttelast = en ekte gjenspilling. Journalførte handlinger får IKKE avtrykket (formen er uendret): der er et avvik en kollisjon (A-M5), ikke en ny forespørsel.
  */
-export function scopedIdempotencyKey(tenantId: string, action: string, key: string): string {
+export function scopedIdempotencyKey(tenantId: string, action: string, key: string, payloadFingerprint?: string): string {
   const tenantTag = createHash("sha256").update(tenantId, "utf8").digest("hex").slice(0, 8);
-  return `${action}:${tenantTag}:${key}`;
+  return payloadFingerprint === undefined ? `${action}:${tenantTag}:${key}` : `${action}:${tenantTag}:${payloadFingerprint}:${key}`;
+}
+
+/** Høyeste nesting `canonicalPayloadJson` godtar (gyldige nyttelaster er høyst 4 dype). Bunnen mot sykliske eller bevisst dype strukturer: en tydelig feil, aldri stakkoverflyt. */
+const CANONICAL_MAX_DEPTH = 16;
+
+/**
+ * K3 (WP-G1b): deterministisk, nøkkel-rekkefølge-uavhengig serialisering av en JSON-verdi. Objektnøkler sorteres (UTF-16-kodeenheter, som RFC 8785), arrayer beholder rekkefølgen, og hver verdi skrives slik at ulike typer aldri gir samme tekst:
+ * `1` er ikke `"1"`, `null` er ikke en fraværende nøkkel, `[]` er ikke `{}`, `true` er ikke `"true"`. `undefined` som objektverdi regnes som fraværende (som i JSON). Alt som IKKE er JSON KASTER i stedet for å skrives om til `null`
+ * (NaN/Infinity, `undefined` i array, funksjon, symbol, bigint, ikke-rene objekter, for dyp nesting): to ulike nyttelaster skal aldri kunne dele avtrykk fordi en verdi ble stille omskrevet.
+ */
+export function canonicalPayloadJson(value: unknown): string {
+  return canonicalize(value, 0);
+}
+
+function canonicalize(value: unknown, depth: number): string {
+  if (depth > CANONICAL_MAX_DEPTH) throw new RangeError("canonical_payload_too_deep");
+  if (value === null) return "null";
+  switch (typeof value) {
+    case "string":
+      return JSON.stringify(value);
+    case "boolean":
+      return value ? "true" : "false";
+    case "number":
+      if (!Number.isFinite(value)) throw new TypeError("canonical_payload_non_finite_number");
+      return JSON.stringify(value);
+    case "object": {
+      if (Array.isArray(value)) return `[${Array.from(value as unknown[], (item) => canonicalize(item, depth + 1)).join(",")}]`;
+      const proto: unknown = Object.getPrototypeOf(value);
+      if (proto !== Object.prototype && proto !== null) throw new TypeError("canonical_payload_not_plain_object");
+      const entries = Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined).sort(([a], [b]) => (a < b ? -1 : 1));
+      return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalize(v, depth + 1)}`).join(",")}}`;
+    }
+    default:
+      throw new TypeError(`canonical_payload_unsupported_type:${typeof value}`);
+  }
+}
+
+/**
+ * Skrivehandlinger hvis virkning er felles for hele utrullingen og IKKE per memory space: Google-kontaktboken er ÉN per utrulling (People API), så samme nøkkel + samme nyttelast fra to rom er SAMME forespørsel (reviewer A funn 2: ellers ble en gjenspilling fra et annet
+ * rom en dobbel opprettelse). Disse bruker `*` som romledd i avtrykket (`*` er ikke et gyldig memory space). Alle andre ikke-journalførte skrivinger har virkning per rom (konto, møte, kontaktlenke) eller er tenant-brede og idempotente (`record_opt_out`: samme rad), og beholder rommet.
+ */
+export const COMMS_ROOM_INDEPENDENT_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete"];
+
+/** Feltnavn som er forespørselens IDENTITET (journalens `request_id`, nøkkelfeltet selv), aldri nyttelast: de teller ikke med i avtrykket. Ingen ikke-journalført handlings skjema godtar dem (låst av testen `payload-fingerprint`). */
+const REQUEST_IDENTITY_FIELDS: readonly string[] = ["request_id", "idempotency_key"];
+
+/**
+ * Nyttelast-avtrykket (hex, `PAYLOAD_FINGERPRINT_LENGTH` tegn) for en ikke-journalført handling: SHA-256 over tenant, memory space og den kanoniske nyttelasten. Memory space er med fordi virkningen er per rom (en konto autoriseres per rom, møter og
+ * kontaktlenker ligger per rom), mens ledgeren er tenant-bred: samme nøkkel og nyttelast fra to rom er to forespørsler. TENANT er med (reviewer B F3) så samme nyttelast i to tenants ikke gir samme avtrykk i ledgerens nøkkel (ellers kunne en som leser
+ * databasen eller en sikkerhetskopi koble en nyttelast på tvers av tenants, og en ordlistetabell ville gjelde alle tenants; samme pseudonymkonvensjon som mottaker-hashen). Kun handlingens parametre teller ellers (ikke person, sesjon, enhet eller kanal:
+ * en gjenspilling etter ny innlogging er samme forespørsel). Avtrykket er en usaltet hash (samme klasse som de øvrige pseudonymene i modulen; JARVIS-112 b), så det er ikke en hemmelighet - kun et skille mellom nyttelaster.
+ */
+export function ownerPayloadFingerprint(tenantId: string, memorySpace: string, parameters: Record<string, JsonValue>): string {
+  if (typeof parameters !== "object" || parameters === null || Array.isArray(parameters)) throw new TypeError("canonical_payload_parameters_not_an_object");
+  // Reviewer A funn 7: også toppnivået må være et rent objekt (Date, Map, Set og klasseinstanser ville ellers blitt skrevet om av `Object.fromEntries` og gitt samme avtrykk som `{}`); nøstede verdier sjekkes av `canonicalPayloadJson`.
+  const topProto: unknown = Object.getPrototypeOf(parameters);
+  if (topProto !== Object.prototype && topProto !== null) throw new TypeError("canonical_payload_not_plain_object");
+  const payload = Object.fromEntries(Object.entries(parameters).filter(([name]) => !REQUEST_IDENTITY_FIELDS.includes(name)));
+  const hashed = JSON.stringify(["comms-owner-payload-v2", tenantId, memorySpace, canonicalPayloadJson(payload)]);
+  return createHash("sha256").update(hashed, "utf8").digest("hex").slice(0, PAYLOAD_FINGERPRINT_LENGTH);
 }
 
 export interface OwnerActionDeps {
@@ -99,12 +177,34 @@ export async function executeCommsOwnerAction(
   if (!isOwner(deps, identity)) return { ok: false, status: "rejected", reason: "owner_required" };
   if (!COMMS_ALLOWED_SPACES.includes(identity.memory_space_id)) return { ok: false, status: "rejected", reason: "comms_space_not_allowed" };
   if (!COMMS_KNOWN_ACTIONS.includes(action) || deps.gateway.get("comms", action) === undefined) return { ok: false, status: "rejected", reason: "comms_unknown_action" };
-  const outbound = COMMS_OUTBOUND_ACTIONS.includes(action) || COMMS_CALL_ACTIONS.includes(action);
+  const outbound = COMMS_JOURNALLED_ACTIONS.includes(action);
   const userKey = input.idempotency_key;
   let parameters = input.parameters;
-  if ((outbound || COMMS_KEYED_CONTACT_ACTIONS.includes(action)) && (userKey === undefined || !KEY.test(userKey))) return { ok: false, status: "rejected", reason: "idempotency_key_required" };
+  // JARVIS-112 e (K4): en for lang nøkkel (for ALLE handlinger som tar en nøkkel) er en tydelig feil - aldri avkortet, aldri den misvisende `idempotency_key_required`. Sjekken står FØR kravet om nøkkel.
+  if (userKey !== undefined && userKey.length > COMMS_IDEMPOTENCY_KEY_MAX_LENGTH) return { ok: false, status: "rejected", reason: "idempotency_key_too_long" };
+  const keyRequired = outbound || COMMS_KEYED_CONTACT_ACTIONS.includes(action);
+  if (keyRequired && (userKey === undefined || !KEY.test(userKey))) return { ok: false, status: "rejected", reason: "idempotency_key_required" };
+  // Reviewer B F2: en OPPGITT nøkkel til en handling der nøkkelen er valgfri må ha samme form som en påkrevd (8-160 tegn, `[A-Za-z0-9._:-]`). En tom eller svak nøkkel ga ellers en stille `deduplicated` (`authorize_account(X, "")`, `revoke_account`,
+  // `authorize_account(X, "")` utførte ikke den andre autoriseringen), og et NUL-tegn ga en ubehandlet databasefeil (HTTP 500). Ingen nøkkel = ingen idempotens (uendret).
+  if (!keyRequired && userKey !== undefined && !KEY.test(userKey)) return { ok: false, status: "rejected", reason: "idempotency_key_invalid" };
   // A-N2: gatewayen og journalen ser kun den SKOPEDE nøkkelen (handling + tenant-merke + brukerens nøkkel).
-  const idempotencyKey = userKey === undefined ? undefined : scopedIdempotencyKey(identity.tenant_id, action, userKey);
+  // JARVIS-112 a: for IKKE-journalførte handlinger (ingen journal binder nøkkelen til forespørselen) er nyttelast-avtrykket et eget ledd i nøkkelen, så en gjenbrukt nøkkel med ULIK nyttelast aldri gir en stille `ok + deduplicated` uten effekt.
+  // Journalførte handlinger får ikke avtrykket: der avvises et avvik som kollisjon (A-M5, under).
+  let idempotencyKey: string | undefined;
+  if (userKey !== undefined) {
+    if (outbound) {
+      idempotencyKey = scopedIdempotencyKey(identity.tenant_id, action, userKey);
+    } else {
+      let fingerprint: string;
+      try {
+        fingerprint = ownerPayloadFingerprint(identity.tenant_id, COMMS_ROOM_INDEPENDENT_ACTIONS.includes(action) ? "*" : identity.memory_space_id, parameters);
+      } catch {
+        // Nyttelasten er ikke ren JSON (NaN, for dyp nesting, ...): aldri en stille omskriving til et avtrykk som kunne delt nøkkel med en annen nyttelast.
+        return { ok: false, status: "rejected", reason: "invalid_parameters" };
+      }
+      idempotencyKey = scopedIdempotencyKey(identity.tenant_id, action, userKey, fingerprint);
+    }
+  }
   if (outbound && idempotencyKey !== undefined) {
     if (parameters["request_id"] !== undefined && parameters["request_id"] !== userKey) return { ok: false, status: "rejected", reason: "comms_request_id_mismatch" };
     parameters = { ...parameters, request_id: idempotencyKey };

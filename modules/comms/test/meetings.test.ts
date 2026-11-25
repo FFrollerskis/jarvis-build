@@ -6,7 +6,7 @@ import { parseTranscript } from "@jarvis/knowledge";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
 import {
-  CommsStore, CommsTransport, MeetingService, OutboundFunnel, commsToolDefinitions, executeCommsOwnerAction, explicitDueDate, extractCommitments, parseCommsConfig, scopedIdempotencyKey, type AudioTranscriber, type MeetingContext
+  CommsStore, CommsTransport, MeetingService, OutboundFunnel, commsToolDefinitions, executeCommsOwnerAction, explicitDueDate, extractCommitments, ownerPayloadFingerprint, parseCommsConfig, scopedIdempotencyKey, type AudioTranscriber, type MeetingContext
 } from "../src/index.ts";
 import { OWNER, TENANT_A, TENANT_B, startCommsDb, type CommsDb } from "./support/harness.ts";
 
@@ -258,7 +258,7 @@ describe("D: godkjenning av forpliktelser og sletting", () => {
     expect(JSON.stringify(full.ok ? full.data : null)).toContain("Ola Nordmann");
     const idem = `del-${uniq()}-abcdef`;
     expect((await act("meeting_delete", { meeting_id: meetingId }, idem)).ok).toBe(true);
-    const ledger = (await db.admin.query(`SELECT before_state, after_state FROM tool_executions WHERE idempotency_key = $1`, [scopedIdempotencyKey(TENANT_A, "meeting_delete", idem)])).rows as Array<Record<string, unknown>>;
+    const ledger = (await db.admin.query(`SELECT before_state, after_state FROM tool_executions WHERE idempotency_key = $1`, [scopedIdempotencyKey(TENANT_A, "meeting_delete", idem, ownerPayloadFingerprint(TENANT_A, "business", { meeting_id: meetingId }))])).rows as Array<Record<string, unknown>>;
     expect(ledger).toHaveLength(1);
     expect(ledger[0]!["before_state"]).toEqual({ exists: true, meeting_id: meetingId });
     const audit = (await db.admin.query(`SELECT payload::text AS payload, reason FROM audit_events WHERE tenant_id = $1 AND tool_id = 'comms' AND action = 'meeting_delete'`, [TENANT_A])).rows as Array<Record<string, unknown>>;
