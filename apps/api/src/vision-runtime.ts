@@ -1,5 +1,4 @@
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { isIP } from "node:net";
 import { join } from "node:path";
 import type pg from "pg";
 import { envInt } from "@jarvis/contracts";
@@ -13,6 +12,9 @@ import {
   type VisionModelGateway, type VisionPollerGuard, type VisionPollerHandle, type VisionService
 } from "@jarvis/vision";
 import { RateLimiter } from "./http-guard.ts";
+import {
+  LocalEndpointError, assertLocalEndpoint, isLocalAddress, resolveEndpointLocality, LOCAL_ENDPOINT_DNS_TIMEOUT_MS, type LocalEndpointDnsLookup, type LocalEndpointOptions
+} from "./local-endpoint-guard.ts";
 import { assertDbLimits, limitedPool, runWithDbLimits, type DbLimits } from "./vision-db-limits.ts";
 import { flagOn, visionFlagsFromEnv, type VisionFlags } from "./vision-flags.ts";
 import type { VisionApiDeps, VisionMaintenanceStatus, VisionStatusReport } from "./vision-routes.ts";
@@ -63,8 +65,6 @@ export const MAINTENANCE_LOCK_TIMEOUT_MS = 15_000;
 export const MAX_ABANDONED_LIGHT_RUNS = 2;
 export const SKIP_LOG_INTERVAL_MS = 10 * 60_000;
 
-const LOCAL_SUFFIXES = [".local", ".lan", ".internal", ".home.arpa", ".localdomain"];
-
 /**
  * Tailscale (CGNAT 100.64.0.0/10 og MagicDNS `*.ts.net`) er KUN tillatt med eierens eksplisitte `JARVIS_VISION_ALLOW_TAILSCALE=on` (review A-L5): et tailnet er eierens eget lukkede nett, så oppsettet «modellen kjører på
  * PC-en min, nådd via Tailscale» må kunne brukes - men `100.x`/`.ts.net` er ellers ikke et privat nett, og uten flagget avvises begge.
@@ -73,29 +73,8 @@ export function visionAllowTailscale(env: NodeJS.ProcessEnv): boolean {
   return flagOn(env["JARVIS_VISION_ALLOW_TAILSCALE"]);
 }
 
-export interface LocalEndpointOptions {
-  allowTailscale?: boolean;
-}
-
-/**
- * Er denne IP-adressen lokal? Loopback, RFC 1918 (10/8, 172.16/12, 192.168/16), IPv6 ULA (fc00::/7, som også dekker Tailscales fd7a:115c:a1e0::/48) og - kun med eier-flagget - CGNAT 100.64/10. Link-lokale adresser
- * (169.254/16 - inkludert skymetadata-adressen 169.254.169.254 - og fe80::/10), 0.0.0.0 og alt offentlig er IKKE lokale (review A-L5). En IPv4-mappet IPv6 (`::ffff:10.0.0.1`, slik getaddrinfo kan gi) vurderes som sin IPv4.
- */
-export function isLocalAddress(address: string, options: LocalEndpointOptions = {}): boolean {
-  let host = address.replace(/^\[|\]$/g, "").toLowerCase();
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(host);
-  if (mapped !== null) host = mapped[1] as string;
-  const kind = isIP(host);
-  if (kind === 4) {
-    const [a, b] = host.split(".").map(Number) as [number, number];
-    if (a === 127 || a === 10) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    return options.allowTailscale === true && a === 100 && b >= 64 && b <= 127;
-  }
-  if (kind === 6) return host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host);
-  return false;
-}
+// WP-G4b K4: adressereglene bor nå i `local-endpoint-guard.ts` (DELT med de lokale modellidentitetene, `local-model-endpoints.ts`); eksportene her er uendret.
+export { isLocalAddress, type LocalEndpointOptions };
 
 /**
  * Kamerabilder forlater ALDRI maskinen/det lokale nettverket. `local_vision`-identiteten er «lokal» ved KONFIGURASJON, så endepunktet valideres deterministisk ved oppstart: http(s), ingen brukerinfo,
@@ -104,57 +83,33 @@ export function isLocalAddress(address: string, options: LocalEndpointOptions = 
  * `verifyVisionEndpoints` (review A-L5). Redirects følges uansett aldri, se adapteren.
  */
 export function assertLocalVisionEndpoint(raw: string, options: LocalEndpointOptions = {}): string {
-  let url: URL;
   try {
-    url = new URL(raw);
-  } catch {
-    throw new VisionConfigError("local_url_malformed");
+    return assertLocalEndpoint(raw, options);
+  } catch (err) {
+    if (err instanceof LocalEndpointError) throw new VisionConfigError(err.code);
+    throw err;
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") throw new VisionConfigError("local_url_scheme");
-  if (url.username !== "" || url.password !== "") throw new VisionConfigError("local_url_credentials");
-  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  const local = isIP(host) !== 0
-    ? isLocalAddress(host, options)
-    : host === "localhost" || host === "host.docker.internal" || !host.includes(".") || LOCAL_SUFFIXES.some((s) => host.endsWith(s)) || (options.allowTailscale === true && host.endsWith(".ts.net"));
-  if (!local) throw new VisionConfigError("local_url_not_local");
-  return raw;
 }
 
 /** Navneoppslag (injisert; i drift `dns.lookup(host, { all: true })` fra main.ts - visjonsfilene importerer aldri node:dns, byggevakten feller det). */
-export type VisionDnsLookup = (hostname: string) => Promise<ReadonlyArray<{ address: string }>>;
+export type VisionDnsLookup = LocalEndpointDnsLookup;
 
 export interface VisionEndpointVerification {
   /** Kode (`embedding_url_not_local` ...) når embedding-endepunktet ikke er lokalt: vision bruker da INGEN embedding (ingen objektvektorer), men API-et starter. `null` = greit eller ikke relevant. */
   embeddingBlockedReason: string | null;
 }
 
-const DNS_TIMEOUT_MS = 5_000;
-
-async function lookupWithTimeout(lookup: VisionDnsLookup, host: string, timeoutMs: number): Promise<ReadonlyArray<{ address: string }>> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([lookup(host), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("dns_timeout")), timeoutMs); })]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
+const DNS_TIMEOUT_MS = LOCAL_ENDPOINT_DNS_TIMEOUT_MS;
 
 /** Løser verten i `rawUrl` og avviser alt som peker utenfor det lokale nettet. Gir `"unresolved"` (med en logglinje uten vertsnavn) når navnet ikke kan løses akkurat nå - se `verifyVisionEndpoints`. */
 async function assertResolvesLocal(rawUrl: string, label: string, deps: { lookup: VisionDnsLookup; timeoutMs: number }, options: LocalEndpointOptions): Promise<"checked" | "literal" | "unresolved"> {
-  const host = new URL(rawUrl).hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (isIP(host) !== 0) return "literal"; // en IP-adresse er allerede vurdert syntaktisk
-  let addresses: ReadonlyArray<{ address: string }>;
-  try {
-    addresses = await lookupWithTimeout(deps.lookup, host, deps.timeoutMs);
-  } catch {
-    addresses = [];
-  }
-  if (addresses.length === 0) {
+  const resolution = await resolveEndpointLocality(rawUrl, deps, options);
+  if (resolution === "unresolved") {
     console.error(JSON.stringify({ msg: "vision_endpoint_unresolved", endpoint: label }));
     return "unresolved";
   }
-  if (addresses.some((entry) => !isLocalAddress(entry.address, options))) throw new VisionConfigError(`${label}_resolves_nonlocal`);
-  return "checked";
+  if (resolution === "nonlocal") throw new VisionConfigError(`${label}_resolves_nonlocal`);
+  return resolution;
 }
 
 /**

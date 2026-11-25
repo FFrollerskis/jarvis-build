@@ -5,6 +5,8 @@ import { envInt, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { createWatchdogIncidentBridge, parseIncidentProducerConfig } from "./incident-producers.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { enforceLocalModelEndpoints } from "./local-model-endpoints.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPolicyAuditSinkFromEnv, createPool, installPolicyAuditDrain, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ClaudeBudgetEnforcer, claudeBudgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv, type ClaudeBudgetConfig } from "@jarvis/model-gateway";
@@ -101,6 +103,8 @@ try {
 } catch (err) {
   failStartup(err);
 }
+// WP-G4b K4 (D-484, JARVIS-115 d): samme oppstartsvakt for lokale modell-URL-er som i apps/api/src/main.ts (workeren kjører også begrenset innhold gjennom ModelGateway: minneuttrekk, sammendrag, delegerte jobber). Flagg AV = ingenting skjer.
+await enforceLocalModelEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
 const workerTrace = traceSinkFromEnv("var/worker-traces.jsonl");
 const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace: workerTrace, actor_person_id: owner.owner_person_id, owner_tenant_id: owner.tenant_id });
 const gateway = new ModelGateway({

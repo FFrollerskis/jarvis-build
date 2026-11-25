@@ -105,6 +105,10 @@ export const MODEL_ENV = [
   "JARVIS_MEMORY_RETENTION_SWEEP_HOUR",
   "JARVIS_MODEL_TIMEOUT_MS",
   "JARVIS_OLLAMA_URL",
+  // WP-G4b K4 (D-484, JARVIS-115 d): oppstartsvakt for URL-ene til de lokale modellidentitetene (`gemma_local`, `local_llm`, `ollama`). Kun eksakt `on` slår på (AV = identisk med main); `_ALLOW_TAILSCALE=on` regner eierens tailnet som lokalt.
+  // api OG worker kjører vakten (begge bygger en ModelGateway med disse identitetene). Ingen hemmeligheter - kun flagg.
+  "JARVIS_LOCAL_MODEL_URL_GUARD",
+  "JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE",
   // WP-D4 (JARVIS-036): valgfri modell-/endepunktoverstyring for Kimi og Hermes (tom = adapterens standard).
   "JARVIS_KIMI_MODEL",
   "JARVIS_KIMI_URL",

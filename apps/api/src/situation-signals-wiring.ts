@@ -25,6 +25,8 @@ export interface SituationSignalsWiringDeps {
   gateway: ToolGateway;
   /** Den ekte `ModelGateway` (strukturelt: `complete`). Alle modellkall går gjennom den (sensitivitetsruting først, så Claude-kreditten). */
   modelGateway: AssistModelGateway;
+  /** WP-G4b K4: lokalitet slått opp LIVE mot modellregisteret (i drift `!servedByCloudModel`); snevrer inn assist-vaktens navneliste, widner aldri. Utelatt = kun navnelisten (uendret). */
+  isLocalProvider?: (provider: string) => boolean;
   ownerIdentity: IdentityContext;
   /** Eierens tenant (løperen betjener kun denne). Navnet er bevisst ikke `ownerTenantId`: `wpg3-vision-runtime.test.ts` teller den strengen i main.ts (kun HA-polleren skal få eierens tenant dit). */
   ownerTenant: string;
@@ -231,7 +233,7 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
   const registry = new SubscriptionRegistry(deps.pool, authority);
   const logs = new SignalLogService(deps.pool);
   const identityFor = (tenantId: string, space: MemorySpace): IdentityContext => ({ ...deps.ownerIdentity, tenant_id: tenantId, memory_space_id: space, session_id: `${deps.ownerIdentity.session_id}-situation-signals` });
-  const assist = flags.modelAssist ? new ModelSignalAssist({ gateway: deps.modelGateway }) : null;
+  const assist = flags.modelAssist ? new ModelSignalAssist({ gateway: deps.modelGateway, ...(deps.isLocalProvider !== undefined ? { isLocalProvider: deps.isLocalProvider } : {}) }) : null;
   // Tilbakemeldingslæring (P2d) KUN med `JARVIS_SITUATION_FEEDBACK=on`: uten flagget finnes verken handlingene eller en terskelkilde (alle regler bruker standard). Simulering er ren lesing og følger hovedbryteren.
   const feedback = flags.feedback ? new FeedbackService(deps.pool, authority, true, now) : undefined;
   const simulation = new SimulationService(deps.pool, simulationToolInfoFrom(deps.gateway), now);

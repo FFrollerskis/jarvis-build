@@ -112,6 +112,7 @@ import {
   situationsToolDefinitions
 } from "@jarvis/situations";
 import { createSituationSignalsWiring } from "./situation-signals-wiring.ts";
+import { enforceLocalModelEndpoints } from "./local-model-endpoints.ts";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, parseFollowUpPushPolicy, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
@@ -334,6 +335,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-G3 (D-465): `local_vision` (lokal bildeklassifisering av kamerabilder) registreres KUN når JARVIS_VISION_ENABLED=on og JARVIS_VISION_CLASSIFIER=on - ellers `null` (ingenting registreres, identisk med main).
   // En ikke-lokal/manglende JARVIS_VISION_LOCAL_URL KASTER her og stopper oppstarten (kamerabilder forlater aldri maskinen).
   // Review A-L5/A-INFO-4: vertsnavnene i endepunktene løses ved oppstart og må peke til det lokale nettet (offentlig oppløsning KASTER); embedding-endepunktet som ikke er lokalt gir kun «ingen vision-embedding».
+  // WP-G4b K4 (D-484, JARVIS-115 d): «lokal» modell er en etikett i registeret; med `JARVIS_LOCAL_MODEL_URL_GUARD=on` valideres URL-en til `gemma_local`/`local_llm`/`ollama` ved oppstart (G3-vakten, DNS inkludert), og en ugyldig/offentlig
+  // URL gjør identiteten IKKE-lokal på SELVE profilen (alle lokalitetsavgjørelser ser det: ruter, gateway-låser, finanslåsen). Flagg AV = ingenting skjer. Kjøres FØR gatewayen bygges (samme i worker-main.ts).
+  await enforceLocalModelEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
   const visionEndpoints = await verifyVisionEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
   const visionAdapter = visionAdapterFromEnv(process.env);
   const gateway = new ModelGateway({
@@ -852,6 +856,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // (verktøylister, utvalg, intents, rate-grenser, ruter og det daglige sveipet er identiske med main). Helse-/visjonsporten tas strukturelt inn fra de ALLEREDE konstruerte tjenestene (denne filen er en godkjent helse-importør).
   const situationSignals = createSituationSignalsWiring({
     env: process.env, pool, engine: situationEngine, domainPauses: situationDomainPauses, gateway: toolGateway, modelGateway: gateway, ownerIdentity, ownerTenant: owner.tenant_id,
+    // WP-G4b K4: assist-vakten følger den SENTRALE lokalitetsregelen (samme `financeLockServedLocally` som finanslåsen; ingen egen kopi): en lokal identitet med ugyldig URL er `cloud` og forkastes.
+    isLocalProvider: (provider) => financeLockServedLocally({ provider, model: "" }),
     ownerPersonId: owner.owner_person_id, incidents: incidentService, vision: visionService, health: healthService, killSwitch,
     haTransport: new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))
   });
