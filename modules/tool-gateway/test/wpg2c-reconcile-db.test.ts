@@ -193,8 +193,11 @@ describe("B: failed - kun bevist; ellers forblir raden ukjent (med tidspunkt, an
   it("FOR TIDLIG (under 5 min etter at eksekutoren konkluderte): ukjent med `too_recent_for_failed_proof`; samme bevis 5 min senere gir `failed`", async () => {
     const rig = homeRig();
     const id = await unknownLock(rig);
+    const concluded = (await rig.journal.findById(G2_TENANT, "personal", id))?.completed_at;
+    expect(concluded).toBeTruthy();
     const early = await rig.reconcile(id, owner, () => Date.now() + 60_000);
     expect(early).toMatchObject({ resolution: "unknown", basis: "too_recent_for_failed_proof", action: { status: "outcome_unknown", reconcile_attempts: 1, reconcile_basis: "too_recent_for_failed_proof" } });
+    expect(early.action.completed_at, "et forsøk som ikke avgjør raden endrer ikke tidspunktet eksekutoren konkluderte (fristen for `failed` regnes fra det)").toEqual(concluded);
     expect(early.action.reconciled_at, "tidspunktet for forsøket er lagret").not.toBeNull();
     expect(early.action.reconciled_state).toMatchObject({ state: "unlocked" });
     expect(await rig.reconcile(id)).toMatchObject({ resolution: "failed", action: { status: "failed", reconcile_attempts: 2 } });
@@ -324,6 +327,57 @@ describe("C: det avstemmingen IKKE påstår", () => {
     const untouched = (await db.adminPool.query("SELECT action_id, reconcile_attempts, status FROM personal_action_journal WHERE action_id LIKE 'pers-act-aaaaaaaa-%' ORDER BY action_id")).rows as Array<{ reconcile_attempts: number; status: string }>;
     expect(untouched.map((r) => r.reconcile_attempts)).toEqual([0, 0, 0, 0]);
     expect((await audits()).filter((a) => String(a.payload["action_id"]).startsWith("pers-act-aaaaaaaa-"))).toEqual([]);
+  });
+});
+
+describe("C3: grensetilfeller rundt lesingen og journalen", () => {
+  const insertManual = async (name: string, over: { tool?: string; status?: string } = {}): Promise<string> => {
+    const id = `pers-act-${name}`;
+    await db.adminPool.query(
+      `INSERT INTO personal_action_journal (action_id, tenant_id, memory_space_id, domain, tool_id, action, risk_class, risk_direction, target_ref, idempotency_key, request_digest, status, actor_person_id, source, request_params)
+       VALUES ($1, $2, 'personal', 'home', $3, 'critical_lock', 'D', 'reduces', 'lock.front_door', $4, $5, $6, 'person-g2-p-owner', 'owner_route', $7::jsonb)`,
+      [id, G2_TENANT, over.tool ?? "home-assistant", `manual-${name}-key`, actionRequestDigest("home", "critical_lock", LOCK), over.status ?? "outcome_unknown", JSON.stringify(LOCK)]
+    );
+    return id;
+  };
+
+  it("målet finnes ikke lenger hos HA (404): ukjent `target_not_found` - aldri applied/failed - og forsøket telles", async () => {
+    const rig = homeRig();
+    const id = await unknownLock(rig);
+    ha.entities.delete("lock.front_door");
+    expect(await rig.reconcile(id)).toMatchObject({ resolution: "unknown", basis: "target_not_found", observed: null, action: { status: "outcome_unknown", reconcile_attempts: 1, reconciled_state: null } });
+  });
+
+  it("verktøy som ikke samsvarer: en rad hvis verktøy-id ikke er indeksens, eller en gateway uten lese-handlingen, gir `personal_action_domain_not_enabled` (ingenting leses, ingenting skrives)", async () => {
+    const rig = homeRig();
+    const foreignTool = await insertManual("00000000-0000-0000-0000-0000000000a1", { tool: "other-tool" });
+    await expect(rig.reconcile(foreignTool)).rejects.toThrow("personal_action_domain_not_enabled");
+    const id = await unknownLock(rig);
+    const withoutRead = reconcilePersonalAction(
+      { executor: { ...rig.executor, gateway: { get: () => undefined, execute: async () => { throw new Error("skal aldri kalles"); } } as never }, domains: new Map([["home", { toolId: "home-assistant", readAction: HOME_CRITICAL_READ_ACTION }]]) },
+      owner, { action_id: id }
+    );
+    await expect(withoutRead).rejects.toThrow("personal_action_domain_not_enabled");
+    expect(rig.gatewayCalls).toEqual([]);
+    expect(await rig.journal.findById(G2_TENANT, "personal", id)).toMatchObject({ reconcile_attempts: 0 });
+  });
+
+  it("journal.recordReconcile er BETINGET på `outcome_unknown`: en terminal eller `requested` rad returneres uendret (`updated: false`) uten revisjon og uten databaseunntak (en samtidig avgjørelse vinner); ukjent id kaster", async () => {
+    const rig = homeRig();
+    const id = await unknownLock(rig);
+    await rig.reconcile(id); // -> failed (terminal)
+    const requested = await insertManual("00000000-0000-0000-0000-0000000000a2", { status: "requested" });
+    const auditCount = (await audits()).length;
+    const terminalBefore = await rig.journal.findById(G2_TENANT, "personal", id);
+    const requestedBefore = await rig.journal.findById(G2_TENANT, "personal", requested);
+    for (const status of ["applied", "failed", "outcome_unknown"] as const) {
+      const onTerminal = await rig.journal.recordReconcile(owner, "personal", id, { status, basis: "forsok_paa_terminal", observed: { state: "locked" } });
+      expect(onTerminal, status).toEqual({ row: terminalBefore, updated: false });
+      const onRequested = await rig.journal.recordReconcile(owner, "personal", requested, { status, basis: "forsok_paa_requested", observed: null });
+      expect(onRequested, status).toEqual({ row: requestedBefore, updated: false });
+    }
+    expect(await audits(), "ingen revisjonsrad for en endring som ikke skjedde").toHaveLength(auditCount);
+    await expect(rig.journal.recordReconcile(owner, "personal", "pers-act-ffffffff-0000-0000-0000-0000000000ff", { status: "applied", basis: "x_y", observed: null })).rejects.toThrow("personal_action_not_found");
   });
 });
 
