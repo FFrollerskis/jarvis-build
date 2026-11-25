@@ -67,6 +67,7 @@ import {
   SubmitInFlightError,
   ProviderOutcomeUnknownError,
   PossibleDuplicatePaymentError,
+  CancelBlockedByCapturesError,
   VIPPS_STATUS_TO_JARVIS_STATE,
   VIPPS_MODIFICATION_EVENTS
 } from "./types.ts";
@@ -1866,6 +1867,41 @@ export class FinanceService {
   // toppkommentarer for hvor og hvorfor.
   // ======================================================================
 
+  /**
+   * WP-FIN2 (D-486, K5b): har intensjonen oppgjorte eller uavklarte Vipps-captures? Kalles med intensjonsraden låst. `settled_captures` = minst én capture er `settled` (pengene er tatt);
+   * `capture_outcome_unresolved` = en capture står `submitted`/`provider_acknowledged` (i flukt eller ukjent) eller er et `draft` flagget `SUBMIT_OUTCOME_UNKNOWN` (kallet er sendt, svaret kjent
+   * ikke) - leverandøren kan ha tatt pengene uten at Jarvis vet det. En ren `draft` uten flagg, og `failed`/`cancelled`, regnes ikke.
+   */
+  private async capturedFundsStatus(client: pg.PoolClient, tenantId: string, paymentIntentId: string): Promise<"none" | "settled_captures" | "capture_outcome_unresolved"> {
+    const { rows } = await client.query(
+      `SELECT COALESCE(SUM(amount_ore) FILTER (WHERE state = 'settled'), 0)::bigint AS settled_ore,
+              count(*) FILTER (WHERE state IN ('submitted', 'provider_acknowledged')
+                                  OR (state = 'draft' AND anomaly_flags @> '["SUBMIT_OUTCOME_UNKNOWN"]'::jsonb))::int AS unresolved
+         FROM vipps_captures WHERE tenant_id = $1 AND payment_intent_id = $2`,
+      [tenantId, paymentIntentId]
+    );
+    const row = rows[0] as { settled_ore: string; unresolved: number };
+    if (Number(row.settled_ore) > 0) return "settled_captures";
+    return row.unresolved > 0 ? "capture_outcome_unresolved" : "none";
+  }
+
+  /**
+   * WP-FIN2 (D-486, K5b): leverandøren (webhook/oppfrisking) eller et gjennomført cancel-kall sier «avsluttet», men intensjonen har oppgjorte/uavklarte captures. Intensjonen avsluttes ikke;
+   * `PROVIDER_STATE_CONFLICT` settes og en `anomaly_flagged`-hendelse skrives KUN første gang (gjentatte webhooks/oppfriskinger støyer ikke). Hendelsen bærer kun kode, aldri beløp.
+   */
+  private async flagCancelConflict(
+    client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, intent: PaymentIntent, funds: "settled_captures" | "capture_outcome_unresolved", cause: string, actorPersonId: string | null
+  ): Promise<void> {
+    const alreadyFlagged = (intent.anomaly_flags ?? []).includes("PROVIDER_STATE_CONFLICT");
+    await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", intent.payment_intent_id, ["PROVIDER_STATE_CONFLICT"]);
+    if (alreadyFlagged) return;
+    await insertEvent(client, tenantId, memorySpace, {
+      payment_intent_id: intent.payment_intent_id, event_type: "anomaly_flagged",
+      summary: `Vipps meldte at betalingen er avsluttet, men intensjonen har ${funds === "settled_captures" ? "oppgjorte" : "uavklarte"} captures - intensjonen beholdes (PROVIDER_STATE_CONFLICT)`,
+      actor_person_id: actorPersonId, metadata: { anomaly_flags: ["PROVIDER_STATE_CONFLICT"], reason: cause, captures: funds }
+    });
+  }
+
   private async requireVippsPaymentIntent(client: pg.PoolClient, tenantId: string, paymentIntentId: string, forUpdate: boolean): Promise<PaymentIntent> {
     const current = await readForUpdate(client, tenantId, paymentIntentId, forUpdate);
     if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
@@ -1910,6 +1946,18 @@ export class FinanceService {
       isModification ? current.provider_reported_currency : outcome.vippsCurrency,
       new Date(outcome.sourceEventEpochMs).toISOString(), outcome.sourceEventKey
     ];
+
+    if (targetState === "cancelled" && !isTerminalPaymentIntentState(current.state)) {
+      // WP-FIN2 (D-486, K5b): ALDRI `cancelled` med oppgjorte/uavklarte captures - da er intensjonen terminal mens penger er tatt, og `createVippsRefund` (krever `settled`)
+      // kan aldri betale dem tilbake. Fail-closed på samme måte som konflikten under: FLAGG (én hendelse første gang), la intensjonen stå, ALDRI overskriv.
+      // Intensjonsraden er låst av kalleren (`FOR UPDATE`), så captures kan ikke endre seg mellom sjekken og skrivingen.
+      const funds = await this.capturedFundsStatus(client, tenantId, current.payment_intent_id);
+      if (funds !== "none") {
+        await this.flagCancelConflict(client, tenantId, memorySpace, current, funds, `provider_reported_${outcome.vippsState.slice(0, 20)}`, actorPersonId);
+        const { rows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, current.payment_intent_id]);
+        return { applied: false, reason: "terminal_state_conflict", intent: rows[0] as PaymentIntent };
+      }
+    }
 
     if (targetState !== null && targetState !== current.state) {
       if (!canTransitionPaymentIntent(current.state, targetState)) {
@@ -2199,7 +2247,12 @@ export class FinanceService {
         // SAMME dobbel-idempotens-begrunnelse som Stripe: avledet FRA capture_id, ALDRI random per forsøk.
         idempotencyKey: `vipps-capture:${captureId}`
       }),
-      apply: async (client) => {
+      apply: async (client, { current }) => {
+        // WP-FIN2 (D-486, K5a): lås INTENSJONEN før capturen (samme rekkefølge som `createVippsCapture`, webhook-innhentingen og `checkVippsFullSettlement`), og skriv capture-oppgjøret,
+        // `captured`-hendelsen og full-oppgjør-sjekken i SAMME transaksjon. Tidligere gikk hendelsen og sjekken i en ANDRE transaksjon etter at capturen var `settled`: feilet den, sto
+        // intensjonen i `provider_acknowledged` til en `CAPTURED`-webhook, og en retry så `done`. Feiler noe her nå, ruller alt tilbake og feilen går i M-F2-stien (ukjent utfall, retry
+        // med samme Idempotency-Key).
+        await client.query(`SELECT 1 FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2 FOR UPDATE`, [tenantId, current.payment_intent_id]);
         const { rows: lockedRows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2 FOR UPDATE`, [tenantId, captureId]);
         const locked = lockedRows[0] as VippsCapture | undefined;
         // En samtidig capture (samme Idempotency-Key) har allerede lagret utfallet, eller raden er avsluttet på annen måte -> aldri skriv på nytt.
@@ -2209,22 +2262,19 @@ export class FinanceService {
            WHERE tenant_id = $1 AND capture_id = $2 RETURNING *`,
           [tenantId, captureId]
         );
-        return { capture: rows[0] as VippsCapture, performed: true };
+        const settled = rows[0] as VippsCapture;
+        await insertEvent(client, tenantId, memorySpace, {
+          payment_intent_id: settled.payment_intent_id, event_type: "captured",
+          summary: `Vipps-capture ${captureId} fullført (${settled.amount_ore} øre)`, actor_person_id: actorPersonId ?? null,
+          metadata: { capture_id: captureId, amount_ore: settled.amount_ore }
+        });
+        await this.checkVippsFullSettlement(client, tenantId, memorySpace, settled.payment_intent_id, actorPersonId ?? null);
+        return { capture: settled, performed: true };
       },
       onCallError: (client, _plan, failureClass, err) =>
         this.releaseChildReservation(client, "vipps_captures", tenantId, captureId, failureClass, err instanceof Error ? err.message : String(err))
     });
 
-    if (outcome.performed) {
-      await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-        await insertEvent(client, tenantId, memorySpace, {
-          payment_intent_id: outcome.capture.payment_intent_id, event_type: "captured",
-          summary: `Vipps-capture ${captureId} fullført (${outcome.capture.amount_ore} øre)`, actor_person_id: actorPersonId ?? null,
-          metadata: { capture_id: captureId, amount_ore: outcome.capture.amount_ore }
-        });
-        await this.checkVippsFullSettlement(client, tenantId, memorySpace, outcome.capture.payment_intent_id, actorPersonId ?? null);
-      });
-    }
     return outcome.capture;
   }
 
@@ -2241,7 +2291,14 @@ export class FinanceService {
   private async checkVippsFullSettlement(client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId: string | null): Promise<void> {
     const { rows: intentRows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2 FOR UPDATE`, [tenantId, paymentIntentId]);
     const intent = intentRows[0] as PaymentIntent | undefined;
-    if (!intent || intent.state !== "provider_acknowledged") return; // allerede terminal, eller ikke funnet - intet å oppgjøre.
+    if (!intent) return; // ikke funnet - intet å oppgjøre.
+    if (intent.state !== "provider_acknowledged") {
+      // WP-FIN2 (D-486, K5b): en capture er oppgjort på en intensjon som allerede er avsluttet uten penger (`cancelled`/`failed`) - den omvendte kappløpsveien av cancel-vernet. Flagg, aldri stille.
+      if ((intent.state === "cancelled" || intent.state === "failed") && (await this.capturedFundsStatus(client, tenantId, paymentIntentId)) === "settled_captures") {
+        await this.flagCancelConflict(client, tenantId, memorySpace, intent, "settled_captures", "capture_settled_after_intent_ended", actorPersonId);
+      }
+      return; // allerede terminal - intet å oppgjøre.
+    }
 
     const { rows: aggregateRows } = await client.query(
       `SELECT COALESCE(SUM(amount_ore), 0)::bigint AS total FROM vipps_captures WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'settled'`,
@@ -2307,6 +2364,10 @@ export class FinanceService {
           return { kind: "done", out: rows[0] as PaymentIntent };
         }
 
+        // WP-FIN2 (D-486, K5b): oppgjorte/uavklarte captures -> typet feil FØR kill switch, credential og leverandørkall (intensjonsraden er låst over).
+        const funds = await this.capturedFundsStatus(client, tenantId, paymentIntentId);
+        if (funds !== "none") throw new CancelBlockedByCapturesError(paymentIntentId, funds);
+
         const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
         if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
           return { kind: "blocked", error: new FinanceKillSwitchActiveError(tenantId) };
@@ -2321,6 +2382,13 @@ export class FinanceService {
       apply: async (client) => {
         const locked = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
         if (isTerminalPaymentIntentState(locked.state)) return locked; // en samtidig annullering/webhook har allerede ferdigstilt den.
+        // WP-FIN2 (D-486, K5b): en capture kan ha blitt oppgjort/uavklart MENS cancel-kallet pågikk (leverandøren har utført cancel). Intensjonen avsluttes da ikke - flagg i stedet.
+        const funds = await this.capturedFundsStatus(client, tenantId, paymentIntentId);
+        if (funds !== "none") {
+          await this.flagCancelConflict(client, tenantId, memorySpace, locked, funds, "cancel_executed_while_capture_changed", actorPersonId ?? null);
+          const { rows: kept } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, paymentIntentId]);
+          return kept[0] as PaymentIntent;
+        }
         const { rows } = await client.query(
           `UPDATE payment_intents SET state = 'cancelled', provider_status = 'CANCELLED', provider_status_updated_at = now(), cancelled_at = now(), updated_at = now()
            WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,

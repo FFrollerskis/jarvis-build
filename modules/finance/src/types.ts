@@ -485,6 +485,21 @@ export class VippsTenantNotConfiguredError extends Error {
   }
 }
 
+/**
+ * WP-FIN2 (D-486, K5b): en Vipps-betaling med OPPGJORTE (`settled`) eller UAVKLARTE captures kan aldri avsluttes som `cancelled` - da ville intensjonen være terminal mens penger er tatt,
+ * og `createVippsRefund` (krever `settled`) kunne aldri betale dem tilbake. Eksplisitt cancel kastes FØR noe leverandørkall.
+ *   - `settled_captures`: minst én capture er oppgjort.
+ *   - `capture_outcome_unresolved`: en capture står `submitted` (i flukt/ukjent) eller bærer `SUBMIT_OUTCOME_UNKNOWN` - leverandøren kan ha tatt pengene uten at Jarvis vet det.
+ * Hva Vipps' egen cancel betyr etter delvis capture er IKKE verifisert mot primærkilde (søkeutdrag: frigjør kun det ikke-fangede restbeløpet; se `FINANCE_D_CHAIN.md` §11) - et eget «delvis oppgjort»
+ * (frigi resten, behold det fangede) er eierens valg (Q-forslag) og er ikke bygget. Meldingen bærer aldri beløp.
+ */
+export class CancelBlockedByCapturesError extends Error {
+  constructor(readonly paymentIntentId: string, readonly reason: "settled_captures" | "capture_outcome_unresolved") {
+    super(`cancel_blocked_by_captures:${paymentIntentId}:${reason}`);
+    this.name = "CancelBlockedByCapturesError";
+  }
+}
+
 /** Speiler `ExcessiveRefundAmountError` (byggeordrens §7 "no over-capture") - egen klasse for korrekt feilnavn/melding, ALDRI gjenbruk av refusjons-klassen for en INNGÅENDE handling. */
 export class ExcessiveCaptureAmountError extends Error {
   constructor(readonly paymentIntentId: string, readonly requestedOre: number, readonly remainingOre: number) {
