@@ -5,8 +5,8 @@ import { TENANT_A } from "./support/harness.ts";
 import { authorizeAll, startChain, type Chain } from "./support/chain.ts";
 
 /**
- * WP-G1b (reviewer A, funn 3 og 5): (1) DRIFT-VAKT for partisjonen `COMMS_JOURNALLED_ACTIONS`: for ALLE 18 skrivehandlinger mot ekte ToolGateway-ledger og Postgres skrives det en journalrad (`comms_outbound_log`) for NØYAKTIG de fem journalførte,
- * og alle skrivinger har en ledgerrad; (2) nøkkellengdene 159/160/161 for ALLE 18 skrivehandlinger mot ekte ledger (uavkortet nøkkel, ledger høyst 230 og journalens request_id høyst 200 tegn, 161 gir `idempotency_key_too_long` uten ledgerrad).
+ * WP-G1b (reviewer A, funn 3 og 5): (1) DRIFT-VAKT for partisjonen `COMMS_JOURNALLED_ACTIONS`: for ALLE 19 skrivehandlinger mot ekte ToolGateway-ledger og Postgres skrives det en journalrad (`comms_outbound_log`) for NØYAKTIG de fem journalførte,
+ * og alle skrivinger har en ledgerrad; (2) nøkkellengdene 159/160/161 for ALLE 19 skrivehandlinger mot ekte ledger (uavkortet nøkkel, ledger høyst 230 og journalens request_id høyst 200 tegn, 161 gir `idempotency_key_too_long` uten ledgerrad).
  * Testen bruker egne, ferske nyttelaster per handling (`FRESH`) og kun atferd, ingen eksporter som kom med fiksen utover partisjonslisten den vokter.
  */
 let chain: Chain;
@@ -69,6 +69,16 @@ const FRESH: Record<string, () => Promise<Record<string, JsonValue>>> = {
   contacts_delete: async () => { const id = `5${++seq}1`; const gone = new Set<string>(); handler = (c) => { const name = c.url.match(/people\/(c\d+)/)?.[1] ?? ""; if (c.method === "DELETE") { gone.add(name); return new Response(null, { status: 204 }); } return gone.has(name) ? jsonRes({ error: { code: 404, status: "NOT_FOUND" } }, 404) : jsonRes(person(name.slice(1))); }; return { resource_name: `people/c${id}` }; },
   contacts_sync: async () => { handler = () => jsonRes({ connections: [] }); return { page_size: 10 + (++seq % 80) }; },
   contacts_unlink: async () => ({ resource_name: `people/c7${++seq}` }),
+  // K4: et FERSKT konfliktforslag per kall (to kontakter med samme telefon -> den andre er en konflikt), og så avvises det (ingen Google-kall trengs)
+  decide_contact_conflict: async () => {
+    const n = ++seq;
+    const phone = `+4722${700000 + n}`;
+    const pair = [person(`8${n}1`, { phoneNumbers: [{ value: phone }], emailAddresses: [{ value: `a${n}@dc.example.com` }] }), person(`8${n}2`, { phoneNumbers: [{ value: phone }], emailAddresses: [{ value: `b${n}@dc.example.com` }] })];
+    handler = (c) => (c.url.includes("/connections") ? jsonRes({ connections: pair }) : new Response("{}", { status: 404 }));
+    ok(await chain.act("contacts_sync", {}, chain.key("pre-sync")));
+    const id = ((await chain.db.admin.query("SELECT conflict_id FROM comms_contact_conflicts WHERE tenant_id = $1 AND resource_name = $2 AND status = 'proposed'", [TENANT_A, `people/c8${n}2`])).rows[0] as { conflict_id: string }).conflict_id;
+    return { conflict_id: id, decision: "dismiss" };
+  },
   meeting_ingest_text: async () => ({ format: "txt", text: transcript(`m${uniq()}`), attest_legal_basis: true }),
   meeting_decide_commitment: async () => {
     const m = ok(await chain.act("meeting_ingest_text", { format: "txt", text: transcript(`mc${uniq()}`), attest_legal_basis: true }));
@@ -86,7 +96,7 @@ const FRESH: Record<string, () => Promise<Record<string, JsonValue>>> = {
 const WRITES = Object.keys(FRESH);
 
 describe("partisjonen journalført/ikke-journalført er den FAKTISKE (journalrad skrevet <=> i COMMS_JOURNALLED_ACTIONS)", () => {
-  it("alle 18 skrivehandlinger: journalrad skrives for NØYAKTIG de fem journalførte; gateway-klasse, nøkkelkrav og ledger-nøkkel tabelleres", async () => {
+  it("alle 19 skrivehandlinger: journalrad skrives for NØYAKTIG de fem journalførte; gateway-klasse, nøkkelkrav og ledger-nøkkel tabelleres", async () => {
     for (const action of WRITES) {
       const payload = await FRESH[action]!();
       const key = chain.key(`part-${action}`);
@@ -101,12 +111,12 @@ describe("partisjonen journalført/ikke-journalført er den FAKTISKE (journalrad
     }
     // lesehandlinger: ingen ledgerrad (klasse A), ingen journalrad
     for (const action of COMMS_KNOWN_ACTIONS.filter((a) => !WRITES.includes(a))) expect(chain.gateway.get("comms", action)?.capability_class ?? "A", `${action} er klasse A`).toBe("A");
-    expect(COMMS_KNOWN_ACTIONS.length).toBe(33);
-    expect(WRITES.length).toBe(18);
+    expect(COMMS_KNOWN_ACTIONS.length).toBe(35);
+    expect(WRITES.length).toBe(19);
   });
 });
 
-describe("159/160/161 mot EKTE ledger for alle 18 skrivehandlinger (ingen unntak, ingen avkorting, ingen rad ved 161)", () => {
+describe("159/160/161 mot EKTE ledger for alle 19 skrivehandlinger (ingen unntak, ingen avkorting, ingen rad ved 161)", () => {
   for (const action of WRITES) {
     it(`${action}`, async () => {
       for (const length of [159, 160]) {

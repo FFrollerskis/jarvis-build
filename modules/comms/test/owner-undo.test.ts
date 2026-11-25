@@ -89,7 +89,8 @@ describe("K5: eierens angre av en feilregistrert STOP - ende til ende", () => {
     const again = await chain.act("record_opt_out", { channel: "sms", recipient: num });
     expect(again.ok && (again.data as { created: boolean }).created).toBe(true);
     expect(await blocked(num)).toBe(true);
-    expect((await rowsFor(num)).map((r) => r.status)).toEqual(["lifted", "active"]);
+    // to rader med samme (injiserte, faste) `created_at`: rekkefølgen er ikke definert, så sammenlign som mengde
+    expect((await rowsFor(num)).map((r) => r.status).sort()).toEqual(["active", "lifted"]);
   });
 });
 

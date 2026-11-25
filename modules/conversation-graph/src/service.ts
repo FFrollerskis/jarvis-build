@@ -333,7 +333,10 @@ export class ConversationGraphService {
               WHERE tenant_id = $1 AND identity_id = $2 AND status = 'active' AND source_type = $3 AND external_id IS NOT NULL AND external_id <> $4`,
             [tenantId, identityId, input.source.source_type, input.source.external_id]
           );
-          if ((owners.rowCount ?? 0) > 0) return { status: "conflict", with: (owners.rows as Array<{ external_id: string }>).map((r) => r.external_id) };
+          // WP-G1c: eierens uttrykkelig godtatte delte kilder (`allow_shared_with`) er ikke en konflikt; ALLE andre eiere er det fortsatt.
+          const allowed = new Set(input.allow_shared_with ?? []);
+          const blocking = (owners.rows as Array<{ external_id: string }>).map((r) => r.external_id).filter((id) => !allowed.has(id));
+          if (blocking.length > 0) return { status: "conflict", with: blocking };
         }
         let linked = 0;
         for (const item of items) {

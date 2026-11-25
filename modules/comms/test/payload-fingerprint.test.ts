@@ -57,6 +57,7 @@ const SAMPLES: Readonly<Record<string, Record<string, JsonValue>>> = {
   list_templates: { channel: "whatsapp", account_ref: "109876543210", waba_id: "123456789" },
   read_message: { channel: "sms", account_ref: "+4791000000", message_sid: `SM${"0".repeat(32)}` },
   lift_owner_opt_out: { opt_out_id: "optout-sample-0001", reason: "Feilregistrert nummer" },
+  list_contact_conflicts: {}, decide_contact_conflict: { conflict_id: "ccf-sample-0001", decision: "dismiss" },
   contacts_list: {}, contacts_search: { query: "Ola" }, contacts_get: { resource_name: "people/c1" },
   contacts_create: { given_name: "Ola" }, contacts_update: { resource_name: "people/c1", etag: "etag-1", given_name: "Ola" }, contacts_delete: { resource_name: "people/c1" }, contacts_sync: {}, contacts_unlink: { resource_name: "people/c1" },
   meeting_list: {}, meeting_commitments: {}, meeting_get: { meeting_id: "meet-12345678" },
@@ -69,7 +70,7 @@ const ALTERNATIVE: Readonly<Record<string, Record<string, JsonValue>>> = {
 };
 /** Romleddet i avtrykket slik koden bruker det: `*` for rom-uavhengige handlinger (Google-kontaktboken er felles), ellers memory space. */
 const spaceFor = (action: string, space = "business"): string => (COMMS_ROOM_INDEPENDENT_ACTIONS.includes(action) ? "*" : space);
-const REQUIRED_KEY_ACTIONS: readonly string[] = [...COMMS_JOURNALLED_ACTIONS, "contacts_create", "contacts_update", "contacts_delete", "meeting_delete", "lift_owner_opt_out"];
+const REQUIRED_KEY_ACTIONS: readonly string[] = [...COMMS_JOURNALLED_ACTIONS, "contacts_create", "contacts_update", "contacts_delete", "meeting_delete", "lift_owner_opt_out", "decide_contact_conflict"];
 const NON_JOURNALLED = COMMS_KNOWN_ACTIONS.filter((a) => !COMMS_JOURNALLED_ACTIONS.includes(a));
 const sample = (action: string): Record<string, JsonValue> => SAMPLES[action]!;
 const keyOfLength = (n: number) => "k".repeat(n);
@@ -331,17 +332,17 @@ describe("scopedIdempotencyKey - formen for journalførte (UENDRET) og ikke-jour
 
 // ---------------------------------------------------------------------------------------------- partisjonen og tabellen
 describe("partisjonen journalført / ikke-journalført og tabelltest over ALLE handlinger (ingen handling med nøkkel glipper)", () => {
-  it("de journalførte er NØYAKTIG send, start_call, edit_message, delete_message, add_reaction; resten av de kjente handlingene er ikke-journalført (28: 15 lesinger + 13 skrivinger)", () => {
+  it("de journalførte er NØYAKTIG send, start_call, edit_message, delete_message, add_reaction; resten av de kjente handlingene er ikke-journalført (30: 16 lesinger + 14 skrivinger)", () => {
     expect([...COMMS_JOURNALLED_ACTIONS].sort()).toEqual(["add_reaction", "delete_message", "edit_message", "send", "start_call"]);
     expect([...COMMS_JOURNALLED_ACTIONS].sort()).toEqual([...COMMS_OUTBOUND_ACTIONS, "start_call"].sort());
-    expect(COMMS_KNOWN_ACTIONS).toHaveLength(33);
-    expect(NON_JOURNALLED).toHaveLength(28);
+    expect(COMMS_KNOWN_ACTIONS).toHaveLength(35);
+    expect(NON_JOURNALLED).toHaveLength(30);
     const writes = [...COMMS_ADMIN_ACTIONS, ...COMMS_CONTACT_WRITE_ACTIONS, ...COMMS_MEETING_WRITE_ACTIONS];
     const reads = [...COMMS_READ_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_MEETING_READ_ACTIONS];
-    expect(writes).toHaveLength(13);
-    expect(reads).toHaveLength(15);
+    expect(writes).toHaveLength(14);
+    expect(reads).toHaveLength(16);
     expect([...writes, ...reads].sort()).toEqual([...NON_JOURNALLED].sort());
-    expect(new Set([...COMMS_JOURNALLED_ACTIONS, ...writes, ...reads]).size).toBe(33);
+    expect(new Set([...COMMS_JOURNALLED_ACTIONS, ...writes, ...reads]).size).toBe(35);
   });
 
   it("tabellen SAMPLES dekker nøyaktig de kjente handlingene, og hvert eksempel er GYLDIG mot verktøyskjemaet (så testene under bruker ekte nyttelaster)", () => {
@@ -367,7 +368,7 @@ describe("partisjonen journalført / ikke-journalført og tabelltest over ALLE h
     }
   });
 
-  it("ALLE 28 ikke-journalførte handlinger: gatewayen får den skopede nøkkelen MED avtrykk (aldri uten), parametrene uendret (ingen request_id), og trakten/journalen røres ikke", async () => {
+  it("ALLE 30 ikke-journalførte handlinger: gatewayen får den skopede nøkkelen MED avtrykk (aldri uten), parametrene uendret (ingen request_id), og trakten/journalen røres ikke", async () => {
     for (const action of NON_JOURNALLED) {
       const r = recorder();
       const key = `tabell-${action}-0001`;
@@ -384,7 +385,7 @@ describe("partisjonen journalført / ikke-journalført og tabelltest over ALLE h
     }
   });
 
-  it("ALLE 28: samme (nøkkel, nyttelast) gir samme gateway-nøkkel; ulik nyttelast, ulik nøkkel, annen tenant eller annet rom gir en ANNEN - og ingenting endrer seg ved ny nøkkelrekkefølge", async () => {
+  it("ALLE 30: samme (nøkkel, nyttelast) gir samme gateway-nøkkel; ulik nyttelast, ulik nøkkel, annen tenant eller annet rom gir en ANNEN - og ingenting endrer seg ved ny nøkkelrekkefølge", async () => {
     for (const action of NON_JOURNALLED) {
       const keyFor = async (params: Record<string, JsonValue>, key = "tabell-nokkel-0001", identity: IdentityContext = owner()): Promise<string> => {
         const r = recorder();

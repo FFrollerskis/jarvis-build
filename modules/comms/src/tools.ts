@@ -4,7 +4,7 @@ import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import { PROVIDER_CREDENTIAL_REFS, connectorIdsForCredentialRef } from "./adapters.ts";
 import { isCommsChannel } from "./channels.ts";
-import { CONTACTS_CREDENTIAL_REF, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema } from "./contacts.ts";
+import { CONTACTS_CREDENTIAL_REF, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema, DecideContactConflictSchema, ListContactConflictsSchema } from "./contacts.ts";
 import { CallParamsSchema, CheckTargetSchema, DeleteParamsSchema, EditParamsSchema, ReactParamsSchema, SendParamsSchema } from "./funnel.ts";
 import type { CommsStore } from "./store.ts";
 import { LiftOwnerOptOutSchema, MeetingCommitmentsSchema, MeetingConfirmSchema, MeetingDecideSchema, MeetingIngestTextSchema, MeetingListSchema, MeetingRefSchema, RecordOptOutSchema } from "./transport.ts";
@@ -241,6 +241,11 @@ export function commsToolDefinitions(deps: CommsToolDeps): ToolDefinition[] {
         { reversible: false, preflight_action: "contacts_check_target", preflight_requires_target: true, preflight_validator: exists, postcondition_target_absent: true }),
       contactsWrite("contacts_sync", "C", "Lenk én side kontakter til identiteter i Conversation Graph (eksakt E.164/e-post, confidence 0.9, aldri automatisk sammenslåing: en kontakt hvis identifikatorer peker på ulike identiteter, eller på en identitet en ANNEN kontakt har lenket seg til, hoppes over og rapporteres som konflikt). Idempotent", ContactsSyncSchema,
         "lenkene en kontakt har satt tilbakekalles reversibelt med comms.contacts_unlink (angres med restore: true); ingen rad slettes og ingen data endres hos Google", { reversible: true, output_trust: "internal" }),
+      // WP-G1c K4 (JARVIS-112 f1, Q-72 pkt 11): konflikter `contacts_sync` fant er LAGRET som forslag eieren godtar eller avviser. Kun Googles ugjennomsiktige ressursnavn lagres (aldri telefon/e-post/navn). Lenkene en godtatt konflikt lager har
+      // fortsatt `match_method: contact_sync` (confidence 0.9): de teller IKKE som relasjonsbevis, så mottakeren er fortsatt KALD og krever `purpose_basis` (kald-regelen er uendret og venter på eierens bekreftelse).
+      { ...read("list_contact_conflicts", "List lagrede kontaktkonflikt-forslag fra contacts_sync (standard: kun åpne; `status` velger proposed/accepted/dismissed). Kun Googles ressursnavn (aldri telefon, e-post eller navn)", cast(ListContactConflictsSchema)), scopes: ["comms.contacts.read"] },
+      contactsWrite("decide_contact_conflict", "C", "Godta eller avvis et lagret kontaktkonflikt-forslag. `accept` lenker kontakten til den delte identiteten (kun når identifikatorene eies av ANDRE kontakter; aldri en sammenslåing av ulike identiteter, som forblir en egen reversibel handling i Conversation Graph) og husker valget slik at senere synker ikke gir konflikt for dette paret; lenkene har fortsatt match_method contact_sync (mottakeren er fortsatt kald). `dismiss` huskes (samme konflikt foreslås ikke på nytt). Krever idempotensnøkkel og step-up", DecideContactConflictSchema,
+        "godta kan angres ved å tilbakekalle lenkene med comms.contacts_unlink { resource_name } og avvise forslaget (avvisning tilbakekaller IKKE lenker); en avvisning kan ombestemmes ved å godta forslaget; et forslag blir aldri åpent igjen", { reversible: true, output_trust: "internal" }),
       contactsWrite("contacts_unlink", "C", "Tilbakekall (reversibelt) identitetslenkene en Google-kontakt har satt i Conversation Graph, eller angre det med restore: true. Sletter aldri en rad eller identitet; rører ingenting hos Google", ContactsUnlinkSchema,
         "angre med comms.contacts_unlink { resource_name, restore: true }, eller kjør comms.contacts_sync på nytt", { reversible: true, output_trust: "internal" })
     );

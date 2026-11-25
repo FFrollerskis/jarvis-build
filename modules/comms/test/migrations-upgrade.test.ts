@@ -93,7 +93,7 @@ describe("oppgradering fra main (001-140) til 141+ med eksisterende data", () =>
 
   it("rom-CHECK: den forblir NOT VALID kun der en gammel rad bryter den (opt-outs med `health`), er fullt gyldig ellers, og ENHVER ny rad med health/home/guest avvises i ALLE sju tabeller", async () => {
     const state = (await admin.query("SELECT conrelid::regclass::text AS tbl, convalidated FROM pg_constraint WHERE conname LIKE 'comms\\_%\\_memory\\_space\\_id\\_check' ORDER BY 1")).rows as Array<{ tbl: string; convalidated: boolean }>;
-    expect(state.map((r) => r.tbl)).toEqual(["comms_authorized_accounts", "comms_inbound_events", "comms_inbound_receipts", "comms_meeting_commitments", "comms_meeting_participants", "comms_meetings", "comms_outbound_log", "comms_recipient_opt_outs"]);
+    expect(state.map((r) => r.tbl)).toEqual(["comms_authorized_accounts", "comms_contact_conflicts", "comms_inbound_events", "comms_inbound_receipts", "comms_meeting_commitments", "comms_meeting_participants", "comms_meetings", "comms_outbound_log", "comms_recipient_opt_outs"]);
     for (const r of state) expect(r.convalidated, r.tbl).toBe(r.tbl !== "comms_recipient_opt_outs");
     const defs = (await admin.query("SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname LIKE 'comms\\_%\\_memory\\_space\\_id\\_check'")).rows as Array<{ def: string }>;
     for (const d of defs) {
@@ -128,9 +128,13 @@ describe("oppgradering fra main (001-140) til 141+ med eksisterende data", () =>
     await expect(asApp((c) => c.query("DELETE FROM comms_outbound_log WHERE tenant_id = $1 AND log_id = 'clog-old-0001'", [T]))).rejects.toMatchObject({ code: "23514" });
     const seqs = await asApp(async (c) => [Number((await c.query("SELECT nextval('comms_event_seq')::text AS s")).rows[0].s), Number((await c.query("SELECT nextval('comms_event_seq')::text AS s")).rows[0].s)]);
     expect(seqs[1]!).toBeGreaterThan(seqs[0]!);
-    const rls = (await admin.query("SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'comms_inbound_receipts'")).rows[0] as { relrowsecurity: boolean; relforcerowsecurity: boolean };
-    expect(rls).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
-    // appen kan ikke endre/slette uten tenant-kontekst: ingen rader synlige
-    expect((await app.query("SELECT count(*)::int AS n FROM comms_inbound_receipts")).rows[0]).toEqual({ n: 0 });
+    // 141 (første-mottak) og 143 (kontaktkonflikt-forslag): begge FORCE RLS, og appen ser ingenting uten tenant-kontekst
+    for (const table of ["comms_inbound_receipts", "comms_contact_conflicts"]) {
+      const rls = (await admin.query("SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = $1", [table])).rows[0] as { relrowsecurity: boolean; relforcerowsecurity: boolean };
+      expect(rls, table).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
+      expect((await app.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0], table).toEqual({ n: 0 });
+    }
+    // 143 er ren tilføyelse: en ny tabell, ingen eksisterende rad rørt, og appen kan bruke den (som app-rolle, med tenant-kontekst, og kun kjerne-/avgjørelsesreglene i triggeren)
+    expect(await scalar("SELECT count(*)::int AS n FROM comms_contact_conflicts", [])).toBe(0);
   });
 });

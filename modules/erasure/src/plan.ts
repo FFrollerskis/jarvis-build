@@ -365,6 +365,8 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "comms_meeting_participants", await run(client, mode, "comms_meeting_participants", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "comms_meetings", await run(client, mode, "comms_meetings", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "comms_inbound_events", await run(client, mode, "comms_inbound_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-G1c K4 (143): lagrede kontaktkonflikt-forslag (kun Googles ressursnavn og eierens avgjørelse; ingen FK). Slettes kun her (databasetriggeren tillater DELETE kun i erasure-transaksjonen).
+  add(result, "comms_contact_conflicts", await run(client, mode, "comms_contact_conflicts", "tenant_id = $1 AND memory_space_id = $2", tv));
   // WP-G1c (141): første-mottak av opt-in-/opt-out-hendelser (ingen FK; kun leverandørens hendelsesnøkkel og en sekvens). Slettes i erasure-transaksjonen (databasetriggeren tillater det kun der, og for utløpt retensjon).
   add(result, "comms_inbound_receipts", await run(client, mode, "comms_inbound_receipts", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "comms_outbound_log", await run(client, mode, "comms_outbound_log", "tenant_id = $1 AND memory_space_id = $2", tv));

@@ -3,7 +3,7 @@ import type pg from "pg";
 import type { MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { containsSecret } from "@jarvis/core";
-import { PROVIDERS_FOR_CHANNEL, isValidAccountRef, type CommsChannel, type CommsProvider } from "./channels.ts";
+import { PROVIDERS_FOR_CHANNEL, isValidAccountRef, sha256Hex, type CommsChannel, type CommsProvider } from "./channels.ts";
 import { textIsSendable, type OutboundKind, type OutboundPurpose, type RateCaps, type RecipientProof, type RuleResult } from "./policy.ts";
 
 /**
@@ -98,6 +98,26 @@ export function validateLiftReason(reason: unknown): string | null {
   const trimmed = reason.trim();
   if (trimmed.length < 3 || trimmed.length > 200 || !textIsSendable(trimmed) || /[\r\n\t]/u.test(trimmed) || containsSecret(trimmed)) return null;
   return trimmed;
+}
+
+/** K4 (JARVIS-112 f1): en kontaktkonflikt `contacts_sync` fant. `shared_identity` = identifikatorene eies allerede av en ANNEN kontakt (kan godtas av eieren); `split_identities` = de peker på ULIKE identiteter (kan aldri godtas: ville vært en sammenslåing). */
+export type ContactConflictKind = "shared_identity" | "split_identities";
+export type ContactConflictStatus = "proposed" | "accepted" | "dismissed";
+/** Et lagret konfliktforslag. Kun Googles ugjennomsiktige ressursnavn: aldri telefon, e-post eller navn. */
+export interface ContactConflictRow {
+  readonly conflict_id: string;
+  readonly resource_name: string;
+  readonly kind: ContactConflictKind;
+  readonly conflicting_resources: readonly string[];
+  readonly status: ContactConflictStatus;
+  readonly first_seen_at: string;
+  readonly last_seen_at: string;
+  readonly seen_count: number;
+  readonly decided_at: string | null;
+}
+/** Fingerprint (SHA-256 hex) av en konflikt: samme kontakt + art + sortert konfliktsett gir alltid samme verdi (idempotens); endres settet, er det et NYTT forslag. */
+export function contactConflictFingerprint(resourceName: string, kind: ContactConflictKind, conflictingResources: readonly string[]): string {
+  return sha256Hex(JSON.stringify(["comms-contact-conflict-v1", resourceName, kind, [...new Set(conflictingResources)].sort()]));
 }
 
 export type JournalStatus = "denied" | "requested" | "sent" | "outcome_unknown" | "failed";
@@ -414,6 +434,96 @@ export class CommsStore {
         status: r["status"] as "active" | "lifted", source: r["source"] as OptOutSource, created_at: iso(r["created_at"]), lifted_at: isoOrNull(r["lifted_at"]),
         lifted_by: (r["lifted_by"] as OptOutLifter | null) ?? null, lift_reason: (r["lift_reason"] as string | null) ?? null
       }));
+    });
+  }
+
+  // ---------------------------------------------------------------- kontaktkonflikt-forslag (K4, migrasjon 143)
+  /**
+   * Lagrer (idempotent) en konflikt `contacts_sync` fant. Samme kontakt + art + konfliktsett i samme rom gir SAMME rad (teller og sist-sett økes, ingenting annet endres - en allerede avgjort konflikt forblir avgjort). Et endret konfliktsett er et NYTT forslag.
+   * Kun ressursnavn lagres (aldri telefon, e-post eller navn).
+   */
+  async recordContactConflict(
+    tenantId: string, space: MemorySpace, input: { resource_name: string; kind: ContactConflictKind; conflicting_resources: readonly string[] }, actor: Actor
+  ): Promise<{ conflict_id: string; status: ContactConflictStatus; created: boolean }> {
+    const conflicting = input.kind === "shared_identity" ? [...new Set(input.conflicting_resources)].sort().slice(0, 20) : [];
+    const fingerprint = contactConflictFingerprint(input.resource_name, input.kind, conflicting);
+    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+      const now = this.clock();
+      const res = await client.query(
+        `INSERT INTO comms_contact_conflicts (tenant_id, conflict_id, memory_space_id, resource_name, kind, conflicting_resources, fingerprint, first_seen_at, last_seen_at, detected_by_person_id, detect_session_id, detect_task_id)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $8, $9, $10, $11)
+         ON CONFLICT (tenant_id, memory_space_id, resource_name, fingerprint) DO UPDATE
+           SET last_seen_at = GREATEST(comms_contact_conflicts.last_seen_at, EXCLUDED.last_seen_at), seen_count = comms_contact_conflicts.seen_count + 1
+         RETURNING conflict_id, status, (xmax = 0) AS created`,
+        [tenantId, newId("ccf"), space, input.resource_name, input.kind, JSON.stringify(conflicting), fingerprint, now, actor.person_id, actor.session_id, actor.task_id ?? null]
+      );
+      const r = res.rows[0] as { conflict_id: string; status: ContactConflictStatus; created: boolean };
+      return { conflict_id: r.conflict_id, status: r.status, created: r.created };
+    });
+  }
+
+  private contactConflictOf(r: Record<string, unknown>): ContactConflictRow {
+    return {
+      conflict_id: r["conflict_id"] as string, resource_name: r["resource_name"] as string, kind: r["kind"] as ContactConflictKind, conflicting_resources: ((r["conflicting_resources"] as string[] | null) ?? []).map(String),
+      status: r["status"] as ContactConflictStatus, first_seen_at: iso(r["first_seen_at"]), last_seen_at: iso(r["last_seen_at"]), seen_count: Number(r["seen_count"]), decided_at: isoOrNull(r["decided_at"])
+    };
+  }
+
+  /** Konfliktforslag i rommet, nyeste først (standard: kun åpne forslag). */
+  async listContactConflicts(tenantId: string, space: MemorySpace, opts: { status?: ContactConflictStatus; limit?: number } = {}): Promise<ContactConflictRow[]> {
+    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+      const res = await client.query(
+        `SELECT conflict_id, resource_name, kind, conflicting_resources, status, first_seen_at, last_seen_at, seen_count, decided_at FROM comms_contact_conflicts
+          WHERE tenant_id = $1 AND status = $2 ORDER BY last_seen_at DESC, conflict_id LIMIT $3`,
+        [tenantId, opts.status ?? "proposed", Math.min(Math.max(opts.limit ?? 50, 1), 200)]
+      );
+      return (res.rows as Array<Record<string, unknown>>).map((r) => this.contactConflictOf(r));
+    });
+  }
+
+  async getContactConflict(tenantId: string, space: MemorySpace, conflictId: string): Promise<ContactConflictRow | null> {
+    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+      const res = await client.query(
+        `SELECT conflict_id, resource_name, kind, conflicting_resources, status, first_seen_at, last_seen_at, seen_count, decided_at FROM comms_contact_conflicts WHERE tenant_id = $1 AND conflict_id = $2`, [tenantId, conflictId]
+      );
+      return res.rowCount === 1 ? this.contactConflictOf(res.rows[0] as Record<string, unknown>) : null;
+    });
+  }
+
+  /**
+   * Eierens avgjørelse. `accepted` er bare lov for `shared_identity` (databasen håndhever det også). Kan ombestemmes mellom godtatt og avvist; et forslag blir aldri åpent igjen. Returnerer `null` når forslaget ikke finnes.
+   * (Selve lenkingen ved `accepted` gjøres av kalleren FØR statusen settes; en avvisning av en tidligere godtatt konflikt tilbakekaller IKKE lenkene - det gjør `contacts_unlink`.)
+   */
+  async decideContactConflict(tenantId: string, space: MemorySpace, conflictId: string, decision: "accepted" | "dismissed", actor: Actor): Promise<ContactConflictRow | null> {
+    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+      const cur = await client.query(`SELECT kind FROM comms_contact_conflicts WHERE tenant_id = $1 AND conflict_id = $2 FOR UPDATE`, [tenantId, conflictId]);
+      if (cur.rowCount !== 1) return null;
+      if (decision === "accepted" && (cur.rows[0] as { kind: ContactConflictKind }).kind !== "shared_identity") throw new Error("comms_contact_conflict_not_acceptable:split_identities");
+      const res = await client.query(
+        `UPDATE comms_contact_conflicts SET status = $3, decided_at = $4, decided_by_person_id = $5, decision_session_id = $6, decision_task_id = $7
+          WHERE tenant_id = $1 AND conflict_id = $2
+          RETURNING conflict_id, resource_name, kind, conflicting_resources, status, first_seen_at, last_seen_at, seen_count, decided_at`,
+        [tenantId, conflictId, decision, this.clock(), actor.person_id, actor.session_id, actor.task_id ?? null]
+      );
+      return this.contactConflictOf(res.rows[0] as Record<string, unknown>);
+    });
+  }
+
+  /**
+   * Kildene eieren har GODTATT at `resourceName` deler identitet med - i begge retninger (en godtatt konflikt for A mot B gjelder også når B synkes). Brukes av `contacts_sync` som `allow_shared_with`; en kontakt uten godtatte konflikter gir en tom liste (da gjelder
+   * den vanlige regelen: enhver annen eier er en konflikt).
+   */
+  async acceptedConflictPartners(tenantId: string, space: MemorySpace, resourceName: string): Promise<string[]> {
+    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+      const res = await client.query(
+        `SELECT partner FROM (
+           SELECT jsonb_array_elements_text(conflicting_resources) AS partner FROM comms_contact_conflicts WHERE tenant_id = $1 AND status = 'accepted' AND resource_name = $2
+           UNION
+           SELECT resource_name AS partner FROM comms_contact_conflicts WHERE tenant_id = $1 AND status = 'accepted' AND conflicting_resources ? $2
+         ) x WHERE partner <> $2 ORDER BY partner`,
+        [tenantId, resourceName]
+      );
+      return (res.rows as Array<{ partner: string }>).map((r) => r.partner);
     });
   }
 
