@@ -692,7 +692,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // SAMME ene register-løkke, aldri en parallell registreringsvei.
   const situationDomainPauses = new DomainPauseRegistry(pool, { owner_person_id: ownerIdentity.person_id });
   await situationDomainPauses.restore();
-  const situationEngine = new SituationEngine(pool, situationDomainPauses, { owner_person_id: ownerIdentity.person_id });
+  // WP-G4b K1 (D-484): bindbarhet til autonom ACT er en egenskap på verktøydefinisjonen (default-deny). Bind-tid-vakten slår opp i SAMME register som utfører handlingen (`toolGateway.get`); kjøringstid-vakten bruker gatewayen den får.
+  const situationEngine = new SituationEngine(pool, situationDomainPauses, { owner_person_id: ownerIdentity.person_id }, { definitionLookup: (toolId, action) => toolGateway.get(toolId, action) });
   // Task #118 ("Charlie"-minne-verifisering): hevet ut hit (FØR register-
   // løkken) slik at DEN SAMME instansen kan registreres som
   // `memory.search`-verktøyet i `additionalTools` under OG gjenbrukes av

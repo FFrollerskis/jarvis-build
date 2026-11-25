@@ -25,7 +25,7 @@ import {
 import { DomainLockBusyError, withDomainAdvisoryLocks } from "./advisory-lock.ts";
 import { ALL_DOMAINS, type DomainPauseRegistry } from "./domain-pause.ts";
 import { NEVER_ACT_DOMAINS } from "./signal-types.ts";
-import { autonomyActionBlocker, SituationActActionForbiddenError } from "./autonomy-guard.ts";
+import { autonomyActionBlocker, autonomyBindBlocker, SituationActActionForbiddenError, type AutonomyActionBlock, type AutonomyDefinitionLookup } from "./autonomy-guard.ts";
 
 /**
  * UA-10 Proactive Situation Engine: JARVIS_CANONICAL hendelses-/situasjons-
@@ -570,13 +570,27 @@ type ClaimOutcome =
   | { kind: "terminal_replay"; situation: Situation }
   | { kind: "evidence_replay"; status: string; externalId: string | null; reason: string | null; notifyMessage: string };
 
+/** WP-G4b K1 (D-484): valgfrie avhengigheter for motoren. Alt utelatt = fail-closed (ingenting er bindbart til autonom ACT). */
+export interface SituationEngineOptions {
+  /**
+   * Hvordan BIND-TID-vakten finner verktøydefinisjonen (`autonomy_bindable`, default-deny). I drift: `(t, a) => toolGateway.get(t, a)` (samme register som utfører handlingen). UTELATT = ingen handling kan bindes
+   * (fail-closed; ingen skjult standard som slipper alt gjennom). Kjøringstid-vakten bruker alltid den `ToolGateway`-en som faktisk skal utføre handlingen (`autoActPending`/`actOn` får den som argument).
+   */
+  definitionLookup?: AutonomyDefinitionLookup;
+}
+
 export class SituationEngine {
+  private readonly definitionLookup: AutonomyDefinitionLookup | undefined;
+
   constructor(
     private readonly pool: pg.Pool,
     private readonly domainPauses: DomainPauseRegistry,
     /** Funn 2 (arkitekt-review runde 3, PR #85) - se `SituationRecoveryUnauthorizedError`. `undefined` gjør `releaseStuckActClaim()` UBETINGET nektet (fail-closed default - ingen gjenoppretting uten eksplisitt konfigurert autoritet). */
-    private readonly recoveryAuthority?: SituationRecoveryAuthority
-  ) {}
+    private readonly recoveryAuthority?: SituationRecoveryAuthority,
+    options: SituationEngineOptions = {}
+  ) {
+    this.definitionLookup = options.definitionLookup;
+  }
 
   // ---------------------------------------------------------------------
   // Notification policy (eier-konfigurert, se filhode)
@@ -950,6 +964,12 @@ export class SituationEngine {
     // WP-G4 fiks-runde (A-HIGH-1): fysiske/kritiske handlinger (lås, alarm, lys, klima, bil, `critical_*`, ukjent i de fysiske navnerommene) kan ALDRI utføres av situasjonsmotoren - FØR pause, lås, claim og ethvert gateway-kall.
     const physical = autonomyActionBlocker(request.tool_id, request.action);
     if (physical !== null) throw new SituationActActionForbiddenError(physical.tool_id, physical.action, physical.code);
+    // WP-G4b K1 (D-484): den AUTONOME veien (auto-ACT-vakten settes kun av `autoActPending`) utfører KUN en handling hvis definisjonen i registeret som faktisk utfører den eksplisitt sier `autonomy_bindable` (default-deny).
+    // Dybdeforsvar mot en lagret binding til en handling som ikke (lenger) er bindbar. En eksplisitt `actOn()` uten auto-ACT-vakt (eier/test) er ikke autonom og påvirkes ikke; eneste produksjonskaller er `autoActPending`.
+    if (options.autoActGuard !== undefined) {
+      const notBindable = autonomyBindBlocker(request.tool_id, request.action, (t, a) => gateway.get(t, a));
+      if (notBindable !== null) throw new SituationActActionForbiddenError(notBindable.tool_id, notBindable.action, notBindable.code);
+    }
 
     // Funn 3 (arkitekt-review runde 1, PR #85), UTVIDET i runde 2 Funn 1:
     // `situationId` er ALLTID en del av selve nøkkelen som FAKTISK sendes
@@ -1556,12 +1576,18 @@ export class SituationEngine {
   }
 
   async listAutonomyPolicies(tenantId: string, memorySpace: MemorySpace): Promise<SituationAutonomyPolicy[]> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const { rows } = await client.query(
+    const rows = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows: found } = await client.query(
         `SELECT * FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 ORDER BY domain ASC`,
         [tenantId, memorySpace]
       );
-      return rows as SituationAutonomyPolicy[];
+      return found as SituationAutonomyPolicy[];
+    });
+    // WP-G4b K1 (D-484): en lagret binding til en handling som ikke (lenger) er bindbar (fysisk eller uten `autonomy_bindable`) utføres aldri og slettes aldri - den MERKES her så eieren ser det (kun merkede rader får feltet;
+    // en bindbar rad er byte-lik før og etter). Bruker motorens egen oppslagsfunksjon (samme register som bind-tid); uten den regnes alt som ikke bindbart.
+    return rows.map((row) => {
+      const blocked = autonomyBindBlocker(row.tool_id, row.action, this.definitionLookup);
+      return blocked === null ? row : { ...row, blocked_code: blocked.code };
     });
   }
 
@@ -1591,9 +1617,10 @@ export class SituationEngine {
     const value = parsed.data;
     // WP-G4: en autonomi-binding for et informer-kun-domene (helse, kamera) avvises ved BINDING (og auto-ACT/`actOn()` nekter det uansett).
     if (NEVER_ACT_DOMAINS.has(value.domain)) throw new SituationActDomainForbiddenError(value.domain);
-    // WP-G4 fiks-runde (A-HIGH-1): en binding til en fysisk/kritisk handling (allowlist: kun kjente lese-handlinger i `home-assistant`/`car`) avvises ved BINDING med en stabil årsakskode.
-    const physicalBinding = autonomyActionBlocker(value.tool_id, value.action);
-    if (physicalBinding !== null) throw new SituationActActionForbiddenError(physicalBinding.tool_id, physicalBinding.action, physicalBinding.code);
+    // WP-G4 fiks-runde (A-HIGH-1) + WP-G4b K1 (D-484): en binding til en fysisk/kritisk handling (allowlist: kun kjente lese-handlinger i `home-assistant`/`car`) ELLER til en handling hvis definisjon ikke eksplisitt sier
+    // `autonomy_bindable` (DEFAULT-DENY) avvises ved BINDING med en stabil årsakskode. Ingen oppslagsfunksjon = ingenting er bindbart (fail-closed).
+    const bindBlock = autonomyBindBlocker(value.tool_id, value.action, this.definitionLookup);
+    if (bindBlock !== null) throw new SituationActActionForbiddenError(bindBlock.tool_id, bindBlock.action, bindBlock.code);
     // WP-G4: valgfri utløpstid. Må være en gyldig tid i fremtiden, høyst 365 dager frem (aldri en bakdatert eller «evig» verdi gjennom feltet).
     let expiresAtIso: string | null = null;
     if (value.expires_at !== undefined) {
@@ -1651,11 +1678,11 @@ export class SituationEngine {
    */
   /** Én logglinje per (tenant, space, domene, handling) og prosess: en blokkert binding skal være synlig uten å fylle loggen hvert tikk. */
   private readonly loggedBlockedBindings = new Set<string>();
-  private logBlockedBinding(tenantId: string, memorySpace: MemorySpace, domain: string, toolId: string, action: string): void {
-    const key = `${tenantId}|${memorySpace}|${domain}|${toolId}.${action}`;
+  private logBlockedBinding(tenantId: string, memorySpace: MemorySpace, domain: string, toolId: string, action: string, code: AutonomyActionBlock["code"] = "physical_action_not_bindable"): void {
+    const key = `${tenantId}|${memorySpace}|${domain}|${toolId}.${action}|${code}`;
     if (this.loggedBlockedBindings.has(key) || this.loggedBlockedBindings.size > 500) return;
     this.loggedBlockedBindings.add(key);
-    console.error(JSON.stringify({ msg: "situation_auto_act_blocked", tenant_id: tenantId, memory_space_id: memorySpace, domain, tool_id: toolId, action, code: "physical_action_not_bindable" }));
+    console.error(JSON.stringify({ msg: "situation_auto_act_blocked", tenant_id: tenantId, memory_space_id: memorySpace, domain, tool_id: toolId, action, code }));
   }
 
   async autoActPending(tenantId: string, memorySpace: MemorySpace, gateway: ToolGateway, identity: IdentityContext, options: { maxAgeMs?: number } = {}): Promise<AutoActResult> {
@@ -1696,9 +1723,11 @@ export class SituationEngine {
         continue;
       }
       // WP-G4 fiks-runde (A-HIGH-1): en binding som finnes fra FØR regelen (eller er skrevet direkte i databasen) til en fysisk/kritisk handling utføres aldri - FØR lås, claim og gateway-kall. Synlig i loggen (én gang per binding og prosess).
-      const physical = autonomyActionBlocker(live.tool_id, live.action);
+      // WP-G4b K1 (D-484): samme vakt + default-deny (`autonomy_bindable` på definisjonen i registeret som faktisk utfører handlingen). En lagret binding til en handling som ikke (lenger) er bindbar feiler LUKKET: ingen lås,
+      // ingen claim, ingen gateway-kall, og bindingen SLETTES ALDRI (den vises til eieren med `blocked_code` i `listAutonomyPolicies`); én logglinje per binding og prosess.
+      const physical = autonomyBindBlocker(live.tool_id, live.action, (t, a) => gateway.get(t, a));
       if (physical !== null) {
-        this.logBlockedBinding(tenantId, memorySpace, candidate.domain, live.tool_id, live.action);
+        this.logBlockedBinding(tenantId, memorySpace, candidate.domain, live.tool_id, live.action, physical.code);
         result.skipped += 1;
         continue;
       }

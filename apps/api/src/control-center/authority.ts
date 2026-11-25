@@ -8,6 +8,7 @@ import type { PolicyAuditSinkStats } from "@jarvis/core";
 import { budgetConfigFromEnv } from "@jarvis/model-gateway";
 import { resolveAuthorityMode, type AuthorityConfig, type InfraExecutionGate, type KillSwitch, type OwnerControls, type PolicyAuditStats } from "@jarvis/policy";
 import { allowedReposFromEnv } from "@jarvis/tasks";
+import { autonomyActionBlocker, autonomyBindBlocker } from "@jarvis/situations";
 import {
   assertManifestInvariants, buildToolManifest, configuredGithubRepo, githubReposUnlocked, parseDockerMutationTargets, parseGceMutationTargets,
   ToolManifestViolationError, type ToolGateway, type ToolManifestEntry
@@ -282,6 +283,9 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
           // Gjennomgang av PR #316 (M-1): kan domene-pausene ikke leses, VET vi ikke om en aktiv binding er stanset - da er den ukjent (aldri «i orden»), og faktaet sier null i stedet for «ikke pauset».
           const pauseUnknown = !pausesR.ok && p.enabled;
           const ownSpace = p.memory_space_id === ctx.identity.memory_space_id;
+          // WP-G4b K1 (D-484): en lagret binding til en handling som ikke (lenger) er bindbar til autonom ACT (fysisk, eller definisjonen erklærer ikke `autonomy_bindable`) utføres ALDRI og slettes aldri; den vises her så eieren ser
+          // at den ikke virker. Kun når definisjonen er kjent i registeret (eller handlingen er fysisk): en ukjent handling i en ren test-/delvis-oppsett gir ingen påstand.
+          const notBindable = deps.toolGateway.get(p.tool_id, p.action) !== undefined || autonomyActionBlocker(p.tool_id, p.action) !== null ? autonomyBindBlocker(p.tool_id, p.action, (t, a) => deps.toolGateway.get(t, a)) : null;
           if (deps.autonomyRevoke === true && ownSpace) {
             actions.push(controlAction({
               id: `authority.revoke_autonomy:${p.memory_space_id}:${p.domain}`, label: `Tilbakekall autonomi: ${p.domain}`, endpoint: "/executive/mutate",
@@ -293,9 +297,9 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
             }));
           }
           return controlItem({
-            id: `${p.memory_space_id}:${p.domain}`, label: `${p.domain} (${p.memory_space_id})`, status: pauseUnknown ? "UNKNOWN" : p.enabled && paused ? "WARN" : "OK", observed_at: p.updated_at,
-            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
-            facts: { tool: p.tool_id, action: p.action, risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id }
+            id: `${p.memory_space_id}:${p.domain}`, label: `${p.domain} (${p.memory_space_id})`, status: pauseUnknown ? "UNKNOWN" : p.enabled && (paused || notBindable !== null) ? "WARN" : "OK", observed_at: p.updated_at,
+            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${notBindable !== null ? ` · UTFØRES IKKE autonomt (${notBindable.code === "physical_action_not_bindable" ? "fysisk/kritisk handling" : "definisjonen erklærer ikke handlingen bindbar til autonom ACT"}); bindingen er ikke slettet - fjern eller erstatt den` : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
+            facts: { tool: p.tool_id, action: p.action, risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id, ...(notBindable !== null ? { not_bindable: notBindable.code } : {}) }
           });
         });
         items.sort(bySeverityThenLabel);

@@ -7,6 +7,7 @@ import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal, toolCall
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, ownerStepUpDenial, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isIndeterminateTransportError, transportErrorKind } from "./transport-errors.ts";
 import { isFinancialNamespace } from "./tool-manifest.ts";
+import type { AutonomyBindability } from "./autonomy-bindable.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
 /**
@@ -515,6 +516,12 @@ export interface ToolDefinition {
    * ikke gatewayen eieren, og flagget har ingen effekt - som resten av eier-bindingen). Avslag: `owner_only`. Gatewayens egne preflight-/readback-lesinger går direkte via transporten og påvirkes ikke.
    */
   owner_only?: boolean;
+  /**
+   * WP-G4b K1 (Q-75 pkt 11, JARVIS-115 m, D-484): eksplisitt, BEGRUNNET samtykke til at handlingen kan BINDES til autonom ACT (`situation_autonomy_policies`) og utføres av situasjonsmotoren uten et menneske i løkka.
+   * DEFAULT-DENY: utelatt = IKKE bindbar. Bindingen avvises ved bind-tid og nektes ved utførelse; de fysiske navnerommene (`home-assistant`, `car`) er stengt uansett hva som står her.
+   * Se `autonomy-bindable.ts` for begrunnelsen, kravene og de manifestinvariantene som feller en feilmerket definisjon. Påvirker ikke hvordan handlingen utføres (risikoklasse, step-up, D-kjede) - kun OM den kan bindes.
+   */
+  autonomy_bindable?: AutonomyBindability;
 }
 
 /**

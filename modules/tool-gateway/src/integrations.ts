@@ -187,7 +187,9 @@ export function firstWaveTools(
       input_schema: record({ message: z.string().max(4000) }), capability_class: "B",
       scopes: ["bot:send"], reversible: true, rollback_procedure: "send korreksjonsmelding",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
-      credential_ref: "JARVIS_TELEGRAM_TOKEN", output_trust: "internal", transport: transport("telegram")
+      credential_ref: "JARVIS_TELEGRAM_TOKEN", output_trust: "internal", transport: transport("telegram"),
+      // WP-G4b K1 (D-484, JARVIS-115 m): en av de FÅ handlingene som kan bindes til autonom ACT. Rent varsel til eierens EGEN kanal.
+      autonomy_bindable: { reason: "Rent varsel til eierens EGEN Telegram-kanal: ingen mottaker utenfor eieren, ingen fysisk effekt, ingen endring av data; samme kanal som motorens eget ACT+NOTIFY-varsel." }
     },
     {
       tool_id: "vercel", action: "read_deployments", description: "Les deploy-status (GET /v6/deployments, valgfritt filtrert på prosjekt)",
@@ -516,7 +518,9 @@ export function firstWaveTools(
       capability_class: "B", scopes: ["business.write"], reversible: true,
       rollback_procedure: "avbryt oppfoelgingen (cancel_followup)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
-      output_trust: "internal", transport: transport("business")
+      output_trust: "internal", transport: transport("business"),
+      // WP-G4b K1 (D-484, JARVIS-115 m): Jarvis' egen bokføring (JARVIS_CANONICAL).
+      autonomy_bindable: { reason: "Jarvis' egen bokføring (JARVIS_CANONICAL): oppretter en intern oppfølging i eierens egen tenant; ingen ekstern effekt, ingen mottaker, ingen fysisk effekt; reverserbar (cancel_followup)." }
     },
     {
       tool_id: "business", action: "complete_followup", description: "Marker en oppfoelging som fullført",
@@ -607,7 +611,9 @@ export function firstWaveTools(
       capability_class: "B", scopes: ["business.write"], reversible: true,
       rollback_procedure: "tildel tilbake til forrige eier", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
-      output_trust: "internal", transport: transport("business")
+      output_trust: "internal", transport: transport("business"),
+      // WP-G4b K1 (D-484, JARVIS-115 m): Jarvis' egen bokføring (JARVIS_CANONICAL).
+      autonomy_bindable: { reason: "Jarvis' egen bokføring (JARVIS_CANONICAL): tildeler et internt open loop til en person i samme tenant; ingen ekstern effekt, ingen fysisk effekt; reverserbar (tildel tilbake)." }
     },
     {
       tool_id: "business", action: "set_open_loop_next_action", description: "Oppdater anbefalt neste handling for et open loop",

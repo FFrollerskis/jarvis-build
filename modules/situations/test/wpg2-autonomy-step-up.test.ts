@@ -9,7 +9,7 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import {
-  CAR_CRITICAL_OPS, CarTransport, HOME_CRITICAL_OPS, HomeAssistantCriticalTransport, ToolGateway, UnconfiguredCarAdapter, autonomyBindingBlocker, carCriticalToolDefinitions, homeCriticalToolDefinitions, parseCarTargets, parseHomeTargets,
+  CAR_CRITICAL_OPS, CarTransport, HOME_CRITICAL_OPS, HomeAssistantCriticalTransport, ToolGateway, UnconfiguredCarAdapter, autonomyBindingBlocker, carCriticalToolDefinitions, firstWaveTools, homeCriticalToolDefinitions, parseCarTargets, parseHomeTargets,
   type ClassDNotification, type SecretProvider
 } from "@jarvis/tool-gateway";
 import { DomainPauseRegistry } from "../src/domain-pause.ts";
@@ -62,7 +62,9 @@ beforeAll(async () => {
   });
   const transport = new HomeAssistantCriticalTransport({ baseUrl: async () => ha.baseUrl, settleMs: 5_000, pollMs: 500 });
   for (const d of homeCriticalToolDefinitions(transport, { targets: parseHomeTargets("lock.front_door,alarm_control_panel.home"), settleMs: 5_000, pollMs: 500 })) gateway.register(d);
-  engine = new SituationEngine(app, new DomainPauseRegistry(app, { owner_person_id: OWNER }), { owner_person_id: OWNER });
+  // WP-G4b K1: den ekte `telegram.notify`-definisjonen (som erklærer seg bindbar) og et bind-tid-oppslag mot samme gateway (som `toolGateway.get` i produksjon).
+  for (const d of firstWaveTools({ telegram: { invoke: async () => ({}) } as never }).filter((t) => t.tool_id === "telegram" && t.action === "notify")) gateway.register(d);
+  engine = new SituationEngine(app, new DomainPauseRegistry(app, { owner_person_id: OWNER }), { owner_person_id: OWNER }, { definitionLookup: (t, a) => gateway.get(t, a) });
 }, 240_000);
 
 afterAll(async () => { await ha?.stop(); await app?.end(); await admin?.end(); await stop?.(); }, 120_000);

@@ -1,6 +1,7 @@
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import { autonomyBindabilityOf } from "@jarvis/tool-gateway";
 import { autonomyActionBlocker } from "./autonomy-guard.ts";
 import { NEVER_ACT_DOMAINS, ruleByKey } from "./signal-types.ts";
 import type { Situation, SituationAutonomyPolicy } from "./types.ts";
@@ -42,6 +43,11 @@ export interface SimulationBinding {
    * `null` = definisjonen er ikke kjent for kalleren (ingen påstand).
    */
   step_up_required?: boolean | null;
+  /**
+   * WP-G4b K1 (D-484): erklærer DEFINISJONEN handlingen bindbar til autonom ACT (`autonomy_bindable`, default-deny)? `false` = den gjør det ikke, så motoren utfører den aldri autonomt (en lagret binding feiler lukket).
+   * `null`/utelatt = definisjonen er ikke kjent for kalleren (ingen påstand).
+   */
+  bindable?: boolean | null;
 }
 
 export interface SimulationInput {
@@ -53,7 +59,7 @@ export interface SimulationInput {
   nowMs: number;
 }
 
-export type SimulationBlocker = "domain_never_act" | "physical_action_not_bindable" | "no_binding" | "step_up_required" | "stage_not_suggest";
+export type SimulationBlocker = "domain_never_act" | "physical_action_not_bindable" | "action_not_bindable" | "no_binding" | "step_up_required" | "stage_not_suggest";
 
 export interface SimulationScenario {
   id: "acted_at_suggest" | "not_acted";
@@ -108,6 +114,8 @@ export function simulateCounterfactual(input: SimulationInput): SimulationReport
     if (!binding.bound) blockers.push("no_binding");
     // Fysisk/kritisk handling (lås, alarm, lys, klima, bil, `critical_*`): situasjonsmotoren utfører den aldri (delt regel i `autonomy-guard.ts`, også for en binding fra før regelen).
     else if (autonomyActionBlocker(binding.tool_id, binding.action) !== null) blockers.push("physical_action_not_bindable");
+    // WP-G4b K1 (D-484): definisjonen erklærer ikke handlingen bindbar (default-deny) - motoren utfører den aldri autonomt, uansett binding.
+    else if (binding.bindable === false) blockers.push("action_not_bindable");
     // Step-up leses fra verktøydefinisjonen: en klasse D UTEN step-up nektes ikke av step-up og utføres av den autonome identiteten gjennom klasse D-kjeden.
     if (binding.step_up_required === true) blockers.push("step_up_required");
     if (situation.stage !== "suggest" && situation.stage !== "act" && situation.stage !== "act_notify") blockers.push("stage_not_suggest");
@@ -117,7 +125,7 @@ export function simulateCounterfactual(input: SimulationInput): SimulationReport
   const savedIfActed = medianMinutes === null || durations.length < SIMULATION_MIN_SIMILAR_RESOLVED ? null : Math.max(0, medianMinutes - ASSUMED_ACTION_MINUTES);
   const acted: SimulationScenario = {
     id: "acted_at_suggest", label: "Hadde Jarvis handlet ved forslaget (innenfor eierens binding)", estimated_minutes: savedIfActed, blocked_by: blockers,
-    requires_owner_approval: blockers.includes("no_binding") || blockers.includes("step_up_required") || blockers.includes("domain_never_act") || blockers.includes("physical_action_not_bindable")
+    requires_owner_approval: blockers.includes("no_binding") || blockers.includes("step_up_required") || blockers.includes("domain_never_act") || blockers.includes("physical_action_not_bindable") || blockers.includes("action_not_bindable")
   };
   const notActed: SimulationScenario = {
     id: "not_acted", label: "Hadde Jarvis kun varslet (som i dag)", estimated_minutes: observedMinutes !== null && situation.status === "resolved" ? observedMinutes : medianMinutes, blocked_by: [], requires_owner_approval: false
@@ -143,6 +151,7 @@ export function simulateCounterfactual(input: SimulationInput): SimulationReport
   if (binding.bound && binding.risk_class === "D" && binding.step_up_required !== true && !blockers.includes("physical_action_not_bindable")) {
     caveats.push("Handlingen er klasse D uten step-up: den kan utføres autonomt gjennom klasse D-kjeden (umiddelbart varsel med gjenopprettingskontekst); vurder bindingen nøye.");
   }
+  if (blockers.includes("action_not_bindable")) caveats.push("Handlingens definisjon erklærer ikke `autonomy_bindable` (default-deny): motoren utfører den aldri autonomt, uansett binding. Bindingen er ikke slettet; eieren må fjerne eller erstatte den, eller en eksplisitt, begrunnet erklæring må legges på definisjonen (D-160 er uendret som beslutning).");
   if (blockers.includes("domain_never_act")) caveats.push("Domenet (helse/kamera) kan aldri handle autonomt: Jarvis informerer og foreslår kun.");
 
   return {
@@ -153,13 +162,13 @@ export function simulateCounterfactual(input: SimulationInput): SimulationReport
 }
 
 /** Slår opp en bundet handling i verktøyregisteret: risikoklasse og `step_up_required` FRA DEFINISJONEN (aldri utledet av klassen). `null` = ukjent definisjon. */
-export type SimulationToolInfo = (toolId: string, action: string) => { risk_class: "A" | "B" | "C" | "D"; step_up_required: boolean } | null;
+export type SimulationToolInfo = (toolId: string, action: string) => { risk_class: "A" | "B" | "C" | "D"; step_up_required: boolean; bindable: boolean } | null;
 
-export function simulationToolInfoFrom(gateway: { get(toolId: string, action: string): { capability_class: string; step_up_required?: boolean } | undefined }): SimulationToolInfo {
+export function simulationToolInfoFrom(gateway: { get(toolId: string, action: string): { capability_class: string; step_up_required?: boolean; autonomy_bindable?: unknown } | undefined }): SimulationToolInfo {
   return (toolId, action) => {
     const def = gateway.get(toolId, action);
     if (def === undefined || !["A", "B", "C", "D"].includes(def.capability_class)) return null;
-    return { risk_class: def.capability_class as "A" | "B" | "C" | "D", step_up_required: def.step_up_required === true };
+    return { risk_class: def.capability_class as "A" | "B" | "C" | "D", step_up_required: def.step_up_required === true, bindable: autonomyBindabilityOf(def) !== null };
   };
 }
 
@@ -214,7 +223,7 @@ export class SimulationService {
     if (gathered.pol === undefined) binding = { bound: false, tool_id: null, action: null, risk_class: null, step_up_required: null };
     else {
       const info = this.toolInfoOf(gathered.pol.tool_id, gathered.pol.action);
-      binding = { bound: true, tool_id: gathered.pol.tool_id, action: gathered.pol.action, risk_class: info?.risk_class ?? null, step_up_required: info === null ? null : info.step_up_required };
+      binding = { bound: true, tool_id: gathered.pol.tool_id, action: gathered.pol.action, risk_class: info?.risk_class ?? null, step_up_required: info === null ? null : info.step_up_required, bindable: info === null ? null : info.bindable };
     }
     return simulateCounterfactual({ situation: gathered.situation, rule_key: gathered.ruleKey, similar: gathered.similar, binding, nowMs: this.now() });
   }

@@ -51,6 +51,8 @@ export * from "./connector-registry.ts";
 export * from "./connector-health-sweep.ts";
 export * from "./owner-stated-memory.ts";
 export * from "./tool-manifest.ts";
+// WP-G4b K1 (D-484): bindbarhet til autonom ACT som egenskap per verktøydefinisjon (default-deny).
+export * from "./autonomy-bindable.ts";
 export * from "./turn-context.ts";
 export * from "./url-safety.ts";
 // WP-G2 (D-464): personlig-domenet (dormant bak JARVIS_PERSONAL_*-flagg).

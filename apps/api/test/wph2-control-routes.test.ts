@@ -145,7 +145,8 @@ beforeAll(async () => {
   policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, authority });
   const pauses = new DomainPauseRegistry(db.appPool, { owner_person_id: OWNER });
   await pauses.restore();
-  engine = new SituationEngine(db.appPool, pauses, { owner_person_id: OWNER });
+  // WP-G4b K1: `test_actuator.assign` er et testverktøy som erklærer seg bindbar (bind-tid-oppslag mot en lokal tabell; produksjonens oppslag er `toolGateway.get`).
+  engine = new SituationEngine(db.appPool, pauses, { owner_person_id: OWNER }, { definitionLookup: (t, a) => (t === "test_actuator" && a === "assign" ? { autonomy_bindable: { reason: "testverktøy uten ekstern effekt: brukes kun til å bevise tilbakekall av autonomi-bindinger" } } : undefined) });
   // eierens bindinger: A/personal (pipeline, spend), A/business (pipeline, growth), A/health (wellbeing - isolert rom), B/personal (pipeline; bundet av B sin egen person - FK-en krever at aktøren er medlem av policyens tenant)
   await bind(TENANT_A, "personal", "pipeline");
   await bind(TENANT_A, "personal", "spend");

@@ -177,6 +177,11 @@ export interface SituationAutonomyPolicy {
   actor_person_id: string;
   created_at: string;
   updated_at: string;
+  /**
+   * WP-G4b K1 (D-484): KUN satt av `listAutonomyPolicies` når den lagrede handlingen ikke (lenger) er bindbar til autonom ACT (`physical_action_not_bindable` eller `action_not_bindable`: definisjonen sier ikke
+   * `autonomy_bindable`). Bindingen utføres da ALDRI (feiler lukket ved utførelse), og den slettes aldri stille: eieren ser den her og kan fjerne eller erstatte den selv.
+   */
+  blocked_code?: "physical_action_not_bindable" | "action_not_bindable";
 }
 
 const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>

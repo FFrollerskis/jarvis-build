@@ -49,7 +49,7 @@ function build(scn: Scenario = {}): { pool: ScriptedPool; run: () => Promise<Con
     { match: /FROM devices d/, rows: scn.devices ?? [dev("dev-current", "person-owner"), dev("dev-phone", "person-owner"), dev("dev-delegate", "person-delegate", { active_grants: 2 }), dev("dev-old", "person-owner", { revoked_at: ago(50 * H), active_grants: 0 })] },
     { match: /SELECT DISTINCT domain FROM situations/, rows: (scn.situationDomains ?? ["finance", "support"]).map((domain) => ({ domain })) },
     { match: /AS n FROM situation_autonomy_policies/, rows: [{ n: scn.healthPolicies ?? 0 }] },
-    { match: /FROM situation_autonomy_policies/, rows: scn.policies ?? [{ memory_space_id: "business", domain: "finance", tool_id: "finance_spend", action: "sync_internal_spend", enabled: true, updated_at: ago(30 * H) }] },
+    { match: /FROM situation_autonomy_policies/, rows: scn.policies ?? [{ memory_space_id: "business", domain: "finance", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) }] },
     { match: /FROM situation_domain_pauses/, rows: scn.pauses ?? [] },
     { match: /FROM finance_kill_switch/, rows: scn.finance ?? [] },
     { match: /FROM action_confirmations/, rows: scn.confirmations ?? [] }
@@ -151,7 +151,7 @@ describe("seksjonene og eier-/delegert autoritet", () => {
     const p = item(r, "autonomy", "business:finance");
     expect(p.status).toBe("WARN");
     expect(p.detail_no).toContain("PAUSET");
-    expect(p.facts).toMatchObject({ tool: "finance_spend", action: "sync_internal_spend", enabled: true, domain_paused: true, risk_class: "B" });
+    expect(p.facts).toMatchObject({ tool: "business", action: "create_followup", enabled: true, domain_paused: true, risk_class: "B" });
     expect(section(r, "autonomy").summary_no).toContain("2 i health-rommet (isolert, ikke listet)");
     const clean = await build().run();
     expect(item(clean, "autonomy", "business:finance").status).toBe("OK");
