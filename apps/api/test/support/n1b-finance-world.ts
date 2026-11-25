@@ -189,7 +189,7 @@ export interface World {
 }
 
 /** Teller hvor mange ganger hver injisert rapportkilde er lest (verdi-, SLO-, AI Mesh-, evolusjons-, selvdiagnose- og infrastatuskilden). */
-export interface ReadCounters { value: number; slo: number; aiMesh: number; evolution: number; selfModel: number; infra: number }
+export interface ReadCounters { value: number; slo: number; aiMesh: number; evolution: number; selfModel: number; infra: number; runRateReport: number; runRateMaintenance: number }
 
 export interface WorldOptions {
   pool: pg.Pool;
@@ -220,7 +220,7 @@ export function buildWorld(options: WorldOptions): World {
   const fin = options.financeData !== false;
   const tenantId = options.tenantId ?? TENANT;
   const ownerId = options.ownerId ?? OWNER;
-  const reads: ReadCounters = { value: 0, slo: 0, aiMesh: 0, evolution: 0, selfModel: 0, infra: 0 };
+  const reads: ReadCounters = { value: 0, slo: 0, aiMesh: 0, evolution: 0, selfModel: 0, infra: 0, runRateReport: 0, runRateMaintenance: 0 };
   let financeCalls = 0;
   const policy = new PolicyGateway({
     devices: new InMemoryDeviceRegistry(), nonces: new PgApprovalStore(pool), killSwitch: new KillSwitch(),
@@ -241,7 +241,13 @@ export function buildWorld(options: WorldOptions): World {
   gateway.register(fakeDef("situations", "get_queue", situationRows(fin)));
   gateway.register(fakeDef("situations", "list_autonomy_policies", autonomyPolicies(fin)));
   gateway.register(fakeDef("situations", "get_notification_policy", null));
-  for (const tool of runRateToolDefinitions(new RunRateTransport(new RunRateService(pool)))) gateway.register(tool);
+  // run_rate: samme tjeneste som i main.ts, men med tellere på lesemetodene (spion: et tilbakehold skal skje FØR kostnadsdata leses)
+  const runRate = new RunRateService(pool);
+  const reportRead = runRate.report.bind(runRate);
+  const maintenanceRead = runRate.maintenanceWithoutFinance.bind(runRate);
+  runRate.report = async (tenant) => { reads.runRateReport += 1; return reportRead(tenant); };
+  runRate.maintenanceWithoutFinance = async (tenant) => { reads.runRateMaintenance += 1; return maintenanceRead(tenant); };
+  for (const tool of runRateToolDefinitions(new RunRateTransport(runRate))) gateway.register(tool);
 
   // De EKTE kontrollsentrene - SAMME fabrikk og registrering som main.ts - mot den samme gatewayen og poolen. Uten `centerFlags` er kun Autoritet, Integrasjoner og AI koblet inn; flaggene (`JARVIS_CONTROL_CENTER_*`) kobler de øvrige.
   // Vakten PÅ gir sentrene `financeGuard` (som main.ts: kun `...(restrictedContextGuard.enabled ? { financeGuard: true } : {})`); AV gir nøyaktig H2-oppførselen.
