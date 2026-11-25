@@ -327,6 +327,34 @@ describe("C: det avstemmingen IKKE påstår", () => {
   });
 });
 
+describe("C2: hva som lagres i journalen", () => {
+  it("`request_params` lagres KUN for parametre som består handlingens strenge skjema (aldri rå klient-JSON): et ukjent felt (her en kode-lignende nøkkel) eller feil type lagres aldri, raden blir `failed` og kan ikke avstemmes", async () => {
+    const rig = homeRig();
+    ha.set("lock.front_door", { state: "unlocked", last_changed: ago(2 * HOUR) });
+    for (const params of [{ entity: "lock.front_door", locked: true, code: "1234-fiktiv" }, { entity: "lock.front_door", locked: "ja" }, { entity: "lock.front_door" }] as Array<Record<string, JsonValue>>) {
+      const r = await rig.run("critical_lock", params);
+      expect(r, JSON.stringify(params)).toMatchObject({ outcome: "FAILED", action: { status: "failed", request_params: null } });
+      const stored = await rig.journal.findById(G2_TENANT, "personal", r.action.action_id);
+      expect(JSON.stringify(stored)).not.toContain("1234-fiktiv");
+      expect(await rig.reconcile(r.action.action_id)).toMatchObject({ resolution: "already_terminal", replayed: true });
+    }
+    expect(ha.serviceCalls()).toHaveLength(0);
+  });
+
+  it("gyldige parametre lagres uendret (også for bil), og digesten regnet på de lagrede parameterne er radens digest (bevis for at ingenting er endret)", async () => {
+    const rig = homeRig();
+    ha.set("lock.front_door", { state: "unlocked", last_changed: ago(2 * HOUR) });
+    const r = await rig.run("critical_lock", { entity: "lock.front_door", locked: true, expected_state: "unlocked" });
+    expect(r.action.request_params).toEqual({ entity: "lock.front_door", locked: true, expected_state: "unlocked" });
+    expect(actionRequestDigest("home", "critical_lock", r.action.request_params as Record<string, JsonValue>)).toBe(r.action.request_digest);
+    const car = carRig();
+    fakeCar.set("bil", { lock: "unlocked", climate: "off", charging: "stopped" });
+    const c = await car.run("lock", { vehicle_id: "bil" });
+    expect(c.action).toMatchObject({ domain: "car", request_params: { vehicle_id: "bil" } });
+    expect(actionRequestDigest("car", "lock", c.action.request_params as Record<string, JsonValue>)).toBe(c.action.request_digest);
+  });
+});
+
 describe("D: bil - kun applied er mulig, og en bufret/eldre observasjon bekrefter aldri noe", () => {
   /** Bil: kommandoen er akseptert, men bilen utfører den aldri (`ineffective`) -> readback viser feil sluttilstand -> `outcome_unknown`. */
   async function unknownCarLock(rig: Rig): Promise<string> {
