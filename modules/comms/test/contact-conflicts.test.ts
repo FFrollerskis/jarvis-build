@@ -71,7 +71,24 @@ describe("A: konflikter lagres som forslag (idempotent, kun ressursnavn)", () =>
     expect(await rowsOf("people/c111")).toMatchObject([{ kind: "split_identities", status: "proposed", conflicting_resources: [], seen_count: 3 }]);
   });
 
-  it("endres konfliktsettet (en tredje kontakt deler samme telefon etter at eieren har godtatt den andre), er det et NYTT forslag med eget id - det gamle står urørt", async () => {
+  it("endres konfliktsettet for SAMME kontakt (en tredje kontakt eier nå identiteten også), er det et NYTT forslag med eget id og eget sett - det gamle står urørt (fingerprint dekker settet)", async () => {
+    publish(person("115", { phoneNumbers: [{ value: "+4722000115" }], emailAddresses: [{ value: "a@x115.no" }] }), person("116", { phoneNumbers: [{ value: "+4722000115" }], emailAddresses: [{ value: "b@x116.no" }] }));
+    const first = conflictsOf(await sync())[0]!;
+    expect(first).toMatchObject({ resource_name: "people/c116", with: ["people/c115"], status: "proposed" });
+    const identity = (await identityOfEmail("a@x115.no"))!;
+    await chain.graph.linkChannelIdentity(TENANT_A, "business", { channel: "email", channel_identifier: "c@x117.no", confidence: 0.9, match_method: "contact_sync", identity_id: identity, source_type: "google_contacts", external_id: "people/c117" });
+    const second = conflictsOf(await sync()).find((c) => c.resource_name === "people/c116")!;
+    expect(second).toMatchObject({ with: ["people/c115", "people/c117"], status: "proposed" });
+    expect(second.conflict_id).not.toBe(first.conflict_id);
+    const rows = (await rowsOf("people/c116")).sort((a, b) => a.conflicting_resources.length - b.conflicting_resources.length);
+    expect(rows.map((r) => r.conflicting_resources)).toEqual([["people/c115"], ["people/c115", "people/c117"]]);
+    expect(rows.map((r) => r.seen_count)).toEqual([1, 1]);
+    // og en NY synk med samme sett gir fortsatt bare to rader (idempotent per sett)
+    await sync();
+    expect((await rowsOf("people/c116")).length).toBe(2);
+  });
+
+  it("en godtatt kontakt og så en tredje kontakt med samme telefon: den tredje er en konflikt mot BEGGE (eget forslag), og de to godtatte er fortsatt uten konflikt", async () => {
     publish(person("121", { phoneNumbers: [{ value: "+4722000121" }], emailAddresses: [{ value: "a@x121.no" }] }), person("122", { phoneNumbers: [{ value: "+4722000121" }], emailAddresses: [{ value: "b@x122.no" }] }));
     const c122 = conflictsOf(await sync())[0]!;
     expect((await decide(c122.conflict_id!, "accept")).ok).toBe(true);
@@ -207,6 +224,11 @@ describe("C: databasens egne regler for forslagene (som tabelleier, uten om kode
     }
     await expect(chain.db.admin.query("UPDATE comms_contact_conflicts SET seen_count = 0 WHERE tenant_id = $1 AND conflict_id = $2", where)).rejects.toThrow();
     await expect(chain.db.admin.query("UPDATE comms_contact_conflicts SET last_seen_at = last_seen_at - interval '1 day' WHERE tenant_id = $1 AND conflict_id = $2", where)).rejects.toThrow(/kan kun øke/);
+    // en avgjørelse MÅ ha både person og tidspunkt (CHECK), og et åpent forslag har ingen av dem
+    await expect(chain.db.admin.query("UPDATE comms_contact_conflicts SET status = 'dismissed', decided_at = now() WHERE tenant_id = $1 AND conflict_id = $2", where)).rejects.toThrow(/check constraint/);
+    await expect(chain.db.admin.query("UPDATE comms_contact_conflicts SET status = 'dismissed', decided_by_person_id = 'person-g1-owner' WHERE tenant_id = $1 AND conflict_id = $2", where)).rejects.toThrow(/check constraint/);
+    await expect(chain.db.admin.query("UPDATE comms_contact_conflicts SET decided_by_person_id = 'person-g1-owner' WHERE tenant_id = $1 AND conflict_id = $2", where)).rejects.toThrow(/check constraint/);
+    expect((await rowsOf("people/c192"))[0]).toMatchObject({ status: "proposed", decided_by_person_id: null });
     expect((await decide(c.conflict_id!, "dismiss")).ok).toBe(true);
     await expect(chain.db.admin.query("UPDATE comms_contact_conflicts SET status = 'proposed', decided_at = NULL, decided_by_person_id = NULL WHERE tenant_id = $1 AND conflict_id = $2", where)).rejects.toThrow(/kan ikke gjøres om/);
     // eieren kan ombestemme seg mellom godtatt og avvist

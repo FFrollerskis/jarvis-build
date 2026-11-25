@@ -192,3 +192,19 @@ describe("K3: en STOP forkastes aldri på alder (en forsinket levering av en ekt
     expect(await optedWa(a), "en gammel START løfter aldri en STOP").toBe(true);
   });
 });
+
+describe("K7 (reviewer B, Y13): statusvarsler på samme UVANLIGE id", () => {
+  it("to statusvarsler på SAMME lange id men ulik status får hver sin dedupe-nøkkel (hashen dekker hele id-en OG statusen), mens samme id og samme status gir samme nøkkel - ingen kollisjon som kan skjule et varsel", () => {
+    const long = `wamid.${"x".repeat(400)}`;
+    const body = { object: "whatsapp_business_account", entry: [{ id: "waba1", changes: [{ field: "messages", value: {
+      messaging_product: "whatsapp", metadata: { phone_number_id: PHONE_ID },
+      statuses: [{ id: long, status: "sent", timestamp: "1731850000", recipient_id: "4791000001" }, { id: long, status: "delivered", timestamp: "1731850001", recipient_id: "4791000001" }, { id: long, status: "sent", timestamp: "1731850002", recipient_id: "4791000001" }]
+    } }] }] };
+    const out = parseMetaBody(body);
+    const keys = "events" in out ? out.events.map((e) => e.event_key) : [];
+    expect(keys).toHaveLength(3);
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(keys[0]).toBe(keys[2]);
+    for (const k of keys) expect(k).toMatch(/^wa:status:sha256:[0-9a-f]{64}$/);
+  });
+});
