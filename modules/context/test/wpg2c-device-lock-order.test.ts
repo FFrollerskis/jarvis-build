@@ -5,7 +5,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, DeviceEnrollmentService, DeviceService, runMigrations, SessionGrantService, type DeviceEnrollmentResult } from "@jarvis/core";
+import { createPool, DeviceEnrollmentService, DeviceService, fingerprintPem, runMigrations, SessionGrantService, type DeviceEnrollmentResult } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { FamilyService, type FamilyActor } from "../src/index.ts";
 
@@ -85,9 +85,17 @@ async function mkCircle(): Promise<Circle> {
 interface Keyed { id: string; keys: { publicKey: KeyObject; privateKey: KeyObject } }
 const pemOf = (k: { publicKey: KeyObject }): string => k.publicKey.export({ type: "spki", format: "pem" }).toString();
 /** En enhet med en ekte Ed25519-nøkkel hvis private del testen har (kan signere en `device_proof`). */
-async function mkKeyed(c: Circle, id: string): Promise<Keyed> {
+async function mkKeyed(c: Circle, id: string, withGrant = false): Promise<Keyed> {
   const keys = generateKeyPairSync("ed25519");
   await admin.query(`INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem) VALUES ($1, $2, $3, 'mobile', $4)`, [id, c.tenant, c.adult, pemOf(keys)]);
+  if (withGrant) {
+    // Et utestående grant (som `revokeForDeviceOn` oppdaterer under fjerningen): radene brukes av testen til å STOPPE fjerningen midt mellom to enheter.
+    await admin.query(`INSERT INTO sessions (session_id, tenant_id, person_id, status, last_channel, last_device_id) VALUES ($1, $2, $3, 'closed', 'api', $4)`, [`sess-grant-${id}`, c.tenant, c.adult, id]);
+    await admin.query(
+      `INSERT INTO session_grants (grant_id, tenant_id, person_id, device_id, session_id, memory_space, channel, auth_strength, device_key_fingerprint, expires_at) VALUES ($1, $2, $3, $4, $5, 'shared', 'api', 'signed', $6, now() + interval '1 hour')`,
+      [`grant-${id}`, c.tenant, c.adult, id, `sess-grant-${id}`, fingerprintPem(pemOf(keys))]
+    );
+  }
   return { id, keys };
 }
 
@@ -173,6 +181,42 @@ describe("A: fjerning mot en SAMTIDIG device_proof-innrullering som roterer en a
     expect(await within(Promise.all([enrolling, removing]), 40_000, "hengende")).toEqual(["ok", "ok"]);
     expect([await isActive(`dev-lo-b-auth-${c.n}`), await isActive(`dev-lo-a-brandnew-${c.n}`)]).toEqual([false, false]);
   }, 90_000);
+});
+
+describe("A2: fjerningen er MIDT I FLUKT (holder sin første enhetsrad) når innrulleringen starter - rekkefølgen INNE i innrulleringens låsing avgjør", () => {
+  /**
+   * En åpen transaksjon (X) holder grant-radene til begge enhetene. Fjerningen låser sin første enhet (den som sorterer først) og står så blokkert på dens grant-rad: den holder én enhetsrad og venter. DA starter innrulleringen. Låser den i
+   * stigende rekkefølge (a, så b) venter den på a (som fjerningen holder) uten å holde noe selv - ingen sirkel. Låser den i en annen rekkefølge (b først, eller bare den ene), holder den b mens fjerningen (etter X) trenger b -> deadlock.
+   * Dette fanger det de andre kappløpene ikke gjør: rekkefølgen MELLOM de to radene i innrulleringens egen låsing, og at fjerningens liste og innrulleringen bruker SAMME sortering.
+   */
+  for (const [label, authorizingFirst] of [["autoriserende enhet sorterer ETTER den roterte", false], ["autoriserende enhet sorterer FØR den roterte", true]] as const) {
+    it(`${label}: fjerningen holder første enhet og venter på X; innrulleringen venter UTEN å holde noe; når X slipper er resultatet fjerning ok + innrullering avvist (nøkkelen er tilbakekalt) - aldri 40P01`, async () => {
+      const c = await mkCircle();
+      const lo = await mkKeyed(c, `dev-lo-a-mid-${c.n}`, true); // sorterer først
+      const hi = await mkKeyed(c, `dev-lo-b-mid-${c.n}`, true); // sorterer sist (settes inn etter, så fysisk rekkefølge = sortert: kun ORDER BY skiller riktig fra feil)
+      const authorizing = authorizingFirst ? lo : hi;
+      const target = authorizingFirst ? hi : lo;
+      const { gated, enrollment } = rig();
+      const request = proof(gated, c, authorizing, target.id);
+      const x = await admin.connect();
+      try {
+        await x.query("BEGIN");
+        await x.query(`SELECT 1 FROM session_grants WHERE device_id = ANY($1::text[]) FOR UPDATE`, [[lo.id, hi.id]]);
+        const removing = settle(svc.removeMember(act(c, c.owner), c.adult));
+        await waitBlocked(1); // fjerningen holder sin første enhetsrad og venter på grant-raden X holder
+        const enrolling = settle(enrollment.enroll(request), verdict as never);
+        await waitBlocked(2); // innrulleringen står også blokkert (på en enhetsrad fjerningen holder)
+        await x.query("COMMIT");
+        const results = await within(Promise.all([removing, enrolling]), 40_000, "deadlock eller hengende transaksjon");
+        expect(results, "fjerning, innrullering").toEqual(["ok", "denied:authorizing_device_proof_invalid"]);
+      } finally {
+        await x.query("ROLLBACK").catch(() => undefined);
+        x.release();
+      }
+      expect(await memberStatus(c)).toBe("removed");
+      expect([await isActive(lo.id), await isActive(hi.id)]).toEqual([false, false]);
+    }, 90_000);
+  }
 });
 
 describe("B: to innrulleringer som krysser hverandre (D1 autoriserer rotasjon av D2, og D2 autoriserer rotasjon av D1)", () => {
