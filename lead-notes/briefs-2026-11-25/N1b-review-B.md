@@ -1,15 +1,109 @@
-# WP-N1b reviewer B: sikkerhet, personvern, omgåelse av tilbakeholdene (K2 tilbakehold, K1 fail-lukket, K3/K6 dokumentasjon, mutanter)
+TS: 2026-11-25T21:03:10.296Z
+VERDICT: MERGE ETTER FIKSER. 0 HIGH og 1 MEDIUM (F1: `executive.get_infra_status` og `infra`-situasjoner lekker finanskobling- og jobbnavn til sky, mens runbooken sier «ingen finans»). I tillegg 6 LOW (F2–F7), alle med minimal fiks under.
 
-Les først `/tmp/lead/briefs/N1b-review-common.md` (felles regler, oppsett, rapportformat) og `/tmp/lead/briefs/N1b-build.md` (byggerens ordre). Din vinkel (B):
+HEAD er `ebc85c38`, worktreen er urørt (`git status --short` tom, probene er flyttet ut). Alt er kjørt som `postgres`, `--maxWorkers=2`, `timeout -k 5`.
 
-1. **Prøv å UMGÅ hvert nytt tilbakehold (K2).** For hver sti som byggeren har gjort om til «tilbakeholdt for sky/ukjent modell ved utførelse»: finn alle veier til SAMME innhold og prøv dem med en skymodell/ukjent modell: (a) samme data via et ANNET verktøy (et annet navn, alias, eldre variant, `*_v2`, batch/plan, `describe`/`help`/`schema`-verktøy som viser eksempeldata), (b) via en samle-/oppsummeringsflate (morgenbrief, daglig oversikt, `get_business_brief` -> `open_loops` -> `tasks` -> `memory.recall` -> `situations`/bridges -> `growth`/D3 -> `executive`-kø/rapport -> `run_rate`-kostoversikt -> `value_report`/AI-senteret), (c) via tilstand som ALLEREDE er skrevet til minne/oppgaver/samtalehistorikk/jobbresultat FØR tilbakeholdet (kjent akseptert rest: JARVIS-116 (c)-(j); men sjekk at de NYE tilbakeholdene ikke selv SKRIVER finansavledet innhold et sted en skymodell senere leser: episodisk minne, `tool_executions`-revisjon med resultat, cache, jobbresultat, `owner_control`-fritekst), (d) via feilmeldinger/unntak/stacktrace/`error.details`, (e) via metadata på det nøytrale svaret (felter, tellere, `withheld_count`, lengde/størrelse på svaret, tidsforskjell som avslører om det fantes finansinnhold), (f) via argumenter (kan modellen styre en `include_finance`/`scope`/`fields`-parameter som slår av tilbakeholdet?), (g) via delegert/MCP/workflow-adapter eller et verktøy som kalles på en annen identitet/tenant enn modellens. Hvert funn med reprodusert probe.
-2. **Nøytraltsvaret er innholdsfritt.** Probe på selve strengene/objektene for realistiske resultater: ingen sifre, id-er, tellinger, leverandørnavn (bank/regnskap/betalingsleverandør), kontonavn, valuta, eller finansord som avslører hva som holdes tilbake utover det som allerede er akseptert i `tasks.get_task_status`-mønsteret (`withheld`/`note_no`); norsk tekst; samme form uansett om det FANTES finansinnhold eller ikke (ellers er forskjellen selv en lekkasje: bevis ved å kjøre med og uten finansdata og diff svarene). Revisjonsrad ved tilbakehold: uten innhold og uten sifre.
-3. **Fail-lukket og feilbaner (K1).** Hva skjer når: ALS-kontekst mangler i en modellvei; `servingModel` er `undefined`/`null`/tom/ukjent leverandør/`Local`/`LOCAL`/` local`; predikatet kaster; verktøyet kaster etter at tilbakeholdet er avgjort; to nøstede nivåer med ulik modell (kan en indre kall «oppgradere» konteksten til lokal fordi det indre kallet selv sier `local`? kan en modell/argument/verktøyoutput sette konteksten (kontekst skal KUN komme fra ToolGateway-stempleren, aldri fra argumenter, brukertekst, verktøyoutput eller modellsvar)? kan en nøstet kontekst-`run` av eierens rute inni et modellkall «vaske» konteksten til eier (privilegie-eskalering: en HTTP-rute/`owner`-sti som kalles fra et modellkall og setter `servingModel = undefined`)? Er det en måte en modellflate kan kalle kode som kjører `run(null, ...)`/`run({}, ...)`/eksporterer settere? Sjekk hva som eksporteres fra den nye modulen: kun lesing + én setter i gatewayen?
-4. **Utførelse vs utvalg.** Tilbakeholdet skal skje VED UTFØRELSE, før verktøyet leser/aggregerer finansdata (nekt før sideeffekt/kostnad, ikke bare skjul svar). Bevis med probe: spy på DB-/tjenestekall under et sky-kall (leses finanstabeller likevel? gir tidsforskjellen/feilmeldingen et orakel?). Gjelder også for nøstede kall.
-5. **Kildevaktene (K4e) og invariantene.** Strukturvakten mot nye nøstede finansoppslag uten sentral lesning og mot en fjerde lokalitetskopi: mutér (legg inn et nytt oppslag/kopi) og vis at vakten faller; er vakten robust mot omdøping/aliasing/dynamisk import (`import()`/`require`), `eval`-lignende mønstre? Kommentaren/vakten for `personal.finance_read` (eier-HTTP uten modell): feller den hvis et verktøy/modellflate noensinne kaller den?
-6. **Dokumentasjon og ærlighet (K3, K6).** `docs/runbooks/WPN1_RESTRICTED_HISTORY.md`: stemmer HVER rad i kartleggingstabellen mot koden (sti, bærer finans?, kan sky lese i dag?, tiltak)? En rad som sier «holdt tilbake» der en probe viser lekkasje er et HIGH-funn. Står aktiveringsrekkefølgen eksplisitt (`JARVIS_CONTROL_CENTER_FINANCE`/`_VALUE` først når `JARVIS_RESTRICTED_CONTEXT_GUARD` er på og K1/K2 er verifisert på NAS; `NOT VERIFIED` inntil eieren har kjørt trinnene)? NAS-trinnene: konkrete, riktige, ufarlige (ingen destruktive kommandoer, ingen hemmeligheter)? Begrensningene 6/12-14/19 oppdatert riktig (ikke løftet som «løst» uten bevis)? Står det noe som `VERIFIED` uten kjørt artefakt?
-7. **Flagg, env og supply chain.** `JARVIS_RESTRICTED_CONTEXT_GUARD` er api-only; ingen nye flagg uten `SERVICE_ENV.api` + compose + guard; ingen nye avhengigheter (`git diff 71a31d8b..HEAD -- '**/package.json' pnpm-lock.yaml` skal være tomt eller begrunnet); ingen `.env`/binærfiler; kjør `/tmp/gitleaks-bin/gitleaks detect --source . --no-banner --log-opts="71a31d8b..HEAD"`; `git diff 71a31d8b..HEAD --stat` viser ingen uventede filer. Er `modules/tool-gateway`-endringen (stemplingen) minimal, og påvirker den KUN modellstyrte kall?
-8. **Byggerens mutantsett og egne mutanter.** Kjør byggerens mutantskript (se `apps/api/test/support/*mutants*` el.l.) og lag minst 25 EGNE mutanter mot tilbakeholdene/predikatene/nøytraltsvaret (startsett under). Rapporter overlevende.
+## Funn (rangert, fil:linje mot HEAD)
 
-## Mutantforslag (lag minst 25; startsett)
-lokal-sjekk snudd for én sti; ukjent modell regnes som lokal; tom streng regnes som lokal; én sti glemmer tilbakehold ved nøstet kall; nøytraltsvaret inkluderer antall/id/leverandørnavn; nøytraltsvaret har ulik form med og uten finansdata; revisjonsrad inneholder resultatet; tilbakehold etter utførelse i stedet for før; `restrictFinance` ignoreres for ett senter; `finance_spend_*`-løkker filtreres bare delvis (prefikssjekk med feil casing); `connector_health` navngir finanskobling for sky; `owner_control`-fritekst slipper gjennom; `tasksSource` slipper gjennom; kontekst kan overstyres via argument; eier-kontekst «vasker» modellkontekst; flagg-parser aksepterer `true`; vakt for `personal.finance_read` fjernet; tabelltest hopper over en rad.
+**F1, MEDIUM: `get_infra_status` og `infra`-situasjoner røper finansmetadata til sky**
+- Runbook l.149 klassifiserer `executive.get_infra_status` som «infrastruktur, ingen finans». Det stemmer ikke.
+- `InfraIncidentItem.title` returneres rått (`modules/executive/src/infra/types.ts:44`, `transport.ts:220`). Kommentaren på `service.ts:588` sier selv «hendelsestitler ... jobbnavn».
+- Titlene bygges av `providerProducer` (`provider.ts:32`: «Tilkobling svikter: <display_name>») og `schedulerProducer` (`scheduler.ts:27`: «Bakgrunnsjobben <job_name> ga opp»). De dekker også Stripe, Vipps, Neonomics, Wallester og jobbene `stripe-payment-sync` osv.
+- Samme titler går via `infra-incident-bridge.ts:60` inn som situasjoner i domenet `infra`. K2 filtrerer bare `spend` (`service.ts:199`), så `get_attention_queue` og `get_attention_item` lekker dem også.
+- Dette er samme klasse metadata som R09/R10/R14 (navn og helse for finanskoblinger). Drift-senteret utelater titler bevisst (`operations.ts:221`), og H2 har `isFinanceJobName` (`shared.ts:272`).
+- Betingelser: eier og signert økt (samme port som sentrene), og at hendelser finnes. Det krever `JARVIS_INCIDENT_PRODUCERS_ENABLED=true` eller manuelt registrerte hendelser. Derfor MEDIUM og ikke HIGH.
+- Probe: `P3` i `zz-n1b-review-b-probes.test.ts`, 3 røde tester. Tittelen kommer fra ekte `providerProducer` og `connectorStatusesFromGateway`. Skyresultatet inneholder `["Tilkobling svikter: Stripe","Bakgrunnsjobben stripe-payment-sync ga opp"]`, og kø-reason `Tilkobling svikter: Stripe (status: open, ...)`.
+- Fiks: i `get_infra_status`, legg til `if (withholdFinanceFromCurrentModel()) return { data: { ...financeWithheldMarker() } }`, som `get_self_diagnosis`. Flytt `get_infra_status` fra `read_no_finance` (`wpn1b-structure.test.ts:206`) til `handled` og legg til en rad R24 i `n1b-rows.ts`. I `rankedQueueWithSource` (`service.ts:199`), utvid filteret med `|| FINANCE_STEM.test(s.reason)` (eller hold `infra` tilbake helt). Alternativt: marker raden ærlig som DEFERRED/PARTIAL og endre «LUKKET» i begrensning 6 og I5.
+
+**F2, LOW: `servingModel: null` er fail-åpent for K2-leserne, men fail-lukket for finanslåsen** (`gateway.ts:791`)
+- `request.servingModel ?? ambient?.servingModel` gjør `null` til «ingen modell», så ingen skop settes og K2-leserne gir eierinnhold.
+- Samtidig nekter `executeCall` `finance.*` for samme `null` (`servedByCloud(null)` gir `true`).
+- Probe `P1` med `null`: `list_open_loops` lekker `N1B-KATEGORI-SPEND`, mens `finance.get_kill_switch` nektes. De ti andre variantene (tom streng, 0, false, `{}`, provider undefined/tall/`" gemma_local"`/`GEMMA_LOCAL`/`Local`/tom) er greit sky.
+- Produksjonskode kan i dag ikke sende `null`: strukturtest C forbyr det, og `MeshToolExecutor` stempler alltid et objekt. Det er altså en grenseherding.
+- Fiks: `(request.servingModel !== undefined ? request.servingModel : ambient?.servingModel)`.
+
+**F3, LOW: setteren er offentlig API, og kildevakten kan omgås**
+- `index.ts:4` (`export *`) eksporterer `runWithModelScope` (`model-scope.ts:59`). Pakken har bare `exports: {".": index.ts}`.
+- Probe `P2b`: en trusted modul kan kalle `runWithModelScope({cloud:false}, ...)` inne i et skykall og få finansløkker.
+- Vakt A (`wpn1b-structure.test.ts:42,46`) teller bare `navn(`. Mutant C41 (alias-import uten ordet `servingModel`) overlever hele suiten. C36 (aliaset leser i `growth`) overlever også.
+- Fiks: eksporter kun lesere og typer fra `index.ts` (`gateway.ts` importerer setteren direkte fra `./model-scope.ts`). La vakt A telle `\brunWithModelScope\b` og `\bwithholdFinanceFromCurrentModel\b` (alle forekomster, også import og alias).
+
+**F4, LOW: orakel i `run_rate.list_connector_maintenance`** (`run-rate.ts:86,165`)
+- `recent` er `LIMIT 5`, og finansfilteret kommer etterpå. Fem nye finansrader tømmer skyens `recent` (3 rader blir 1) mens `minutes_30d` er uendret.
+- Dermed røpes det at finans-vedlikehold finnes. Probe `P4b` er rød.
+- Fiks: filtrer finanskoblinger i SQL før `LIMIT`, eller hent uten `LIMIT` og `slice(0,5)` etter filteret.
+
+**F5, LOW: testhull som mutantene viser**
+- C15/C16: å legge `withheld_count` i skysvaret på `list_open_loops` og `get_attention_queue` overlever. «Ingen orakel» er ikke test-vokta. Fiks: ta inn `P4` (skysvar med og uten finansdata, normalisert) i tabelltesten.
+- C23/C24: `get_value_report` og `get_cost_overview` leser først og holder tilbake etterpå. Overlever, fordi ingen test spionerer på at tjenesten ikke kalles for sky. Det bryter intensjonen «før verktøyet leser».
+- C20/C21: redundant OR i `centerResponse`. Funksjonelt ekvivalent i dagens kobling.
+
+**F6, LOW: dokumentasjon**
+- NAS-trinn 7c (l.218, fra før) og 7g (l.226, nytt) bruker `audit_events.created_at`. Kolonnen heter `at` (`004_audit_cost.sql`). Reprodusert: `column "created_at" does not exist`. K3 krever riktige steg.
+- «LUKKET» i begrensning 6 (l.257) og I5 (l.97) er overdrevet så lenge F1 står.
+- «23 stier (R01–R23)» (l.31): tabellen har 25 rad-id-er (R14b, R21a, R21b).
+
+**F7, INFO**
+- K2-tilbakehold gir ingen egen revisjonsrad, bare vanlig `tool.executed`. Steg 7h–7k kan derfor ikke telle tilbakehold fra `audit_events`.
+- Worker-gatewayen har ingen lås. Bakgrunnsflaten gir `executive.get_capability_status` (`tool-manifest.ts:~303`), så K2-tilbakeholdet for den stien gjelder ikke i worker. Dette er kjent rest (c)–(j) og begrensning 7/23e.
+
+## Dine fire punkter
+
+- **(a) Glemt/misklassifisert:** F1 er den eneste ekte. Antakelse 4–12 og begrensning 20–24 stemmer med koden og er ærlig DEFERRED. Verifisert:
+  - `growth.*` er dokumentert og inkonsistent med at `marketing_spend_anomaly` holdes tilbake (begrensning 21).
+  - `open_tasks` leses ikke av `conversation.ts`.
+  - `tasksSource` brukes bare i `main.ts:1626` (scheduler og `/brief`).
+  - `business.read_metrics` gir `open_pipeline_value_ore` fra CRM. Det er dokumentert som ikke-finans, men ikke et Q-punkt.
+  - Skriveekkoet er bak bekreftelseskort: `confirmation-store.ts` har bare `approveAndTake`, ingen «approved uten take».
+- **(b) Nøytraltsvaret:** `FINANCE_WITHHELD_NOTE_NO` er konstant, uten sifre og uten leverandørnavn. Samme form med og uten finansdata er bevist på 9 DB-baserte stier (list, kø, daglig/ukentlig brief, kalibrering, tverr-kanal ×2, vedlikehold og kostoversikt). Unntaket er F4.
+- **(c) Enkeltoppslag gir merket i stedet for «ikke funnet»:** akseptabelt. ID-ene er `biz-ol-<randomUUID>` (`open-loop-service.ts:70`), så en modell kan ikke gjette dem. `Q4` viser tre forskjellige svar, men orakelet krever en kjent ID.
+- **(d) Ukjent løkketype utelates fra SQL-hvitlisten:** ingen bivirkning i dag. `P6`: loop_type-CHECK i DB er lik nøklene i `FINANCE_DERIVED_LOOP_TYPE`. En fremtidig migrasjon uten klassifisering skjules for sky (fail-lukket), og pin-testen fanger avviket.
+
+## Byggerens påstander mot dom
+
+| Påstand | Dom | Bevis |
+|---|---|---|
+| K1: skopet settes én gang i `execute()`, nøstede kall arver | BEKREFTET | P2a/c/d. C06/C07/C39/C40 drept av atferdstester også uten strukturtestene. |
+| K1: ingen lekkasje mellom samtidige forespørsler (≥50) | BEKREFTET | Q1: 400 samtidige kall (alle 25 rader × sky/ukjent/blank/lokal/ingen) + 60 sentre: 0 kryssinger. C08 (`enterWith`) drept. |
+| K1: uten modell gir full tilgang | BEKREFTET | Q1 «eier» og «lokal». |
+| K1: fail-lukket | DELVIS | Ti av elleve ugyldige varianter er greit. `null` gir F2. «Modellvei uten stempel = full tilgang» er antakelse 3, ikke fail-lukket. |
+| K1: én lokalitetsfunksjon | BEKREFTET | `servedByCloud(` finnes 3 ganger, ingen ny kopi. C01–C04 drept. |
+| K1: flagg AV er identisk med main | BEKREFTET | `execute()` går rett til `executeCall`. Q2: ingen nye felter. Guard-/differensialsettet (10 filer, 93 tester) er grønt. Fixturen er urørt. |
+| K1: setteren bare i gatewayen | DELVIS | F3. |
+| K2: 23 stier holdt tilbake ved utførelse | DELVIS | Tabelltesten 151/151 og Q1 grønne. `get_infra_status` og `infra`-situasjoner mangler (F1). |
+| K2: merket alltid med | BEKREFTET | P4 og Q1. |
+| K2: `tasksSource`/`open_tasks`/`personal.finance_read` ikke modellnåbare | BEKREFTET | Grep. C37 (modellflate) og C38 (importerer ToolGateway) drept. |
+| K2: revisjon uten innhold | BEKREFTET | P5: 0 finansmarkører i `audit_events` og `tool_executions` for skykall. |
+| K3: aktiveringsrekkefølge og NOT VERIFIED | DELVIS | Tekst riktig (l.44, l.234). NAS-SQL 7g er feil (F6). Ingen steg er destruktive. 7h nevner test-tenant. |
+| K4: tester, rød-først, mutanter | BEKREFTET | Baseline 9 filer/262 tester grønne. Ingen `skip`/`only`. De to endrede N1-testene er strammet (invertert hull-forventning), ikke svekket. Hull: F5. |
+| K5: ingen nye flagg, avhengigheter eller migrasjon | BEKREFTET | Diff har 0 nye `JARVIS_*`. Ingen `package.json`, lock, infra, ops eller .sql. `gitleaks` (10 commits): `no leaks found`. |
+| K6: tabell og begrensninger stemmer med koden | DELVIS | F6, og tabellraden for `get_infra_status`. |
+
+## Mutasjoner
+
+- **Byggerens skript** (`N1B_RUN_AS=postgres node apps/api/test/support/wpn1b-mutants.mjs`): 39 kjørt, 39 drept av assertion, 0 overlevd.
+- **Mine egne** (`/tmp/lead/N1b-review-B-probes/mutants-B.mjs`): 41 kjørt, 33 drept, 8 overlevd.
+  - Drept (33): blant annet predikat kaster/undefined/ikke-funksjon regnes lokalt, leser snudd, `enterWith`, ordstamme `payment|bank` fjernet, ikke-streng id/ref/domene fail-åpent, `owner_control` begrunnelse/`reasons_withheld`, SLO ikke rekomponert, lokalt skop vinner over sky, delegeringstavle/sentre/overvåking, tre klassifiseringsflipp, flagg-parser godtar `true`, `personal.finance_read` på modellflate, `servingModel` ikke videresendt, nøstet kall arver ikke.
+  - Overlevde, testhull: C15, C16 (`withheld_count`), C23, C24 (les før tilbakehold).
+  - Overlevde, kildevakt omgått: C36, C41 (alias).
+  - Overlevde, ekvivalente: C20, C21 (redundant OR i senter-avgjørelsen).
+- Ekvivalent men drept bare av kildetekstvakt: C05 (overlever uten strukturtester). C09 (`Object.freeze`) drepes også av en atferdstest.
+
+## Ikke verifisert av meg
+
+- NAS, ekte skymodell og ekte lokal modell.
+- Ekte transporter (Gmail, MCP, browser) og at skopet overlever der.
+- Ekte hendelsesprodusenter via `JARVIS_INCIDENT_PRODUCERS_ENABLED` og situasjonssveipet i drift. F1 er bevist med ekte `providerProducer`, men fake `infra.source` og fake `situations.get_queue`.
+- H2-sentrene memory/agent/operations/privacy/security. Min probe Q5 var ikke informativ, fordi sentrene ikke ble registrert i testverdenen. Jeg støtter meg bare på at `wph2-restrict-finance-db` er grønn.
+- `pnpm typecheck`, `lint` og `check:containment` (byggerens påstand).
+- Hele suiten (lead kjører den).
+- Worker-adferd.
+
+## Probe-mappe
+
+`/tmp/lead/N1b-review-B-probes/`
+
+- `zz-n1b-review-b-probes.test.ts`: 36 tester, 5 røde (P1 `null`, P2b setter, P3 ×3 F1) pluss P4b (F4). Totalt 6 røde over begge filer.
+- `zz-n1b-review-b-probes2.test.ts`: 6 tester, alle grønne (samtidighet, flagg AV, Q3 `get_capability_status`, Q4 id-former, Q5 ikke informativ).
+- `mutants-B.mjs` med loggene `mutants-B.log`, `mutants-B-nostruct.log` og `mutants-builder.log`.
+- `run-vitest.sh`, `out-*.log`.
