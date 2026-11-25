@@ -14,7 +14,7 @@ import {
   type CarAdapter, type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ReconcileInput, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { familySharedDataReaders, type HealthReadApi, type LocationReadApi } from "./personal-family-readers.ts";
-import type { PersonalDavDeps } from "./personal-dav.ts";
+import { createDavRateLimit, davAuditDecision, type DavRateLimits, type PersonalDavDeps } from "./personal-dav.ts";
 import { FINANCE_READ_VIEWS, type PersonalFinanceDeps } from "./personal-finance-read.ts";
 import type { PersonalActionDomainDeps, PersonalApiDeps, PersonalFamilyDeps, PersonalHealthDeps } from "./personal-routes.ts";
 
@@ -57,6 +57,8 @@ export interface PersonalWiringInput {
    * Må være de SAMME instansene som `PolicyGateway`/`ToolGateway` bruker (LIVE `*Durable`-sjekker, delt mellom prosesser).
    */
   controls?: { killSwitch: Pick<KillSwitch, "isActiveDurable">; ownerControls: Pick<OwnerControls, "isRevokedDurable"> };
+  /** Grenser per prinsipal for DAV-rutene (WP-G2c, JARVIS-113 e/6); utelatt = `DEFAULT_DAV_RATE_LIMITS`. Ugyldige verdier faller tilbake til standarden (aldri «ingen grense»). Ingen miljøvariabel: grensene er en kodebeslutning. */
+  davRateLimits?: Partial<DavRateLimits>;
   /** KUN tester: virtuell klokke for HA-transportens venteløkke (uten den brukes ekte tid). Gjør at «domenets ventetid brukes faktisk» kan bevises gjennom selve oppkoblingen uten å vente 90 s (fiks-runde 2, review A NY-2). */
   homeTimers?: { now?: () => number; sleep?: (ms: number) => Promise<void> };
 }
@@ -152,12 +154,14 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
     });
     dav = {
       guard,
+      rateLimit: createDavRateLimit(input.davRateLimits),
       client: new AppleDavClient({ transport, collections }),
       // Et forsøk stoppkontrollene stoppet (`decision: "DENY"`) skrives som `tool.denied` med årsaken - samme type som et avslått verktøykall, så sikkerhetssenteret teller den; alt annet er mutasjonssporet (`dav.mutation`). Aldri innhold.
+      // `decision` følger UTFALLET (WP-G2c, JARVIS-113 e/7): ALLOW kun for `requested`/`SUCCESS`/`REPLAYED`; avvist, uavklart og avvikende readback er aldri ALLOW (se `davAuditDecision`).
       audit: (identity, entry) =>
         withTenantTransaction(pool, identity.tenant_id, (client) =>
           writeAudit(client, identity, {
-            type: entry.decision === "DENY" ? "tool.denied" : "dav.mutation", decision: entry.decision ?? "ALLOW", ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+            type: entry.decision === "DENY" ? "tool.denied" : "dav.mutation", decision: davAuditDecision(entry), ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
             tool_id: "apple_dav", action: entry.action, payload: { collection: entry.collection, ...(entry.uid !== undefined ? { uid: entry.uid } : {}), outcome: entry.outcome, channel: identity.channel }
           })
         )

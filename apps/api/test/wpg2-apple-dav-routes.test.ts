@@ -211,7 +211,8 @@ function harness(opts: { path: string; body?: Record<string, unknown>; owner?: b
   const dav: PersonalDavDeps = {
     client: (opts.real ?? client) as unknown as PersonalDavDeps["client"],
     audit: async (_i, entry) => { calls.push(`audit:${entry.outcome}`); if (opts.auditFails === true && entry.outcome === "requested") throw new Error("db nede"); audits.push(entry); },
-    guard: opts.guard ?? (async () => null) // påkrevd (fiks-runde 2, NY-4): testene som ikke handler om stopp sier «ingen stopp» eksplisitt
+    guard: opts.guard ?? (async () => null), // påkrevd (fiks-runde 2, NY-4): testene som ikke handler om stopp sier «ingen stopp» eksplisitt
+    rateLimit: { check: () => ({ ok: true }) } // påkrevd (WP-G2c, JARVIS-113 e/6): disse testene handler ikke om grenser (se `wpg2c-dav-hardening.test.ts`)
   };
   const ctx: PersonalRouteContext = {
     req: { method: opts.method ?? "POST" } as never, res: {} as never, url: new URL(opts.path, "http://localhost"), deps: opts.dav === false ? {} : { dav },
