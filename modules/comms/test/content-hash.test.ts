@@ -97,6 +97,17 @@ describe("journalen: nye rader har HMAC-hash (versjon 2); den usaltede hashen fi
     expect(entry).toMatchObject({ content_hash_version: 2 });
   });
 
+  it("et AVSLÅTT forsøk (avmeldt mottaker) journalføres også med HMAC-hash og versjon 2 - avslåtte rader er like ordbok-gjettbare som sendte, så de får samme vern", async () => {
+    pepper = TEST_PEPPER;
+    const n = chain.phone();
+    expect((await chain.act("record_opt_out", { channel: "sms", recipient: n })).ok).toBe(true);
+    const key = chain.key("chden");
+    const r = await chain.act("send", sendP(n, "Takk!"), key);
+    expect(r.ok === false && r.status === "denied" ? r.denial_codes : []).toContain("recipient_opted_out");
+    const row = (await journalRow(scopedIdempotencyKey(TENANT_A, "send", key)))!;
+    expect(row).toMatchObject({ status: "denied", content_sha256: recipe(TEST_PEPPER, "content", finalText("Takk!")), content_hash_version: 2 });
+  });
+
   it("to like meldinger gir samme hash (kjent, og uten pepperen ikke gjettbar), begge i versjon 2", async () => {
     pepper = TEST_PEPPER;
     const ka = chain.key("same-a");
@@ -122,7 +133,7 @@ describe("fail-closed: ingen pepper (eller en for kort) = ingen utsendelse - ald
       expect(r.ok).toBe(false);
       expect(r.ok === false && r.status === "denied" ? r.denial_codes : []).toContain(KEY_UNAVAILABLE);
       expect(sends(), "ingen sending uten pepper").toBe(before);
-      const denied = (await chain.db.admin.query("SELECT content_sha256, content_hash_version, status, denial_codes FROM comms_outbound_log WHERE tenant_id = $1 AND status = 'denied' ORDER BY created_at DESC LIMIT 1", [TENANT_A])).rows[0] as { content_sha256: string | null; content_hash_version: number; denial_codes: string[] };
+      const denied = (await chain.db.admin.query("SELECT content_sha256, content_hash_version, status, denial_codes FROM comms_outbound_log WHERE tenant_id = $1 AND status = 'denied' AND request_id = $2", [TENANT_A, scopedIdempotencyKey(TENANT_A, "send", key)])).rows[0] as { content_sha256: string | null; content_hash_version: number; denial_codes: string[] };
       expect(denied.content_sha256).toBeNull();
       expect(denied.denial_codes).toContain(KEY_UNAVAILABLE);
       expect(JSON.stringify(r)).not.toContain(value ?? "@@");
