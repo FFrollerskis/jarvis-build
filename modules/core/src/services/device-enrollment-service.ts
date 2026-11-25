@@ -167,6 +167,9 @@ export class DeviceEnrollmentService {
         // i vinduet siden beviset gir her samme avslag som om beviset aldri
         // hadde holdt.
         if (request.enrollment.kind === "device_proof") {
+          // WP-G2c (D-483, JARVIS-113 j): FELLES LÅSREKKEFØLGE. Innrulleringen rører to enhetsrader (den autoriserende og den som skrives/roteres): lås BEGGE i stigende `device_id` FØR noe annet, med samme sortering som
+          // fjerningen fra en familiesirkel bruker (`FamilyService.endMembership`), så de aldri kan vente på hverandres rader (40P01). `lockDeviceKeyOn` under låser den autoriserende raden på nytt (allerede holdt) og leser nøkkelen.
+          await this.deps.devices.lockDeviceRowsOn(client, { tenant_id: request.tenant_id, person_id: request.person_id }, [request.enrollment.authorizing_device_id, request.device.device_id]);
           const lockedKey = await this.deps.devices.lockDeviceKeyOn(client, {
             tenant_id: request.tenant_id,
             person_id: request.person_id,
