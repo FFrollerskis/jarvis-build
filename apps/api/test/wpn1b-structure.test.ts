@@ -1,7 +1,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { SURFACE_TOOL_GRANTS } from "@jarvis/tool-gateway";
+import { CHAT_READ_TIER_KEYS, SURFACE_TOOL_GRANTS, isFinancialNamespace } from "@jarvis/tool-gateway";
+import { CENTER_ROWS, ROWS } from "./support/n1b-rows.ts";
 
 /**
  * WP-N1b (K1 iii + K4 e): strukturtester og kildevakter for den modell-stemplede konteksten (`model-scope.ts`) og for «nye nøstede finansoppslag uten sentral lesning».
@@ -11,6 +12,8 @@ import { SURFACE_TOOL_GRANTS } from "@jarvis/tool-gateway";
  *  C. Ingen produksjonskode overstyrer/fjerner modellen på et nøstet kall.
  *  D. Hvem som overhodet kan nå finansmodulens kjøretid (`@jarvis/finance`) uten om `ToolGateway`: kun komposisjonsroten, eierens ruter og workeren - ingen modellnåbar modul. Et nytt importsted må vurderes mot utførelseslåsen.
  *  E. `personal.finance_read` (eierens HTTP-rute, ingen modell i løkka, Q-9) har ingen modellflate og får aldri en: en kildevakt feller det hvis den noen gang kobles til verktøyregisteret, flatene eller en modellløkke.
+ *  F. K2-KLASSIFISERINGEN dekker HELE modellflaten: hvert verktøynavnerom på en flate er klassifisert (et nytt navnerom feller testen til noen har vurdert om det kan bære finansavledet innhold), og i de fire navnerommene med
+ *     håndtert innhold er HVER handling plassert nøyaktig ett sted (håndtert med en rad i kartleggingstabellen / skrive-handling bak bekreftelseskortet / vurdert uten finans). Ukjent = finans (strengeste regel).
  */
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const read = (rel: string): string => readFileSync(`${root}${rel}`, "utf8");
@@ -41,7 +44,11 @@ describe("A: modell-skopet settes ett sted og leses kun av kjente filer", () => 
 
   it("de SENTRALE LESERNE (`currentModelScope`, `currentServingModel`, `withholdFinanceFromCurrentModel`) brukes kun av gatewayen og de kjente nøstede/begrensede oppslagene - en ny leser må vurderes (aldri i delt arbeid som deles av flere kallere)", () => {
     expect(countBy(/\b(?:currentModelScope|currentServingModel|withholdFinanceFromCurrentModel)\s*\(/g, [SCOPE_FILE])).toEqual({
+      "apps/api/src/run-rate.ts": 2, // K2: `get_cost_overview` (kun merket) og `list_connector_maintenance` (finanskoblinger filtrert)
+      "modules/business/src/transport.ts": 5, // K2: åpne løkker, enkeltoppslag, oppmerksomhetskø, brief (daglig/ukentlig, én avlesning) og kalibreringsrapport
+      "modules/conversation-graph/src/transport.ts": 2, // K2: tverr-kanal-kø og identitetsvisning
       "modules/executive/src/service.ts": 2, // K1: nøstede finansavlesninger (`getControlSurfaceStatus`/`getDelegationBoard`)
+      "modules/executive/src/transport.ts": 11, // K2: senter-svar, oversikt, kø/enkeltoppslag, kapabilitet/connector, SLO, verdi, selvdiagnose, AI Mesh, evolusjon
       "modules/tool-gateway/src/gateway.ts": 1 // `execute()`: arver et ytre skop
     });
   });
@@ -143,5 +150,89 @@ describe("E: personal.finance_read (eierens HTTP-rute) har ingen modellflate - o
     }
     // navnet står kun i selve rutehåndtereren (eier-porten `requireOwner`) og som et loggfelt i oppstartsledningen - aldri i en verktøydefinisjon eller tildeling
     expect(countBy(/["'`]finance_read["'`]/g)).toEqual({ "apps/api/src/personal-finance-read.ts": 1, "apps/api/src/personal-wiring.ts": 1 });
+  });
+});
+
+describe("F: K2-klassifiseringen dekker hele modellflaten (ukjent = finans: et nytt navnerom eller en ny handling må vurderes)", () => {
+  type NsClass = "locked_finance" | "handled_k2" | "handled_n1" | "own_domain" | "external" | "deferred";
+  /**
+   * ALLE verktøynavnerom som står på en modellflate (`SURFACE_TOOL_GRANTS`), med hvorfor det er plassert der. `handled_k2`/`handled_n1`/`locked_finance` er håndhevet VED UTFØRELSE og bevist av tabelltesten/N1-testene.
+   * `own_domain` = Jarvis' egne forretningsdomener, kartlagt: leser ikke `finance_*`, ingen beløpsfelt avledet av finansdata (kontrakter/driftsoppgaver/produkt/support har ingen beløpsfelt i det hele tatt).
+   * `external` = leverandørens innhold (EXTERNAL_CANONICAL, ubetrodd data): ikke Jarvis-avledet finansmetadata. `deferred` = KJENT ÅPEN, med begrunnelse i runbooken (vokter: ingen sentral leser finnes i modulen, test A).
+   */
+  const NAMESPACE_CLASS: Readonly<Record<string, NsClass>> = {
+    finance_neonomics: "locked_finance", finance_spend: "locked_finance", finance_stripe: "locked_finance", finance_vipps: "locked_finance", finance_wallester: "locked_finance",
+    business: "handled_k2", conversation_graph: "handled_k2", executive: "handled_k2", run_rate: "handled_k2",
+    tasks: "handled_n1",
+    contract: "own_domain", operations: "own_domain", product: "own_domain", support: "own_domain",
+    growth: "deferred", // annonseutgift/budsjett/CAC/ROAS i øre i Growth-kjernens egne tabeller (ikke `finance_*`): eierbeslutning (Q), se runbooken
+    knowledge: "deferred", memory: "deferred", // JARVIS-116 (d) / Q-52 / D-386: lagret tekst kan bære finansavledet innhold - utenfor denne WP-en
+    brave_search: "external", calendar: "external", discord: "external", drive: "external", dropbox: "external", email: "external", exa: "external", github: "external", google_maps: "external",
+    google_places: "external", google_routes: "external", google_sheets: "external", googleads: "external", grafana: "external", "home-assistant": "external", hubspot: "external", jira: "external",
+    linear: "external", make: "external", metaads: "external", microsoft_outlook: "external", n8n: "external", notion: "external", onedrive: "external", pipedrive: "external", prometheus: "external",
+    sentry: "external", slack: "external", spotify: "external", tavily: "external", telegram: "external", telnyx: "external", todoist: "external", trello: "external", twilio: "external", vercel: "external",
+    whatsapp: "external"
+  };
+  const grants = Object.values(SURFACE_TOOL_GRANTS).flat();
+  const namespaces = [...new Set(grants.map((g) => g.tool_id))].sort();
+  const actionsOf = (toolId: string): string[] => [...new Set(grants.filter((g) => g.tool_id === toolId).map((g) => g.action))].sort();
+
+  it("hvert verktøynavnerom på en modellflate er klassifisert, og ingen oppføring er foreldet", () => {
+    expect(namespaces.length).toBe(54);
+    expect(Object.keys(NAMESPACE_CLASS).sort()).toEqual(namespaces);
+  });
+
+  it("finansnavnerommene (`isFinancialNamespace`) er NØYAKTIG de som er låst av utførelseslåsen - ingen finans-id med annen klasse, og ingen låst id som ikke er finans", () => {
+    expect(namespaces.filter((n) => isFinancialNamespace(n))).toEqual(Object.keys(NAMESPACE_CLASS).filter((n) => NAMESPACE_CLASS[n] === "locked_finance").sort());
+  });
+
+  /** De fire navnerommene der finansavledet innhold ER håndtert: HVER handling står nøyaktig ett sted. */
+  const K2_PLACEMENT: Readonly<Record<string, { handled: readonly string[]; handled_h2: readonly string[]; read_no_finance: readonly string[] }>> = {
+    business: {
+      handled: ["list_open_loops", "read_open_loop", "get_attention_queue", "get_business_brief", "get_calibration_report"],
+      handled_h2: [],
+      // CRM/scoring: ingen `finance_*`-avledning. `get_churn_overview` bærer ANTALL forfalte kundefakturaer fra produktbruk-fakturasignalet (ikke `finance*`) og `read_metrics`/`get_customer_overview` pipeline-verdi (CRM): kartlagt, se runbooken.
+      read_no_finance: ["explain_score", "find_companies", "find_contacts", "get_churn_overview", "get_customer_overview", "get_lead_score", "get_opportunity_score", "list_overdue_followups", "rank_leads", "rank_opportunities", "read_company_timeline", "read_metrics"]
+    },
+    conversation_graph: {
+      handled: ["read_cross_channel_attention", "read_cross_channel_commitment_view"],
+      handled_h2: [],
+      read_no_finance: ["list_channel_links", "read_cross_channel_commitments", "read_identity", "read_identity_timeline", "resolve_effective_identity", "resolve_identity"]
+    },
+    executive: {
+      handled: ["get_ai_mesh_status", "get_attention_item", "get_attention_queue", "get_capability_status", "get_connector_status", "get_control_center", "get_control_surface_status", "get_delegation_board", "get_evolution_report", "get_self_diagnosis", "get_slo_report", "get_value_report"],
+      // WP-H1/H2: finans-/verdi-/evolusjonssenteret holdt tilbake helt, øvrige sentre bygget uten finansavledet tilstand (`restrictFinance`) - uendret av N1b (K1 gir dem bare den arvede modellen)
+      handled_h2: ["get_agent_center", "get_evolution_center", "get_finance_center", "get_memory_center", "get_operations_center", "get_privacy_center", "get_security_center", "get_value_center"],
+      read_no_finance: ["get_infra_status"]
+    },
+    run_rate: { handled: ["get_cost_overview", "list_connector_maintenance"], handled_h2: [], read_no_finance: [] }
+  };
+
+  for (const [ns, placement] of Object.entries(K2_PLACEMENT)) {
+    it(`${ns}: hver handling er plassert nøyaktig ett sted; alt som ikke er klassifisert som lesing er en skrive-/kontrollhandling UTENFOR chattens lese-nivå (bak bekreftelseskortet, modellen ser aldri resultatet)`, () => {
+      const all = actionsOf(ns);
+      const placed = [...placement.handled, ...placement.handled_h2, ...placement.read_no_finance];
+      expect(new Set(placed).size, "dublett i plasseringen").toBe(placed.length);
+      for (const a of placed) expect(all, `foreldet oppføring ${ns}.${a}`).toContain(a);
+      const rest = all.filter((a) => !placed.includes(a));
+      for (const a of rest) expect(CHAT_READ_TIER_KEYS.has(`${ns}.${a}`), `${ns}.${a} er en LESE-handling uten klassifisering (ukjent = finans)`).toBe(false);
+    });
+  }
+
+  it("hver K2-håndtert handling har en rad i kartleggingstabellen (og omvendt): tabellen er den eneste kilden til hva som er bevist mot ekte kode", () => {
+    const handled = Object.entries(K2_PLACEMENT).flatMap(([ns, p]) => p.handled.map((a) => `${ns}.${a}`)).sort();
+    const rowKeys = [...new Set([...ROWS.map((r) => `${r.tool}.${r.action}`), ...(CENTER_ROWS.length > 0 ? ["executive.get_control_center"] : [])])].sort();
+    expect(rowKeys).toEqual(handled);
+  });
+
+  it("hver rad i tabellen er en handling en modell faktisk kan nå: tildelt på minst én modellflate (ellers er raden et bevis for ingenting)", () => {
+    for (const r of ROWS) expect(grants.some((g) => g.tool_id === r.tool && g.action === r.action), `${r.id} ${r.tool}.${r.action}`).toBe(true);
+  });
+
+  it("`deferred`-navnerommene har INGEN sentral leser: lukkes et av dem, må klassifiseringen og runbooken endres samtidig", () => {
+    const deferred = Object.keys(NAMESPACE_CLASS).filter((n) => NAMESPACE_CLASS[n] === "deferred");
+    expect(deferred.sort()).toEqual(["growth", "knowledge", "memory"]);
+    const readers = Object.keys(countBy(/\b(?:currentModelScope|currentServingModel|withholdFinanceFromCurrentModel)\s*\(/g, [SCOPE_FILE]));
+    for (const f of readers) expect(f, "en leser i et deferred-domene").not.toMatch(/^modules\/(growth|knowledge|memory)\//);
   });
 });
