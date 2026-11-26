@@ -348,6 +348,8 @@ function normalise(value: unknown): unknown {
 /** `extraOptions` lar differensialtesten legge til varianter (f.eks. en gateway med pipelinen konstruert i modus «off»); baseline genereres UTEN (kun main-API). */
 export async function runScenarios(deps: HarnessDeps, extraOptions: (() => Partial<ToolGatewayOptions>) | undefined = undefined, only: readonly string[] | undefined = undefined): Promise<Observation[]> {
   const out: Observation[] = [];
+  // Samme DB kan kjøre flere varianter etter hverandre: ledgeren tømmes først, ellers ville en senere variant se `deduplicated` fra en tidligere (nøklene er stabile per scenario). Audit-loggen er append-only og avgrenses med vannmerke.
+  await deps.adminPool.query("DELETE FROM tool_executions");
   for (const scenario of SCENARIOS) {
     if (only !== undefined && !only.includes(scenario.id)) continue;
     const transports = [new ScriptedTransport(scenario.id, SCRIPTS[scenario.id] ?? {})];
