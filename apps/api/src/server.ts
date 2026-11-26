@@ -1904,7 +1904,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
           if (err.status === 503) { res.setHeader("retry-after", String(bodyGuard.config.retryAfterSeconds)); res.setHeader("connection", "close"); }
           // En loggfeil skal aldri endre svaret: leverandøren skal fortsatt få 413/503 (ikke 500) selv om logghjelperen kaster.
           try { deps.comms.webhooks.service.noteRejectedBeforeSignature(commsWebhookProvider, err.code as PreSignatureRejection); } catch {
-            // bevisst ignorert (linjekommentar, ikke blokkommentar: kildevakten `wpn1-job-delivery` D fjerner kommentarer naivt, og et `*/` etter CSP-linjen `ws://*:3020` gjør at `/*` der leses som en blokkommentar som skjuler `restrictedOrigin: true`)
+            // bevisst ignorert (linjekommentar, ikke blokkommentar: kildevaktene `wpn1-job-delivery` D, `d449` og `wpn1-guard-env` fjerner kommentarer naivt, og en ulukket blokkstart i en streng, f.eks. i CSP-linjen, kan da skjule kode; ingen blokk-avslutter etter den linjen)
           }
         }
         throw err;
