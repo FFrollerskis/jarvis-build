@@ -25,6 +25,9 @@ import {
  * `locality: "local"`, og sender minneinnhold (inkl. helse/økonomi, D-386) dit. Vakten kaller derfor `embeddingEndpointFromEnv` (samme URL-valg som leverandøren selv) og kjører NØYAKTIG samme syntaks- og DNS-sjekk. Embedding er
  * ikke en modellprofil som kan demoteres til sky (minnets vektorrom MÅ være lokalt), så en ikke-lokal URL KASTER `MemoryEmbeddingNotLocalError` (`memory_embedding_must_be_local:<kode>`) og stopper oppstarten FØR leverandøren
  * opprettes; loggen har kun `identity: "memory_embedding"` og koden. Et navn som ikke kan løses akkurat nå beholdes med en advarsel (som for de andre identitetene; en av-slått PC med et `.lan`-navn skal ikke stoppe hele API-et).
+ *
+ * WP-G4b fiks-runde 2 (FIX-D, delta-review): compose har `restart: unless-stopped`, så en avvist embedding-URL (typisk en tailnet-adresse uten `JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE=on`) gir en omstartsløkke i api OG worker. Feilmeldingen har derfor, etter den
+ * UENDREDE stabile koden, et kort hint: NAVNET (aldri verdien) på variabelen som er avvist, og at en tailnet-adresse krever tailnet-flagget. Hintet bygges kun av konstanter (ingen del av URL-en er med).
  */
 export const LOCAL_MODEL_URL_GUARD_FLAG = "JARVIS_LOCAL_MODEL_URL_GUARD";
 export const LOCAL_MODEL_ALLOW_TAILSCALE_FLAG = "JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE";
@@ -61,11 +64,45 @@ export const LOCAL_MODEL_ENDPOINTS: ReadonlyArray<{ readonly provider: string; r
 /** Identiteten for minnets embedding-leverandør i verdikt og logger (ikke en modellprofil: kan ikke demoteres, en ikke-lokal URL stopper oppstarten). */
 export const MEMORY_EMBEDDING_IDENTITY = "memory_embedding";
 
-/** Kastet ved oppstart når minnets embedding-URL ikke er lokal (flagget PÅ). Kun den stabile koden, aldri URL eller vert. */
+/**
+ * Miljøvariablene minnets embedding-URL leses fra, i SAMME prioriteringsrekkefølge som `embeddingEndpointFromEnv` (`||`-kjeden i `modules/memory`: den første som er satt vinner). Kun NAVN, aldri verdier; rekkefølgen er låst mot
+ * `embeddingEndpointFromEnv` av `wpg4b-local-model-guard-embedding.test.ts`.
+ */
+export const MEMORY_EMBEDDING_URL_ENV_CHAIN: readonly string[] = Object.freeze(["JARVIS_EMBEDDING_URL", "JARVIS_OLLAMA_URL", "JARVIS_GEMMA_LOCAL_URL"]);
+
+/** Navnet (aldri verdien) på variabelen som URL-en minnet faktisk bruker står i; `null` når ingen er satt. */
+function memoryEmbeddingUrlSource(env: Readonly<Record<string, string | undefined>>): string | null {
+  return MEMORY_EMBEDDING_URL_ENV_CHAIN.find((name) => Boolean(env[name])) ?? null;
+}
+
+/** Årsakskodene der en tailnet-adresse kan være den egentlige grunnen (`assertLocalEndpoint`: ikke lokal adresse; navneoppløsning: løste til en ikke-lokal adresse). */
+const TAILNET_RELEVANT_CODES: ReadonlySet<string> = new Set(["local_url_not_local", "local_url_resolves_nonlocal"]);
+
+/**
+ * Hintet bak den stabile koden i `MemoryEmbeddingNotLocalError` (FIX-D, delta-review): oppstart STOPPER, og compose starter api/worker på nytt (`restart: unless-stopped`) - eieren må kunne lese av feilen hva som er galt. Bygget KUN av konstanter: variabelnavnet
+ * (fra den lukkede lista over, aldri verdien), flaggnavnene og en fast tekst per årsakskode. Ingen del av URL-en (vert, port, sti, brukerinfo, skjema) er med, så hintet kan aldri lekke noe selv om URL-en inneholder hemmeligheter.
+ */
+function memoryEmbeddingHint(code: string, source: string | null, allowTailscale: boolean): string {
+  const variable = source !== null && MEMORY_EMBEDDING_URL_ENV_CHAIN.includes(source) ? source : MEMORY_EMBEDDING_URL_ENV_CHAIN.join("/");
+  const remedy = !TAILNET_RELEVANT_CODES.has(code)
+    ? "Rett URL-en: en gyldig http(s)-adresse uten innlogging i URL-en"
+    : allowTailscale
+      ? "URL-en må være lokal: loopback, privat nett eller et docker-tjenestenavn"
+      : `En tailnet-adresse (100.64.0.0/10, *.ts.net) krever ${LOCAL_MODEL_ALLOW_TAILSCALE_FLAG}=on, ellers må URL-en være lokal`;
+  return ` (${variable} er avvist av ${LOCAL_MODEL_URL_GUARD_FLAG}; verdien vises aldri. ${remedy})`;
+}
+
+/**
+ * Kastet ved oppstart når minnets embedding-URL ikke er lokal (flagget PÅ). Meldingen starter ALLTID med den stabile koden `memory_embedding_must_be_local:<kode>` (`code` er også egen egenskap), fulgt av et kort hint (`memoryEmbeddingHint`):
+ * hvilken variabel som er avvist (kun navnet) og at en tailnet-adresse krever `JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE=on`. Aldri URL, vert eller hemmeligheter.
+ */
 export class MemoryEmbeddingNotLocalError extends Error {
-  constructor(readonly code: string) {
-    super(`memory_embedding_must_be_local:${code}`);
+  /** Navnet (aldri verdien) på miljøvariabelen den avviste URL-en står i; `null` når det ikke er kjent. */
+  readonly source: string | null;
+  constructor(readonly code: string, options: { source?: string | null; allowTailscale?: boolean } = {}) {
+    super(`memory_embedding_must_be_local:${code}${memoryEmbeddingHint(code, options.source ?? null, options.allowTailscale === true)}`);
     this.name = "MemoryEmbeddingNotLocalError";
+    this.source = options.source ?? null;
   }
 }
 
@@ -151,7 +188,7 @@ export async function enforceLocalModelEndpoints(env: Readonly<Record<string, st
     const check = await checkEndpoint(embeddingUrl, deps.lookup, timeoutMs, options, false);
     if (check.demoteCode !== null) {
       log({ msg: "local_model_endpoint_rejected", identity: MEMORY_EMBEDDING_IDENTITY, code: check.demoteCode }, "warn");
-      throw new MemoryEmbeddingNotLocalError(check.demoteCode);
+      throw new MemoryEmbeddingNotLocalError(check.demoteCode, { source: memoryEmbeddingUrlSource(env), allowTailscale: config.allowTailscale });
     }
     verdicts.push({ identity: MEMORY_EMBEDDING_IDENTITY, status: check.status, code: null });
     if (check.status === "unresolved") log({ msg: "local_model_endpoint_unresolved", identity: MEMORY_EMBEDDING_IDENTITY }, "warn");

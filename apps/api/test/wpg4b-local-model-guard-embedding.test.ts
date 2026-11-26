@@ -3,7 +3,8 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_PROFILES, type ModelProfile } from "@jarvis/model-gateway";
-import { MemoryEmbeddingNotLocalError, enforceLocalModelEndpoints } from "../src/local-model-endpoints.ts";
+import { embeddingEndpointFromEnv } from "@jarvis/memory";
+import { MEMORY_EMBEDDING_URL_ENV_CHAIN, MemoryEmbeddingNotLocalError, enforceLocalModelEndpoints } from "../src/local-model-endpoints.ts";
 
 /**
  * WP-G4b fiks-runde 1, FIX-1: K4-vakten dekker ogsa MINNETS embedding (`JARVIS_EMBEDDING_URL` -> `JARVIS_OLLAMA_URL` -> `JARVIS_GEMMA_LOCAL_URL`, kun nar leverandoren er Ollama). Embedding er IKKE en modellprofil som kan
@@ -36,7 +37,8 @@ describe("HULL-1: en offentlig embedding-URL stopper oppstarten (minnetekst send
   it("vakt PA + JARVIS_OLLAMA_URL=offentlig + Ollama-embedding: chat-profilen demoteres OG embedding avvises (`memory_embedding_must_be_local:local_url_not_local`)", async () => {
     const out = await run({ JARVIS_OLLAMA_URL: "http://example.com:11434", JARVIS_EMBEDDING_PROVIDER: "ollama", JARVIS_EMBEDDING_MODEL: "bge-m3" }, async () => PUBLIC);
     expect(out.error).toBeInstanceOf(MemoryEmbeddingNotLocalError);
-    expect((out.error as Error).message).toBe("memory_embedding_must_be_local:local_url_not_local");
+    // den stabile koden står FØRST i meldingen (FIX-D la et kort hint bak den; se «FIX-D» nederst)
+    expect((out.error as Error).message).toMatch(/^memory_embedding_must_be_local:local_url_not_local(?: |$)/);
     expect(codeOf(out)).toBe("local_url_not_local");
     // loggen sier hvilken identitet og hvilken kode - aldri URL/vert
     expect(out.lines.filter((l) => l.line["msg"] === "local_model_endpoint_rejected")).toEqual([{ line: { msg: "local_model_endpoint_rejected", identity: "memory_embedding", code: "local_url_not_local" }, level: "warn" }]);
@@ -252,5 +254,142 @@ describe("struktur (AST): oppstart STOPPER når embedding-vakten kaster - kastet
     expect(fail?.type?.kind, "`failStartup(...)`: never").toBe(ts.SyntaxKind.NeverKeyword);
     expect(fail?.body?.statements.some(isProcessExitNonZero), "`failStartup` avslutter prosessen med `process.exit(<≠0>)` som egen setning").toBe(true);
     expectBeforeEmbeddingProviders(sf, call, "src/worker-main.ts");
+  });
+});
+
+/**
+ * FIX-D (delta-review, brukervennlighet): med vakten PÅ og en tailnet-adresse (100.64.0.0/10) som embedding-URL uten `JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE=on` STOPPER api OG worker oppstart, og compose har `restart: unless-stopped` - en omstartsløkke der
+ * feilen verken nevnte variabelen eller tailnet-flagget. Meldingen beholder den stabile koden `memory_embedding_must_be_local:<kode>` FØRST og har et kort hint bak: NAVNET (aldri verdien) på variabelen som er avvist, og at en tailnet-adresse krever
+ * flagget. Meldingen bygges kun av konstanter: den skal ALDRI inneholde URL, vert, port, sti, query eller brukerinfo (sentinel-testene under legger en gjenkjennelig verdi i HVER del av URL-en).
+ */
+describe("FIX-D: feilmeldingen har et kort hint (variabelnavn + tailnet-flagget) bak den stabile koden - og aldri URL, vert eller hemmelighet", () => {
+  const PREFIX = "memory_embedding_must_be_local:";
+  const TAILNET_FLAG = "JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE";
+  const failure = async (env: Record<string, string>, lookup: (h: string) => Promise<ReadonlyArray<{ address: string }>> = noLookup): Promise<{ error: MemoryEmbeddingNotLocalError; lines: Out["lines"] }> => {
+    const out = await run(env, lookup);
+    expect(out.error, JSON.stringify(Object.keys(env))).toBeInstanceOf(MemoryEmbeddingNotLocalError);
+    return { error: out.error as MemoryEmbeddingNotLocalError, lines: out.lines };
+  };
+  const ollama = (name: string, url: string, extra: Record<string, string> = {}) => ({ JARVIS_EMBEDDING_PROVIDER: "ollama", JARVIS_EMBEDDING_MODEL: "bge-m3", [name]: url, ...extra });
+
+  it("stabil kode FØRST (`memory_embedding_must_be_local:<kode>` + mellomrom) og `code` som egen egenskap; hintet bak navngir NØYAKTIG variabelen URL-en kom fra og tailnet-flagget, for hver av de tre variablene", async () => {
+    for (const name of MEMORY_EMBEDDING_URL_ENV_CHAIN) {
+      const { error } = await failure(ollama(name, "http://8.8.8.8:11434"));
+      expect(error.code, name).toBe("local_url_not_local");
+      expect(error.source, name).toBe(name);
+      expect(error.message.startsWith(`${PREFIX}local_url_not_local `), name).toBe(true);
+      expect(error.message, name).toContain(`${name} er avvist`);
+      for (const other of MEMORY_EMBEDDING_URL_ENV_CHAIN.filter((n) => n !== name)) expect(error.message, `${name}: nevner ikke ${other}`).not.toContain(other);
+      expect(error.message, name).toContain(`${TAILNET_FLAG}=on`);
+      expect(error.message, name).toContain("100.64.0.0/10");
+      expect(error.message, name).toContain("JARVIS_LOCAL_MODEL_URL_GUARD");
+      expect(error.name).toBe("MemoryEmbeddingNotLocalError");
+    }
+  });
+
+  it("eierens dokumenterte tailnet-eksempel (Tailscale-IP som JARVIS_EMBEDDING_URL, vakt PÅ, uten flagget) stopper oppstarten MED hintet - og er godtatt med flagget", async () => {
+    const tailnetIp = ["100", "86", "89", "57"].join(".");
+    const url = `http://${tailnetIp}:11434`;
+    const { error } = await failure(ollama("JARVIS_EMBEDDING_URL", url));
+    expect(error.message).toMatch(new RegExp(`^${PREFIX}local_url_not_local `));
+    expect(error.message).toContain("JARVIS_EMBEDDING_URL er avvist");
+    expect(error.message).toContain(`${TAILNET_FLAG}=on`);
+    expect(error.message).not.toContain(tailnetIp);
+    const withFlag = await run(ollama("JARVIS_EMBEDDING_URL", url, { JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE: "on" }));
+    expect(withFlag.error).toBeUndefined();
+  });
+
+  it("variabelen i hintet følger prioritetsrekkefølgen provideren faktisk bruker (JARVIS_EMBEDDING_URL -> JARVIS_OLLAMA_URL -> JARVIS_GEMMA_LOCAL_URL): første SATTE variabel avvises, ikke de bak", async () => {
+    const bad = (n: number) => `http://8.8.8.${n}:11434`;
+    const first = await failure({ JARVIS_EMBEDDING_PROVIDER: "ollama", JARVIS_EMBEDDING_URL: bad(1), JARVIS_OLLAMA_URL: bad(2), JARVIS_GEMMA_LOCAL_URL: bad(3) });
+    expect(first.error.source).toBe("JARVIS_EMBEDDING_URL");
+    const second = await failure({ JARVIS_EMBEDDING_PROVIDER: "ollama", JARVIS_EMBEDDING_URL: "", JARVIS_OLLAMA_URL: bad(2), JARVIS_GEMMA_LOCAL_URL: bad(3) });
+    expect(second.error.source).toBe("JARVIS_OLLAMA_URL");
+    expect(second.error.message).toContain("JARVIS_OLLAMA_URL er avvist");
+    expect(second.error.message).not.toContain("JARVIS_EMBEDDING_URL");
+    expect(second.error.message).not.toContain("JARVIS_GEMMA_LOCAL_URL");
+    const third = await failure({ JARVIS_EMBEDDING_PROVIDER: "ollama", JARVIS_GEMMA_LOCAL_URL: bad(3) });
+    expect(third.error.source).toBe("JARVIS_GEMMA_LOCAL_URL");
+  });
+
+  it("kjeden i feilmeldingen er LÅST mot `embeddingEndpointFromEnv` (minnets egen URL-velger): for alle 7 kombinasjoner av satte variabler er den avviste variabelen den samme som provideren faktisk leser", async () => {
+    const names = [...MEMORY_EMBEDDING_URL_ENV_CHAIN];
+    expect(names).toEqual(["JARVIS_EMBEDDING_URL", "JARVIS_OLLAMA_URL", "JARVIS_GEMMA_LOCAL_URL"]);
+    for (let mask = 1; mask < 8; mask++) {
+      const env: Record<string, string> = { JARVIS_EMBEDDING_PROVIDER: "ollama" };
+      names.forEach((n, i) => { if ((mask & (1 << i)) !== 0) env[n] = `http://8.8.8.${i + 1}:11434`; });
+      const { error } = await failure(env);
+      expect(env[error.source ?? ""], `maske ${mask}`).toBe(embeddingEndpointFromEnv(env));
+    }
+    // et variabel med KUN mellomrom er «satt» for provideren (`||`) og gir ingen URL: ingenting sjekkes, ingenting kastes (kjeden gir samme svar som minnets velger)
+    const blank = { JARVIS_EMBEDDING_PROVIDER: "ollama", JARVIS_EMBEDDING_URL: "   ", JARVIS_OLLAMA_URL: "http://8.8.8.2:11434" };
+    expect(embeddingEndpointFromEnv(blank)).toBeNull();
+    const blankRun = await run(blank);
+    expect(blankRun.error).toBeUndefined();
+    expect(blankRun.verdicts?.map((v) => v.identity)).not.toContain("memory_embedding");
+  });
+
+  it("DNS-avvisning (`local_url_resolves_nonlocal`) har samme hint som en direkte ikke-lokal adresse; med tailnet-flagget PÅ nevnes ikke flagget (det hjelper ikke), kun at URL-en må være lokal", async () => {
+    const viaDns = await failure(ollama("JARVIS_EMBEDDING_URL", "http://gpu.lan:11434"), async () => PUBLIC);
+    expect(viaDns.error.code).toBe("local_url_resolves_nonlocal");
+    expect(viaDns.error.message).toContain(`${TAILNET_FLAG}=on`);
+    const flagOn = await failure(ollama("JARVIS_EMBEDDING_URL", "http://8.8.8.8:11434", { JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE: "on" }));
+    expect(flagOn.error.code).toBe("local_url_not_local");
+    expect(flagOn.error.message).toMatch(new RegExp(`^${PREFIX}local_url_not_local `));
+    expect(flagOn.error.message).not.toContain(TAILNET_FLAG);
+    expect(flagOn.error.message).not.toContain("100.64.0.0/10");
+    expect(flagOn.error.message).toContain("URL-en må være lokal");
+  });
+
+  it("syntaksfeil (`local_url_credentials`/`scheme`/`malformed`) får variabelnavnet men ikke tailnet-rådet (tailnet-flagget hjelper ikke); rådet er å rette URL-en", async () => {
+    for (const [url, code] of [["http://u:p@10.0.0.1:11434", "local_url_credentials"], ["ftp://10.0.0.1:11434", "local_url_scheme"], ["http://10.0.0.1:99999", "local_url_malformed"]] as const) {
+      const { error } = await failure(ollama("JARVIS_OLLAMA_URL", url));
+      expect(error.code, url).toBe(code);
+      expect(error.message.startsWith(`${PREFIX}${code} `), url).toBe(true);
+      expect(error.message, url).toContain("JARVIS_OLLAMA_URL er avvist");
+      expect(error.message, url).not.toContain(TAILNET_FLAG);
+      expect(error.message, url).not.toContain("100.64.0.0/10");
+      expect(error.message, url).toContain("Rett URL-en");
+    }
+  });
+
+  it("SENTINEL: ingen del av URL-en (bruker, passord, vert, port, sti, query) står i meldingen, navnet, stakken, egenskapene eller loggen - for hver feilkode og hver av de tre variablene", async () => {
+    const parts = ["SENTINEL-USER", "SENTINEL-PW", "SENTINEL-HOST", "SENTINEL-PATH", "SENTINEL-TOKEN", "34567", "example.com"];
+    const urls: Array<[string, string, ReadonlyArray<{ address: string }>]> = [
+      [`http://SENTINEL-USER:SENTINEL-PW@SENTINEL-HOST.example.com:34567/SENTINEL-PATH?token=SENTINEL-TOKEN`, "local_url_credentials", PUBLIC],
+      [`https://SENTINEL-HOST.example.com:34567/SENTINEL-PATH?token=SENTINEL-TOKEN`, "local_url_not_local", PUBLIC],
+      [`ftp://SENTINEL-HOST.example.com:34567/SENTINEL-PATH?token=SENTINEL-TOKEN`, "local_url_scheme", PUBLIC],
+      [`http://SENTINEL-HOST:99999/SENTINEL-PATH?token=SENTINEL-TOKEN`, "local_url_malformed", PUBLIC],
+      [`http://SENTINEL-HOST.lan:34567/SENTINEL-PATH?token=SENTINEL-TOKEN`, "local_url_resolves_nonlocal", PUBLIC],
+      [`http://:SENTINEL-PW@SENTINEL-HOST.lan:34567/SENTINEL-PATH`, "local_url_credentials", PRIVATE]
+    ];
+    for (const name of MEMORY_EMBEDDING_URL_ENV_CHAIN) {
+      for (const [url, code, answer] of urls) {
+        const { error, lines } = await failure(ollama(name, url), async () => answer);
+        expect(error.code, `${name} ${code}`).toBe(code);
+        const everything = JSON.stringify([error.message, error.name, error.code, error.source, String(error.stack), lines, Object.entries(error)]);
+        for (const part of parts) expect(everything, `${name} ${code}: lekker «${part}»`).not.toContain(part);
+        expect(error.message.startsWith(`${PREFIX}${code} `), `${name} ${code}`).toBe(true);
+      }
+    }
+  });
+
+  it(".env.example: eksempel-URL-en til JARVIS_EMBEDDING_URL utløser IKKE omstartsløkka (godtas av vakten uten tailnet-flagget), og kommentaren nevner tailnet-flagget", async () => {
+    const env = readFileSync(fileURLToPath(new URL("../../../.env.example", import.meta.url)), "utf8");
+    const lines = env.split("\n");
+    const at = lines.findIndex((l) => l === "JARVIS_EMBEDDING_URL=");
+    expect(at, "JARVIS_EMBEDDING_URL= finnes i .env.example").toBeGreaterThan(0);
+    const urlLine = lines.slice(0, at).reverse().find((l) => l.startsWith("# URL:")) ?? "";
+    const example = /f\.eks\. (http:\/\/[^\s)]+)/.exec(urlLine)?.[1];
+    expect(example, "# URL:-linjen har et eksempel («f.eks. http://...»)").toBeDefined();
+    const out = await run(ollama("JARVIS_EMBEDDING_URL", example!), async () => PRIVATE);
+    expect(out.error, "eksempelet må ikke stoppe oppstart med vakten PÅ og flagget AV").toBeUndefined();
+    // kommentarblokken rett over variabelen (kommentarlinjer og `JARVIS_EMBEDDING_PROVIDER=`) forklarer tailnet-flagget og at oppstarten ellers stopper
+    let top = at;
+    while (top > 0 && (lines[top - 1]!.startsWith("#") || lines[top - 1] === "JARVIS_EMBEDDING_PROVIDER=")) top -= 1;
+    const block = lines.slice(top, at).join("\n");
+    expect(block).toContain("JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE=on");
+    expect(block).toContain("memory_embedding_must_be_local");
+    expect(block).toContain("restart: unless-stopped");
   });
 });
