@@ -60,6 +60,8 @@ export const CORE_ENV = [
   "JARVIS_TENANT_ID",
   // WP-K (D-471, JARVIS-018, review M2): nødutgang for avbruddsmekanismen i ToolGateway (kun eksakt `off` slår den av; standard PÅ). api OG worker bruker samme gateway-kode. Ingen hemmeligheter.
   "JARVIS_TOOL_CALL_ABORT",
+  // WP-T1 (JARVIS-102, K3/K4): modus for forespørselsavtrykk og nøkkelkrav i ToolGateway-ledgeren (`off`/`observe`/`enforce`, standard `off` = som før). api OG worker bruker samme gateway-kode. Ingen hemmeligheter.
+  "JARVIS_TOOL_REQUEST_DIGEST",
   "JARVIS_WATCHDOG_INTERVAL_MS",
   "LANGFUSE_PUBLIC_KEY",
   "LANGFUSE_SECRET_KEY"

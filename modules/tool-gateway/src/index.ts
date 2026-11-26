@@ -1,4 +1,5 @@
 export * from "./gateway.ts";
+export * from "./request-digest-gate.ts";
 export * from "./call-signal.ts";
 // WP-N1b (K1): modell-stemplet kontekst gjennom nøstede kall (AsyncLocalStorage); skopet SETTES kun av `ToolGateway.execute()` (importerer setteren direkte fra `./model-scope.ts`).
 // FIX-4 (fiks-runde 1): KUN lesere og typer er offentlig API - setteren (`runWithModelScope`) eksporteres ALDRI herfra, så ingen annen modul kan vaske skopet (`{ cloud: false }`) inne i et skykall.

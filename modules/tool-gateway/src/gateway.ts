@@ -10,6 +10,9 @@ import { isIndeterminateTransportError, transportErrorKind } from "./transport-e
 import { isPolicyDenied } from "./policy-denied.ts";
 import { isFinancialNamespace } from "./tool-manifest.ts";
 import type { AutonomyBindability } from "./autonomy-bindable.ts";
+import {
+  IDEMPOTENCY_KEY_REQUIRED, IDEMPOTENCY_KEY_REUSE_MISMATCH, REQUEST_DIGEST_INVALID_PREFIX, digestForRequest, judgeKeyReuse, requestDigestMode, shortFingerprint, type RequestDigestMode
+} from "./request-digest-gate.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
 /**
@@ -524,7 +527,25 @@ export interface ToolDefinition {
    * Se `autonomy-bindable.ts` for begrunnelsen, kravene og de manifestinvariantene som feller en feilmerket definisjon. Påvirker ikke hvordan handlingen utføres (risikoklasse, step-up, D-kjede) - kun OM den kan bindes.
    */
   autonomy_bindable?: AutonomyBindability;
+  /**
+   * WP-T1 K4 (JARVIS-102, Q-65 pkt 1): handlingens KRAV til idempotensnøkkel.
+   *  - `required` = hvert kall MÅ bære en `idempotency_key` (sideeffekter som ikke er idempotente av natur: penger, utsendelse, skriv mot ekstern leverandør, sletting). Håndheves av gatewayen
+   *    (`idempotency_key_required`) når `JARVIS_TOOL_REQUEST_DIGEST=enforce`; i `observe` kun en revisjonsrad.
+   *  - `optional` = nøkkel brukes (ledger) når den oppgis, kreves ikke.
+   *  - `none`     = ikke aktuelt (ren lesing, eller en handling som er idempotent av natur): erklært, aldri krevd.
+   * UTELATT = som før WP-T1: kun styrt klasse D krever nøkkel (`class_d_idempotency_key_required`). Produksjonsregisteret får verdien satt fra den deterministiske listen i `idempotency-requirements.ts`;
+   * en test feller en NY skrivehandling som ikke tar stilling.
+   */
+  idempotency?: IdempotencyMode;
+  /**
+   * WP-T1 K1: toppnivåfelt i `parameters` som IKKE skal inngå i `request_digest` (i tillegg til `idempotency_key`). Brukes for felt som bærer en hemmelighet (digesten er et usaltet avtrykk og skal ikke
+   * kunne brukes til å gjette en lav-entropi-verdi) - f.eks. `owner_controls.set_connector_credential.value`. Konsekvens: en endring av akkurat dette feltet under samme nøkkel gir IKKE `idempotency_key_reuse_mismatch`.
+   */
+  digest_exclude_parameters?: readonly string[];
 }
+
+/** WP-T1 K4: se `ToolDefinition.idempotency`. */
+export type IdempotencyMode = "required" | "optional" | "none";
 
 /**
  * WP-F1: en transport som VET at leverandørutfallet er ukjent (tidsavbrudd/nettverk/5xx etter at et kall kan ha nådd leverandøren) kaster en feil som begynner med
@@ -617,6 +638,8 @@ export interface ToolGatewayOptions {
   credentialBinding?: CredentialBinding;
   /** WP-N1 (K6): utførelseslås for finansverktøyene mot skymodeller. Utelatt = av (identisk med main). */
   financeExecutionLock?: FinanceExecutionLock;
+  /** WP-T1 (K3/K4): modus for forespørselsavtrykk og nøkkelkrav. Utelatt = leses fra `JARVIS_TOOL_REQUEST_DIGEST` ved hvert kall (standard `off` = identisk med main). Tester kan sette den eksplisitt. */
+  requestDigestMode?: RequestDigestMode;
 }
 
 /**
@@ -1044,6 +1067,26 @@ export class ToolGateway {
     const tenantId = request.identity.tenant_id;
     const ledgerKey = dedupeApplies && request.idempotency_key ? request.idempotency_key : undefined;
 
+    // WP-T1 (JARVIS-102, K3/K4): modus `off` (standard) = ingenting under kjøres - identisk med main (ingen digest, ingen ny kolonne, ingen ekstra spørring).
+    // `observe`/`enforce`: (K4) en handling merket `idempotency: "required"` uten nøkkel, og (K3) forespørselens digest for ledger-raden. Begge FØR preflight og FØR approval-noncen forbrukes.
+    const digestMode: RequestDigestMode = this.options?.requestDigestMode ?? requestDigestMode();
+    let requestDigestValue: string | undefined;
+    if (digestMode !== "off") {
+      if (dedupeApplies && definition.idempotency === "required" && !request.idempotency_key) {
+        if (digestMode === "enforce") return deny(IDEMPOTENCY_KEY_REQUIRED);
+        await this.auditObservation(request, definition, "tool.idempotency_key_missing_observed", IDEMPOTENCY_KEY_REQUIRED, {}, corr, policyDecisionId);
+      }
+      if (ledgerKey !== undefined) {
+        const outcome = digestForRequest({
+          tool_id: request.tool_id, action: request.action, parameters: request.parameters, tenant_id: tenantId, person_id: request.identity.person_id,
+          exclude_parameters: definition.digest_exclude_parameters
+        });
+        if (outcome.ok) requestDigestValue = outcome.digest;
+        else if (digestMode === "enforce") return deny(`${REQUEST_DIGEST_INVALID_PREFIX}:${outcome.code}`);
+        else await this.auditObservation(request, definition, "tool.request_digest_invalid_observed", `${REQUEST_DIGEST_INVALID_PREFIX}:${outcome.code}`, {}, corr, policyDecisionId);
+      }
+    }
+
     // v4.0 D-pipeline: for høyrisiko (C/D) med definert preflight leses
     // nå-tilstanden FØR handlingen (deterministisk preflight + recovery-
     // grunnlag) og PÅ NYTT etterpå (readback/before-after-evidens).
@@ -1118,19 +1161,55 @@ export class ToolGateway {
     // Står raden igjen som 'reserved' (krasj/SIGKILL/audit-feil midt i kallet) er utfallet UKJENT og en retry utfører ALDRI en ny mutasjon.
     if (ledgerKey !== undefined) {
       const gate = await withTenantTransaction<ToolResult | "rearmed_unvalidated" | null>(this.pool, tenantId, async (client) => {
-        const inserted = await client.query(
-          `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status, before_state)
+        // WP-T1 (K3): digesten skrives KUN når modusen er observe/enforce og en digest kunne beregnes; ellers er INSERT/SELECT akkurat som før (modus `off` = main).
+        const inserted = requestDigestValue === undefined
+          ? await client.query(
+            `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status, before_state)
            VALUES ($1, $2, $3, $4, 'reserved', $5) ON CONFLICT DO NOTHING`,
-          [tenantId, ledgerKey, request.tool_id, request.action, JSON.stringify(beforeState)]
-        );
+            [tenantId, ledgerKey, request.tool_id, request.action, JSON.stringify(beforeState)]
+          )
+          : await client.query(
+            `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status, before_state, request_digest)
+           VALUES ($1, $2, $3, $4, 'reserved', $5, $6) ON CONFLICT DO NOTHING`,
+            [tenantId, ledgerKey, request.tool_id, request.action, JSON.stringify(beforeState), requestDigestValue]
+          );
         if (inserted.rowCount === 1) return null;
-        const prior = await client.query(
-          "SELECT external_id, status, postcondition_reason FROM tool_executions WHERE idempotency_key = $1",
-          [ledgerKey]
-        );
+        const prior = digestMode === "off"
+          ? await client.query(
+            "SELECT external_id, status, postcondition_reason FROM tool_executions WHERE idempotency_key = $1",
+            [ledgerKey]
+          )
+          : await client.query(
+            "SELECT external_id, status, postcondition_reason, tool_id, action, request_digest FROM tool_executions WHERE idempotency_key = $1",
+            [ledgerKey]
+          );
         const row = prior.rows[0] as
-          | { external_id: string | null; status: string; postcondition_reason: string | null }
+          | { external_id: string | null; status: string; postcondition_reason: string | null; tool_id?: string; action?: string; request_digest?: string | null }
           | undefined;
+        // WP-T1 (K3, JARVIS-102): SAMME nøkkel brukt til en ANNEN forespørsel er aldri «det lagrede resultatet». Avgjort HER, i samme transaksjon som konflikten (atomisk mot samtidige kall), FØR noen statusgren.
+        if (digestMode !== "off" && requestDigestValue !== undefined && row?.tool_id !== undefined && row.action !== undefined) {
+          const verdict = judgeKeyReuse({ tool_id: row.tool_id, action: row.action, request_digest: row.request_digest ?? null }, { tool_id: request.tool_id, action: request.action, digest: requestDigestValue });
+          if (verdict !== "match") {
+            const detail = {
+              mode: digestMode, key_fp: shortFingerprint(ledgerKey), request_digest_fp: shortFingerprint(requestDigestValue),
+              stored_digest_fp: row.request_digest === null || row.request_digest === undefined ? null : shortFingerprint(row.request_digest),
+              stored_tool_id: row.tool_id.slice(0, 80), stored_action: row.action.slice(0, 80), stored_status: row.status
+            };
+            if (verdict === "mismatch" && digestMode === "enforce") {
+              await writeAudit(client, request.identity, { ...corr,
+                type: "tool.idempotency_key_reuse_mismatch", decision: "DENY", reason: IDEMPOTENCY_KEY_REUSE_MISMATCH,
+                tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class, payload: auditPayload(detail)
+              });
+              return { ok: false, reason: IDEMPOTENCY_KEY_REUSE_MISMATCH } as const;
+            }
+            // observe (mismatch) og begge moduser for en rad uten digest (legacy): kjører som før, men loggføres.
+            await writeAudit(client, request.identity, { ...corr,
+              type: verdict === "mismatch" ? "tool.idempotency_key_reuse_observed" : "tool.idempotency_legacy_row", decision: "ALLOW",
+              reason: verdict === "mismatch" ? IDEMPOTENCY_KEY_REUSE_MISMATCH : "idempotency_legacy_row_unverifiable",
+              tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class, payload: auditPayload({ ...detail, would_reject: verdict === "mismatch" })
+            });
+          }
+        }
         if (row?.status === "succeeded") {
           await writeAudit(client, request.identity, { ...corr,
             type: "tool.deduplicated", tool_id: request.tool_id, action: request.action,
@@ -1355,6 +1434,27 @@ export class ToolGateway {
       return this.notifyClassD(request, definition, classDOutcome, result, beforeState, { ...corr, ...(policyDecisionId !== undefined ? { policy_decision_id: policyDecisionId } : {}) });
     }
     return result;
+  }
+
+  /**
+   * WP-T1 (modus `observe`): en OBSERVASJON - kallet kjører som før, men det som ville blitt avvist i `enforce` står i revisjonssporet (`decision: ALLOW`, `reason` = koden enforce ville gitt). Best-effort: en feil her
+   * bryter aldri kallet (en observasjon er ikke en port). Aldri parametre eller nøkkel i klartekst.
+   */
+  private async auditObservation(
+    request: { identity: IdentityContext; tool_id: string; action: string; idempotency_key?: string },
+    definition: ToolDefinition, type: string, reason: string, extra: Record<string, unknown>, corr: AuditCorrelation, policyDecisionId: string | undefined
+  ): Promise<void> {
+    try {
+      await withTenantTransaction(this.pool, request.identity.tenant_id, (client) =>
+        writeAudit(client, request.identity, {
+          ...(corr.task_id !== undefined ? { task_id: corr.task_id } : {}), ...(corr.trace_id !== undefined ? { trace_id: corr.trace_id } : {}),
+          type, decision: "ALLOW", reason, tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class,
+          payload: { mode: "observe", would_deny: true, ...extra, ...(request.idempotency_key !== undefined ? { key_fp: shortFingerprint(request.idempotency_key) } : {}), ...(policyDecisionId !== undefined ? { policy_decision_id: policyDecisionId } : {}) }
+        })
+      );
+    } catch (err) {
+      console.error(JSON.stringify({ msg: "tool_observation_audit_failed", type, error: err instanceof Error ? err.message.slice(0, 80) : String(err).slice(0, 80) }));
+    }
   }
 
   /** WP-F1: status på ledger-raden for en nøkkel (`null` = ingen rad). Kort, selvstendig transaksjon - brukes av replay-vakten rundt preflight-validatoren. */

@@ -14,7 +14,7 @@ import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubTransport, createGitHubAuth, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
   CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, memoryToolDefinitions,
-  ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets,
+  ToolGateway, assertManifestInvariants, assertRequestDigestModeValid, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets,
   INFRA_GATED_TOOL_IDS,
   configuredGithubRepo, githubReposUnlocked,
   configureGoogleOAuthClientSource, createVaultFirstConfigReader, primeGoogleDriveCredentialCheck
@@ -88,6 +88,12 @@ process.env["JARVIS_PROCESS"] ??= "worker"; // D-394 (JARVIS-054): audit-rader m
 const pool = createPool(configFromEnv());
 try {
   await assertRuntimeRoleSafe(pool);
+} catch (err) {
+  failStartup(err);
+}
+// WP-T1 (JARVIS-102): samme oppstartsvakt som api - en ukjent JARVIS_TOOL_REQUEST_DIGEST (typo) stopper workeren (tom/usatt = off).
+try {
+  assertRequestDigestModeValid(process.env);
 } catch (err) {
   failStartup(err);
 }
