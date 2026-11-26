@@ -245,9 +245,9 @@ export const REQUEST_DIGEST_TEST_VECTORS: readonly RequestDigestVector[] = [
   },
   {
     name: "other_tool_action", note: "Annet verktøy og annen handling gir annen digest.",
-    input: { tool_id: "email", action: "send", parameters: { "to": "a@example.com", "subject": "Hei", "body": "Tekst" }, tenant_id: "tenant-a", person_id: "person-1" },
-    canonical: `{"action":"send","parameters":{"body":"Tekst","subject":"Hei","to":"a@example.com"},"person_id":"person-1","tenant_id":"tenant-a","tool_id":"email","v":1}`,
-    digest: "b601c6fbc40a820e9a93eeb35221c6b65d36a594cdd787caf9451044efef1d98"
+    input: { tool_id: "email", action: "send", parameters: { "to": "recipient-1", "subject": "Hei", "body": "Tekst" }, tenant_id: "tenant-a", person_id: "person-1" },
+    canonical: `{"action":"send","parameters":{"body":"Tekst","subject":"Hei","to":"recipient-1"},"person_id":"person-1","tenant_id":"tenant-a","tool_id":"email","v":1}`,
+    digest: "9b6525cf8ffb771d78b73b890fd7d9f512d67682d3cf8bc854e57e6c07998220"
   },
   {
     name: "other_tenant", note: "Samme parametre som `simple`, annen tenant.",
