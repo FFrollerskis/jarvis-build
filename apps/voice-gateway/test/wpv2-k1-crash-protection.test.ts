@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -115,7 +116,7 @@ describe("K1a: ugyldige WebSocket-rammer krasjer aldri gatewayen", () => {
     socket.on("data", (d) => {
       handshake += d.toString("latin1"); // leser, men svarer ALDRI på close-rammen
     });
-    socket.write("GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+    socket.write(`GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString("base64")}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
     const started = Date.now();
     while (!handshake.includes("101") && Date.now() - started < 3000) await sleep(10);
     expect(handshake).toContain("101");
