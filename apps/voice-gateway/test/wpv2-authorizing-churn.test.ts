@@ -69,6 +69,7 @@ describe("ConnectionTracker: «authorizing» (FIX-2, F11)", () => {
     expect(t.unprovenFor("p")).toBe(0); // en autorisering er ikke en ubevist sesjon
     t.markProven(proven);
     t.endAuthorizing(denied); // Core avslo
+    expect(t.unprovenFor("p")).toBe(0); // tilbake til «pending» (ingen sesjon), IKKE «unproven» (telles ikke mot ubevist-taket)
     admitOk(t, "p", () => evicted.push("new")); // full: den eneste utkastbare er `denied`
     expect(evicted).toEqual(["denied"]);
     t.endAuthorizing(proven); // et sent endAuthorizing rører ikke en bevist tilkobling
