@@ -1266,6 +1266,101 @@ describe("E7: review N6 - avkortede leverandørlister feiler LUKKET også for GB
     await v.stop();
   });
 
+  describe("WP-P3 fiks-runde 1 (K1-rest): en `ads`-kant som svarer HTTP 200 uten en lesbar `data`-LISTE, eller med uforståelig paginering, er KUTTET - aldri «ingen annonser»", () => {
+    type VReply = Awaited<ReturnType<FakeVendor["handler"]>>;
+    const BASE = { ad_account_id: "act_1234567890123", ad_set_id: "60010" };
+    const TOKEN = "fake-meta-token-for-test";
+    const ad = (i: number) => ({ id: String(700000 + i), name: `Annonse ${i}`, status: "PAUSED" });
+    /** Falsk Graph-leverandør der `ads`-kanten svarer det `edge()` gir (HTTP 200 om ikke annet er oppgitt); POST oppretter annonsen, som vises i en lesbar `data`-liste etterpå (readback). */
+    async function metaVendor(edge: () => VReply) {
+      const v = new FakeVendor(); await v.start();
+      const createdAds: Array<Record<string, unknown>> = [];
+      v.handler = (r) => {
+        if (r.method === "GET" && r.path === "/v26.0/act_1234567890123") return { json: { id: "act_1234567890123", currency: "NOK" } };
+        if (r.method === "GET" && r.path === "/v26.0/60010") return { json: { id: "60010", status: "ACTIVE", account_id: "1234567890123" } };
+        if (r.method === "GET" && r.path === "/v26.0/60010/ads") {
+          const reply = edge();
+          const json = (reply as { json?: Record<string, unknown> }).json;
+          return createdAds.length > 0 && json !== undefined && Array.isArray(json["data"]) ? { ...reply, json: { ...json, data: [...(json["data"] as unknown[]), ...createdAds] } } : reply;
+        }
+        if (r.method === "POST" && r.path === "/v26.0/act_1234567890123/ads") { createdAds.push({ id: "799999", name: r.body["name"], status: "PAUSED" }); return { json: { id: "799999" } }; }
+        return { status: 404, json: {} };
+      };
+      const t = new MetaAdsWriteTransport({ ...killOpen, spec: specs.meta_ads, baseUrl: v.baseUrl, sleep: async () => undefined });
+      const listed = async () => ((await t.invoke("list_ads", BASE, TOKEN, { identity: owner })).data as Record<string, any>);
+      const create = (name: string) => t.invoke("create_ad", { ...BASE, name, page_id: "1234567890", link: "https://example.test/x", message: "Hei", headline: "Tittel" }, TOKEN, { identity: owner });
+      return { v, t, listed, create, posts: () => v.requests.filter((r) => r.method === "POST") };
+    }
+
+    const unreadableShapes: Array<[string, VReply]> = [
+      ["tomt objekt {}", { json: {} }],
+      ["tom kropp", {}],
+      ["{ data: null }", { json: { data: null } }],
+      ["{ data: {} } (objekt i stedet for liste)", { json: { data: {} } }],
+      ["{ error: ... } uten data", { json: { error: { message: "noe gikk galt", code: 1 } } }],
+      ["[] (toppnivå-liste)", { json: [] }],
+      ["{ data: \"tekst\" }", { json: { data: "tekst" } }]
+    ];
+    it.each(unreadableShapes)("HTTP 200 med %s: list_ads er truncated + ads_unreadable (ingen annonser vist), create_ad nektes `ad_list_truncated` og INGEN POST sendes", async (_name, reply) => {
+      const { v, listed, create, posts } = await metaVendor(() => reply);
+      try {
+        expect(await listed()).toMatchObject({ truncated: true, ads_unreadable: true, ads: [], ad_set_status: "ACTIVE" });
+        await expect(create("Helt ny annonse")).rejects.toThrow("growth_precondition_failed:ad_list_truncated");
+        await expect(create("Annonse 1")).rejects.toThrow("growth_precondition_failed:ad_list_truncated");
+        expect(posts()).toHaveLength(0);
+      } finally {
+        await v.stop();
+      }
+    });
+
+    const unclearPaging: Array<[string, VReply]> = [
+      ["paging.next = 123 (tall)", { json: { data: [ad(1)], paging: { next: 123 } } }],
+      ["paging.next = true", { json: { data: [ad(1)], paging: { next: true } } }],
+      ["paging.next = false", { json: { data: [ad(1)], paging: { next: false } } }],
+      ["paging.next = {} (objekt)", { json: { data: [ad(1)], paging: { next: {} } } }],
+      ["paging.next = [\"x\"] (liste)", { json: { data: [ad(1)], paging: { next: ["x"] } } }],
+      ["paging.next = \"\" (tom streng)", { json: { data: [ad(1)], paging: { next: "" } } }],
+      ["paging = \"x\" (ikke et objekt)", { json: { data: [ad(1)], paging: "x" } }],
+      ["paging = [] (liste)", { json: { data: [ad(1)], paging: [] } }]
+    ];
+    it.each(unclearPaging)("lesbar `data`, men %s: KUTTET (kan ikke bevise at det ikke finnes flere annonser), uten `ads_unreadable`; create_ad nektes og INGEN POST sendes", async (_name, reply) => {
+      const { v, listed, create, posts } = await metaVendor(() => reply);
+      try {
+        const state = await listed();
+        expect(state["truncated"]).toBe(true);
+        expect(state["ads_unreadable"]).toBeUndefined();
+        expect(state["ads"]).toEqual([{ id: "700001", name: "Annonse 1", status: "PAUSED" }]);
+        await expect(create("Helt ny annonse")).rejects.toThrow("growth_precondition_failed:ad_list_truncated");
+        expect(posts()).toHaveLength(0);
+      } finally {
+        await v.stop();
+      }
+    });
+
+    const complete: Array<[string, VReply]> = [
+      ["{ data: [] }", { json: { data: [] } }],
+      ["{ data: [..] } uten paging", { json: { data: [ad(1)] } }],
+      ["paging med kun cursors (ingen next = siste side)", { json: { data: [ad(1)], paging: { cursors: { before: "a", after: "b" } } } }],
+      ["paging.next = null (ingen neste side)", { json: { data: [ad(1)], paging: { next: null } } }],
+      ["paging = null", { json: { data: [ad(1)], paging: null } }]
+    ];
+    it.each(complete)("kontroll (ingen falsk positiv): %s er en KOMPLETT liste - ikke avkortet, dedupe virker og opprettelse sender nøyaktig én POST", async (_name, reply) => {
+      const { v, listed, create, posts } = await metaVendor(() => reply);
+      try {
+        const state = await listed();
+        expect(state["truncated"]).toBe(false);
+        expect(state["ads_unreadable"]).toBeUndefined();
+        const has = (state["ads"] as unknown[]).length > 0;
+        if (has) expect(await create("Annonse 1")).toEqual({ data: { unchanged: true } }); // dedupe på navn
+        expect(posts()).toHaveLength(0);
+        expect(await create("Helt ny annonse")).toMatchObject({ external_id: "799999" });
+        expect(posts()).toHaveLength(1);
+      } finally {
+        await v.stop();
+      }
+    });
+  });
+
   describe("WP-P3 K6 (JARVIS-108, Q-68 pkt 5; PARTIAL, UVERIFISERT mot Googles dokumentasjon): paginering av GBP-lokale innlegg", () => {
     const LOC = "accounts/1111/locations/123456789";
     const post = (i: number) => ({ name: `${LOC}/localPosts/${i}`, summary: `Innlegg ${i}`, state: "LIVE", topicType: "STANDARD" });
