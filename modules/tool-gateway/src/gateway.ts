@@ -6,6 +6,7 @@ import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
 import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal, toolCallAbortEnabled } from "./call-signal.ts";
 import { currentModelScope, runWithModelScope } from "./model-scope.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, ownerStepUpDenial, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
+import { CLASS_C_READ_TIMEOUT_MS, requestDigestOf, type ClassCMode, type ClassCPipeline } from "./class-c-pipeline.ts";
 import { isIndeterminateTransportError, transportErrorKind } from "./transport-errors.ts";
 import { isPolicyDenied } from "./policy-denied.ts";
 import { isFinancialNamespace } from "./tool-manifest.ts";
@@ -617,6 +618,8 @@ export interface ToolGatewayOptions {
   credentialBinding?: CredentialBinding;
   /** WP-N1 (K6): utførelseslås for finansverktøyene mot skymodeller. Utelatt = av (identisk med main). */
   financeExecutionLock?: FinanceExecutionLock;
+  /** WP-AUTH2a (JARVIS-014): deterministisk klasse C-behandling (preflight, før/etter-diff, rollback-plan, forsterket audit) for handlinger med adapter. Utelatt eller modus `off` = identisk med main. */
+  classCPipeline?: ClassCPipeline;
 }
 
 /**
@@ -683,9 +686,17 @@ export class ToolGateway {
   ) {
     this.classDPipeline = options?.classDPipeline;
     this.classDNotifier = options?.classDPipeline?.notifier;
+    this.classCPipeline = options?.classCPipeline;
   }
 
   private readonly classDPipeline: ClassDPipelineOptions | undefined;
+
+  private readonly classCPipeline: ClassCPipeline | undefined;
+
+  /** WP-AUTH2a: modusen til klasse C-pipelinen i DENNE prosessen (`off` når den ikke er koblet inn) - for oppstartslogg og kontrollsenter. */
+  classCMode(): ClassCMode {
+    return this.classCPipeline?.mode ?? "off";
+  }
 
   private classDNotifier: ClassDNotifier | undefined;
 
@@ -816,8 +827,8 @@ export class ToolGateway {
     let policyDecisionId: string | undefined;
     const auditPayload = (payload: Record<string, unknown> = {}): Record<string, unknown> =>
       policyDecisionId === undefined ? payload : { ...payload, policy_decision_id: policyDecisionId };
-    const deny = (reason: string): Promise<ToolResult> =>
-      this.deny(request, reason, { ...corr, ...(policyDecisionId !== undefined ? { policy_decision_id: policyDecisionId } : {}) });
+    const deny = (reason: string, extra?: Record<string, unknown>): Promise<ToolResult> =>
+      this.deny(request, reason, { ...corr, ...(policyDecisionId !== undefined ? { policy_decision_id: policyDecisionId } : {}) }, extra);
     // WP-K (D-471, JARVIS-018): et NØSTET kall (en transport som selv kaller `execute()`, f.eks. `support.reply` -> `email.send`) startes aldri på vegne av et ytre kall som allerede er avbrutt/tidsavbrutt -
     // ellers kunne en forlatt transport utføre en mutasjon ETTER at det ytre kallet er meldt «utfall ukjent».
     // UNNTAK (review H1): sikkerhetsbryterne (kill switch, `CLASS_D_EXEMPT_ACTIONS`) og selvgjenopprettings-handlingene (`isSelfRecoveryAction`) MÅ virke også fra en avbrutt kontekst - de er
@@ -1053,7 +1064,18 @@ export class ToolGateway {
     // MÅ validatoren kjøres på fersk tilstand før noe utføres (se re-arm under).
     let validatorSkipped = false;
     const needsEvidence = (definition.capability_class === "C" || definition.capability_class === "D") && definition.preflight_action;
-    if (needsEvidence) {
+    // WP-AUTH2a (JARVIS-014): klasse C-pipelinen (kun for klasse C med adapter og modus observe/enforce; ellers `null` = alt under er som før). Pipelinen ERSTATTER den gamle klasse C-preflight-lesingen for handlingen.
+    // Replay: har ledgeren allerede en rad for nøkkelen (ikke `failed`), hoppes preflight over - tilstanden har flyttet seg ved handlingen selv, og ledger-porten svarer med det lagrede utfallet.
+    const classCRun = this.classCPipeline?.begin(definition, { requestDigest: requestDigestOf(request), isRegistered: (toolId, action) => this.get(toolId, action) !== undefined }) ?? null;
+    const classCRead = (action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> => invokeRead(definition, action, parameters, credential, invocationContext);
+    const classCAudit = (): Record<string, unknown> => (classCRun === null ? {} : { class_c: classCRun.auditBlock() });
+    if (classCRun !== null) {
+      const replay = ledgerKey !== undefined ? await this.peekLedgerStatus(tenantId, ledgerKey).catch(() => null) : null;
+      const pre = await classCRun.preflight(request.parameters, classCRead, { replay: replay !== null && replay !== "failed" });
+      if (pre.block !== null) return deny(pre.block, classCAudit());
+      beforeState = pre.beforeState;
+    }
+    if (needsEvidence && classCRun === null) {
       try {
         const pre = await invokePreflight(definition, request.parameters, credential, invocationContext);
         beforeState = pre.data ?? null;
@@ -1195,6 +1217,14 @@ export class ToolGateway {
         return deny(denial);
       }
     }
+    // WP-AUTH2a: samme levende kontroll for klasse C med pipeline - pipelinens lesinger tar tid, og eierens pause/frys/tilbakekall skal gjelde helt frem til leverandørkallet (uten nøkkel finnes ingen reservasjon å frigi).
+    if (classCRun !== null) {
+      const denial = await this.liveControlDenial(request.tool_id, definition, credentialRef, isCredentialRevocationSelfRecovery);
+      if (denial !== null) {
+        if (ledgerKey !== undefined) await this.releaseLedgerReservation(tenantId, ledgerKey, `recheck_${denial}`);
+        return deny(denial, classCAudit());
+      }
+    }
 
     // Fase 2 - UTFØR utenfor transaksjon (JARVIS-022): leverandørkall, preflight og readback holder ingen pool-forbindelse, så nøstede
     // `execute()`-kall (eksekutiv/komposisjoner) kan ikke tømme poolen og deadlocke.
@@ -1226,7 +1256,7 @@ export class ToolGateway {
     if (!failure) {
       let readbackFailed = false;
       let readbackAbsent = false;
-      if (needsEvidence) {
+      if (needsEvidence && classCRun === null) {
         try {
           const post = await withTimeout(
             (signal) => invokeWithCallSignal(definition.transport, definition.preflight_action!, request.parameters, credential, invocationContext, signal),
@@ -1264,6 +1294,12 @@ export class ToolGateway {
           if (postconditionReason === null && !predicateHeld) postconditionReason = "postcondition_mismatch";
         }
       }
+      // WP-AUTH2a: klasse C-etterkontroll (readback, diff mot forventet diff, rollback-plan). `observe` endrer aldri utfallet; `enforce` gjør en ubekreftet handling `unverified` (aldri suksess).
+      if (classCRun !== null) {
+        const verified = await classCRun.verify(request.parameters, { external_id: external.external_id ?? null, data: external.data ?? null }, classCRead);
+        afterState = verified.afterState;
+        if (verified.postconditionReason !== null) postconditionReason = verified.postconditionReason;
+      }
     }
     const postconditionVerified = !failure && postconditionReason === null;
     // Et tidsavbrudd betyr at bivirkningen KAN ha skjedd: aldri retry-bar (unverified), i motsetning til en kastet leverandørfeil.
@@ -1290,7 +1326,7 @@ export class ToolGateway {
             type: "tool.failed", decision: "DENY", reason: failure.message.slice(0, 120),
             tool_id: request.tool_id, action: request.action,
             capability_class: definition.capability_class,
-            payload: auditPayload({ credential_ref: credentialRef, outcome_unknown: failure.timedOut })
+            payload: auditPayload({ credential_ref: credentialRef, outcome_unknown: failure.timedOut, ...classCAudit() })
           });
           return;
         }
@@ -1304,7 +1340,8 @@ export class ToolGateway {
             external_id: external.external_id ?? null,
             scopes: definition.scopes,
             rollback: definition.rollback_procedure,
-            ...(needsEvidence ? { before_state: beforeState, after_state: afterState, recovery: { snapshot: beforeState, procedure: definition.rollback_procedure } } : {})
+            ...(needsEvidence ? { before_state: beforeState, after_state: afterState, recovery: { snapshot: beforeState, procedure: definition.rollback_procedure } } : {}),
+            ...classCAudit()
           })
         });
       });
@@ -1537,15 +1574,18 @@ export class ToolGateway {
   private async deny(
     request: { identity: IdentityContext; tool_id: string; action: string },
     reason: string,
-    audit: AuditCorrelation = {}
+    audit: AuditCorrelation = {},
+    // WP-AUTH2a: bevis som følger et avslag fra klasse C-pipelinen (`class_c`); utelatt = nøyaktig som før.
+    extra?: Record<string, unknown>
   ): Promise<ToolResult> {
+    const payload = { ...(audit.policy_decision_id !== undefined ? { policy_decision_id: audit.policy_decision_id } : {}), ...(extra ?? {}) };
     await withTenantTransaction(this.pool, request.identity.tenant_id, (client) =>
       writeAudit(client, request.identity, {
         // WP-K (JARVIS-054): også avslag bærer oppgave-/spor-ID og (etter policy) ID-en til avgjørelsen som gikk forut.
         ...(audit.task_id !== undefined ? { task_id: audit.task_id } : {}), ...(audit.trace_id !== undefined ? { trace_id: audit.trace_id } : {}),
         type: "tool.denied", decision: "DENY", reason,
         tool_id: request.tool_id, action: request.action,
-        ...(audit.policy_decision_id !== undefined ? { payload: { policy_decision_id: audit.policy_decision_id } } : {})
+        ...(Object.keys(payload).length > 0 ? { payload } : {})
       })
     ).catch((err) => {
       console.error(JSON.stringify({
@@ -1606,4 +1646,17 @@ function invokePreflight(
   const action = definition.preflight_action!;
   if (!toolCallAbortEnabled()) return definition.transport.invoke(action, parameters, credential, invocationContext);
   return withTimeout((signal) => invokeWithCallSignal(definition.transport, action, parameters, credential, invocationContext, signal), definition.timeout_ms);
+}
+
+/**
+ * WP-AUTH2a: en LESING for klasse C-pipelinen - samme transport, credential og kontekst som mutasjonen (en eksisterende lese-handling i samme connector), med frist og kallsignal. Fristen gjelder ALLTID (også med
+ * `JARVIS_TOOL_CALL_ABORT=off`, der kun selve avbruddet av forespørselen er av): en hengende lesing skal aldri holde en mutasjon for alltid. Kaster ved feil/tidsavbrudd (`tool_timeout`); pipelinen gjør det til fail-lukket utfall.
+ */
+function invokeRead(
+  definition: ToolDefinition, action: string, parameters: Record<string, JsonValue>, credential: string, invocationContext: ToolInvocationContext
+): Promise<{ external_id?: string; data?: JsonValue }> {
+  return withTimeout(
+    (signal) => invokeWithCallSignal(definition.transport, action, parameters, credential, invocationContext, signal),
+    Math.min(definition.timeout_ms, CLASS_C_READ_TIMEOUT_MS)
+  );
 }
