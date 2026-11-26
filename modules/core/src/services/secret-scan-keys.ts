@@ -40,31 +40,38 @@ export function keyWords(rawKey: string): string[] {
   return spaced.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 0);
 }
 
+/** Ord som bare sier «dette ER verdien» (`token_value`, `private_key_pem`, `pin_code`): strippes bakfra før nøkkelen vurderes. */
+const VALUE_WORDS: ReadonlySet<string> = new Set(["value", "text", "string", "plain", "raw", "data", "content", "pem", "hex", "base64", "b64", "code"]);
+
+/**
+ * En nøkkel er en hemmelighet når det siste (meningsbærende) ordet SELV er et hemmelighetsord: `db_password`, `client_secret`, `access_token`, `x-api-key`, `Authorization`, `private_key_pem`. En nøkkel der hemmelighetsordet står
+ * foran noe annet beskriver noe RELATERT til hemmeligheten, ikke selve verdien (`credential_binding: "owner_bound"`, `secret_manager`, `token_endpoint`, `password_reset_url`) og redigeres ikke - ellers ville enum- og
+ * metadatafelt (og connector-manifester) bli ødelagt. Teller-/metadatanøkler (`token_count`, `expires_at`, `secret_name` ...) er trygge uansett.
+ */
 export function classifyKey(rawKey: string): KeyClass {
   const words = keyWords(rawKey);
   if (words.length === 0) return { secret: false, strong: false, safe: false, metadata: false };
-  const metadata = SAFE_LAST_WORDS.has(words[words.length - 1] as string);
+  const lastWord = words[words.length - 1] as string;
+  const metadata = SAFE_LAST_WORDS.has(lastWord);
+  const hasSecretWord = words.some((w) => SECRET_WORDS.has(w) || (w.length > 5 && /(?:secret|token|password|passwd|credential)$/.test(w)));
+  let end = words.length;
+  while (end > 1 && VALUE_WORDS.has(words[end - 1] as string)) end -= 1;
+  const last = words[end - 1] as string;
+  const prev = end >= 2 ? (words[end - 2] as string) : "";
   let secret = false;
   let strong = false;
-  for (let i = 0; i < words.length; i += 1) {
-    const w = words[i] as string;
-    if (SECRET_WORDS.has(w)) {
-      secret = true;
-      if (STRONG_WORDS.has(w)) strong = true;
-      continue;
-    }
+  if (SECRET_WORDS.has(last)) {
+    secret = true;
+    strong = STRONG_WORDS.has(last);
+  } else if (last.length > 5 && /(?:secret|token|password|passwd|credential)$/.test(last)) {
     // sammenskrevet: `accesstoken`, `clientsecret`, `mypassword` (men ikke `tokenizer`, `secretary`)
-    if (w.length > 5 && /(?:secret|token|password|passwd|credential)$/.test(w)) {
-      secret = true;
-      if (!/token$/.test(w)) strong = true;
-      continue;
-    }
-    if (w === "key" && i > 0 && KEY_QUALIFIERS.has(words[i - 1] as string)) {
-      secret = true;
-      strong = true;
-    }
+    secret = true;
+    strong = !/token$/.test(last);
+  } else if (last === "key" && KEY_QUALIFIERS.has(prev)) {
+    secret = true;
+    strong = true;
   }
-  if (!secret) return { secret: false, strong: false, safe: false, metadata };
+  if (!secret) return { secret: false, strong: false, safe: hasSecretWord && metadata, metadata };
   return metadata ? { secret: false, strong: false, safe: true, metadata } : { secret: true, strong, safe: false, metadata };
 }
 

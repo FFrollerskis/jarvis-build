@@ -3,6 +3,7 @@ import type pg from "pg";
 import type { IdentityContext } from "@jarvis/contracts";
 import { withTenantTransaction } from "../db/pool.ts";
 import { writeAudit } from "./audit-writer.ts";
+import { scanForSecrets } from "./secret-scan.ts";
 
 export type MessageRole = "user" | "assistant" | "system" | "tool";
 
@@ -29,23 +30,27 @@ export class MessageStore {
   async save(identity: IdentityContext, role: MessageRole, content: string, opts: { restricted?: boolean } = {}): Promise<string> {
     // Fiks-runde 1 (F-B4/I2): FAIL-CLOSED normalisering for JS-kallere uten TS-typer - ALT som ikke er `undefined`/`false` lagres begrenset (`"true"`, `1`, `null`, `{}` ...). Kun et eksplisitt valg om å IKKE begrense gir en vanlig rad.
     const restricted = opts?.restricted !== undefined && opts.restricted !== false;
+    // WP-SEC2 (K7b, JARVIS-013): ALL meldingstekst (også assistent-/verktøy-/systemrader, ikke bare eierens) skannes før den lagres. Brukermeldingen er allerede redigert av samtalemotoren (idempotent); uten funn lagres teksten BYTE-IDENTISK.
+    const scanned = scanForSecrets(content);
+    const stored = scanned.text;
+    const redactedKinds = scanned.findings.map((f) => f.kind);
     return withTenantTransaction(this.pool, identity.tenant_id, async (client) => {
       const messageId = `msg-${randomUUID()}`;
       if (restricted) {
         await client.query(
           `INSERT INTO messages (message_id, tenant_id, session_id, role, content, restricted)
            VALUES ($1, $2, $3, $4, $5, true)`,
-          [messageId, identity.tenant_id, identity.session_id, role, content]
+          [messageId, identity.tenant_id, identity.session_id, role, stored]
         );
-        await writeAudit(client, identity, { type: "message.saved", payload: { role, restricted: true } });
+        await writeAudit(client, identity, { type: "message.saved", payload: { role, restricted: true, ...(redactedKinds.length > 0 ? { secret_redacted: redactedKinds } : {}) } });
         return messageId;
       }
       await client.query(
         `INSERT INTO messages (message_id, tenant_id, session_id, role, content)
          VALUES ($1, $2, $3, $4, $5)`,
-        [messageId, identity.tenant_id, identity.session_id, role, content]
+        [messageId, identity.tenant_id, identity.session_id, role, stored]
       );
-      await writeAudit(client, identity, { type: "message.saved", payload: { role } });
+      await writeAudit(client, identity, { type: "message.saved", payload: { role, ...(redactedKinds.length > 0 ? { secret_redacted: redactedKinds } : {}) } });
       return messageId;
     });
   }

@@ -25,6 +25,7 @@ describe("K1: skjulte tegn, fullbredde og kombinerende merker unngår ikke skann
     ["Hangul-fyller (default ignorable) i kroppen", insertAt(github, 11, HIDDEN.hangulFiller)],
     ["kombinerende aksent etter prefiksbokstaver", insertAt(insertAt(github, 1, HIDDEN.acute), 3, HIDDEN.ring)],
     ["kombinerende aksent etter hver bokstav i prefikset", [...github.slice(0, 4)].map((c) => c + HIDDEN.acute).join("") + github.slice(4)],
+    ["matematiske fete bokstaver og sifre (astrale kodepunkt som NFKC gjør om til ASCII)", [...github].map((c) => (/[a-z]/.test(c) ? String.fromCodePoint(0x1d41a + c.charCodeAt(0) - 97) : /[A-Z]/.test(c) ? String.fromCodePoint(0x1d400 + c.charCodeAt(0) - 65) : /[0-9]/.test(c) ? String.fromCodePoint(0x1d7ce + c.charCodeAt(0) - 48) : c)).join("")],
     ["fullbredde (ｇｈｐ＿ + kropp)", fullwidth(github)],
     ["fullbredde kun i prefikset", fullwidth(github.slice(0, 4)) + github.slice(4)],
     ["kyrillisk homoglyf (һ for h) i prefikset", github[0] + String.fromCodePoint(0x04bb) + github.slice(2)],
@@ -224,7 +225,8 @@ describe("K3: nøkkelnavn-bevisst tekstform - JSON, Authorization og Cookie", ()
       `{"token_type":"Bearer","expires_in":3600,"expires_at":"2026-12-01T10:00:00Z","scope":"read write"}`,
       `{"password_policy":"strong","password_min_length":12,"secret_name":"JARVIS_GITHUB_TOKEN","api_key_id":"abc-123"}`,
       `{"auth":"none","token":"[REDACTED:named_secret]","description":"passord kreves ikke"}`,
-      `{"user":"kari","email":"kari@example.no","active":true,"password_set":"ja"}`
+      `{"user":"kari","email":"kari@example.no","active":true,"password_set":"ja"}`,
+      `{"mode":"sovereign","credential_binding":"owner_bound","secret_manager":"infisical","token_endpoint":"https://auth.example.com/token"}`
     ]) expect(scanForSecrets(input), input).toEqual({ text: input, findings: [] });
   });
 

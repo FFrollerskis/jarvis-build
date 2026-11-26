@@ -520,6 +520,33 @@ export function describeSecretFindings(findings: SecretFinding[]): string {
   return findings.map((f) => (f.count > 1 ? `${f.kind} ×${f.count}` : f.kind)).join(", ");
 }
 
+/**
+ * WP-SEC2 (K7b): «skann FØRST, kutt etterpå». Kuttes en tekst før skanning, kan en hemmelighet som krysser kuttgrensen bli igjen som et halvt token som ikke lenger matcher noe mønster. Alle steder som lagrer eller viser en
+ * tekst kuttet til en grense bruker denne (eller skanner hele teksten selv).
+ */
+export function clipRedacted(text: string, max: number): string {
+  return scanForSecrets(text).text.slice(0, Math.max(0, max));
+}
+
+/**
+ * WP-SEC2 (K7d): ÉN felles loggredaksjon for driftstekst (`incidents/redact.ts` og `tool-gateway/docker-transport.ts` hadde hver sin kopi av disse mønstrene). De lokale formene (`Bearer <hva som helst>`, hele
+ * `Authorization:`-linjen, `NAVN=verdi` der navnet har TOKEN/KEY/SECRET/PASSWORD/PASSWD/CREDENTIAL) er bevart, og resultatet går alltid gjennom sentralen til slutt - så redaksjonen er aldri svakere enn `scanForSecrets`.
+ * Navneprefikset/-suffikset er BEGRENSET (`{0,64}`, som i sentralen): uten tak er `[A-Z0-9_]*` + nøkkelord kvadratisk på lange løper.
+ */
+const LOG_LOCAL_PATTERNS: ReadonlyArray<{ re: RegExp; replacement: string }> = [
+  { re: /Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, replacement: "Bearer [REDACTED]" },
+  { re: /Authorization:\s*.*/gi, replacement: "Authorization: [REDACTED]" },
+  { re: /gh[pousr]_[A-Za-z0-9]{20,}/g, replacement: "[REDACTED_GITHUB_TOKEN]" },
+  { re: /sk-ant-[A-Za-z0-9\-_]{10,}/g, replacement: "[REDACTED_ANTHROPIC_KEY]" },
+  { re: /((?:[A-Z0-9_]{0,64}(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]{0,64})\s*[:=]\s*)(\S+)/gi, replacement: "$1[REDACTED]" }
+];
+
+export function redactLogText(text: string): string {
+  let result = text;
+  for (const { re, replacement } of LOG_LOCAL_PATTERNS) result = result.replace(re, replacement);
+  return scanForSecrets(result).text;
+}
+
 // eslint-disable-next-line no-control-regex -- kontrolltegn i en loggmelding er nettopp det som skal bort
 const LOG_CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
 /** Øvre grense for hvor mye av en loggverdi som skannes (skann FØRST, kutt etterpå - men arbeidet er begrenset uansett hva leverandøren sender). */

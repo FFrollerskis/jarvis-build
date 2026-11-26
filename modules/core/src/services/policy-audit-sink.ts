@@ -97,13 +97,16 @@ const CLASSES: ReadonlySet<string> = new Set(["A", "B", "C", "D"]);
 const DEGRADED_WINDOW_MS = 5 * 60_000;
 const LOG_THROTTLE_MS = 60_000;
 
-/** Øvre grense for hvor mye fritekst som skannes (arbeidet er begrenset uansett hva en feilende kaller sender). */
-const MAX_SCANNED_TEXT = 4_096;
+/** Øvre grense for hvor mye fritekst som skannes (arbeidet er begrenset uansett hva en feilende kaller sender). Mye større enn `max`: kuttet skjer ETTER skanningen (WP-SEC2 K7b). */
+const MAX_SCANNED_TEXT = 65_536;
 
-/** Fritekst (grunnkode): kontrolltegn bort, hemmeligheter redigert (`[REDACTED:<type>]`), kuttet til `max`. `null` for ikke-tekst/tom. KUN fritekst skannes - id-er gjør det aldri (se `cleanId`). */
+/**
+ * Fritekst (grunnkode): hemmeligheter redigert (`[REDACTED:<type>]`), så kontrolltegn bort, så kuttet til `max`. `null` for ikke-tekst/tom. KUN fritekst skannes - id-er gjør det aldri (se `cleanId`).
+ * WP-SEC2 (K7b): SKANN FØRST, kutt etterpå - og kontrolltegn byttes ut ETTER skanningen (skanneren fjerner dem selv i sin visning), ellers kunne et token delt av et kontrolltegn eller kuttgrensen bli igjen som et halvt token.
+ */
 function cleanText(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
-  const text = scanForSecrets(value.slice(0, MAX_SCANNED_TEXT).replace(CONTROL_CHARS, " ")).text.trim();
+  const text = scanForSecrets(value.length > MAX_SCANNED_TEXT ? value.slice(0, MAX_SCANNED_TEXT) : value).text.replace(CONTROL_CHARS, " ").trim();
   return text.length === 0 ? null : text.slice(0, max);
 }
 

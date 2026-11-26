@@ -87,6 +87,15 @@ describe("K3: nøkkelnavn-bevisst redaksjon i strukturer", () => {
     expect(classifyKey("cache_key").secret).toBe(false);
   });
 
+  it("nøkler der hemmelighetsordet står FORAN noe annet beskriver noe relatert (enum/metadata) og røres ikke - men `…_value`/`…_pem`/`…_code` er selve verdien", () => {
+    const descriptive = { credential_binding: "owner_bound", secret_manager: "infisical", token_endpoint: "https://auth.example.com/token", password_reset_url: "https://example.com/reset", auth_mode: "sovereign", token_source: "infisical-vault", secret_backend: "vault" };
+    const r = scanStructuredForSecrets(descriptive);
+    expect(r.findings).toEqual([]);
+    expect(r.value).toBe(descriptive);
+    const values = scanStructuredForSecrets({ token_value: "abcdefgh", private_key_pem: "xyz", pin_code: "4821", access_code: "k3", error_code: "E_FAIL", status_code: "500" });
+    expect(values.value).toEqual({ token_value: MARK("named_secret"), private_key_pem: MARK("named_secret"), pin_code: MARK("named_secret"), access_code: "k3", error_code: "E_FAIL", status_code: "500" });
+  });
+
   it("tall under en STERK nøkkel (passord/PIN/privat nøkkel) redigeres, men ikke under `token` (ofte en teller); boolske og null røres aldri", () => {
     const r = scanStructuredForSecrets({ password: 12345678, pin: 4821, token: 12345, passwords: 3, secret: true, api_key: null, count: 5 });
     expect(r.value).toEqual({ password: MARK("named_secret"), pin: MARK("named_secret"), token: 12345, passwords: 3, secret: true, api_key: null, count: 5 });
