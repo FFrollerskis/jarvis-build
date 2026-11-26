@@ -1,0 +1,45 @@
+# UTKAST til CODEOWNERS (WP-EV0, H2-0.1/C1) - GENERERT av ops/security/github-governance/codeowners.mjs fra det signerte manifestets beskyttede stier.
+# IKKE AKTIV: `.github/` er en beskyttet sti. Eieren kopierer denne filen til `.github/CODEOWNERS` i en egen eier-PR og bytter plassholderen under med sin egen
+# GitHub-bruker (eller et team) - se ops/security/github-governance/README.md (forutsetninger, fallgruver, hva som er uverifisert).
+# Med regelsettet `ruleset-main.draft.json` slått på krever GitHub review fra kodeeieren for enhver endring av disse stiene, uavhengig av hvem som har skrevet den.
+# Rekkefølge: siste treff vinner; alle linjene her har samme eier, så rekkefølgen er likegyldig.
+
+/modules/policy/ @PLATFORM-OPERATOR
+/modules/owner-controls/ @PLATFORM-OPERATOR
+/modules/self-modification/ @PLATFORM-OPERATOR
+/modules/tool-gateway/src/gateway.ts @PLATFORM-OPERATOR
+/modules/core/src/db/migrations/ @PLATFORM-OPERATOR
+/.github/ @PLATFORM-OPERATOR
+/infra/ @PLATFORM-OPERATOR
+package.json @PLATFORM-OPERATOR
+pnpm-lock.yaml @PLATFORM-OPERATOR
+pnpm-workspace.yaml @PLATFORM-OPERATOR
+/.env* @PLATFORM-OPERATOR
+/docs/security/ @PLATFORM-OPERATOR
+/docs/remediation/ @PLATFORM-OPERATOR
+*CLAUDE.md @PLATFORM-OPERATOR
+/config/evolution/ @PLATFORM-OPERATOR
+/ops/security/ @PLATFORM-OPERATOR
+/ops/backup/ @PLATFORM-OPERATOR
+/ops/break-glass/ @PLATFORM-OPERATOR
+/config/program/ @PLATFORM-OPERATOR
+/ops/job-runner/ @PLATFORM-OPERATOR
+/ops/claude-worker/ @PLATFORM-OPERATOR
+/modules/tool-gateway/src/class-d-pipeline.ts @PLATFORM-OPERATOR
+/modules/tool-gateway/src/finance-class-d.ts @PLATFORM-OPERATOR
+/modules/tool-gateway/src/model-tool-surface.ts @PLATFORM-OPERATOR
+/apps/api/src/step-up.ts @PLATFORM-OPERATOR
+/modules/core/src/services/audit-writer.ts @PLATFORM-OPERATOR
+/modules/core/src/services/policy-audit-sink.ts @PLATFORM-OPERATOR
+/modules/core/src/services/approval-store.ts @PLATFORM-OPERATOR
+/modules/core/src/services/identity-service.ts @PLATFORM-OPERATOR
+/modules/core/src/services/session-grant-service.ts @PLATFORM-OPERATOR
+/modules/core/src/services/device-authority.ts @PLATFORM-OPERATOR
+/modules/core/src/services/channel-session-authority.ts @PLATFORM-OPERATOR
+/modules/core/src/services/voice-session-authority.ts @PLATFORM-OPERATOR
+/modules/core/src/services/telegram-owner-authority.ts @PLATFORM-OPERATOR
+/modules/core/src/services/runtime-role.ts @PLATFORM-OPERATOR
+/modules/core/src/db/pool.ts @PLATFORM-OPERATOR
+/modules/executive/src/self-model/confidence-gate.ts @PLATFORM-OPERATOR
+/docs/SECURITY_MODEL.md @PLATFORM-OPERATOR
+/docs/CANONICAL_SPEC.md @PLATFORM-OPERATOR
