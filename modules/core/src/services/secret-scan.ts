@@ -138,8 +138,22 @@ const PATTERNS: ReadonlyArray<PatternDef> = [
   { kind: "secret_blob", re: /\b(?:secret|key|token|password|passwd|passord|credential|hmac|salt|pepper|signature|seed|nøkkel|hemmelighet)s?\b[ \t]{0,8}(?:(?:is|er|=>|[:=-])[ \t]{0,8})?["'`]?([0-9A-Fa-f]{32,}|[A-Za-z0-9+/_-]{32,}={0,2})(?![A-Za-z0-9+/_=-])/gid, group: 1, skip: blobSkip }
 ];
 
-/** Dedikert kortnummerpass (Luhn) - kjøres sist. Regelen er IKKE utvidet i WP-SEC2. */
+/** Dedikert kortnummerpass (Luhn) - kjøres sist. Regelen er IKKE utvidet i WP-SEC2 (kun innsnevret: en UUID er aldri et kortnummer, se `insideUuid`). */
 const CARD_RE = /\b(?:\d[ -]?){13,19}\b/g;
+const UUID_SHAPE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const isHexOrHyphen = (c: number): boolean => c === 0x2d || (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66);
+
+/**
+ * Et siffertreff som ligger inne i en UUID (`fin-pi-47015187-4988-4107-9302-…`) er ingen kortnummer: de første gruppene i en UUID kan bestå bare av sifre og (10 % av gangene) bestå Luhn. WP-SEC2 skanner mer tekst enn før
+ * (feilårsaker i ledger/audit), og en UUID-id i en `tool_failed:possible_duplicate_of:<id>`-grunn ble tilfeldig til `[REDACTED:card_number]` (oppdaget av `modules/finance/test/wpf1-review-fixes.test.ts`).
+ */
+function insideUuid(text: string, start: number, end: number): boolean {
+  let a = start;
+  while (a > 0 && start - a < 40 && isHexOrHyphen(text.charCodeAt(a - 1))) a -= 1;
+  let b = end;
+  while (b < text.length && b - end < 40 && isHexOrHyphen(text.charCodeAt(b))) b += 1;
+  return UUID_SHAPE.test(text.slice(a, b));
+}
 
 function luhnValid(digits: string): boolean {
   let sum = 0;
@@ -447,6 +461,7 @@ function scanWindow(source: string, ws: number, we: number, isLast: boolean, sta
   for (let m = CARD_RE.exec(text); m !== null; m = CARD_RE.exec(text)) {
     const digits = m[0].replace(/[ -]/g, "");
     if (digits.length < 13 || digits.length > 19 || !luhnValid(digits)) continue;
+    if (insideUuid(text, m.index, m.index + m[0].length)) continue;
     place("card_number", m.index, m.index + m[0].length, true);
   }
 }

@@ -327,6 +327,13 @@ describe("K4: nye formater (alle `unverified`: docs-vertene var blokkert) og kon
     expect(r.text).not.toContain(body(30));
   });
 
+  it("en UUID er aldri et kortnummer: første gruppene av bare sifre som består Luhn (4111 1111 1111 1111) røres ikke, mens et ekte kortnummer fortsatt redigeres", () => {
+    const luhnUuid = ["41111111", "1111", "1111", "9111", "111111111111"].join("-");
+    for (const text of [luhnUuid, `fin-pi-${luhnUuid}`, `tool_failed:possible_duplicate_of:fin-pi-${luhnUuid}`, `id=${luhnUuid.toUpperCase()}`]) expect(scanForSecrets(text), text).toEqual({ text, findings: [] });
+    expect(scanForSecrets("kortet er 4111-1111-1111-1111 ok").findings).toEqual([{ kind: "card_number", count: 1 }]);
+    expect(scanForSecrets("kortet er 4111 1111 1111 1111 ok").text).not.toContain("4111"); // (kortregelen er uendret: den tar med mellomrommet etter sifrene)
+  });
+
   it("hex og base64 redigeres KUN med et hemmelighetsord rett foran (aldri frittstående)", () => {
     const hex = "3f2a9c".repeat(11).slice(0, 64);
     const b64 = body(44, 5);
