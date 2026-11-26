@@ -559,8 +559,8 @@ export class LocalPiperTts implements TtsAdapter {
         return;
       }
       const proc = child;
-      // Ingen prosess (aldri startet), en som allerede er død, eller en som aldri kom i gang (spawn-feil: ingen pid, `exit` er ikke garantert): gi plassen tilbake nå.
-      if (!proc || proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null) {
+      // Ingen prosess (aldri startet) eller en som allerede er død - også en spawn-feil (Node setter da `exitCode` til en negativ errno og sender kun `close`, ikke `exit`): gi plassen tilbake nå.
+      if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
         release();
         return;
       }
