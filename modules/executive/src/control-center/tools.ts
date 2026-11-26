@@ -79,8 +79,25 @@ const WITHHELD_REASON_NO: Readonly<Partial<Record<ControlCenterId, string>>> = {
   finance: "finansdata er SECRET_RESTRICTED (D-378) og går aldri til en skymodell",
   value: "verdimålingene inkluderer AI-kostnad i øre, som holdes som finansdata (SECRET_RESTRICTED, D-378) og ikke går til en skymodell inntil eieren har avgjort noe annet",
   // WP-B3 (D-475): kostmodellen (EV-16) er månedsforbruk, grenser og prognose i øre - samme strengeste regel som Verdi (Q-64) - og hele senteret holdes tilbake (som Verdi), ikke bare kostdelen.
-  evolution: "kostmodellen (EV-16) viser månedsforbruk, grenser og prognose i øre, som holdes som finansdata (SECRET_RESTRICTED, D-378) og ikke går til en skymodell inntil eieren har avgjort noe annet (Q-64)"
+  evolution: "kostmodellen (EV-16) viser månedsforbruk, grenser og prognose i øre, som holdes som finansdata (SECRET_RESTRICTED, D-378) og ikke går til en skymodell inntil eieren har avgjort noe annet (Q-64)",
+  // WP-N1b (K2): sentre som holdes tilbake kun med begrenset-vakten på (`GUARDED_CLOUD_WITHHELD_CENTERS`) - nøytrale tekster UTEN sifre, id-er, tellinger eller leverandørnavn.
+  authority: "senteret viser finansavledet tilstand (finans-nødbryteren, bindinger og bekreftelser for finansverktøy, kostnadsgrenser), som holdes som finansdata og ikke går til en skymodell",
+  integration: "senteret viser finanskoblingene (konfigurasjon, helse, synkjobber og vedlikehold), som er finansavledet metadata og ikke går til en skymodell",
+  ai: "senteret viser modellkostnad (forbruk, prognose og grenser), som holdes som finansdata og ikke går til en skymodell inntil eieren har avgjort noe annet"
 };
+
+/**
+ * WP-N1b (JARVIS-116 a, Q-76 pkt 7, Q-64 pkt 2, K2): sentre som holdes tilbake HELT fra en sky-/ukjent modell KUN når begrenset-vakten er på (sentral lesning, `withholdFinanceFromCurrentModel`): Autoritet (finans-nødbryteren,
+ * bindinger og åpne bekreftelser for finansverktøy, kostnadsgrenser i øre), Integrasjoner (finanskoblingene: konfigurasjon, helse, synkjobber, vedlikehold) og AI (modellkostnad i øre: forbruk, prognose, grenser).
+ * Begrunnelse for HELT i stedet for `restrictFinance` per bygger: de finansavledede delene er spredt over mange steder (seksjonstekster, fakta, handlinger, jobbnavn, tellinger) i tre store byggere, og en bygger som glemmer ÉN av dem lekker
+ * stille; de strukturerte statusverktøyene (`get_connector_status`, `get_capability_status`, `get_control_surface_status`, `get_delegation_board`) gir skyen en FINANSFRI visning av det samme. Eieren (`/control`) og lokal modell får alt.
+ * Med vakten AV er listen uvirksom (som på main). Åpne for skyen igjen = fjern id-en her (og la bygger-versjonen med `restrictFinance` komme som en egen WP).
+ */
+export const GUARDED_CLOUD_WITHHELD_CENTERS: readonly ControlCenterId[] = ["authority", "integration", "ai"];
+
+export function isGuardedCloudWithheldCenter(center: string): boolean {
+  return (GUARDED_CLOUD_WITHHELD_CENTERS as readonly string[]).includes(center);
+}
 
 /**
  * Verktøynøklene (`tool_id.action`) som er håndhevet VED UTFØRELSE mot skymodeller (ikke bare ved utvalg). Låst mot manifestets `restricted`-merking av `wph1-restricted-tools-invariant.test.ts`:
