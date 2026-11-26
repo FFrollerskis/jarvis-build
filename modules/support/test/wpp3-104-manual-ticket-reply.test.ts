@@ -260,6 +260,29 @@ describe("K3: ingestMessage med internt `ticket_id` leser raden (tenant, id) und
     expect((await adminPool.query("SELECT count(*)::int AS n FROM support_ticket_events WHERE tenant_id = $1 AND source_instance_id = $2 AND summary = 'Notat'", [TENANT, ACCOUNT])).rows[0].n).toBe(0);
   }, 60_000);
 
+  it("en TOM `ticket_id` er et oppslag som ikke finnes (ikke «uten ticket_id»): `support_ticket_not_found`, ingen ny ticket og ingen hendelse - heller ikke når (kilde, instans, tråd) peker på et eksisterende ticket", async () => {
+    const support = new SupportService(appPool);
+    const { ticketId, thread } = await threadTicket(support);
+    const before = await countTickets();
+    const events = await countEvents(TENANT, ticketId);
+    // tråden finnes: uten id-vakten ville meldingen blitt festet til det tråd-forankrede ticketet
+    await expect(support.ingestMessage(TENANT, "business", input({ ticket_id: "", source_type: "gmail", source_instance_id: "acct-p3-104", source_thread_id: thread }))).rejects.toThrow("support_ticket_not_found");
+    // tråden finnes ikke: uten id-vakten ville det blitt opprettet et nytt (skygge-)ticket
+    await expect(support.ingestMessage(TENANT, "business", input({ ticket_id: "", source_thread_id: "trad-finnes-ikke-p3" }))).rejects.toThrow("support_ticket_not_found");
+    expect(await countTickets()).toBe(before);
+    expect(await countEvents(TENANT, ticketId)).toBe(events);
+    expect((await adminPool.query("SELECT count(*)::int AS n FROM support_ticket_events WHERE tenant_id = $1 AND source_instance_id = $2 AND summary = 'Notat'", [TENANT, ACCOUNT])).rows[0].n).toBe(0);
+  }, 60_000);
+
+  it("`reply()` med tom ticket-id: `support_ticket_not_found` FØR noe sendes (ingen sending, ingen nye tickets)", async () => {
+    const email = countingEmail(() => ({ external_id: "gmail-p3-tom-id" }));
+    const t = build(email.transport);
+    const before = await countTickets();
+    await expect(t.emailService.reply(TENANT, "business", identity, "", replyInput("p3-tom-id"))).rejects.toThrow("support_ticket_not_found");
+    expect(email.sends()).toBe(0);
+    expect(await countTickets()).toBe(before);
+  }, 60_000);
+
   it("annen tenant og annet rom: `support_ticket_not_found` uten hendelse (RLS + eksplisitt tenant-filter)", async () => {
     const support = new SupportService(appPool);
     const manual = await manualTicket(support);

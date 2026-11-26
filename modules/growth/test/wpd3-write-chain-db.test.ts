@@ -1648,3 +1648,40 @@ describe("V5: WP-P3 fiks-runde 1 (107c) - samtidig duplikat med samme nøkkel: e
     expect(gMut()).toHaveLength(1);
   });
 });
+
+describe("V6: WP-P3 fiks-runde 1 - en NY journalrad som møter en eksisterende ledger-rad for nøkkelen er en kollisjon, også når raden tilhører SAMME tool og handling (ingenting sendes)", () => {
+  const ledgerRow = async (key: string) => (await adminPool.query(`SELECT status FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [A, key])).rows[0] as { status: string } | undefined;
+  const insertLedger = (key: string, status: string) => adminPool.query(
+    `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status, postcondition_reason) VALUES ($1,$2,'growth_googleads','set_campaign_budget',$3,$4)`,
+    [A, key, status, status === "unverified" ? "postcondition_unverified:tool_timeout_outcome_unknown" : null]
+  );
+  const inputFor = (key: string) => ({ idempotency_key: key, provider: "google_ads", action: "set_campaign_budget", parameters: { customer_id: CID, campaign_id: "101", amount_ore: 40_000 } });
+
+  // Et direkte gatewaykall utenfor journalen (eller en slettet journalrad) kan ha latt en ledger-rad for samme tool og handling. Uten `begun.created ||` i vakten ville en `failed` rad blitt re-armet av gatewayen og
+  // utført som en NY mutasjon uten at noen tidligere journalrad kan bevise nøkkelen (de andre statusene gir UKJENT/dedupe i stedet for kollisjon, og gatewayen ville ha vært kalt).
+  it.each(["failed", "reserved", "unverified", "succeeded"])("ledger-rad `%s` (samme tool og handling, ingen journalrad): FAILED `growth_write_idempotency_key_collision`, gatewayen kalles ikke, ingen leverandørmutasjon, ledgeren urørt", async (status) => {
+    const key = uniq(`p3-v6-${status}`);
+    await insertLedger(key, status);
+    let calls = 0;
+    const gw = { get: gateway.get.bind(gateway), execute: async (req: Parameters<typeof gateway.execute>[0]) => { calls += 1; return gateway.execute(req); } };
+    const res = await executeGrowthWrite({ ...exec, gateway: gw as never }, owner, inputFor(key));
+    expect(res).toMatchObject({ outcome: "FAILED", reason: "growth_write_idempotency_key_collision", replayed: false });
+    expect(res.write.status).toBe("failed");
+    expect(res.write.external_id).toBeNull();
+    expect(calls).toBe(0);
+    expect(gMut()).toHaveLength(0);
+    expect(gads.budgets.get("11")?.micros).toBe(500_000_000);
+    expect(await ledgerRow(key)).toEqual({ status });
+    // nøkkelen er brent: en replay gir bare det lagrede utfallet (journalraden er terminal), fortsatt uten sending
+    const again = await executeGrowthWrite({ ...exec, gateway: gw as never }, owner, inputFor(key));
+    expect(again).toMatchObject({ outcome: "FAILED", reason: "growth_write_idempotency_key_collision", replayed: true });
+    expect(calls).toBe(0);
+    expect(gMut()).toHaveLength(0);
+  });
+
+  it("kontroll: uten noen ledger-rad (og uten journalrad) utføres en ny forespørsel som før", async () => {
+    const res = await executeGrowthWrite(exec, owner, inputFor(uniq("p3-v6-fresh")));
+    expect(res).toMatchObject({ outcome: "SUCCESS", replayed: false });
+    expect(gMut()).toHaveLength(1);
+  });
+});
