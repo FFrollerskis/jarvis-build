@@ -8,6 +8,7 @@ import {
 import { PassthroughAec, PassthroughNoiseSuppressor, rmsEnergy, type AudioFilter } from "./audio.ts";
 import { EnergyVad, type VadAdapter } from "./vad.ts";
 import { SentenceChunker } from "./chunker.ts";
+import { isRequestNotSent } from "./core-errors.ts";
 import { errorCode, withDeadline } from "./deadline.ts";
 import { UtteranceJournal, journalKey } from "./journal.ts";
 import { DEFAULT_VOICE_LIMITS, VoiceBusyError } from "./limits.ts";
@@ -689,9 +690,10 @@ export class VoiceSession {
         this.journal.complete(journalId);
       } else {
         // §27: normalisert brukerrettet feil - tekniske detaljer kun i logg/audit.
-        console.error(JSON.stringify({ msg: "voice_core_error", error: (err as Error).message.slice(0, 200) }));
-        // `voice_session_required` kastes av HttpCoreClient FØR noe HTTP-kall (ubevist sti): ingenting nådde Core.
-        notSent = (err as Error).message === "voice_session_required";
+        // FIX-5: kun en feil som BEVISER at forespørselen aldri nådde Core (`voice_session_required` før noe HTTP-kall, eller nektet tilkobling/DNS) frigjør
+        // claimen så klienten kan sende på nytt. Alt annet (reset midt i, lesefeil, HTTP-feil, frist, avbrudd) er UKJENT utfall: claimen beholdes, aldri retry.
+        notSent = isRequestNotSent(err);
+        console.error(JSON.stringify({ msg: "voice_core_error", error: (err as Error).message.slice(0, 200), request_not_sent: notSent }));
         // WP-V2 (K4): en Core-frist er en egen, synlig feilkode (ikke bare «core_error»).
         this.events.onError((err as Error).message === "core_timeout" ? "core_timeout" : "core_error");
       }

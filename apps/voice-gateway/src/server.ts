@@ -12,6 +12,7 @@ import {
   type VoiceSessionGrant
 } from "@jarvis/contracts";
 import { debugDumpEnabled } from "./debug-audio-dump.ts";
+import { classifyFetchFailure } from "./core-errors.ts";
 import { deadlineSignal } from "./deadline.ts";
 import { VoiceHealth } from "./health.ts";
 import { UtteranceJournal } from "./journal.ts";
@@ -105,11 +106,14 @@ export class HttpCoreClient implements CoreClient {
     const body = this.body(identity, message);
     const deadline = deadlineSignal(this.timeouts.turnTimeoutMs ?? DEFAULT_CORE_TURN_TIMEOUT_MS);
     try {
+      // FIX-5: en feil fra tilkoblings-/DNS-fasen BEVISER at forespørselen aldri nådde Core (`CoreRequestNotSentError`); alt annet gis uendret videre.
       const response = await fetch(`${this.baseUrl}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body,
         signal: deadline.signal
+      }).catch((err: unknown) => {
+        throw classifyFetchFailure(err);
       });
       if (!response.ok) {
         throw new Error(`core_${response.status}`);
@@ -162,6 +166,8 @@ export class HttpCoreClient implements CoreClient {
       headers: { "content-type": "application/json", accept: "text/event-stream" },
       body,
       signal
+    }).catch((err: unknown) => {
+      throw classifyFetchFailure(err); // FIX-5: se `chat()`
     });
     if (!response.ok || !response.body) {
       throw new Error(`core_${response.status}`);
