@@ -113,3 +113,27 @@ describe("B-H2: feil i avmeldingen ruller tilbake hele hendelsen (retry behandle
     expect(hello.body).toMatchObject({ events: { inserted: 1, opt_outs: 0, opt_ins: 0 } });
   });
 });
+
+describe("B-H2/X6: hendelsen og STOP-effekten bruker NØYAKTIG ÉN transaksjon (rask, ren assertion i stedet for en henging)", () => {
+  /**
+   * `recordInbound` tar mottakerlåsen i sin transaksjon og skriver dedupe-raden og avmeldingen under den. Kjørte avmeldingen i en EGEN transaksjon (egen forbindelse), ville den vente på låsen `recordInbound` selv holder: en selv-vranglås
+   * som uten tidsgrense bare ga en 159 s lang test-timeout. Med `lock_timeout` på de to forbindelsene blir det et rask, tydelig avslag (SQLSTATE 55P03 etter ca. 2 s), og denne testen feiler på `resolves`-sjekken, ikke på en timeout.
+   */
+  it("en STOP gjennom webhook-tjenesten fullfører på ÉN forbindelse med lock_timeout 2 s: avmeldt, nøyaktig én hendelsesrad og én avmeldingsrad", async () => {
+    const guarded = db.appPool({ lockTimeoutMs: 2000 });
+    const guardedStore = new CommsStore(guarded, clock, { startTieMarginMs: 0 });
+    const guardedService = new CommsWebhookService({
+      store: guardedStore, graph: new ConversationGraphService(guarded),
+      config: parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "whatsapp", JARVIS_COMMS_WEBHOOKS: "meta", JARVIS_COMMS_TENANT_ID: TENANT_A }),
+      secrets: { get: async (ref) => (ref === WEBHOOK_SECRET_REFS.meta ? META_SECRET : null) }, clock
+    });
+    const from = phone();
+    const mid = `wamid.x6-single-tx-${++n}`;
+    const started = Date.now();
+    await expect(guardedService.handle("meta", metaReq(waStop(digits(from), mid)))).resolves.toMatchObject({ status: 200 });
+    expect(Date.now() - started, "ingen venting på en lås: fullfører langt under lock_timeout").toBeLessThan(1500);
+    expect(await opted(from)).toBe(true);
+    expect(await eventRows(`wa:msg:${mid}`)).toHaveLength(1);
+    expect(await optRows(from)).toHaveLength(1);
+  }, 30_000);
+});
