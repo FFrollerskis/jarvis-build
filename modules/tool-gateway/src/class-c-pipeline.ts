@@ -554,6 +554,8 @@ const ADAPTER_KEY = /^[a-z0-9][a-z0-9_-]*\.[a-z0-9_]+$/;
  */
 export const CLASS_C_OWNER_OVERRIDE_ACTIONS: ReadonlySet<string> = new Set([
   "executive.pause_domain", "executive.resume_domain", "executive.freeze_connector", "executive.unfreeze_connector", "executive.revoke_credential", "executive.restore_credential", "executive.revoke_device",
+  // Innstramminger eieren gjør selv: tilbakekall av en autonomi-binding og av en kommunikasjonskonto (stopper utgående på kontoen).
+  "executive.revoke_autonomy_binding", "comms.revoke_account",
   "situations.pause_domain", "situations.unpause_domain", "situations.pause_all", "situations.unpause_all"
 ]);
 
