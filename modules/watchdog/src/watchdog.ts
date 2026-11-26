@@ -144,6 +144,8 @@ export class Watchdog {
   private readonly lastAlert = new Map<string, { message: string; at: number }>();
   /** WP-E1: valgfri observatør av hvert fullførte tikk. Feil i observatøren påvirker ALDRI vakthunden (logges, aldri kastet), og tikket venter ikke på den. */
   private observer: ((report: WatchdogTickReport) => void | Promise<void>) | undefined;
+  /** WP-OPS2a K3: når siste tikk FULLFØRTE (vakthundens egen klokke, ms). Grunnlaget for den eksterne dead man's switch-en: et hengt eller dødt tikk flytter det aldri. */
+  private lastTickCompletedAt: number | null = null;
 
   constructor(
     private readonly alerts: AlertSink,
@@ -172,6 +174,14 @@ export class Watchdog {
   /** Sant mens en tick() faktisk kjører - kun til test-/observabilitetsbruk. */
   isTicking(): boolean {
     return this.ticking;
+  }
+
+  /**
+   * WP-OPS2a K3: tidspunktet (ms, samme klokke som vakthunden) da siste tikk FULLFØRTE, eller `null` før første. Settes KUN når et tikk faktisk er ferdig (alle sjekker kjørt, også de som feilet eller fikk tidsavbrudd) - et hoppet
+   * overlappende tikk setter det ikke, og et tikk som henger (f.eks. en varslingssink som aldri svarer) flytter det ikke. Den eksterne heartbeaten (`apps/api/src/watchdog-heartbeat.ts`) pinger kun mens dette er ferskt.
+   */
+  lastCompletedTickAt(): number | null {
+    return this.lastTickCompletedAt;
   }
 
   async tick(): Promise<Alert[]> {
@@ -250,6 +260,7 @@ export class Watchdog {
           console.error(JSON.stringify({ msg: "watchdog_observer_failed", error: (err as Error).message }));
         }
       }
+      this.lastTickCompletedAt = this.now();
       return fired;
     } finally {
       this.ticking = false;

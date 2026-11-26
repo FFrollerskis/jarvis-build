@@ -5,6 +5,7 @@ import { envInt, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { createWatchdogIncidentBridge, parseIncidentProducerConfig } from "./incident-producers.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
+import { poolPing, startWatchdogHeartbeat } from "./watchdog-heartbeat.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPolicyAuditSinkFromEnv, createPool, installPolicyAuditDrain, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ClaudeBudgetEnforcer, claudeBudgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv, type ClaudeBudgetConfig } from "@jarvis/model-gateway";
@@ -635,6 +636,9 @@ setInterval(
       .catch((err) => console.error(JSON.stringify({ msg: "watchdog_tick_error", error: (err as Error).message }))),
   WATCHDOG_INTERVAL_MS
 );
+// WP-OPS2a K3: ekstern dead man's switch for vakthunden. AV uten URL-variabelen (ingen timer, ingen utgående kall; se watchdog-heartbeat.ts). Pinger eierens EGEN monitor kun mens siste FULLFØRTE tikk er ferskt og databasen svarer; stillhet er alarmen.
+// Kaster aldri (ugyldig konfig logges uten URL og starter ikke), og timerne er unref - workeren kan ikke velte av denne.
+startWatchdogHeartbeat({ watchdog, watchdogIntervalMs: WATCHDOG_INTERVAL_MS, dbPing: poolPing(pool) });
 // WP-B4 (D-476): Telegram-varsel om Claude-kreditten (50/75/90/100 % og tempo over 1,3 × kurven) - ÉN gang per terskel per kredittperiode, via vakthundens eksisterende varslingsvei (samme sink som `costWarningCheck`,
 // D-395). Kun eierens tenant. AV uten JARVIS_CLAUDE_BUDGET_USD. Ingen modellkall og ingen verktøykall: kun lesing av `cost_events` og skriving av revisjonsmarkører.
 if (claudeBudgetConfig !== null) {

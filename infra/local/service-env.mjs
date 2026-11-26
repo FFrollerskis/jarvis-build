@@ -464,7 +464,10 @@ export const SERVICE_ENV = {
     // (valgfri override) - uten den, og med tomme verdier her, feiler hver kodejobb lukket som før.
     "JARVIS_JOB_RUNNER_SOCKET", "JARVIS_JOB_RUNNER_TOKEN_FILE",
     // WP-D1 (UA-2): konfigurerte kunnskapskilder (dvale uten), allowlistede basemapper for filsystemkilder og det valgfrie modellassisterte entitetspasset (AV som standard).
-    "JARVIS_KNOWLEDGE_SOURCES", "JARVIS_KNOWLEDGE_FS_ROOTS", "JARVIS_KNOWLEDGE_ENTITY_LLM"],
+    "JARVIS_KNOWLEDGE_SOURCES", "JARVIS_KNOWLEDGE_FS_ROOTS", "JARVIS_KNOWLEDGE_ENTITY_LLM",
+    // WP-OPS2a (K3): ekstern dead man's switch for VAKTHUNDEN - worker pinger eierens EGEN monitor kun mens siste fullførte vakthund-tikk er ferskt og databasen svarer (stillhet = alarm). AV uten URL. Worker-only
+    // (vakthunden kjører kun i worker; api har sin egen JARVIS_UPTIME_HEARTBEAT_URL). URL-en er en kapabilitet (nøkkelen står ofte i stien) og logges aldri. Se docs/runbooks/WPOPS2A_WATCHDOG.md.
+    "JARVIS_WATCHDOG_HEARTBEAT_URL", "JARVIS_WATCHDOG_HEARTBEAT_INTERVAL_SEC"],
   // migrate: engangs-jobb med ADMIN-rollen (CREATE ROLE/EXTENSION/RLS) - IKKE en runtime-tjeneste. Får den distinkte
   // runtime-rollens passord for å opprette rollen, men ingen connector-/modellnøkler.
   migrate: ["JARVIS_DB_ADMIN_USER", "JARVIS_DB_ADMIN_PASSWORD", "JARVIS_DB_USER", "JARVIS_DB_PASSWORD", "JARVIS_ENV", "JARVIS_TENANT_ID", "JARVIS_OWNER_PERSON_ID", "JARVIS_OWNER_NAME"],

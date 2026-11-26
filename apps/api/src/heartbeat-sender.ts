@@ -28,20 +28,23 @@ const MAX_URL_LENGTH = 2048;
 const FIRST_TICK_DELAY_MS = 15_000;
 const LOG_EVERY_N = 10;
 
+/** Variabelen API-heartbeaten leses fra - standard i feilmeldingene. WP-OPS2a K3: andre kallere (vakthundens heartbeat) gir sitt EGET variabelnavn, så meldingen peker på riktig innstilling. */
+const UPTIME_URL_ENV = "JARVIS_UPTIME_HEARTBEAT_URL";
+
 /** https:// (http:// kun mot loopback, for test/lokal proxy); ingen brukerinfo/fragment/mellomrom. Feilmeldingen siterer ALDRI URL-en (nøkkelen står i den). */
-export function validateHeartbeatUrl(raw: string): URL {
-  if (raw.length === 0 || raw.length > MAX_URL_LENGTH || UNSAFE.test(raw)) throw new HeartbeatConfigError("JARVIS_UPTIME_HEARTBEAT_URL: ugyldig URL (tom, for lang, mellomrom/kontrolltegn eller backslash)");
+export function validateHeartbeatUrl(raw: string, envName: string = UPTIME_URL_ENV): URL {
+  if (raw.length === 0 || raw.length > MAX_URL_LENGTH || UNSAFE.test(raw)) throw new HeartbeatConfigError(`${envName}: ugyldig URL (tom, for lang, mellomrom/kontrolltegn eller backslash)`);
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new HeartbeatConfigError("JARVIS_UPTIME_HEARTBEAT_URL: ikke en gyldig URL");
+    throw new HeartbeatConfigError(`${envName}: ikke en gyldig URL`);
   }
-  if (url.username !== "" || url.password !== "") throw new HeartbeatConfigError("JARVIS_UPTIME_HEARTBEAT_URL: brukerinfo i URL er ikke tillatt");
-  if (url.hash !== "") throw new HeartbeatConfigError("JARVIS_UPTIME_HEARTBEAT_URL: fragment (#) er ikke tillatt");
-  if (url.hostname === "") throw new HeartbeatConfigError("JARVIS_UPTIME_HEARTBEAT_URL: mangler vert");
+  if (url.username !== "" || url.password !== "") throw new HeartbeatConfigError(`${envName}: brukerinfo i URL er ikke tillatt`);
+  if (url.hash !== "") throw new HeartbeatConfigError(`${envName}: fragment (#) er ikke tillatt`);
+  if (url.hostname === "") throw new HeartbeatConfigError(`${envName}: mangler vert`);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))) {
-    throw new HeartbeatConfigError("JARVIS_UPTIME_HEARTBEAT_URL: kun https:// er tillatt (http:// bare mot loopback, for test)");
+    throw new HeartbeatConfigError(`${envName}: kun https:// er tillatt (http:// bare mot loopback, for test)`);
   }
   return url;
 }
@@ -70,18 +73,23 @@ export interface PingResult {
 }
 export type PingFn = (url: string, timeoutMs: number) => Promise<PingResult>;
 
-/** Standard utsending: GET via `guardedFetch`, ingen redirect, svarkroppen leses aldri. */
-export const sendPing: PingFn = async (url, timeoutMs) => {
-  try {
-    const res = await guardedFetch(url, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { "user-agent": "jarvis-api-uptime/1" } });
-    await res.body?.cancel().catch(() => undefined);
-    if (res.status >= 200 && res.status < 300) return { ok: true, status: res.status, reason: null };
-    return { ok: false, status: res.status, reason: `http_${res.status}` };
-  } catch (err) {
-    const name = (err as { name?: string })?.name;
-    return { ok: false, status: null, reason: name === "TimeoutError" || name === "AbortError" ? "timeout" : "network" };
-  }
-};
+/** Utsending: GET via `guardedFetch`, ingen redirect, svarkroppen leses aldri. WP-OPS2a K3: user-agent er valgfri (vakthundens heartbeat bruker sin egen), `sendPing` under er uendret. */
+export function makeSendPing(userAgent: string): PingFn {
+  return async (url, timeoutMs) => {
+    try {
+      const res = await guardedFetch(url, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { "user-agent": userAgent } });
+      await res.body?.cancel().catch(() => undefined);
+      if (res.status >= 200 && res.status < 300) return { ok: true, status: res.status, reason: null };
+      return { ok: false, status: res.status, reason: `http_${res.status}` };
+    } catch (err) {
+      const name = (err as { name?: string })?.name;
+      return { ok: false, status: null, reason: name === "TimeoutError" || name === "AbortError" ? "timeout" : "network" };
+    }
+  };
+}
+
+/** Standard utsending for API-heartbeaten (uendret user-agent). */
+export const sendPing: PingFn = makeSendPing("jarvis-api-uptime/1");
 
 /** Selvsjekken: API-et svarer på sin egen port og `/health` (som kjører beredskapssjekken inkl. databasen) gir 200. Kaster aldri. */
 export function loopbackSelfCheck(port: number, fetchImpl: typeof fetch = fetch, timeoutMs = 3000): () => Promise<boolean> {
@@ -107,6 +115,10 @@ export interface HeartbeatSenderOptions {
   sendTimeoutMs?: number;
   now?: () => Date;
   log?: HeartbeatLog;
+  /** WP-OPS2a K3: prefiks på loggeventene (`<name>_started`, `<name>_selfcheck_failed` ...). Standard `uptime_heartbeat` (uendret for API-et). */
+  name?: string;
+  /** WP-OPS2a K3: user-agent for standard utsending når `send` ikke er gitt. Standard `jarvis-api-uptime/1` (uendret for API-et). */
+  userAgent?: string;
 }
 export type TickOutcome = "sent" | "send_failed" | "silent" | "skipped_busy";
 
@@ -123,9 +135,11 @@ export class HeartbeatSender {
   private readonly sendTimeoutMs: number;
   private readonly now: () => Date;
   private readonly log: HeartbeatLog;
+  private readonly name: string;
 
   constructor(private readonly options: HeartbeatSenderOptions) {
-    this.send = options.send ?? sendPing;
+    this.name = options.name ?? "uptime_heartbeat";
+    this.send = options.send ?? (options.userAgent !== undefined ? makeSendPing(options.userAgent) : sendPing);
     this.selfCheckTimeoutMs = options.selfCheckTimeoutMs ?? 5_000;
     this.sendTimeoutMs = options.sendTimeoutMs ?? 5_000;
     this.now = options.now ?? (() => new Date());
@@ -153,11 +167,11 @@ export class HeartbeatSender {
       if (!healthy) {
         this.silentTicks += 1;
         if (this.silentTicks === 1 || this.silentTicks % LOG_EVERY_N === 0) {
-          this.log({ msg: "uptime_heartbeat_selfcheck_failed", silent_ticks: this.silentTicks, note: "sender IKKE ping (stillhet = alarm hos monitoren)" });
+          this.log({ msg: `${this.name}_selfcheck_failed`, silent_ticks: this.silentTicks, note: "sender IKKE ping (stillhet = alarm hos monitoren)" });
         }
         return "silent";
       }
-      if (this.silentTicks > 0) this.log({ msg: "uptime_heartbeat_selfcheck_recovered", silent_ticks: this.silentTicks });
+      if (this.silentTicks > 0) this.log({ msg: `${this.name}_selfcheck_recovered`, silent_ticks: this.silentTicks });
       this.silentTicks = 0;
       let result: PingResult;
       try {
@@ -166,14 +180,14 @@ export class HeartbeatSender {
         result = { ok: false, status: null, reason: "network" };
       }
       if (result.ok) {
-        if (this.sendFailures > 0) this.log({ msg: "uptime_heartbeat_ping_recovered", failures: this.sendFailures, target: this.options.origin });
+        if (this.sendFailures > 0) this.log({ msg: `${this.name}_ping_recovered`, failures: this.sendFailures, target: this.options.origin });
         this.sendFailures = 0;
         this.lastOkAt = this.now().toISOString();
         return "sent";
       }
       this.sendFailures += 1;
       if (this.sendFailures === 1 || this.sendFailures % LOG_EVERY_N === 0) {
-        this.log({ msg: "uptime_heartbeat_ping_failed", reason: result.reason, target: this.options.origin, consecutive_failures: this.sendFailures });
+        this.log({ msg: `${this.name}_ping_failed`, reason: result.reason, target: this.options.origin, consecutive_failures: this.sendFailures });
       }
       return "send_failed";
     } finally {
@@ -183,7 +197,7 @@ export class HeartbeatSender {
 
   start(): void {
     if (this.timer !== undefined) return;
-    this.log({ msg: "uptime_heartbeat_started", target: this.options.origin, interval_sec: Math.round(this.options.intervalMs / 1000) });
+    this.log({ msg: `${this.name}_started`, target: this.options.origin, interval_sec: Math.round(this.options.intervalMs / 1000) });
     const run = () => void this.tick().catch(() => undefined);
     // Første ping kort etter oppstart (serveren må rekke å lytte), deretter fast intervall. Ingen timer holder prosessen i live.
     this.firstTimer = setTimeout(run, Math.min(this.options.intervalMs, FIRST_TICK_DELAY_MS));
