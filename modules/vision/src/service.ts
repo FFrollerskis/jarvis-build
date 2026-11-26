@@ -271,7 +271,11 @@ export class VisionService {
     });
   }
 
-  /** Eksplisitt eier-handling - endrer KUN retensjonsvinduet, oppretter/leser ALDRI observasjoner selv. */
+  /**
+   * @internal GAMMEL, lav-nivå skriving (kun tester og engangskjøringer; ingen produksjonskode kaller den): den omgår advisory-låsen, den typede bekreftelsen ved forkorting, grensene (kun > 0, ingen øvre grense) og revisjonsraden
+   * (`vision.retention_set`). Eierens eneste vei er `applyRetentionPolicy` via `/vision/retention/set`; en kildevakt i wpg3b-vision-retention-routes.test.ts pinner at ingen produksjonskode bruker denne.
+   * Eksplisitt eier-handling - endrer KUN retensjonsvinduet, oppretter/leser ALDRI observasjoner selv.
+   */
   async setRetentionPolicy(
     tenantId: string,
     memorySpace: MemorySpace,

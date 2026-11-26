@@ -154,18 +154,20 @@ function publicRequest(request: CaptureRequest): Record<string, unknown> {
 }
 
 /**
- * Retensjonssvaret (get og set): KUN dager og tidspunkt (aldri tenant, aktør eller andre kolonner), pluss de faste standardene og grensene slik at klienten ikke trenger å gjette dem. Feltene bygges eksplisitt (ingen spread), så en
+ * Retensjonssvaret (get og set): KUN dager og tidspunkt (aldri tenant, aktør eller andre kolonner), pluss de faste standardene og grensene slik at klienten ikke trenger å gjette dem, og `memory_space` = GRANTETS eget space (hvilket rom raden gjelder;
+ * kommer fra grantet, aldri fra raden eller kroppen). Feltene bygges eksplisitt (ingen spread), så en
  * utvidet rad aldri kan lekke ut. `applies_to: "new_records"`: vinduene er forankret VED SKRIVING (`retention_expires_at` settes ved innsetting) - en endring gjelder rader som skrives etter den og sletter ikke lagrede hendelser, bilder eller
  * inventar. Unntak (egen, avledet tabell): signalsituasjoner i domenet `vision` ryddes mot `min(JARVIS_SITUATION_LOG_RETENTION_DAYS, hendelsesvinduet)` ved sveipet (G4, kun med JARVIS_SITUATION_SIGNALS=on), så en forkorting kan fjerne EKSISTERENDE
  * avledede situasjoner (også åpne og `security_alert`) - derfor typet bekreftelse, og derfor `affects_existing: ["signal_situations"]` (stabil kode; feltet finnes KUN med signalbryteren på, ellers er svaret uendret).
  */
-function retentionData(view: VisionRetentionView, derivedOn: boolean): Record<string, unknown> {
+function retentionData(view: VisionRetentionView, space: string, derivedOn: boolean): Record<string, unknown> {
   return {
     configured: view.configured,
     retention_days: view.retention_days,
     snapshot_retention_days: view.snapshot_retention_days,
     effective_snapshot_retention_days: view.effective_snapshot_retention_days,
     updated_at: view.updated_at,
+    memory_space: space,
     defaults: { retention_days: DEFAULT_RETENTION_DAYS, snapshot_retention_days: DEFAULT_SNAPSHOT_RETENTION_DAYS },
     limits: { retention_days: { min: MIN_RETENTION_DAYS, max: MAX_RETENTION_DAYS }, snapshot_retention_days: { min: MIN_RETENTION_DAYS, max: MAX_SNAPSHOT_RETENTION_DAYS } },
     applies_to: "new_records",
@@ -290,7 +292,7 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
           h.json(503, { error: "retention_unavailable", request_id: requestId });
           return true;
         }
-        h.json(200, { ok: true, data: { retention: retentionData(await deps.retention.getRetentionView(tenant, space), deps.signalSituationWindowDays !== undefined) } });
+        h.json(200, { ok: true, data: { retention: retentionData(await deps.retention.getRetentionView(tenant, space), space, deps.signalSituationWindowDays !== undefined) } });
         return true;
       }
       case "/vision/retention/set": {
@@ -310,7 +312,7 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
           );
           // `shortened`: navnene på vinduene som ble kortere (samme form som i 409-svaret og i revisjonsraden; tom liste = ingen forkorting).
           const shortened = (["retention_days", "snapshot_retention_days"] as const).filter((field) => result.shortened[field]);
-          h.json(200, { ok: true, data: { changed: result.changed, shortened, retention: retentionData(result.current, deps.signalSituationWindowDays !== undefined) } });
+          h.json(200, { ok: true, data: { changed: result.changed, shortened, retention: retentionData(result.current, space, deps.signalSituationWindowDays !== undefined) } });
         } catch (err) {
           if (!(err instanceof VisionRetentionConfirmationRequiredError)) throw err;
           // `affects_existing` (kun når DENNE endringen gjør det avledede G4-vinduet kortere): å bekrefte kan la neste sveip slette eksisterende avledede situasjoner (også åpne og `security_alert`). Stabile koder, aldri fri tekst.

@@ -165,8 +165,8 @@ describe("get: gjeldende vinduer (standardene når ingenting er satt)", () => {
   it("uten rad: standardene, `configured: false`, de faste grensene og `applies_to` - og BARE de feltene (ingen tenant, aktør eller rom)", async () => {
     const res = await get();
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, data: { retention: { ...DEFAULT_VIEW, ...STATIC_PART } } });
-    expect(Object.keys(res.body["data"]["retention"]).sort()).toEqual(["applies_to", "configured", "defaults", "effective_snapshot_retention_days", "limits", "retention_days", "snapshot_retention_days", "updated_at"]);
+    expect(res.body).toEqual({ ok: true, data: { retention: { ...DEFAULT_VIEW, ...STATIC_PART, memory_space: "home" } } });
+    expect(Object.keys(res.body["data"]["retention"]).sort()).toEqual(["applies_to", "configured", "defaults", "effective_snapshot_retention_days", "limits", "memory_space", "retention_days", "snapshot_retention_days", "updated_at"]);
     // grensene i svaret er de samme som koden bruker
     expect(STATIC_PART.defaults).toEqual({ retention_days: DEFAULT_RETENTION_DAYS, snapshot_retention_days: DEFAULT_SNAPSHOT_RETENTION_DAYS });
     expect(STATIC_PART.limits).toEqual({ retention_days: { min: MIN_RETENTION_DAYS, max: MAX_RETENTION_DAYS }, snapshot_retention_days: { min: MIN_RETENTION_DAYS, max: MAX_SNAPSHOT_RETENTION_DAYS } });
@@ -178,6 +178,22 @@ describe("get: gjeldende vinduer (standardene når ingenting er satt)", () => {
     expect(res.body["data"]["retention"]).toMatchObject({ configured: true, retention_days: 5, snapshot_retention_days: 9, effective_snapshot_retention_days: 5 });
     expect(new Date(res.body["data"]["retention"]["updated_at"] as string).toISOString()).toBe(res.body["data"]["retention"]["updated_at"]);
     expect(JSON.stringify(res.body)).not.toMatch(new RegExp(`${T.tenant}|${T.owner}|actor_person_id|tenant_id`));
+  });
+});
+
+describe("get/set oppgir hvilket space svaret gjelder (grantets eget space - aldri tenant eller person)", () => {
+  it("`memory_space` er grantets space på get og set, og et annet space-grant får sitt eget; en tjeneste hvis rad bærer et annet rom (`memory_space_id`) kan ikke endre det ruten sier", async () => {
+    expect((await get()).body["data"]["retention"]["memory_space"]).toBe("home");
+    expect((await get("owner-signed-personal")).body["data"]["retention"]["memory_space"]).toBe("personal");
+    const written = await set({ retention_days: 40, snapshot_retention_days: null }, "owner-signed-personal");
+    expect(written.status, written.text).toBe(200);
+    expect(written.body["data"]["retention"]["memory_space"]).toBe("personal");
+    expect(await row(T.tenant, "personal")).toMatchObject({ retention_days: 40 }); // raden ligger i det spacet svaret sier
+    expect(await row(T.tenant, "home")).toBeUndefined();
+    expect((await get("owner-signed", urlLeaky)).body["data"]["retention"]["memory_space"]).toBe("home"); // LEAKY_VIEW.memory_space_id = "home-lekkasje"
+    const leaky = await set({ retention_days: 12, snapshot_retention_days: 4 }, "owner-signed", urlLeaky);
+    expect(leaky.body["data"]["retention"]["memory_space"]).toBe("home");
+    expect(leaky.text).not.toMatch(/lekkasje/);
   });
 });
 
@@ -364,7 +380,7 @@ describe("isolasjon: space og tenant", () => {
 
 describe("svaret bygges eksplisitt: kun de fem feltene + faste standarder/grenser, selv om tjenesten gir mer", () => {
   it("en tjeneste som returnerer ekstra felt (tenant, aktør, rom, notat) lekker ingenting gjennom get eller set", async () => {
-    const WHITELIST = ["applies_to", "configured", "defaults", "effective_snapshot_retention_days", "limits", "retention_days", "snapshot_retention_days", "updated_at"];
+    const WHITELIST = ["applies_to", "configured", "defaults", "effective_snapshot_retention_days", "limits", "memory_space", "retention_days", "snapshot_retention_days", "updated_at"];
     const read = await get("owner-signed", urlLeaky);
     expect(read.status).toBe(200);
     expect(Object.keys(read.body["data"]["retention"]).sort()).toEqual(WHITELIST);
@@ -398,6 +414,15 @@ describe("aldri et modellverktøy: eier-ruten er eneste vei til skriving av vind
     expect(all.filter((f) => /setRetentionPolicy\(/.test(f.code) && /tool|intent|transport/i.test(f.file)).map((f) => f.file)).toEqual([]);
     // ingen modellvendt verktøydefinisjon nevner retensjonsruten eller de to tjenestemetodene
     expect(all.filter((f) => /(tool|intent|surface|capabilit)/i.test(f.file) && /(retention_set|retention_get|applyRetentionPolicy|getRetentionView)/.test(f.code)).map((f) => f.file)).toEqual([]);
+  });
+
+  it("den gamle `setRetentionPolicy` er merket `@internal` (omgår advisory-lås, typet bekreftelse, grenser og revisjon), og INGEN produksjonskode som bruker `@jarvis/vision` kaller den - `applyRetentionPolicy` via eier-ruten er eneste vei", () => {
+    const raw = readFileSync(`${ROOT}modules/vision/src/service.ts`, "utf8");
+    expect(raw.match(/async setRetentionPolicy\(/g)).toHaveLength(1);
+    expect(raw).toMatch(/@internal(?:(?!\*\/)[\s\S])*\*\/\s*async setRetentionPolicy\(/); // @internal står i doc-kommentaren rett over metoden
+    expect(raw).toMatch(/@internal(?:(?!\*\/)[\s\S])*omgår(?:(?!\*\/)[\s\S])*\*\/\s*async setRetentionPolicy\(/);
+    const callers = sources().filter((f) => /\bsetRetentionPolicy\(/.test(f.code) && f.file !== "modules/vision/src/service.ts" && (/@jarvis\/vision/.test(f.code) || f.file.startsWith("modules/vision/src/")));
+    expect(callers.map((f) => f.file)).toEqual([]);
   });
 
   it("ruten er `owner_write`/`owner_read` i rutetabellen (aldri `device`), og `confirm`-nøklene finnes bare på `set`", () => {
