@@ -180,6 +180,24 @@ describe("gjennom gatewayen: eierens ventende autorisering overlever churn fra s
     }
   });
 
+  it("en BEVIST tilkobling forblir vernet (markProven) også når en ny start på samme socket avslås - den skilles fra en tilkobling med pågående autorisering først ved vedtaket", async () => {
+    const core = new GatedCore();
+    core.releaseOwner(); // ingen venting
+    gateway = await startGateway({ core, limits: { maxConnectionsPerPeer: 2, maxUnprovenPerPeer: 2 } });
+    const owner = await new TestClient(gateway.url).connect();
+    owner.send(ownerStart);
+    await owner.waitFor((m) => m.type === "started"); // bevist: markProven
+    core.deny = true;
+    owner.send(ownerStart); // nytt bevis på samme socket - Core avslår (sesjonen er revet, men tilkoblingen er fortsatt bevist, jf. «Gjenstår» i runbooken)
+    await owner.waitFor((m) => m.type === "error" && String(m["error"]).startsWith("voice_authority_denied"));
+    const other = await new TestClient(gateway.url).connect(); // peeren er full (2)
+    const third = await new TestClient(gateway.url).connect(); // den eneste utkastbare er `other` - aldri den bevisste eieren (som er eldst)
+    await other.waitClosed();
+    expect(other.closeEvent).toEqual({ code: 1013, reason: "evicted" });
+    expect(owner.closeEvent).toBeNull();
+    for (const c of [owner, third]) c.close();
+  });
+
   it("Core-autorisering som aldri kommer (Core-frist): ingen utkasting underveis, og når fristen går ut er tilkoblingen utkastbar igjen", async () => {
     // GatedCore med lukket gate = «Core henger». Fristen simuleres av at autoriseringen kaster etter en stund (som HttpCoreClient sin AbortSignal.timeout).
     class HangThenFail extends ScriptedCore {
