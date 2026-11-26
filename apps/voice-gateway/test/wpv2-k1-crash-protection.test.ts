@@ -101,6 +101,35 @@ describe("K1a: ugyldige WebSocket-rammer krasjer aldri gatewayen", () => {
     bystander.close();
   });
 
+  it("en ugyldig ramme frigjør tilkoblingsplassen umiddelbart (connections.active tilbake til 0) selv om motparten ikke svarer på close", async () => {
+    gateway = await startGateway();
+    const active = async (): Promise<number> =>
+      ((await (await fetch(`http://127.0.0.1:${gateway!.port}/status`)).json()) as { connections: { active: number } }).connections.active;
+    const socket = createConnection({ host: "127.0.0.1", port: gateway.port });
+    let closedAt = 0;
+    socket.on("close", () => {
+      closedAt = Date.now();
+    });
+    socket.on("error", () => undefined);
+    let handshake = "";
+    socket.on("data", (d) => {
+      handshake += d.toString("latin1"); // leser, men svarer ALDRI på close-rammen
+    });
+    socket.write("GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+    const started = Date.now();
+    while (!handshake.includes("101") && Date.now() - started < 3000) await sleep(10);
+    expect(handshake).toContain("101");
+    expect(await active()).toBe(1);
+    const sentAt = Date.now();
+    socket.write(Buffer.from([0x83, 0x80, 1, 2, 3, 4])); // maskert ramme med reservert opcode 3
+    while (closedAt === 0 && Date.now() - sentAt < 8000) await sleep(20);
+    expect(closedAt).toBeGreaterThan(0);
+    expect(closedAt - sentAt).toBeLessThan(3000);
+    await sleep(100);
+    expect(await active()).toBe(0);
+    expect(tracker.errors).toEqual([]);
+  }, 20_000);
+
   it("ødelagt HTTP-forespørsel (clientError): 400 og prosessen overlever", async () => {
     gateway = await startGateway();
     const response = await new Promise<string>((resolve) => {

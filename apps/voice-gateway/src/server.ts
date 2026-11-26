@@ -441,6 +441,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
     // sender `close` etterpå - her logges kun en kode (aldri meldingsinnhold).
     ws.on("error", (err) => {
       console.error(JSON.stringify({ msg: "voice_ws_error", code: codeOf(err) }));
+      // ws har allerede sendt close-rammen (1007/1002/1009) og avslutter selv socketen ved en mottakerfeil - testet i wpv2-k1 (plassen frigjøres).
     });
 
     // WP-V2 (K2): kapasitet. Over grensen = definert avvisning (1013 «prøv igjen senere»), aldri et krasj og aldri en påvirkning av andre økter.
