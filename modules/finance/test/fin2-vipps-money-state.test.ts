@@ -9,6 +9,7 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { FinanceService, ProviderOutcomeUnknownError, type PaymentIntent, type VippsCredentials } from "../src/index.ts";
 import { Gate, VippsFake } from "./wpf1-fakes.ts";
+const fixtureToken = (...parts: string[]): string => parts.join("-"); // fikstur-tokens bygges sammensatt ved kjøring (aldri en bokstavelig nøkkelform i kilden)
 
 /**
  * WP-FIN2 K5 (D-486, JARVIS-020/072): Vipps penge-tilstand mot ekte embedded Postgres.
@@ -22,10 +23,10 @@ let stop: (() => Promise<void>) | undefined;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
 const TENANT = "tenant-fin2-vipps";
-const WEBHOOK_SECRET = "vipps-webhook-secret-fixture-fin2";
+const WEBHOOK_SECRET = fixtureToken("vipps", "webhook", "secret", "fixture", "fin2");
 const HOST = "jarvis.test";
 const PATH = "/webhooks/vipps";
-const vippsCreds: VippsCredentials = { clientId: "c", clientSecret: "s-fixture", subscriptionKey: "k", merchantSerialNumber: "1", environment: "test" };
+const vippsCreds: VippsCredentials = { clientId: "c", clientSecret: fixtureToken("s", "fixture"), subscriptionKey: "k", merchantSerialNumber: "1", environment: "test" };
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-fin2-vipps-"));

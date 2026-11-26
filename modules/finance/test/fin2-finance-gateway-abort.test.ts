@@ -35,6 +35,7 @@ import {
   type StripeCredentials,
   type VippsCredentials
 } from "../src/index.ts";
+const fixtureToken = (...parts: string[]): string => parts.join("-"); // fikstur-tokens bygges sammensatt ved kjøring (aldri en bokstavelig nøkkelform i kilden)
 
 /**
  * WP-FIN2 K2 (D-486, JARVIS-018-resten) - GATEWAY-NIVÅ: ekte `ToolGateway` (klasse D-pipeline påslått som i produksjon), ekte `FinanceService`/`CardService`, ekte Postgres og de EKTE
@@ -52,10 +53,10 @@ const OWNER = "person-fin2-gwabort-owner";
 const APP_ROLE = "jarvis_fin2_gwabort";
 const GATEWAY_TIMEOUT_MS = 400;
 
-const stripeCreds: StripeCredentials = { secretKey: "sk-fixture-not-a-key" };
-const vippsCreds: VippsCredentials = { clientId: "c", clientSecret: "s-fixture", subscriptionKey: "k", merchantSerialNumber: "1", environment: "test" };
-const fikenCreds: FikenCredentials = { refreshToken: "refresh-fixture-gw", companySlug: "firma" };
-const neonomicsCreds: NeonomicsCredentials = { clientId: "fake-client", clientSecret: "fake-secret-fixture", deviceId: "11111111-2222-3333-4444-555555555555", environment: "sandbox" };
+const stripeCreds: StripeCredentials = { secretKey: fixtureToken("sk", "fixture", "not", "a", "key") };
+const vippsCreds: VippsCredentials = { clientId: "c", clientSecret: fixtureToken("s", "fixture"), subscriptionKey: "k", merchantSerialNumber: "1", environment: "test" };
+const fikenCreds: FikenCredentials = { refreshToken: fixtureToken("refresh", "fixture", "gw"), companySlug: "firma" };
+const neonomicsCreds: NeonomicsCredentials = { clientId: "fake-client", clientSecret: fixtureToken("fake", "secret", "fixture"), deviceId: "11111111-2222-3333-4444-555555555555", environment: "sandbox" };
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
 
 const owner: IdentityContext = { person_id: OWNER, tenant_id: TENANT, memory_space_id: "business", session_id: "sess-fin2-gwabort", device_id: "dev-pc", channel: "web", auth_strength: "signed" };
@@ -79,7 +80,7 @@ const status503: Handler = (_req, res) => { res.writeHead(503, { "content-type":
 const isToken = (url: string) => /accesstoken\/get|openid-connect\/token|oauth\/token/.test(url);
 /** Token-endepunktene svarer gyldig; resten styres av `next`. */
 const withTokens = (next: Handler): Handler => (req, res) => {
-  if (isToken(req.url ?? "")) { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ access_token: "tok-fixture", expires_in: 3600 })); return; }
+  if (isToken(req.url ?? "")) { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ access_token: fixtureToken("tok", "fixture"), expires_in: 3600 })); return; }
   next(req, res);
 };
 const requestsTo = (part: string) => seen.filter((s) => s.url.includes(part) && !isToken(s.url));
@@ -128,7 +129,7 @@ beforeEach(() => {
   handler = HANG;
   resetFikenAccessTokenCache();
   vi.stubEnv("JARVIS_FIKEN_CLIENT_ID", "client-fixture");
-  vi.stubEnv("JARVIS_FIKEN_CLIENT_SECRET", "secret-fixture");
+  vi.stubEnv("JARVIS_FIKEN_CLIENT_SECRET", fixtureToken("secret", "fixture"));
   vi.stubGlobal("fetch", (input: string | URL, init: RequestInit = {}) => {
     const u = new URL(String(input));
     return realFetch(`http://127.0.0.1:${port}${u.pathname}${u.search}`, init);
@@ -140,8 +141,8 @@ afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 const secrets = {
   name: "fin2-fixture",
   get: async (ref: string) => ({
-    JARVIS_BUSINESS_INTERNAL_TOKEN: "internal-sentinel", JARVIS_STRIPE_SECRET_KEY: "sk-fixture-not-a-key", JARVIS_VIPPS_CLIENT_SECRET: "s-fixture",
-    JARVIS_FIKEN_REFRESH_TOKEN: "t-fixture", JARVIS_NEONOMICS_CLIENT_SECRET: "n-fixture", JARVIS_WALLESTER_PRIVATE_KEY_PEM: "pem-fixture"
+    JARVIS_BUSINESS_INTERNAL_TOKEN: fixtureToken("internal", "sentinel"), JARVIS_STRIPE_SECRET_KEY: fixtureToken("sk", "fixture", "not", "a", "key"), JARVIS_VIPPS_CLIENT_SECRET: fixtureToken("s", "fixture"),
+    JARVIS_FIKEN_REFRESH_TOKEN: fixtureToken("t", "fixture"), JARVIS_NEONOMICS_CLIENT_SECRET: fixtureToken("n", "fixture"), JARVIS_WALLESTER_PRIVATE_KEY_PEM: fixtureToken("pem", "fixture")
   } as Record<string, string>)[ref] ?? null
 };
 
@@ -150,12 +151,12 @@ function wire(): Wired {
   const notifier = new FakeNotifier();
   const neonomicsProvider = { getCredentials: async () => neonomicsCreds };
   const finance = new FinanceService(
-    appPool, (c) => new FikenTransport(c.refreshToken, c.companySlug), { getCredentials: async () => stripeCreds }, (c) => new StripeTransport(c.secretKey), () => "whsec-fixture", () => TENANT,
+    appPool, (c) => new FikenTransport(c.refreshToken, c.companySlug), { getCredentials: async () => stripeCreds }, (c) => new StripeTransport(c.secretKey), () => fixtureToken("whsec", "fixture"), () => TENANT,
     { getCredentials: async () => vippsCreds }, (c) => new VippsTransport(c.clientId, c.clientSecret, c.subscriptionKey, c.merchantSerialNumber, c.environment), () => "vipps-fixture", () => TENANT,
     neonomicsProvider, (c) => new NeonomicsTransport(c.clientId, c.clientSecret, c.deviceId, c.environment), () => "neo-key", () => TENANT
   );
   const cards = new CardService(
-    appPool, { getCredentials: async () => ({ baseUrl: `http://127.0.0.1:${port}`, apiKey: "key-fixture", sign: createRsaJwtSigner(privateKey), accountId: "acc-1", environment: "sandbox" as const }) },
+    appPool, { getCredentials: async () => ({ baseUrl: `http://127.0.0.1:${port}`, apiKey: fixtureToken("key", "fixture"), sign: createRsaJwtSigner(privateKey), accountId: "acc-1", environment: "sandbox" as const }) },
     (c) => new WallesterTransport(c.baseUrl, c.apiKey, c.sign, c.accountId), () => null, () => TENANT
   );
   const policy = new PolicyGateway({

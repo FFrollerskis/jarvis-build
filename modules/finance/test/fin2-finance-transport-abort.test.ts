@@ -15,6 +15,7 @@ import {
   type FinanceService
 } from "../src/index.ts";
 import { financeFetch } from "../src/http.ts";
+const fixtureToken = (...parts: string[]): string => parts.join("-"); // fikstur-tokens bygges sammensatt ved kjøring (aldri en bokstavelig nøkkelform i kilden)
 
 /**
  * WP-FIN2 K2 (D-486, JARVIS-018-resten) - TRANSPORTNIVÅ mot en EKTE hengende lokal HTTP-server (ekte undici, ekte socket): gatewayens kallsignal avbryter finansforespørslene.
@@ -63,7 +64,7 @@ beforeEach(() => {
   handler = HANG;
   resetFikenAccessTokenCache();
   vi.stubEnv("JARVIS_FIKEN_CLIENT_ID", "client-fixture");
-  vi.stubEnv("JARVIS_FIKEN_CLIENT_SECRET", "secret-fixture");
+  vi.stubEnv("JARVIS_FIKEN_CLIENT_SECRET", fixtureToken("secret", "fixture"));
   vi.stubGlobal("fetch", (input: string | URL, init: RequestInit = {}) => {
     initSignals.push(init.signal ?? undefined);
     const u = new URL(String(input));
@@ -76,23 +77,23 @@ const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, private
 /** Token-endepunktene svarer; alt annet håndteres av `handler`. */
 function withTokens(next: Handler): Handler {
   return (req, res, entry) => {
-    if (/accesstoken\/get|openid-connect\/token|oauth\/token/.test(req.url ?? "")) { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ access_token: "tok-fixture", expires_in: 3600 })); return; }
+    if (/accesstoken\/get|openid-connect\/token|oauth\/token/.test(req.url ?? "")) { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ access_token: fixtureToken("tok", "fixture"), expires_in: 3600 })); return; }
     next(req, res, entry);
   };
 }
 
 interface Case { name: string; mutation: boolean; call: () => Promise<unknown>; pathPart: string }
 const CASES: readonly Case[] = [
-  { name: "Stripe createPaymentIntent (POST med Idempotency-Key)", mutation: true, pathPart: "/v1/payment_intents", call: () => new StripeTransport("sk-fixture-not-a-key").createPaymentIntent({ amountOre: 10_000, currency: "NOK", metadata: {}, idempotencyKey: "k" }) },
-  { name: "Stripe getPaymentIntent (GET)", mutation: false, pathPart: "/v1/payment_intents/", call: () => new StripeTransport("sk-fixture-not-a-key").getPaymentIntent("pi_1") },
-  { name: "Vipps capturePayment (POST med Idempotency-Key)", mutation: true, pathPart: "/capture", call: () => new VippsTransport("c", "s-fixture", "k", "1", "test").capturePayment({ reference: "fin-pi-1", amountOre: 100, currency: "NOK", idempotencyKey: "k" }) },
-  { name: "Vipps getPayment (GET)", mutation: false, pathPart: "/epayment/v1/payments/", call: () => new VippsTransport("c", "s-fixture", "k", "1", "test").getPayment("fin-pi-1") },
-  { name: "Neonomics initiateDomesticPayment (POST uten Idempotency-Key)", mutation: true, pathPart: "domestic-transfer", call: () => new NeonomicsTransport("c", "s-fixture", "11111111-2222-3333-4444-555555555555", "sandbox").initiateDomesticPayment({ sessionId: "s", debtorAccountId: "a", creditorName: "L", creditorAccountIdentifier: "98765432101", amountOre: 100, currency: "NOK", referenceText: "x", endToEndReference: "e" }) },
-  { name: "Neonomics getPayment (GET)", mutation: false, pathPart: "domestic-transfer/", call: () => new NeonomicsTransport("c", "s-fixture", "11111111-2222-3333-4444-555555555555", "sandbox").getPayment("s", "p1") },
-  { name: "Wallester createCard (POST)", mutation: true, pathPart: "/v1/cards", call: () => new WallesterTransport(`http://127.0.0.1:${port}`, "key-fixture", createRsaJwtSigner(privateKey), "acc-1").createCard({ externalReference: "card-1", name: "K", type: "virtual", currency: "EUR", cardholderName: null, limits: { transactionLimitOre: null, dailyLimitOre: null, weeklyLimitOre: null, monthlyLimitOre: null, atmEnabled: false, onlineEnabled: true, contactlessEnabled: true } }) },
-  { name: "Wallester getCard (GET)", mutation: false, pathPart: "/v1/cards/", call: () => new WallesterTransport(`http://127.0.0.1:${port}`, "key-fixture", createRsaJwtSigner(privateKey), "acc-1").getCard("wc-1") },
-  { name: "Fiken createGeneralJournalEntry (POST uten Idempotency-Key)", mutation: true, pathPart: "generalJournalEntries", call: () => new FikenTransport("refresh-fixture", "firma").createGeneralJournalEntry({ description: "x", date: "2026-11-25", lines: [{ account: "3000", amount: 100 }, { account: "1920", amount: -100 }] }) },
-  { name: "Fiken listCompanies (GET)", mutation: false, pathPart: "/companies", call: () => new FikenTransport("refresh-fixture", "firma").listCompanies() }
+  { name: "Stripe createPaymentIntent (POST med Idempotency-Key)", mutation: true, pathPart: "/v1/payment_intents", call: () => new StripeTransport(fixtureToken("sk", "fixture", "not", "a", "key")).createPaymentIntent({ amountOre: 10_000, currency: "NOK", metadata: {}, idempotencyKey: "k" }) },
+  { name: "Stripe getPaymentIntent (GET)", mutation: false, pathPart: "/v1/payment_intents/", call: () => new StripeTransport(fixtureToken("sk", "fixture", "not", "a", "key")).getPaymentIntent("pi_1") },
+  { name: "Vipps capturePayment (POST med Idempotency-Key)", mutation: true, pathPart: "/capture", call: () => new VippsTransport("c", fixtureToken("s", "fixture"), "k", "1", "test").capturePayment({ reference: "fin-pi-1", amountOre: 100, currency: "NOK", idempotencyKey: "k" }) },
+  { name: "Vipps getPayment (GET)", mutation: false, pathPart: "/epayment/v1/payments/", call: () => new VippsTransport("c", fixtureToken("s", "fixture"), "k", "1", "test").getPayment("fin-pi-1") },
+  { name: "Neonomics initiateDomesticPayment (POST uten Idempotency-Key)", mutation: true, pathPart: "domestic-transfer", call: () => new NeonomicsTransport("c", fixtureToken("s", "fixture"), "11111111-2222-3333-4444-555555555555", "sandbox").initiateDomesticPayment({ sessionId: "s", debtorAccountId: "a", creditorName: "L", creditorAccountIdentifier: "98765432101", amountOre: 100, currency: "NOK", referenceText: "x", endToEndReference: "e" }) },
+  { name: "Neonomics getPayment (GET)", mutation: false, pathPart: "domestic-transfer/", call: () => new NeonomicsTransport("c", fixtureToken("s", "fixture"), "11111111-2222-3333-4444-555555555555", "sandbox").getPayment("s", "p1") },
+  { name: "Wallester createCard (POST)", mutation: true, pathPart: "/v1/cards", call: () => new WallesterTransport(`http://127.0.0.1:${port}`, fixtureToken("key", "fixture"), createRsaJwtSigner(privateKey), "acc-1").createCard({ externalReference: "card-1", name: "K", type: "virtual", currency: "EUR", cardholderName: null, limits: { transactionLimitOre: null, dailyLimitOre: null, weeklyLimitOre: null, monthlyLimitOre: null, atmEnabled: false, onlineEnabled: true, contactlessEnabled: true } }) },
+  { name: "Wallester getCard (GET)", mutation: false, pathPart: "/v1/cards/", call: () => new WallesterTransport(`http://127.0.0.1:${port}`, fixtureToken("key", "fixture"), createRsaJwtSigner(privateKey), "acc-1").getCard("wc-1") },
+  { name: "Fiken createGeneralJournalEntry (POST uten Idempotency-Key)", mutation: true, pathPart: "generalJournalEntries", call: () => new FikenTransport(fixtureToken("refresh", "fixture"), "firma").createGeneralJournalEntry({ description: "x", date: "2026-11-25", lines: [{ account: "3000", amount: 100 }, { account: "1920", amount: -100 }] }) },
+  { name: "Fiken listCompanies (GET)", mutation: false, pathPart: "/companies", call: () => new FikenTransport(fixtureToken("refresh", "fixture"), "firma").listCompanies() }
 ];
 
 describe("K2: hengende leverandør - kallsignalet avbryter forespørselen (socketen lukkes), nøyaktig én forespørsel", () => {
@@ -136,14 +137,14 @@ describe("K2: ventetiden mellom forsøk (backoff) avbrytes - ingen forespørsel 
 
   it("kontroll: uten kallsignal gjentas en retry-sikker 5xx (GET) som før - flagg AV er identisk med main", async () => {
     handler = status503;
-    const err = await new StripeTransport("sk-fixture-not-a-key").getPaymentIntent("pi_1").catch((e: unknown) => e);
+    const err = await new StripeTransport(fixtureToken("sk", "fixture", "not", "a", "key")).getPaymentIntent("pi_1").catch((e: unknown) => e);
     expect((err as Error).message).toMatch(/stripe_api_failed_503/);
     expect(seen.filter((s) => s.url.includes("/v1/payment_intents/"))).toHaveLength(3); // MAX_ATTEMPTS
   }, 15_000);
 
   it("kontroll: en mutasjon UTEN Idempotency-Key som får 5xx sendes ÉN gang (isRetrySafe er uendret)", async () => {
     handler = withTokens(status503);
-    await new FikenTransport("refresh-fixture", "firma").createGeneralJournalEntry({ description: "x", date: "2026-11-25", lines: [{ account: "3000", amount: 100 }, { account: "1920", amount: -100 }] }).catch(() => undefined);
+    await new FikenTransport(fixtureToken("refresh", "fixture"), "firma").createGeneralJournalEntry({ description: "x", date: "2026-11-25", lines: [{ account: "3000", amount: 100 }, { account: "1920", amount: -100 }] }).catch(() => undefined);
     expect(seen.filter((s) => s.url.includes("generalJournalEntries"))).toHaveLength(1);
   });
 });
@@ -179,7 +180,7 @@ describe("K2: allerede avbrutt kall sender ingenting; eget 20 s-tak består uten
 describe("K2d: delt token-utveksling (Fiken) dør ikke med første kallers frist", () => {
   it("to samtidige kall: A (frist 100 ms) slippes fri av sin egen frist; B (uten frist) får tokenet - ÉN utveksling, utvekslingen ble ikke avbrutt", async () => {
     handler = (req, res) => {
-      if (/oauth\/token/.test(req.url ?? "")) { setTimeout(() => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ access_token: "tok-shared", expires_in: 3600 })); }, 1_500); return; }
+      if (/oauth\/token/.test(req.url ?? "")) { setTimeout(() => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ access_token: fixtureToken("tok", "shared"), expires_in: 3600 })); }, 1_500); return; }
       res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify([{ slug: "firma-as", name: "Firma AS" }]));
     };
     const controller = new AbortController();

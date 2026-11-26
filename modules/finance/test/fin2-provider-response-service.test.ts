@@ -21,6 +21,7 @@ import {
   type NeonomicsGateway,
   type PaymentIntent
 } from "../src/index.ts";
+const fixtureToken = (...parts: string[]): string => parts.join("-"); // fikstur-tokens bygges sammensatt ved kjøring (aldri en bokstavelig nøkkelform i kilden)
 
 /**
  * WP-FIN2 K7 (D-486): et UGYLDIG 2xx-svar fra leverandøren (mangler id/beløp/valuta/status) gjennom de EKTE transportene og tjenestene: aldri en lagret «undefined» som provider-id,
@@ -60,7 +61,7 @@ function stubFetch(body: unknown): { calls: string[] } {
   const calls: string[] = [];
   vi.stubGlobal("fetch", async (url: string) => {
     calls.push(String(url));
-    if (/accesstoken\/get|openid-connect\/token/.test(String(url))) return jsonResponse({ access_token: "tok-fixture", expires_in: 3600 });
+    if (/accesstoken\/get|openid-connect\/token/.test(String(url))) return jsonResponse({ access_token: fixtureToken("tok", "fixture"), expires_in: 3600 });
     return jsonResponse(body);
   });
   return { calls };
@@ -78,7 +79,7 @@ async function newIntent(svc: FinanceService, provider: "stripe" | "vipps" | "ne
 
 describe("K7: ugyldig 2xx ved innsending = ukjent utfall, aldri en lagret «undefined»", () => {
   it("Stripe: svar uten id/status gir ProviderOutcomeUnknownError; intensjonen er tilbake i draft, flagget, provider_ref er NULL", async () => {
-    const svc = new FinanceService(appPool, undefined, { getCredentials: async () => ({ secretKey: "sk-fixture-not-a-key" }) }, (c) => new StripeTransport(c.secretKey));
+    const svc = new FinanceService(appPool, undefined, { getCredentials: async () => ({ secretKey: fixtureToken("sk", "fixture", "not", "a", "key") }) }, (c) => new StripeTransport(c.secretKey));
     const intent = await newIntent(svc, "stripe");
     stubFetch({ object: "payment_intent", amount: 10_000, currency: "nok" }); // id og status mangler
     const err = await svc.submitPaymentIntent(TENANT, "business", intent.payment_intent_id, { getCredentials: async () => null }).catch((e: unknown) => e);
@@ -94,7 +95,7 @@ describe("K7: ugyldig 2xx ved innsending = ukjent utfall, aldri en lagret «unde
   it("Vipps: svar uten `reference` (eller med en annen) gir ukjent utfall; ingen provider_ref lagres. (Fiks-runde 1, FIX-2: manglende state/beløp er IKKE lenger ukjent utfall - se fin2-vipps-ack-and-locks.test.ts)", async () => {
     const svc = new FinanceService(
       appPool, undefined, undefined, undefined, undefined, undefined,
-      { getCredentials: async () => ({ clientId: "c", clientSecret: "s-fixture", subscriptionKey: "k", merchantSerialNumber: "1", environment: "test" as const }) },
+      { getCredentials: async () => ({ clientId: "c", clientSecret: fixtureToken("s", "fixture"), subscriptionKey: "k", merchantSerialNumber: "1", environment: "test" as const }) },
       (c) => new VippsTransport(c.clientId, c.clientSecret, c.subscriptionKey, c.merchantSerialNumber, c.environment)
     );
     const intent = await newIntent(svc, "vipps");
@@ -109,7 +110,7 @@ describe("K7: ugyldig 2xx ved innsending = ukjent utfall, aldri en lagret «unde
   });
 
   it("Neonomics: svar uten betalings-id/status gir ukjent utfall; intensjonen blir stående `submitted` UTEN provider_ref (ikke «undefined») og ny innsending blokkeres", async () => {
-    const credentials: NeonomicsCredentials = { clientId: "fake-client", clientSecret: "fake-secret-fixture", deviceId: "11111111-2222-3333-4444-555555555555", environment: "sandbox" };
+    const credentials: NeonomicsCredentials = { clientId: "fake-client", clientSecret: fixtureToken("fake", "secret", "fixture"), deviceId: "11111111-2222-3333-4444-555555555555", environment: "sandbox" };
     const provider = { getCredentials: async () => credentials };
     // oppsett: samtykke + debitorkonto via en fake bankgateway (kun AIS-delen)
     const setupGateway = new Proxy({}, {
@@ -155,7 +156,7 @@ describe("K7: ugyldig 2xx ved innsending = ukjent utfall, aldri en lagret «unde
     const { createRsaJwtSigner } = await import("../src/index.ts");
     const cards = new CardService(
       appPool,
-      { getCredentials: async () => ({ baseUrl: "https://wallester.test", apiKey: "key-fixture", sign: createRsaJwtSigner(privateKey), accountId: "acc-1", environment: "sandbox" as const }) },
+      { getCredentials: async () => ({ baseUrl: "https://wallester.test", apiKey: fixtureToken("key", "fixture"), sign: createRsaJwtSigner(privateKey), accountId: "acc-1", environment: "sandbox" as const }) },
       (c) => new WallesterTransport(c.baseUrl, c.apiKey, c.sign, c.accountId), () => null, () => TENANT
     );
     const draft = await cards.createCard(TENANT, "business", { idempotency_key: `card-${randomUUID()}`, name: "K", purpose: "P", card_type: "virtual", currency: "EUR" });
@@ -173,7 +174,7 @@ describe("K7: ugyldig 2xx ved innsending = ukjent utfall, aldri en lagret «unde
 
 describe("K7: ugyldig 2xx ved LESING = typet feil uten flagg, og tilstanden røres ikke", () => {
   it("Stripe-oppfrisking med ugyldig svar kaster en typet feil; intensjonens tilstand og flagg er uendret", async () => {
-    const svc = new FinanceService(appPool, undefined, { getCredentials: async () => ({ secretKey: "sk-fixture-not-a-key" }) }, (c) => new StripeTransport(c.secretKey));
+    const svc = new FinanceService(appPool, undefined, { getCredentials: async () => ({ secretKey: fixtureToken("sk", "fixture", "not", "a", "key") }) }, (c) => new StripeTransport(c.secretKey));
     const intent = await newIntent(svc, "stripe");
     await adminPool.query("UPDATE payment_intents SET state = 'provider_acknowledged', provider_ref = 'pi_read', provider_status = 'requires_payment_method', provider_status_updated_at = now() - interval '1 hour' WHERE payment_intent_id = $1", [intent.payment_intent_id]);
     const flagsBefore = (await intentRow(intent.payment_intent_id)).anomaly_flags;

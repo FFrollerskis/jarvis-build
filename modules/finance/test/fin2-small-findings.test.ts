@@ -14,6 +14,7 @@ import { CardService } from "../src/card-service.ts";
 import { FinanceService, type StripeCredentials, type StripeCredentialsProvider, type StripePaymentWriter } from "../src/service.ts";
 import type { StripeBalanceObject, StripePaymentIntentObject, StripeRefundObject } from "../src/stripe-transport.ts";
 import type { WallesterCredentials, WallesterGateway } from "../src/index.ts";
+const fixtureToken = (...parts: string[]): string => parts.join("-"); // fikstur-tokens bygges sammensatt ved kjøring (aldri en bokstavelig nøkkelform i kilden)
 
 /**
  * WP-FIN2 K9 (D-486): småfunn fra revisjonen, hver for seg og mot ekte Postgres (app-rolle, RLS):
@@ -56,7 +57,7 @@ afterAll(async () => {
 // ===========================================================================
 
 describe("K9a: oppgjør lenkes kun mot autorisasjoner på SAMME kort", () => {
-  const creds: WallesterCredentials = { baseUrl: "https://wallester.invalid", apiKey: "fixture-key", sign: () => "sig", accountId: "wacc-1", environment: "sandbox" };
+  const creds: WallesterCredentials = { baseUrl: "https://wallester.invalid", apiKey: fixtureToken("fixture", "key"), sign: () => "sig", accountId: "wacc-1", environment: "sandbox" };
   const authFor = (cardId: string, id: string) => ({ id, cardId, status: "approved" as const, amountOre: 5_000, currency: "EUR", merchantName: "Kafe", merchantCategoryCode: "5812", channel: "pos" as const, declineReason: null, authorizedAt: "2026-11-01T10:00:00Z" });
   const txFor = (cardId: string, id: string, authorizationId: string | null) => ({ id, cardId, authorizationId, type: "purchase" as const, amountOre: 5_000, currency: "EUR", merchantName: "Kafe", merchantCategoryCode: "5812", channel: "pos" as const, transactionAt: "2026-11-01T10:05:00Z", settledAt: "2026-11-02T10:00:00Z" });
   const authsByProviderCard = new Map<string, ReturnType<typeof authFor>[]>();

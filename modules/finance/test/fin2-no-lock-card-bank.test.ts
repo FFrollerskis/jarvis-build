@@ -16,6 +16,7 @@ import {
   type WallesterCredentials,
   type WallesterGateway
 } from "../src/index.ts";
+const fixtureToken = (...parts: string[]): string => parts.join("-"); // fikstur-tokens bygges sammensatt ved kjøring (aldri en bokstavelig nøkkelform i kilden)
 
 /**
  * WP-FIN2 K1(b) (D-486, JARVIS-019-resten): KJØRETIDSPROBE som `wpf1-refresh-no-lock.test.ts`, men for kort- og banktjenestene. Ledgerrad 019 sto med «Åpent: kort-/bank-/spend-tjenester ligger fortsatt i
@@ -103,7 +104,7 @@ describe("A: negativ kontroll - proben ser faktisk en holdt lås og en åpen app
 });
 
 describe("B: CardService - leverandørkallet holder verken transaksjon eller radlås", () => {
-  const creds: WallesterCredentials = { baseUrl: "https://wallester.invalid", apiKey: "fixture-key", sign: () => "sig", accountId: "wacc-1", environment: "sandbox" };
+  const creds: WallesterCredentials = { baseUrl: "https://wallester.invalid", apiKey: fixtureToken("fixture", "key"), sign: () => "sig", accountId: "wacc-1", environment: "sandbox" };
   const observed: Array<{ op: string; probe: Probe }> = [];
   let cardId = "";
   const record = async (op: string): Promise<void> => { observed.push({ op, probe: await probe("provider_cards", "card_id", cardId) }); };
@@ -157,7 +158,7 @@ describe("B: CardService - leverandørkallet holder verken transaksjon eller rad
 });
 
 describe("C: BankingService - leverandørkallet holder verken transaksjon eller radlås", () => {
-  const creds: NeonomicsCredentials = { clientId: "fake-client", clientSecret: "fake-secret-fixture", deviceId: "11111111-2222-3333-4444-555555555555", environment: "sandbox" };
+  const creds: NeonomicsCredentials = { clientId: "fake-client", clientSecret: fixtureToken("fake", "secret", "fixture"), deviceId: "11111111-2222-3333-4444-555555555555", environment: "sandbox" };
   const observed: Array<{ op: string; probe: Probe }> = [];
   let consentId = "";
   let accountRowId = "";

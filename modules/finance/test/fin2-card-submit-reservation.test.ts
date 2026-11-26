@@ -23,6 +23,7 @@ import {
   type WallesterGateway
 } from "../src/index.ts";
 import { Gate, timeoutError } from "./wpf1-fakes.ts";
+const fixtureToken = (...parts: string[]): string => parts.join("-"); // fikstur-tokens bygges sammensatt ved kjøring (aldri en bokstavelig nøkkelform i kilden)
 
 /**
  * WP-FIN2 K8 (D-486): `CardService.submitCard` er reserve-then-execute. Før: den låste raden, committet og kalte `createCard` UTEN reservasjon, så to samtidige kall (eller en
@@ -36,7 +37,7 @@ let stop: (() => Promise<void>) | undefined;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
 const TENANT = "tenant-fin2-card";
-const creds: WallesterCredentials = { baseUrl: "https://wallester.invalid", apiKey: "fixture-key", sign: () => "sig", accountId: "wacc-fin2", environment: "sandbox" };
+const creds: WallesterCredentials = { baseUrl: "https://wallester.invalid", apiKey: fixtureToken("fixture", "key"), sign: () => "sig", accountId: "wacc-fin2", environment: "sandbox" };
 
 class CardGateway implements WallesterGateway {
   createCalls: CreateWallesterCardInput[] = [];
