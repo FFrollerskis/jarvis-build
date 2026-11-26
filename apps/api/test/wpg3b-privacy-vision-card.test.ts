@@ -328,6 +328,28 @@ describe("4. fail-lukket: en kilde som er nede gir «utilgjengelig» (aldri OK),
     expect(JSON.stringify(r)).not.toMatch(/hemmelig|password|ECONNREFUSED/);
   });
 
+  it("oppbevaringsbyggingen feiler (ødelagt `defaults` i kilden): ETT element `retention` er UNKNOWN (kun feilkategorien), helsebildet vises likevel, og seksjonen er IKKE «utilgjengelig» som helhet (hver lesing er avgrenset av `settle`)", async () => {
+    // `main.ts` setter `defaults` fra konstanter, så dette kan i praksis bare skje ved en programmeringsfeil - men feilen skal da gi ETT ukjent element, ikke et tomt kort.
+    const withDefaults = (defaults: unknown): PrivacyVisionSource => ({
+      get defaults(): unknown { if (defaults instanceof Error) throw defaults; return defaults; },
+      status: () => healthy()
+    }) as unknown as PrivacyVisionSource;
+    const cases: Array<[string, unknown, string]> = [["null", null, "TypeError"], ["undefined", undefined, "TypeError"], ["en getter som kaster", new Error(FAKE_SECRET_TEXT), "Error"]];
+    for (const [label, defaults, category] of cases) {
+      const rows = [{ memory_space_id: "home", retention_days: 14, snapshot_retention_days: null, updated_at: iso(D) }];
+      const r = await report(new ScriptedPool(baseRules([POLICY(rows)])), withDefaults(defaults));
+      expect(card(r), label).toMatchObject({ measured: true, status: "UNKNOWN" });
+      expect(item(r, "retention"), label).toMatchObject({ status: "UNKNOWN", facts: { measured: false } });
+      expect(item(r, "retention").detail_no, label).toBe(`Utilgjengelig (${category}).`);
+      expect(item(r, "retention_default"), label).toBeUndefined();
+      expect(item(r, "retention:home"), label).toBeUndefined(); // ingen halvferdig oppbevaringsliste
+      expect(item(r, "poller").status, label).toBe("OK"); // helsebildet er uberørt
+      expect(card(r).items.some((i) => i.id === "configuration"), label).toBe(true);
+      expect(r.sections, label).toHaveLength(6); // resten av senteret er uendret
+      expect(JSON.stringify(r), label).not.toMatch(/hemmelig|password|ECONNREFUSED|Cannot read/); // aldri feilmeldingen, kun kategorien
+    }
+  });
+
   it("begge kildene nede: hele seksjonen er «ikke målt» (measured: false, UNKNOWN, ingen elementer), og senteret svarer likevel med de fem øvrige", async () => {
     const r = await report(new ScriptedPool(baseRules([{ match: /FROM vision_retention_policies/, rows: new Error(FAKE_SECRET_TEXT) }])), source(() => { throw new Error(FAKE_SECRET_TEXT); }));
     expect(card(r)).toMatchObject({ measured: false, status: "UNKNOWN", items: [], observed_at: null });
