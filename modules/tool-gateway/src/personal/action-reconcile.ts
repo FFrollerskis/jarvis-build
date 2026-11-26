@@ -10,15 +10,16 @@ import { isRecord, parseIsoInstant, type Params } from "./critical-ops.ts";
  * skrive-verktøyet (eksekutoren kalles ikke; kun lese-handlingen). Reglene (hver er en test):
  *  - `applied` KUN når handlingens EGEN etterbetingelse (`op.post`, den samme som gatewayens readback) holder på en FERSK, brukbar og ferdig-settlet lesing - og ingen nyere handling mot samme mål kan ha forårsaket tilstanden
  *    (da kan sluttilstanden ikke tilskrives denne raden: den står). For bil kreves i tillegg `fresh` og et `observed_at` som ikke er eldre enn forespørselen (en bufret «låst» fra før kommandoen bekrefter aldri noe).
- *  - `failed` KUN når det er BEVIST at handlingen ikke skjedde: for tilstandshandlinger at HAs `last_changed` (når tilstandsverdien sist endret seg) er ELDRE enn forespørselen (minus klokkeskjevhet) og tilstanden fortsatt er før-tilstanden, for
- *    scene/skript at markøren (siste aktivering/start) er UENDRET siden forhåndsvisningen - og i begge tilfeller først en frist etter at eksekutoren konkluderte (en sen forespørsel skal ha rukket å dø). Bil kan ikke bevises «ikke utført»
+ *  - `failed` KUN når det er BEVIST at handlingen ikke skjedde: for tilstandshandlinger at HAs `last_changed` (når tilstandsverdien sist endret seg) er ELDRE enn forespørselen (minus klokkeskjevhet) og tilstanden fortsatt er den LAGREDE før-tilstanden
+ *    (uten lagret før-tilstand: aldri `failed`), for scene/skript at markøren (siste aktivering/start) er UENDRET siden forhåndsvisningen - og i begge tilfeller kun uten en nyere handling mot målet (den kan ha reversert kommandoen) og først en frist etter
+ *    at eksekutoren konkluderte (en sen forespørsel skal ha rukket å dø). Klokkebeviset bortfaller når HAs klokke er MÅLT (HTTP-`Date`) til å avvike mer enn `HA_MEASURED_SKEW_LIMIT_MS`. Bil kan ikke bevises «ikke utført»
  *    (adapter-kontrakten har ikke noe endringstidspunkt): kun `applied` er mulig der (PARTIAL).
  *  - ellers forblir raden `outcome_unknown`, med tidspunkt, antall forsøk og en kort begrunnelseskode (aldri utstyrets tekst) - aldri en gjetning. Typiske koder: `read_failed:*`, `observed_in_transition`, `state_changed_since_request`, `later_action_on_target`.
  *  - idempotent: en terminal rad leses ikke på nytt og skrives ikke (`already_terminal`); et nytt forsøk på en rad som fortsatt er ukjent leser på nytt og teller opp. Samme prosess-lokale lås som handlingene (`holdPersonalTarget`): en handling i
  *    flukt mot målet gir `personal_action_target_busy` (409, ingenting leses eller skrives), så en avstemming aldri tolker en pågående kommando som beviset for en eldre rad.
  *  - revidert: hvert forsøk som endrer raden skriver `personal.action_reconciled` (uten innhold) i samme transaksjon som journalendringen (migrasjon 144: triggeren tvinger teller +1, uforanderlig `request_params`, ingen endring av en terminal rad).
  * Begrensninger (ærlige): attribusjon («ingen nyere handling») ser kun journalen i eierens egen (tenant, memory space); en endring utenfor Jarvis (manuelt, en HA-automasjon) kan ikke skilles fra kommandoen - sluttilstanden er likevel det eieren
- * ba om. `last_changed` forutsetter at HAs og Jarvis' klokker ikke avviker mer enn `HA_CLOCK_SKEW_MS`. `requested`-rader (en krasjet vinner) avstemmes ikke her: de blir `outcome_unknown` først når samme nøkkel sendes på nytt (eksekutoren).
+ * ba om. `last_changed` forutsetter at HAs og Jarvis' klokker ikke avviker mer enn `HA_CLOCK_SKEW_MS`; en skjevhet over `HA_MEASURED_SKEW_LIMIT_MS` fanges kun når HA-svaret har en `Date`-header (ellers, eller bak en proxy med egen klokke, gjelder antakelsen ukontrollert). `requested`-rader (en krasjet vinner) avstemmes ikke her: de blir `outcome_unknown` først når samme nøkkel sendes på nytt (eksekutoren).
  */
 export type ReconcileResolution = "applied" | "failed" | "unknown" | "already_terminal";
 
@@ -51,6 +52,12 @@ export interface PersonalActionReconcileDeps {
 export const RECONCILE_FAILED_MIN_AGE_MS = 5 * 60_000;
 /** Klokkeskjevhet mellom HA og Jarvis som `failed`-beviset tåler: `last_changed` må være eldre enn forespørselen med minst dette (en endring forårsaket av kommandoen har `last_changed` >= forespørselen). */
 export const HA_CLOCK_SKEW_MS = 60_000;
+/**
+ * Største MÅLTE klokkeskjevhet (HA mot Jarvis, begge retninger) som `failed`-beviset tåler (fiks-runde 1, LOW-1). Transporten måler skjevheten fra HTTP-`Date` i HA-svaret (`clock_skew_ms` i den leste tilstanden, nøyaktig til ca. ett sekund).
+ * `HA_CLOCK_SKEW_MS` alene dekker bare at HA ligger FREM (da blir `last_changed` for ny: forsiktig); ligger HA BAK med mer enn 60 s pluss tiden til en revertering, kan en endring kommandoen selv forårsaket få en `last_changed` som ser eldre ut enn
+ * forespørselen, og en revertert handling ville blitt en falsk `failed`. Over denne grensen finnes derfor ikke noe klokkebevis. Mangler målingen (ingen `Date`; en proxy kan også sette sin egen klokke), er oppførselen som før (dokumentert begrensning).
+ */
+export const HA_MEASURED_SKEW_LIMIT_MS = 30_000;
 
 /** Markør-handlinger (scene/skript): tilstanden er et «sist aktivert/startet»-tidsstempel som bare går fremover. `observed` = feltet i den leste tilstanden, `expected` = parameteren fra forhåndsvisningen. */
 const MARKER_OPS: Readonly<Record<string, { observed: string; expected: string }>> = {
@@ -104,6 +111,8 @@ export function decideReconcile(e: ReconcileEvidence): ReconcileDecision {
 
   // Sluttilstanden er IKKE observert. `failed` krever et BEVIS for at handlingen ikke skjedde - ellers står raden.
   if (entry.domain === "car") return unknown("not_executed_unprovable_for_car");
+  // En nyere handling mot samme mål (også en Jarvis selv har gjort, f.eks. en motsatt kommando) kan ha endret målet - også tilbake til før-tilstanden - så «uendret siden forespørselen» sier ingenting om DENNE raden (fiks-runde 1, LOW-1).
+  if (e.laterAction) return unknown("later_action_on_target");
   let basis: string;
   if (marker) {
     if (observed["running"] === true) return unknown("script_running");
@@ -114,11 +123,16 @@ export function decideReconcile(e: ReconcileEvidence): ReconcileDecision {
     if (current !== expected) return unknown("marker_state_unclear");
     basis = "marker_unchanged_since_preflight";
   } else {
+    // Klokkebeviset (HAs `last_changed` mot Jarvis' `requested_at`) gjelder kun med samsvarende klokker: en målt skjevhet over grensen (eller en måling som er til stede men uleselig) er fail-closed; manglende måling (ingen `Date`) = som før.
+    const skew = observed["clock_skew_ms"];
+    if (skew !== undefined && skew !== null && !(typeof skew === "number" && Number.isFinite(skew) && Math.abs(skew) <= HA_MEASURED_SKEW_LIMIT_MS)) return unknown("ha_clock_skew");
     const changed = parseIsoInstant(observed["last_changed"]);
     if (changed === null) return unknown("change_time_unavailable");
     if (changed + HA_CLOCK_SKEW_MS > requestedMs) return unknown("state_changed_since_request");
+    // Før-tilstanden MÅ være lagret og stemme med den observerte: uten den er «uendret» et løst påstand (fiks-runde 1, LOW-1).
     const before = isRecord(row.before_state) ? row.before_state["state"] : undefined;
-    if (typeof before === "string" && before !== observed["state"]) return unknown("before_state_differs");
+    if (typeof before !== "string") return unknown("before_state_missing");
+    if (before !== observed["state"]) return unknown("before_state_differs");
     basis = "no_state_change_since_request";
   }
   const concludedMs = ms(row.completed_at ?? row.requested_at);
@@ -127,15 +141,18 @@ export function decideReconcile(e: ReconcileEvidence): ReconcileDecision {
 }
 
 const RECONCILE_ID = /^pers-act-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const safeCode = (reason: string): string => reason.toLowerCase().replace(/[^a-z0-9_:.-]/g, "_").slice(0, 60);
+/** Begrunnelseskoden fra en lesefeil: små bokstaver/tall/`_:.-`, maks 60 tegn (databasens CHECK på `reconcile_basis` tillater 80 inkl. prefikset). Alt som ikke er tekst gir en tom kode - aldri en feil. */
+const safeCode = (reason: unknown): string => (typeof reason === "string" ? reason : "").toLowerCase().replace(/[^a-z0-9_:.-]/g, "_").slice(0, 60);
 
 export interface ReconcileInput { action_id: string }
 
 /**
- * Avstemmer ÉN journalrad. Kaster kun våre egne, bevisste feilkoder (`personal_action_*`): ugyldig id, ikke funnet, `requested` (kan ikke avstemmes), domene ikke slått på, målet er opptatt. Alt annet (leser feilet, bevis mangler) er et
+ * Avstemmer ÉN journalrad. Kaster kun våre egne, bevisste feilkoder (`personal_action_*`): ikke eier/delegat, ugyldig id, ikke funnet, `requested` (kan ikke avstemmes), domene ikke slått på, målet er opptatt. Alt annet (leser feilet, bevis mangler) er et
  * NORMALT utfall: raden forblir `outcome_unknown` med begrunnelse.
  */
 export async function reconcilePersonalAction(deps: PersonalActionReconcileDeps, identity: IdentityContext, input: ReconcileInput): Promise<ReconcileOutcome> {
+  // Eier-assert (fiks-runde 1, I-1): ruten er porten (eier + enhetssignert økt), men funksjonen skal heller ikke kunne kalles av en delegat - da ville en lesing mislyktes og et forsøk blitt telt uten at eieren ba om det. FØR noe leses.
+  if (identity.delegation_id !== undefined) throw new Error("personal_action_reconcile_owner_only");
   if (typeof input.action_id !== "string" || !RECONCILE_ID.test(input.action_id)) throw new Error("personal_action_reconcile_id_invalid");
   const { journal, index, gateway } = deps.executor;
   const tenantId = identity.tenant_id;
@@ -143,6 +160,8 @@ export async function reconcilePersonalAction(deps: PersonalActionReconcileDeps,
 
   const row = await journal.findById(tenantId, space, input.action_id);
   if (row === null) throw new Error("personal_action_not_found");
+  // Kun personen som startet handlingen (eieren) kan avstemme den; en annen person i samme (tenant, rom) får ingenting - verken avgjørelse, lagret utfall eller et talt forsøk.
+  if (row.actor_person_id !== identity.person_id) throw new Error("personal_action_reconcile_owner_only");
   // Idempotens: en rad som allerede er avgjort leses ikke på nytt og skrives ikke - svaret er det lagrede.
   if (row.status === "applied" || row.status === "failed") return { action: row, resolution: "already_terminal", basis: row.reconcile_basis ?? "already_terminal", observed: null, replayed: true };
   if (row.status !== "outcome_unknown") throw new Error("personal_action_not_reconcilable");

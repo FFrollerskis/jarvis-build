@@ -53,6 +53,12 @@ export class FakeHomeAssistant {
   scriptLagReads = 0;
   private heldWaiters: Array<() => void> = [];
   private readonly pendingScripts = new Map<string, { reads: number; marker: string }>();
+  /** WP-G2c fiks-runde 1: HTTP-`Date` i svarene er virkelig tid + dette (ms; negativt = HA-klokken går BAK). `null` = tjenerens egen `Date` (ekte tid). */
+  dateSkewMs: number | null = null;
+  /** WP-G2c fiks-runde 1: ingen `Date`-header i svarene (en tjener uten klokke). */
+  omitDate = false;
+  /** WP-G2c fiks-runde 1: `Date`-headeren er nøyaktig denne teksten (f.eks. uleselig). Har forrang over `dateSkewMs`. */
+  rawDate: string | null = null;
   /** Hvis satt, krever alarmpanelet denne koden (PIN) ved arm/disarm. */
   requireAlarmCode: string | null = null;
   /** Fast klokke for scene-/skript-tidsstempler (ISO). Hvert kall teller opp ett sekund. */
@@ -84,6 +90,9 @@ export class FakeHomeAssistant {
     this.scriptLagReads = 0;
     this.pendingScripts.clear();
     this.requireAlarmCode = null;
+    this.dateSkewMs = null;
+    this.omitDate = false;
+    this.rawDate = null;
     this.clock = Date.parse("2026-11-18T10:00:00.000Z");
   }
 
@@ -121,7 +130,11 @@ export class FakeHomeAssistant {
   }
 
   private json(res: ServerResponse, status: number, value: unknown): void {
-    res.writeHead(status, { "content-type": "application/json" });
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.dateSkewMs !== null) headers["date"] = new Date(Date.now() + this.dateSkewMs).toUTCString();
+    if (this.rawDate !== null) headers["date"] = this.rawDate;
+    if (this.omitDate) res.sendDate = false;
+    res.writeHead(status, headers);
     res.end(JSON.stringify(value));
   }
 
