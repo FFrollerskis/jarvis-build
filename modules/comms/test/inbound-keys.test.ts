@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CommsWebhookService, WEBHOOK_SECRET_REFS, optOutHash, parseMetaBody, parseTelnyxBody, parseTwilioParams, type WebhookRequest } from "../src/index.ts";
+import { CommsWebhookService, WEBHOOK_SECRET_REFS, optOutHash, parseMetaBody, parseTelnyxBody, parseTwilioParams, sha256Hex, type WebhookRequest } from "../src/index.ts";
 import { TENANT_A } from "./support/harness.ts";
 import { authorizeAll, startChain, type Chain } from "./support/chain.ts";
 
@@ -19,15 +19,16 @@ const waBody = (id: string, text: string, from = "4790000001") => ({
 const SAFE = /^[A-Za-z0-9._:@=+/-]{1,300}$/;
 
 describe("parserne: en hendelse forkastes aldri på grunn av id-en (ren tolkning)", () => {
-  it("vanlige id-er gir UENDRET nøkkel; uvanlige (lange, `~ % * $`, mellomrom) gir en stabil hash-nøkkel i trygt tegnsett - og samme id gir alltid samme nøkkel", () => {
+  it("WhatsApp-id-er hashes alltid (FIX-8); uvanlige (lange, `~ % * $`, mellomrom) gir en stabil hash-nøkkel i trygt tegnsett - og samme id gir alltid samme nøkkel", () => {
     const usual = "wamid.HBgLNDc5MDAwMDAwMRUCABIYFjNFQjAxMjM0NTY3ODlBQkNERUY=";
     const ok = parseMetaBody(waBody(usual, "Hei"));
-    expect(ok.events.map((e) => e.event_key)).toEqual([`wa:msg:${usual}`]);
-    // en lang id (250 tegn, trygt tegnsett, nøkkelen <= 300) ble tidligere forkastet (over 200); den beholdes nå UENDRET som nøkkel
+    // FIX-8: en WhatsApp-id (`wamid`) lagres ALDRI rått (den kan kode avsenderens nummer): nøkkelen er alltid `wa:msg:sha256:<hex av id-en>`, også for en kort, trygg id (Slack/Twilio/Telnyx beholder sin rene nøkkel under)
+    expect(ok.events.map((e) => e.event_key)).toEqual([`wa:msg:sha256:${sha256Hex(usual)}`]);
+    // en lang id (250 tegn, trygt tegnsett) ble tidligere forkastet (over 200); den gir samme slags hash-nøkkel som alle andre WhatsApp-id-er (ÉN mekanisme)
     const long = `wamid.${"B".repeat(250)}`;
     const longKey = parseMetaBody(waBody(long, "STOPP"));
     expect(longKey.ignored).toBe(0);
-    expect(longKey.events.map((e) => e.event_key)).toEqual([`wa:msg:${long}`]);
+    expect(longKey.events.map((e) => e.event_key)).toEqual([`wa:msg:sha256:${sha256Hex(long)}`]);
     const odd = ["wamid.a~b%c*d", "wamid.med mellomrom", `wamid.${"x".repeat(900)}`, "mid.$cAAAB", `wamid.${"B".repeat(300)}`];
     const keys = odd.map((id) => {
       const r = parseMetaBody(waBody(id, "STOPP"));

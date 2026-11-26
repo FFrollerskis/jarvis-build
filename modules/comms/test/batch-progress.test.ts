@@ -30,7 +30,8 @@ const service = (extra: { maxEventsPerRequest?: number } = {}) => new CommsWebho
   store: chain.store, graph: chain.graph, config: chain.config, clock: chain.now, warn: (w) => warnings.push(w), ...extra,
   secrets: { get: async (ref) => (ref === WEBHOOK_SECRET_REFS.meta ? META_SECRET : null) }
 });
-const storedCount = async (prefix: string): Promise<number> => ((await chain.db.admin.query("SELECT count(*)::int AS n FROM comms_inbound_events WHERE tenant_id = $1 AND event_key LIKE $2", [TENANT_A, `${prefix}%`])).rows[0] as { n: number }).n;
+/** Antall lagrede WhatsApp-meldingshendelser (FIX-8: nøkkelen er en hash, så en delmengde kan ikke telles på id-prefiks - testene sammenligner før/etter). */
+const storedCount = async (): Promise<number> => ((await chain.db.admin.query("SELECT count(*)::int AS n FROM comms_inbound_events WHERE tenant_id = $1 AND event_key LIKE 'wa:msg:sha256:%'", [TENANT_A])).rows[0] as { n: number }).n;
 
 beforeAll(async () => {
   chain = await startChain("g1c2p", { JARVIS_COMMS_WEBHOOKS: "meta", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: "https://hooks.example.com" });
@@ -41,7 +42,8 @@ afterAll(async () => { await chain?.stop(); }, 120_000);
 describe("FIX-2: hver retry tar neste porsjon (konvergerer)", () => {
   it("2500 hendelser (det ekte taket 1000), STOP SIST: konvergerer innen 3 forsøk; STOP er registrert allerede i første forsøk; alle 2500 er lagret til slutt", async () => {
     const stopper = waNum();
-    const prefix = `wa:msg:wamid.conv${++mid}x`; // unik delmengde i event_key for telling
+    ++mid;
+    const stored0 = await storedCount();
     const normals = Array.from({ length: 2499 }, (_, i) => waMessage(waNum(), "hei", `wamid.conv${mid}x${i}`));
     const body = waBatch([...normals, waMessage(stopper, "STOPP", `wamid.conv${mid}xSTOP`)]);
     const svc = service();
@@ -57,7 +59,7 @@ describe("FIX-2: hver retry tar neste porsjon (konvergerer)", () => {
     const attempt3 = await svc.handle("meta", metaReq(body));
     expect(attempt3.status, "forsøk 3: resten, ferdig").toBe(200);
     expect(attempt3.body).toMatchObject({ received: true, events: { inserted: 500, duplicates: 2000 } });
-    expect(await storedCount(prefix)).toBe(2500);
+    expect((await storedCount()) - stored0).toBe(2500);
 
     const attempt4 = await svc.handle("meta", metaReq(body));
     expect(attempt4.status).toBe(200);
@@ -67,6 +69,7 @@ describe("FIX-2: hver retry tar neste porsjon (konvergerer)", () => {
   it("1001 hendelser: forsøk 1 gir 503 med nøyaktig én utsatt; forsøk 2 behandler hendelse nr. 1001 og gir 200 (før: `duplicates: 1000, deferred: 1`, for alltid)", async () => {
     const msgs = Array.from({ length: 1001 }, (_, i) => waMessage(waNum(), "hei", `wamid.one${mid}x${i}`));
     const body = waBatch(msgs);
+    const stored0 = await storedCount();
     const svc = service();
     const first = await svc.handle("meta", metaReq(body));
     expect(first.status).toBe(503);
@@ -74,7 +77,7 @@ describe("FIX-2: hver retry tar neste porsjon (konvergerer)", () => {
     const second = await svc.handle("meta", metaReq(body));
     expect(second.status).toBe(200);
     expect(second.body).toMatchObject({ events: { inserted: 1, duplicates: 1000 } });
-    expect(await storedCount(`wa:msg:wamid.one${mid}x`)).toBe(1001);
+    expect((await storedCount()) - stored0).toBe(1001);
   }, 300_000);
 
   it("kjente duplikater slås opp i ÉN spørring og koster ingen behandling: retry av en kropp der alt unntatt halen er sett kaller recordInbound kun for halen", async () => {

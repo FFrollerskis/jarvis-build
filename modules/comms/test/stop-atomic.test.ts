@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ConversationGraphService } from "@jarvis/conversation-graph";
-import { CommsStore, CommsWebhookService, evidenceRefFor, optOutHash, parseCommsConfig, WEBHOOK_SECRET_REFS, type WebhookRequest } from "../src/index.ts";
+import { CommsStore, CommsWebhookService, evidenceRefFor, optOutHash, parseCommsConfig, sha256Hex, WEBHOOK_SECRET_REFS, type WebhookRequest } from "../src/index.ts";
 import { TENANT_A, startCommsDb, type CommsDb } from "./support/harness.ts";
 
 /**
@@ -27,6 +27,8 @@ const metaReq = (body: object): WebhookRequest => {
 };
 const phone = () => `+4790${String(700000 + ++n).padStart(6, "0").slice(-6)}`;
 const digits = (e164: string) => e164.slice(1);
+/** FIX-8: WhatsApp-hendelsesnøkkelen er alltid en SHA-256 av meldings-id-en (aldri den rå `wamid`). */
+const waKey = (mid: string): string => `wa:msg:sha256:${sha256Hex(mid)}`;
 const opted = (e164: string) => store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "whatsapp", e164));
 const eventRows = async (key: string) => (await db.admin.query("SELECT kind, event_key FROM comms_inbound_events WHERE tenant_id = $1 AND event_key = $2", [TENANT_A, key])).rows as Array<{ kind: string; event_key: string }>;
 const optRows = async (e164: string) => (await db.admin.query("SELECT status, source, evidence_ref FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2", [TENANT_A, optOutHash(TENANT_A, "whatsapp", e164)])).rows as Array<{ status: string; source: string; evidence_ref: string }>;
@@ -67,8 +69,9 @@ describe("B-H2: WhatsApp-STOP med lang meldings-id registreres alltid", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.source).toBe("inbound_stop_keyword");
     expect(rows[0]!.evidence_ref!.length).toBeLessThanOrEqual(200);
-    if (`wa:msg:${mid}`.length > 200) expect(rows[0]!.evidence_ref).toBe(evidenceRefFor(`wa:msg:${mid}`));
-    expect(await eventRows(`wa:msg:${mid}`)).toEqual([{ kind: "opt_out", event_key: `wa:msg:${mid}` }]);
+    expect(rows[0]!.evidence_ref, "peker til den hashede nøkkelen, aldri den rå id-en").toBe(evidenceRefFor(waKey(mid)));
+    expect(rows[0]!.evidence_ref).not.toContain(mid);
+    expect(await eventRows(waKey(mid))).toEqual([{ kind: "opt_out", event_key: waKey(mid) }]);
     // gjenspilling av samme levering: duplikat, ingen ny avmelding, fortsatt avmeldt
     const again = await service.handle("meta", metaReq(waStop(digits(from), mid)));
     expect(again.body).toMatchObject({ events: { inserted: 0, duplicates: 1, opt_outs: 0 } });
@@ -78,16 +81,17 @@ describe("B-H2: WhatsApp-STOP med lang meldings-id registreres alltid", () => {
 
 describe("B-H2: feil i avmeldingen ruller tilbake hele hendelsen (retry behandles på nytt, aldri en «duplikat» uten avmelding)", () => {
   it("avmeldings-INSERT feiler (simulert via DB-trigger): leveringen gir feil, INGEN dedupe-rad og ingen avmelding; retry samme levering registrerer STOP", async () => {
+    const from = phone();
+    const mid = "wamid.FAILME-retry-1";
+    const key = waKey(mid);
+    // FIX-8: evidens-pekeren er den hashede nøkkelen, så triggeren feiler på akkurat den (hex-tegn, trygt å sette inn i SQL)
     await db.admin.query(`
       CREATE FUNCTION g1_fail_optout() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
-        IF NEW.evidence_ref LIKE '%FAILME%' THEN RAISE EXCEPTION 'simulert feil i avmeldingssteget'; END IF;
+        IF NEW.evidence_ref = '${key}' THEN RAISE EXCEPTION 'simulert feil i avmeldingssteget'; END IF;
         RETURN NEW;
       END $$;
       CREATE TRIGGER g1_fail_optout BEFORE INSERT ON comms_recipient_opt_outs FOR EACH ROW EXECUTE FUNCTION g1_fail_optout();`);
-    const from = phone();
-    const mid = "wamid.FAILME-retry-1";
-    const key = `wa:msg:${mid}`;
     try {
       await expect(service.handle("meta", metaReq(waStop(digits(from), mid)))).rejects.toThrow(/simulert feil/);
       expect(await eventRows(key)).toEqual([]); // dedupe-raden er rullet tilbake sammen med avmeldingen
@@ -133,7 +137,7 @@ describe("B-H2/X6: hendelsen og STOP-effekten bruker NØYAKTIG ÉN transaksjon (
     await expect(guardedService.handle("meta", metaReq(waStop(digits(from), mid)))).resolves.toMatchObject({ status: 200 });
     expect(Date.now() - started, "ingen venting på en lås: fullfører langt under lock_timeout").toBeLessThan(1500);
     expect(await opted(from)).toBe(true);
-    expect(await eventRows(`wa:msg:${mid}`)).toHaveLength(1);
+    expect(await eventRows(waKey(mid))).toHaveLength(1);
     expect(await optRows(from)).toHaveLength(1);
   }, 30_000);
 });

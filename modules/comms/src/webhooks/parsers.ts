@@ -53,8 +53,17 @@ const SAFE_KEY = /^[A-Za-z0-9._:@=+/-]{1,300}$/;
  */
 function eventKey(prefix: string, ...ids: readonly string[]): string {
   const direct = [prefix, ...ids].join(":");
-  return SAFE_KEY.test(direct) ? direct : `${prefix}:sha256:${sha256Hex(ids.join("\n"))}`;
+  return !HASHED_KEY_PREFIXES.has(prefix) && SAFE_KEY.test(direct) ? direct : `${prefix}:sha256:${sha256Hex(ids.join("\n"))}`;
 }
+
+/**
+ * FIX-8 (fiks-runde 1): ÉN mekanisme for hva som lagres som hendelsesnøkkel. WhatsApp-meldings-id-er (`wamid.HBgL<base64>...`) KAN (UVERIFISERT mot en ekte id; sannsynlig etter Metas id-format) kode AVSENDERENS TELEFONNUMMER i base64. Nøkkelen lagres i
+ * `comms_inbound_events` (30/1825 d), `comms_inbound_receipts` (1825 d) og som peker i `comms_recipient_opt_outs.evidence_ref` - en rå wamid der ville gjort pseudonymiseringen av en STOP-avsender verdiløs. Derfor hashes WhatsApp-nøkler ALLTID
+ * (`<prefiks>:sha256:<hex>`, samme form som en uvanlig/lang id fikk i K3: samme funksjon, samme format), aldri bare når id-en er uvanlig. SHA-256 uten pepper er VALGT BEVISST: id-en har en tilfeldig, meldingsspesifikk del (ca. 80 bit) som ikke kan gjettes, så hashen kan ikke
+ * snus tilbake til nummeret, og STOP-mottak skal ALDRI avhenge av om en pepper er konfigurert (en pepper-avhengig nøkkel ville også brutt dedupe og 1825-dagers gjenspillingsvernet ved rotasjon). Hashen er deterministisk (dedupe virker) og lagres per tenant (nøkkelen er del av en tenant-nøklet primærnøkkel).
+ * Andre leverandørers id-er (Slack `Ev...`, Twilio `SM...`, Telnyx-UUID) er ikke telefonnumre og beholdes rene når de er trygge, som før. UTGÅENDE `provider_message_id` (journalen) trengs for redigering/sletting og kan ikke hashes (se runbook).
+ */
+const HASHED_KEY_PREFIXES: ReadonlySet<string> = new Set(["wa:msg", "wa:status"]);
 
 function obj(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
