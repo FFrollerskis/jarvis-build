@@ -52,6 +52,11 @@ describe("A: grunnregler - kanal, konto, mottaker", () => {
     expect(normalizeRecipient("whatsapp", "4790000000")).toEqual({ ok: true, value: "+4790000000" });
     expect(normalizeRecipient("sms", "4790000000").ok).toBe(false);
     expect(normalizeRecipient("discord", SNOWFLAKE).ok).toBe(true);
+    expect(normalizeRecipient("discord", `0${SNOWFLAKE}`), "FIX-4 (runde 2): en snowflake har aldri ledende null (en utfylt form ville fått en annen avmeldingsnøkkel)").toEqual({ ok: false, code: "recipient_not_a_discord_id" });
+    expect(normalizeRecipient("discord", "9".repeat(20)).ok).toBe(true);
+    expect(normalizeRecipient("discord", "1".repeat(21)).ok).toBe(false);
+    expect(normalizeRecipient("discord", "1".repeat(17)).ok).toBe(true);
+    expect(normalizeRecipient("discord", "1".repeat(16)).ok).toBe(false);
     expect(normalizeRecipient("teams", "chat:19:abc_def@thread.v2").ok).toBe(true);
     expect(normalizeRecipient("teams", "kari@firma.no").ok).toBe(false);
   });

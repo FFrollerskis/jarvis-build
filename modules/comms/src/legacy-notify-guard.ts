@@ -12,7 +12,9 @@ import { normalizeRecipient, optOutHash, type CommsChannel } from "./channels.ts
  *  - En avmeldt mottaker gir `PolicyDeniedError("recipient_opted_out")` (melding `comms_policy_denied:recipient_opted_out`) FØR noe forlater prosessen. Feilen er et policy-avslag, ikke en leverandørfeil, og teller ikke mot
  *    connector-helse (g4). Et oppslag som feiler (databasen utilgjengelig) feiler LUKKET (`opt_out_check_unavailable`): vi sender aldri uten å ha sjekket.
  *  - FIX-4 (fiks-runde 1): DISCORD er strengt. `DiscordTransport` setter `channel_id` RÅTT inn i URL-en (`/channels/${id}/messages`), så en verdi vakten ikke kunne normalisere (`123456789012345678/messages?`) ble SENDT mot den avmeldte kanalen.
- *    En Discord-mottaker som ikke er NØYAKTIG en snowflake (`^\d{17,20}$`, uten trim: det som sjekkes er det som sendes) avvises derfor med `comms_policy_denied:recipient_invalid` FØR noe forlater prosessen. Discord-id-er er alltid snowflakes.
+ *    En Discord-mottaker som ikke er NØYAKTIG en snowflake (`^[1-9]\d{16,19}$`, uten trim: det som sjekkes er det som sendes) avvises derfor med `comms_policy_denied:recipient_invalid` FØR noe forlater prosessen. Discord-id-er er alltid snowflakes.
+ *    Fiks-runde 2 (FIX-4): ingen LEDENDE NULL. En snowflake er et 64-bits heltall (i desimal 17-20 siffer) og starter aldri med 0; `0` + en avmeldt id har en ANNEN avmeldingsnøkkel enn den avmeldte og ble tidligere SENDT. Om Discord selv fjerner ledende
+ *    nuller i URL-en (og den utfylte formen dermed ville nådd den avmeldte kanalen) er UVERIFISERT (ingen nettilgang); avvisningen er riktig uansett.
  *  - Telefon (Twilio/Telnyx/WhatsApp): en mottaker vakten ikke kan normalisere (f.eks. et nummer uten landkode) kan ikke ha en avmeldingsrad (registeret nøkles på normalisert identifikator) og slippes videre til transporten, som validerer
  *    selv (`assertE164`, ingen normalisering). Dette er ikke et nytt hull: avmeldinger registreres alltid på normalisert form. Slack-ID-er (`C…`/`D…`/`G…`/`U…`/`W…`, også små bokstaver og mellomrom rundt) normaliseres og sjekkes.
  *  - UDEKKET OG DOKUMENTERT (runbook, DEFERRED): Slack-KANALNAVN (`#general`, `@kari`) kan ikke ha en avmeldingsrad (registeret er nøklet på ID) og slippes gjennom (eierens egne varsel-kanaler må fortsette å virke; en kanalpost er ikke per mottaker);
@@ -36,8 +38,8 @@ export interface LegacyNotifyGuardDeps {
   readonly warn?: (event: Record<string, unknown>) => void;
 }
 
-/** Discord-id-er er alltid snowflakes (17-20 siffer). Matches mot den RÅ verdien, uten trim: transporten setter den uendret inn i URL-en (FIX-4). `\d` er kun ASCII-sifre og `$` matcher kun ved slutten (ikke før en avsluttende linjeskift). */
-const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
+/** Discord-id-er er alltid snowflakes (17-20 siffer, første siffer 1-9: aldri ledende null, FIX-4 runde 2). Matches mot den RÅ verdien, uten trim: transporten setter den uendret inn i URL-en (FIX-4). `\d` er kun ASCII-sifre og `$` matcher kun ved slutten (ikke før en avsluttende linjeskift). */
+const DISCORD_SNOWFLAKE = /^[1-9]\d{16,19}$/;
 
 /** (kanal, normalisert mottaker) for en `notify`-handling, eller `null` når verktøyet ikke er et eldre `notify`-verktøy eller mottakeren ikke kan normaliseres. */
 export function legacyNotifyTarget(toolId: string, parameters: Record<string, JsonValue>): { channel: CommsChannel; recipient: string } | null {

@@ -52,7 +52,8 @@ export const CUSTOMER_SERVICE_WINDOW_MS = 24 * 3_600_000;
 export type RecipientResult = { readonly ok: true; readonly value: string } | { readonly ok: false; readonly code: string };
 
 const SLACK_RECIPIENT = /^[CDGUW][A-Z0-9]{8,14}$/;
-const DISCORD_RECIPIENT = /^\d{17,20}$/;
+/** FIX-4 (runde 2): en snowflake starter aldri med 0. En utfylt form (`0` + id) ville fått en ANNEN avmeldingsnøkkel enn id-en den ligner på, så den kan ikke regnes som samme mottaker: avvises. */
+const DISCORD_RECIPIENT = /^[1-9]\d{16,19}$/;
 const TEAMS_CHAT = /^chat:19:[A-Za-z0-9_.@:=-]{5,200}$/;
 const TEAMS_CHANNEL = /^channel:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\/19:[A-Za-z0-9_.@:=-]{5,200}$/;
 const META_RECIPIENT = /^\d{5,20}$/;

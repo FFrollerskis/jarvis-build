@@ -7,6 +7,9 @@ import { guardLegacyNotifyTransport, optOutHash, type LegacyNotifyGuardDeps } fr
  * normalisere gå videre: `channel_id = "123456789012345678/messages?"` ble SENDT mot den avmeldte kanalen. Nå avvises en Discord-mottaker som ikke er en ren snowflake (`^\\d{17,20}$`, nøyaktig slik den skal sendes) med `comms_policy_denied:recipient_invalid`
  * FØR noe forlater prosessen. Slack-kanalnavn (`#navn`, `@navn`) slippes fortsatt gjennom (eierens egne varsel-kanaler må fortsette å virke; en kanalpost er ikke per mottaker), og en Slack-ID (`C…`/`U…`/`D…`) som matcher en aktiv avmelding blokkeres.
  * Her mot de EKTE transportene (uten nettverk: `fetch` stubbes og URL/kropp fanges), så testen viser hva som faktisk ville gått ut.
+ *
+ * Fiks-runde 2 (FIX-4): regexen tillot LEDENDE NULL (`0` + avmeldt id ga en annen avmeldingsnøkkel enn den avmeldte og ble SENDT). En snowflake er et 64-bits heltall uten ledende null, så mønsteret er nå `^[1-9]\\d{16,19}$`.
+ * Om Discord selv normaliserer ledende nuller i URL-en (og dermed ville levert til den avmeldte kanalen) er UVERIFISERT (ingen nettilgang i bygget); avvisningen er riktig uansett.
  */
 const TENANT = "t-strict";
 const CTX = { identity: { tenant_id: TENANT } } as never;
@@ -42,13 +45,34 @@ describe("FIX-4: Discord - kun en ren snowflake slipper gjennom, og den sendes n
     stubFetch();
     const crafted = [
       `${DISCORD_ID}/messages?`, `${DISCORD_ID}/../${DISCORD_ID}`, `${DISCORD_ID}?x=`, `${DISCORD_ID}#x`, `${DISCORD_ID}/`, `/${DISCORD_ID}`, `../${DISCORD_ID}`, `${DISCORD_ID}%2f..%2f${DISCORD_ID}`,
-      `${DISCORD_ID}\n`, ` ${DISCORD_ID} `, `${DISCORD_ID}\u200b`, "１".repeat(18), "1".repeat(16), "1".repeat(21), "0x" + "1".repeat(18), "", "   ", "abc", "@me", "channels"
+      `${DISCORD_ID}\n`, ` ${DISCORD_ID} `, `${DISCORD_ID}\u200b`, "１".repeat(18), "1".repeat(16), "1".repeat(21), "0x" + "1".repeat(18), "", "   ", "abc", "@me", "channels",
+      // FIX-4 (runde 2): ledende null (alle lengder 17-20, og bare nuller) avvises
+      `0${DISCORD_ID}`, "0".repeat(18), `0${"1".repeat(16)}`, `0${"1".repeat(19)}`, `00${"1".repeat(17)}`
     ];
     for (const channel_id of crafted) {
       seen.length = 0;
       const out = await send("discord", { channel_id });
       expect(out, JSON.stringify(channel_id)).toEqual({ kind: "denied", code: "comms_policy_denied:recipient_invalid" });
       expect(seen, `ingenting forlot prosessen for ${JSON.stringify(channel_id)}`).toEqual([]);
+    }
+  });
+
+  it("LEDENDE NULL (FIX-4, runde 2): `0` + en avmeldt snowflake har en ANNEN avmeldingsnøkkel enn den avmeldte (vakten kunne ikke gjenkjenne den) og ble SENDT; nå avvises den som recipient_invalid, og ingenting sendes", async () => {
+    stubFetch();
+    const padded = `0${DISCORD_ID}`;
+    expect(optOutHash(TENANT, "discord", padded), "forutsetningen: den utfylte formen har en annen nøkkel enn den avmeldte").not.toBe(optOutHash(TENANT, "discord", DISCORD_ID));
+    expect(await send("discord", { channel_id: padded })).toEqual({ kind: "denied", code: "comms_policy_denied:recipient_invalid" });
+    expect(seen, "ingenting forlot prosessen").toEqual([]);
+    // den avmeldte selv er fortsatt blokkert som avmeldt (ikke som ugyldig)
+    expect(await send("discord", { channel_id: DISCORD_ID })).toEqual({ kind: "denied", code: "comms_policy_denied:recipient_opted_out" });
+  });
+
+  it("alle første sifre 1-9 er gyldige snowflakes (sendes): stramningen avviser kun ledende null, ikke ekte id-er", async () => {
+    stubFetch();
+    for (const d of "123456789") {
+      seen.length = 0;
+      const id = `${d}${"7".repeat(17)}`;
+      expect(await send("discord", { channel_id: id }), id).toEqual({ kind: "sent", urls: [`https://discord.com/api/v10/channels/${id}/messages`] });
     }
   });
 
