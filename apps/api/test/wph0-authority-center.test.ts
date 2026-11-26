@@ -212,6 +212,13 @@ describe("seksjonene og eier-/delegert autoritet", () => {
     expect(r.actions.map((a) => a.id).filter((id) => id.startsWith("authority.revoke_autonomy:")).sort()).toEqual(["authority.revoke_autonomy:personal:finance", "authority.revoke_autonomy:personal:home", "authority.revoke_autonomy:personal:vision"]);
     const home = r.actions.find((a) => a.id === "authority.revoke_autonomy:personal:home")!;
     expect(home).toMatchObject({ endpoint: "/executive/mutate", body: { action: "revoke_autonomy_binding", parameters: { domain: "home" } }, reversible: false, section_id: "autonomy", item_id: "personal:home" });
+    // FIX-C (delta-review, mutant D22): knappens body er NØYAKTIG `{ action, parameters: { domain } }` (toMatchObject godtar ekstra felt; et ekstra `rule`/`category`/`scope` ville gjort tilbakekallet skopet eller ugyldig). Samme for hver knapp, med SITT domene.
+    const revokeBodies = Object.fromEntries(r.actions.filter((a) => a.id.startsWith("authority.revoke_autonomy:")).map((a) => [a.id, a.body]));
+    expect(revokeBodies).toStrictEqual({
+      "authority.revoke_autonomy:personal:finance": { action: "revoke_autonomy_binding", parameters: { domain: "finance" } },
+      "authority.revoke_autonomy:personal:home": { action: "revoke_autonomy_binding", parameters: { domain: "home" } },
+      "authority.revoke_autonomy:personal:vision": { action: "revoke_autonomy_binding", parameters: { domain: "vision" } }
+    });
     expect(home.description_no).toContain("ALLE 3 bindingene i domenet «home»");
     expect(home.description_no).toContain("etterpå utfører Jarvis ingenting selv i domenet (fail-closed)");
     for (const listed of ["hele domenet", "rule:home_assistant:water_leak", "category:opening"]) expect(home.description_no, listed).toContain(listed); // også den avslåtte raden fjernes
