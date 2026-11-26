@@ -138,6 +138,9 @@ describe("main.ts-kobling (statisk)", () => {
   it("lokale prosesser deler semaforer med grenser fra VoiceLimits, og en listen-feil stopper prosessen (K1/K2)", () => {
     expect(MAIN_SOURCE).toContain("new ProcessSlots(DEFAULT_VOICE_LIMITS.maxConcurrentWhisper");
     expect(MAIN_SOURCE).toContain("new ProcessSlots(DEFAULT_VOICE_LIMITS.maxConcurrentPiper");
+    // FIX-4: begge semaforene har den reserverte plassen for bevisste sesjoner (uten den kan en ubevist klient sulte eierens tur).
+    expect(MAIN_SOURCE).toMatch(/new ProcessSlots\(DEFAULT_VOICE_LIMITS\.maxConcurrentWhisper, [^)]*DEFAULT_VOICE_LIMITS\.reservedProvenSlots\)/);
+    expect(MAIN_SOURCE).toMatch(/new ProcessSlots\(DEFAULT_VOICE_LIMITS\.maxConcurrentPiper, [^)]*DEFAULT_VOICE_LIMITS\.reservedProvenSlots\)/);
     expect(MAIN_SOURCE).toMatch(/server\.on\("error"[\s\S]*?process\.exit\(1\)/);
   });
 });

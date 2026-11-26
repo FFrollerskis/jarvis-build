@@ -140,6 +140,12 @@ describe("FIX-4: adapterne sender sesjonens tillitsnivå til semaforen", () => {
     })().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(VoiceBusyError);
 
+    const noContext = ok.synthesize("hei"); // manglende kontekst = fail-closed: regnes som ubevist
+    const errNoContext = await (async () => {
+      for await (const _ of noContext.frames) void _;
+    })().catch((e: unknown) => e);
+    expect(errNoContext).toBeInstanceOf(VoiceBusyError);
+
     const frames: Buffer[] = [];
     for await (const f of ok.synthesize("hei", undefined, PROVEN).frames) frames.push(f);
     expect(Buffer.concat(frames).toString()).toBe("AAAABBBBCCCC");
