@@ -110,3 +110,47 @@ describe("FIX-8: kort med en innsending uten svar overflates etter at leasen er 
     expect(await loopFor(id)).toBeUndefined();
   });
 });
+
+/**
+ * FIX-5 (fiks-runde 1): en banktransaksjon med ukjent/manglende leverandørstatus settes av `BankingService.syncTransactions` i karantene (lagret som `pending` med flagget
+ * `BANK_TRANSACTION_STATUS_UNKNOWN`). Runbooken (`FINANCE_D_CHAIN.md` §11.6) lover at den overflates som `bank_transaction_unmatched` i attention-køen; den eksisterende regelen
+ * (`detectBankTransactionAnomalies`: enhver transaksjon med avviksflagg, uavhengig av status) hadde ingen test. Rene SQL-fixturer, samme presedens som kortene over.
+ */
+describe("FIX-5: en banktransaksjon i karantene (ukjent status) overflates i attention-køen", () => {
+  const QUARANTINE_FLAG = "BANK_TRANSACTION_STATUS_UNKNOWN";
+  async function bankAccount(): Promise<string> {
+    const consentId = `consent-${randomUUID()}`;
+    const accountId = `bank-acc-${randomUUID()}`;
+    await adminPool.query("INSERT INTO bank_consents (consent_id, tenant_id, bank_id, state) VALUES ($1, $2, 'bank-x', 'active')", [consentId, TENANT]);
+    await adminPool.query("INSERT INTO bank_accounts (bank_account_id, tenant_id, provider_account_id, consent_id, bank_id) VALUES ($1, $2, $3, $4, 'bank-x')", [accountId, TENANT, `pa-${randomUUID()}`, consentId]);
+    return accountId;
+  }
+  async function bankTx(accountId: string, flags: string[]): Promise<string> {
+    const id = `bank-tx-${randomUUID()}`;
+    await adminPool.query(
+      `INSERT INTO bank_transactions (bank_transaction_id, tenant_id, bank_account_id, provider_transaction_id, status, direction, amount_ore, currency, anomaly_flags)
+       VALUES ($1, $2, $3, $4, 'pending', 'debit', 7000, 'NOK', $5::jsonb)`,
+      [id, TENANT, accountId, `ptx-${randomUUID()}`, JSON.stringify(flags)]
+    );
+    return id;
+  }
+  async function bankLoopFor(txId: string) {
+    const loops = await openLoops.listOpenLoops(TENANT, "business", "open");
+    return (loops as unknown as Array<{ loop_type: string; detection_key: string; reason: string }>).find((l) => l.detection_key === `bank_transaction_unmatched:${txId}`);
+  }
+
+  it("pending-rad med karantene-flagget gir bank_transaction_unmatched med flagget i årsaken; en rad uten flagg gir ingen loop; loopen lukkes når flagget er fjernet (banken sendte en kjent status)", async () => {
+    const accountId = await bankAccount();
+    const quarantined = await bankTx(accountId, [QUARANTINE_FLAG]);
+    const clean = await bankTx(accountId, []);
+    await openLoops.detectBankTransactionAnomalies(TENANT, "business");
+    const loop = await bankLoopFor(quarantined);
+    expect(loop?.loop_type).toBe("bank_transaction_unmatched");
+    expect(loop?.reason).toContain(QUARANTINE_FLAG);
+    expect(await bankLoopFor(clean)).toBeUndefined();
+    await adminPool.query("UPDATE bank_transactions SET anomaly_flags = '[]'::jsonb WHERE bank_transaction_id = $1", [quarantined]);
+    const sweep = await openLoops.detectBankTransactionAnomalies(TENANT, "business");
+    expect(sweep.auto_resolved).toBeGreaterThanOrEqual(1);
+    expect(await bankLoopFor(quarantined)).toBeUndefined();
+  });
+});
