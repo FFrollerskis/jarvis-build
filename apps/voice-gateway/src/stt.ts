@@ -6,6 +6,17 @@ import { join } from "node:path";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
 import { WebSocket as WsClient } from "ws";
 import { maybeDumpAudioForDebug } from "./debug-audio-dump.ts";
+import { deadlineSignal } from "./deadline.ts";
+import { AVAILABILITY_CACHE_MS, AvailabilityCache, killProcessGroup, probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
+import { DEFAULT_VOICE_LIMITS, ProcessSlots } from "./limits.ts";
+import type { SpeechCallContext } from "./speech-context.ts";
+
+/** WP-V2 (K4): standard totalfrist (ms) for ett batch-STT-kall til en skyleverandør (en tur er maks ca. 30 s lyd). */
+export const DEFAULT_STT_HTTP_TIMEOUT_MS = 20_000;
+/** WP-V2 (K4): standard maksvarighet (ms) for én lokal whisper-prosess. */
+export const DEFAULT_WHISPER_TIMEOUT_MS = 60_000;
+/** Prosess-delt standardsemafor for whisper (CPU-tung). `main.ts` injiserer et eget med grensen fra `VoiceLimits`. */
+const DEFAULT_WHISPER_SLOTS = new ProcessSlots(2, DEFAULT_VOICE_LIMITS.processQueueTimeoutMs, DEFAULT_VOICE_LIMITS.reservedProvenSlots);
 
 /**
  * SpeechAdapter (STT): streaming-kontrakt bak adapter - ingen leverandørkode
@@ -28,7 +39,10 @@ export interface SttAdapter {
    */
   readonly processor: SpeechProcessorDeclaration;
   available(): boolean;
-  startStream(): SttStream;
+  /** `context` (WP-V2, K4): sesjonens memory space/tillitsnivå - en failover-adapter dømmer reserven mot den. Enkle adaptere ignorerer den. */
+  startStream(context?: SpeechCallContext): SttStream;
+  /** WP-V2: valgfri, hemmelighetsfri driftsstatus til `/status` (ikke-tilgjengelighetsårsak, failover-tilstand). */
+  status?(): Record<string, unknown>;
 }
 
 /**
@@ -107,7 +121,9 @@ export class OpenAiStt implements SttAdapter {
     private readonly apiKey: string | undefined = process.env["OPENAI_API_KEY"],
     private readonly model: string = "whisper-1",
     /** PCM-samplerate for wav-innpakking (mikrofon 16k; OpenAI TTS-rundtur 24k). */
-    private readonly sampleRate: number = 16000
+    private readonly sampleRate: number = 16000,
+    /** WP-V2 (K4): totalfrist (ms) for transkripsjonskallet. */
+    private readonly timeoutMs: number = DEFAULT_STT_HTTP_TIMEOUT_MS
   ) {}
 
   available(): boolean {
@@ -119,7 +135,7 @@ export class OpenAiStt implements SttAdapter {
       throw new Error("openai_stt_not_configured");
     }
     const chunks: Buffer[] = [];
-    const { apiKey, model, sampleRate } = this;
+    const { apiKey, model, sampleRate, timeoutMs } = this;
     return {
       pushAudio(frame: Buffer): void {
         chunks.push(frame);
@@ -130,15 +146,30 @@ export class OpenAiStt implements SttAdapter {
         form.set("model", model);
         form.set("language", "no");
         form.set("file", new Blob([new Uint8Array(wav)], { type: "audio/wav" }), "audio.wav");
-        const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-          method: "POST",
-          headers: { authorization: `Bearer ${apiKey}` },
-          body: form
-        });
-        if (!response.ok) {
-          throw new Error(`openai_stt_error_${response.status}`);
+        const deadline = deadlineSignal(timeoutMs);
+        try {
+          let response: Response;
+          try {
+            response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+              method: "POST",
+              headers: { authorization: `Bearer ${apiKey}` },
+              body: form,
+              signal: deadline.signal
+            });
+          } catch {
+            throw new Error(deadline.timedOut() ? "openai_stt_timeout" : "openai_stt_network_error");
+          }
+          if (!response.ok) {
+            throw new Error(`openai_stt_error_${response.status}`);
+          }
+          try {
+            return ((await response.json()) as { text: string }).text;
+          } catch {
+            throw new Error(deadline.timedOut() ? "openai_stt_timeout" : "openai_stt_invalid_response");
+          }
+        } finally {
+          deadline.dispose();
         }
-        return ((await response.json()) as { text: string }).text;
       },
       onPartial(): void {
         // Batch-API gir ikke partials; streaming-kandidater vurderes i benchmark.
@@ -223,7 +254,8 @@ export class RemoteWhisperStt implements SttAdapter {
     return (this.options.now ?? Date.now)();
   }
 
-  startStream(): SttStream {
+  /** `context` (FIX-4): gis videre til den lokale reserven, så en BEVIST sesjon ikke mister sin reserverte prosessplass ved fallback. */
+  startStream(context?: SpeechCallContext): SttStream {
     const baseUrl = this.baseUrl;
     if (!baseUrl) throw new Error("remote_whisper_not_configured");
     const chunks: Buffer[] = [];
@@ -237,7 +269,7 @@ export class RemoteWhisperStt implements SttAdapter {
         const runFallback = async (reason: string): Promise<string> => {
           if (!fallback?.available()) throw new Error(`remote_whisper_failed_no_fallback:${reason}`);
           console.warn(JSON.stringify({ msg: "stt_remote_whisper_fallback_local", reason }));
-          const stream = fallback.startStream();
+          const stream = fallback.startStream(context);
           for (const c of chunks) stream.pushAudio(c);
           return stream.end();
         };
@@ -320,7 +352,9 @@ export class DeepgramStt implements SttAdapter {
     private readonly apiKey: string | undefined = process.env["JARVIS_DEEPGRAM_API_KEY"],
     private readonly language: string = process.env["JARVIS_DEEPGRAM_LANG"] ?? "no",
     /** PCM-samplerate for wav-innpakking - SAMME 16 kHz-forventning som resten av piloten. */
-    private readonly sampleRate: number = 16000
+    private readonly sampleRate: number = 16000,
+    /** WP-V2 (K4): totalfrist (ms) for transkripsjonskallet. */
+    private readonly timeoutMs: number = DEFAULT_STT_HTTP_TIMEOUT_MS
   ) {}
 
   available(): boolean {
@@ -332,25 +366,39 @@ export class DeepgramStt implements SttAdapter {
       throw new Error("deepgram_stt_not_configured");
     }
     const chunks: Buffer[] = [];
-    const { apiKey, language, sampleRate } = this;
+    const { apiKey, language, sampleRate, timeoutMs } = this;
     return {
       pushAudio(frame: Buffer): void {
         chunks.push(frame);
       },
       async end(): Promise<string> {
         const wav = pcm16ToWav(Buffer.concat(chunks), sampleRate);
-        const response = await fetch(`https://api.deepgram.com/v1/listen?language=${language}`, {
-          method: "POST",
-          headers: { authorization: `Token ${apiKey}`, "content-type": "audio/wav" },
-          body: wav
-        });
-        if (!response.ok) {
-          throw new Error(`deepgram_stt_error_${response.status}`);
+        const deadline = deadlineSignal(timeoutMs);
+        try {
+          let response: Response;
+          try {
+            response = await fetch(`https://api.deepgram.com/v1/listen?language=${language}`, {
+              method: "POST",
+              headers: { authorization: `Token ${apiKey}`, "content-type": "audio/wav" },
+              body: wav,
+              signal: deadline.signal
+            });
+          } catch {
+            throw new Error(deadline.timedOut() ? "deepgram_stt_timeout" : "deepgram_stt_network_error");
+          }
+          if (!response.ok) {
+            throw new Error(`deepgram_stt_error_${response.status}`);
+          }
+          let body: { results?: { channels?: Array<{ alternatives?: Array<{ transcript?: string }> }> } };
+          try {
+            body = (await response.json()) as typeof body;
+          } catch {
+            throw new Error(deadline.timedOut() ? "deepgram_stt_timeout" : "deepgram_stt_invalid_response");
+          }
+          return body.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
+        } finally {
+          deadline.dispose();
         }
-        const body = (await response.json()) as {
-          results?: { channels?: Array<{ alternatives?: Array<{ transcript?: string }> }> };
-        };
-        return body.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
       },
       onPartial(): void {
         // Batch-API gir ikke partials; streaming-kandidater vurderes i benchmark.
@@ -629,8 +677,19 @@ export class LocalWhisperStt implements SttAdapter {
      * D-390: valgfri `--prompt` - whisper bruker den som stilkontekst (norsk bokmål, navnene Charlie/Tobias/Jarvis) og gjenkjenner
      * egennavn og norsk ortografi bedre. Tom = ikke sendt.
      */
-    private readonly prompt: string | undefined = process.env["JARVIS_WHISPER_PROMPT"]
-  ) {}
+    private readonly prompt: string | undefined = process.env["JARVIS_WHISPER_PROMPT"],
+    /** WP-V2 (K2): samtidige whisper-prosesser (delt semafor). */
+    private readonly slots: ProcessSlots = DEFAULT_WHISPER_SLOTS,
+    /** WP-V2 (K4): maks varighet (ms) for én whisper-prosess. */
+    private readonly timeoutMs: number = DEFAULT_WHISPER_TIMEOUT_MS,
+    /** FIX-7: klokke for tilgjengelighets-cachen (tester). */
+    now: () => number = Date.now
+  ) {
+    this.availability = new AvailabilityCache(() => probeLocalBinary(this.binPath, this.modelPath), AVAILABILITY_CACHE_MS, now);
+  }
+
+  /** FIX-7: `available()` går hit (5 s cache) i stedet for synkron stat/access ved hvert kall. */
+  private readonly availability: AvailabilityCache;
 
   /** Argumentene som sendes til whisper-cli (observerbart for tester). */
   cliArgs(tmpOutBase: string): string[] {
@@ -639,23 +698,36 @@ export class LocalWhisperStt implements SttAdapter {
     return args;
   }
 
-  /** Modellen er like påkrevd som binæren - whisper.cpp kan strukturelt ikke kjøre uten `-m`. */
+  /**
+   * Modellen er like påkrevd som binæren - whisper.cpp kan strukturelt ikke kjøre uten `-m`. WP-V2 (K1c, audit D1): sjekker nå også
+   * at binæren finnes og er kjørbar og at modellfilen er lesbar (ikke bare at miljøvariablene er satt).
+   */
   available(): boolean {
-    return Boolean(this.binPath) && Boolean(this.modelPath);
+    return this.unavailableReason() === undefined;
   }
 
-  startStream(): SttStream {
+  unavailableReason(): LocalBinaryProblem | undefined {
+    return this.availability.get();
+  }
+
+  status(): Record<string, unknown> {
+    const reason = this.unavailableReason();
+    return {
+      ...(reason !== undefined ? { unavailable_reason: reason } : {}),
+      process_slots: { max: this.slots.max, in_use: this.slots.inUse, queued: this.slots.queued, reserved_for_proven: this.slots.reservedForProven }
+    };
+  }
+
+  /** `context` (FIX-4): kun `SERVER_VERIFIED` får de reserverte prosessplassene; manglende kontekst regnes som ubevist (fail-closed). */
+  startStream(context?: SpeechCallContext): SttStream {
     if (!this.binPath || !this.modelPath) {
       throw new Error("local_whisper_not_configured");
     }
-    const { binPath, sampleRate } = this;
+    const unproven = context?.authority !== "SERVER_VERIFIED";
+    const { binPath, sampleRate, slots, timeoutMs } = this;
     const cliArgs = (tmpOutBase: string): string[] => this.cliArgs(tmpOutBase);
     const chunks: Buffer[] = [];
-    return {
-      pushAudio(frame: Buffer): void {
-        chunks.push(frame);
-      },
-      async end(): Promise<string> {
+    const runWhisper = async (): Promise<string> => {
         const wav = pcm16ToWav(Buffer.concat(chunks), sampleRate);
         // D-266 (Tobias direkte i chat, live NAS-test MED D-265 sin
         // anti-alias-fiks aktiv): IDENTISK symptom som FØR D-265 - whisper.cpp
@@ -767,8 +839,11 @@ export class LocalWhisperStt implements SttAdapter {
         // fortsatt intakt.
         const tmpOutBase = join(tmpdir(), `jarvis-whisper-${randomUUID()}`);
         // D-390: `-t <tråder>` (+ valgfri `--prompt`) i tillegg - se `cliArgs()`.
+        // WP-V2 (K4): `detached: true` gjør whisper til gruppeleder, så en frist kan drepe HELE prosessgruppen (en wrapper-script med barn
+        // lot ellers pipen stå åpen og kallet henge selv etter SIGKILL av toppen) - samme mønster som piper.
         const proc = spawn(binPath, cliArgs(tmpOutBase), {
-          stdio: ["pipe", "pipe", "pipe"]
+          stdio: ["pipe", "pipe", "pipe"],
+          detached: true
         });
         let stdout = "";
         let stderr = "";
@@ -796,11 +871,23 @@ export class LocalWhisperStt implements SttAdapter {
           proc.once("close", resolve);
         });
         proc.stdin.end(wav);
+        // WP-V2 (K4): en whisper-prosess som ikke er ferdig innen `timeoutMs` drepes (SIGKILL) - ellers blokkerer den turnChain.
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          killProcessGroup(proc, "SIGKILL");
+        }, timeoutMs);
         let code: number | null;
         try {
           code = await exitCode;
         } catch (err) {
           throw new Error(`local_whisper_spawn_failed:${(err as Error).message.slice(0, 200)}`);
+        } finally {
+          clearTimeout(timer);
+        }
+        if (timedOut) {
+          await cleanupTmpOutput(tmpOutBase);
+          throw new Error("local_whisper_timeout");
         }
         if (code !== 0) {
           await cleanupTmpOutput(tmpOutBase);
@@ -901,6 +988,19 @@ export class LocalWhisperStt implements SttAdapter {
             });
         }
         return text;
+    };
+    return {
+      pushAudio(frame: Buffer): void {
+        chunks.push(frame);
+      },
+      async end(): Promise<string> {
+        // WP-V2 (K2): samtidige whisper-prosesser er begrenset; køen har en frist og avvises med `VoiceBusyError` ("voice_busy").
+        const release = await slots.acquire(undefined, { unproven });
+        try {
+          return await runWhisper();
+        } finally {
+          release();
+        }
       },
       onPartial(): void {
         // whisper.cpp sin batch-CLI gir ingen inkrementelle partials - se klassekommentaren.
