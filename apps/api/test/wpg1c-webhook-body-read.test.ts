@@ -295,4 +295,27 @@ describe("FIX-2 del B: den ekte ruten", () => {
     a.sock.destroy(); b.sock.destroy();
     await waitFor("plassene frigitt", () => guard().activeLargeReads === 0);
   }, 30_000);
+
+  it("en chunked kropp (uten Content-Length) over 256 KB når alle plasser er tatt: forbindelsen lukkes UTEN statuslinje (som for 413 på en chunked kropp), `webhook_busy` logges, og plassene er uendret", async () => {
+    warnings.length = 0; received.length = 0;
+    const a = stalled("meta", 1 * MIB, 300 * KIB);
+    const b = stalled("meta", 1 * MIB, 300 * KIB);
+    await waitFor("begge plasser tatt", () => guard().activeLargeReads === 2);
+    const sock = createConnection({ host: "127.0.0.1", port });
+    let text = ""; let isClosed = false;
+    sock.on("data", (d) => { text += d.toString("latin1"); });
+    sock.on("close", () => { isClosed = true; });
+    sock.on("error", () => { isClosed = true; });
+    sock.write("POST /webhooks/comms/meta HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n");
+    sock.write(`${(300 * KIB).toString(16)}\r\n`);
+    sock.write(Buffer.alloc(300 * KIB, 0x61));
+    sock.write("\r\n");
+    await waitFor("forbindelsen lukket", () => isClosed);
+    expect(text, "ingen statuslinje: forbindelsen ble lukket uten svar (dokumentert i runbooken)").toBe("");
+    expect(warnings).toEqual([{ msg: "comms_webhook_rejected", provider: "meta", reason: "webhook_busy" }]);
+    expect(received, "ingen kropp nådde tjenesten").toEqual([]);
+    expect(guard().activeLargeReads, "den avviste tok ingen plass").toBe(2);
+    a.sock.destroy(); b.sock.destroy();
+    await waitFor("plassene frigitt", () => guard().activeLargeReads === 0);
+  }, 30_000);
 });
