@@ -266,7 +266,8 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
  * WP-G4b K4 (D-484, JARVIS-115 d): «lokal» er en ETIKETT på profilen, og for de tre identitetene som er lokale kun ved KONFIGURASJON (`local_llm`, `gemma_local`, `ollama`) er den bare sann så lenge det konfigurerte
  * endepunktet faktisk er lokalt. Oppstartsvakten (`apps/api/src/local-model-endpoints.ts`, bak `JARVIS_LOCAL_MODEL_URL_GUARD=on`) kaller denne når URL-en er ugyldig/offentlig: profilen blir `cloud`, og ALLE som leser
  * `locality` ser det (ruteren, `ModelGateway`s kjøringslåser, `servedByCloudModel` og dermed utførelseslåsen for finans, chat-jobbene, kontrollsentrene) - det finnes ingen egen liste å huske å oppdatere.
- * Ren nedgradering: aldri `cloud` -> `local`. Muterer profilobjektene (som `CapabilityRegistry` og `DEFAULT_PROFILES`-forbrukerne deler); kalles kun ved oppstart, før en gateway brukes. Returnerer om noe ble endret.
+ * Ren nedgradering: aldri `cloud` -> `local`, og det finnes bevisst INGEN motsatt funksjon i produksjonskoden (en `cloud -> local`-primitiv ville vært en måte å gjøre en identitet «lokal» igjen uten en ny oppstartsvurdering; testene
+ * har sin egen tilbakestilling i `apps/api/test/wpg4b-local-model-guard.test.ts`). Muterer profilobjektene (som `CapabilityRegistry` og `DEFAULT_PROFILES`-forbrukerne deler); kalles kun ved oppstart, før en gateway brukes. Returnerer om noe ble endret.
  */
 export function demoteLocalProfileToCloud(provider: string, profiles: ModelProfile[] = DEFAULT_PROFILES): boolean {
   let changed = false;
@@ -277,17 +278,6 @@ export function demoteLocalProfileToCloud(provider: string, profiles: ModelProfi
     }
   }
   return changed;
-}
-
-/** Standard-`locality` per leverandør slik den står i `DEFAULT_PROFILES` ved lasting (kilden `resetProfileLocalityToDefaults` gjenoppretter fra). */
-const DEFAULT_LOCALITY: ReadonlyMap<string, ModelProfile["locality"]> = new Map(DEFAULT_PROFILES.map((profile) => [profile.provider, profile.locality]));
-
-/** Gjenoppretter `locality` til registerets standard for alle profiler i `profiles` (tester og en eventuell ny verifisering). Rører ingen annen egenskap. */
-export function resetProfileLocalityToDefaults(profiles: ModelProfile[] = DEFAULT_PROFILES): void {
-  for (const profile of profiles) {
-    const original = DEFAULT_LOCALITY.get(profile.provider);
-    if (original !== undefined) profile.locality = original;
-  }
 }
 
 /**

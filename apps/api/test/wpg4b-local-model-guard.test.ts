@@ -1,8 +1,9 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type pg from "pg";
-import { CapabilityRegistry, DEFAULT_PROFILES, MemoryTraceSink, ModelGateway, demoteLocalProfileToCloud, resetProfileLocalityToDefaults, type CompleteInput, type ModelProfile } from "@jarvis/model-gateway";
+import { CapabilityRegistry, DEFAULT_PROFILES, MemoryTraceSink, ModelGateway, demoteLocalProfileToCloud, type CompleteInput, type ModelProfile } from "@jarvis/model-gateway";
 import type { ModelProviderAdapter, ModelRequest, ModelResult } from "@jarvis/provider-adapters";
 import { ModelSignalAssist, type AssistInput } from "@jarvis/situations";
 // @ts-expect-error - ren .mjs uten typer (genererer compose-blokkene)
@@ -20,6 +21,14 @@ import { FINANCE_EXECUTION_LOCK, financeLockServedLocally, withholdsRestrictedJo
  *  A: flaggparseren (kun eksakt `on`).   B: vakten (URL-former, tailnet, DNS, fail-lukket, logg uten URL).   C: demoteringen flyter inn i HVER lokalitetsavgjørelse (mot den delte `DEFAULT_PROFILES`).
  *  D: struktur (api OG worker kaller vakten FØR gatewayen; flaggene leses kun i vaktfilen; miljø/compose).
  */
+// Standard-lokalitet slik den står i `DEFAULT_PROFILES` ved import (FØR noen test demoterer). Tilbakestillingen finnes KUN her: produksjonskoden har bevisst ingen `cloud -> local`-funksjon.
+const DEFAULT_LOCALITY = new Map(DEFAULT_PROFILES.map((profile) => [profile.provider, profile.locality] as const));
+const resetProfileLocalityToDefaults = (): void => {
+  for (const profile of DEFAULT_PROFILES) {
+    const original = DEFAULT_LOCALITY.get(profile.provider);
+    if (original !== undefined) profile.locality = original;
+  }
+};
 // rekkefølgen er `LOCAL_MODEL_ENDPOINTS`
 const NAMES = ["local_llm", "gemma_local", "ollama"];
 const profilesCopy = (): ModelProfile[] => DEFAULT_PROFILES.map((profile) => ({ ...profile }));
@@ -260,6 +269,25 @@ describe("C: demoteringen flyter inn i HVER lokalitetsavgjørelse (mot den delte
 describe("D: struktur - api OG worker kaller vakten FØR gatewayen, flaggene leses ett sted, miljø og compose", () => {
   const read = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
   const strip = (code: string): string => code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+  it("INGEN produksjonskode kan gjøre en profil lokal igjen: den eneste tilordningen til `.locality` er nedgraderingen til `cloud` (`capability-registry.ts`)", () => {
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    const walk = (dir: string, out: string[] = []): string[] => {
+      for (const name of readdirSync(dir)) {
+        if (name === "node_modules" || name === "test" || name === "dist") continue;
+        const full = join(dir, name);
+        if (statSync(full).isDirectory()) walk(full, out);
+        else if (name.endsWith(".ts") || name.endsWith(".mjs")) out.push(full);
+      }
+      return out;
+    };
+    const hits: string[] = [];
+    for (const file of [...walk(join(root, "modules")), ...walk(join(root, "apps")), ...walk(join(root, "packages"))]) {
+      if (!file.includes("/src/") && !file.includes("/scripts/")) continue;
+      for (const m of strip(readFileSync(file, "utf8")).matchAll(/\.locality\s*=(?!=)\s*([^;\n]*)/g)) hits.push(`${file.slice(root.length)}: ${m[0].trim()}`);
+    }
+    expect(hits).toEqual(['modules/model-gateway/src/capability-registry.ts: .locality = "cloud"']);
+  });
 
   it("main.ts og worker-main.ts: `await enforceLocalModelEndpoints(process.env, ...)` står FØR `new ModelGateway(`", () => {
     for (const file of ["../src/main.ts", "../src/worker-main.ts"]) {
