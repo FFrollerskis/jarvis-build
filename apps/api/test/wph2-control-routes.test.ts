@@ -209,7 +209,7 @@ describe("A: avslag i samme rekkefølge som de øvrige knappene (handling → gr
   });
 });
 
-describe("B: revoke_autonomy_binding - nøyaktig én rad, i identitetens eget rom og egen tenant", () => {
+describe("B: revoke_autonomy_binding - kun identitetens eget (tenant, rom, domene); andre domener, rom og tenanter er urørt", () => {
   it("eieren: 200, bindingen for domenet er borte - andre domener, andre rom og andre tenanter er urørt", async () => {
     expect((await policyRows()).map((r) => `${r.tenant_id}/${r.memory_space_id}/${r.domain}`)).toEqual([
       `${TENANT_A}/business/growth`, `${TENANT_A}/business/pipeline`, `${TENANT_A}/health/wellbeing`, `${TENANT_A}/personal/pipeline`, `${TENANT_A}/personal/spend`, `${TENANT_B}/personal/pipeline`

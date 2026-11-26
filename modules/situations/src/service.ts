@@ -1638,7 +1638,7 @@ export class SituationEngine {
     const value = parsed.data;
     // WP-G4: en autonomi-binding for et informer-kun-domene (helse, kamera) avvises ved BINDING (og auto-ACT/`actOn()` nekter det uansett).
     if (NEVER_ACT_DOMAINS.has(value.domain)) throw new SituationActDomainForbiddenError(value.domain);
-    // WP-G4 fiks-runde (A-HIGH-1) + WP-G4b K1 (D-484): en binding til en fysisk/kritisk handling (allowlist: kun kjente lese-handlinger i `home-assistant`/`car`) ELLER til en handling hvis definisjon ikke eksplisitt sier
+    // WP-G4 fiks-runde (A-HIGH-1) + WP-G4b K1 (D-484, FIX-9): en binding til en fysisk/kritisk handling (ENHVER handling i `home-assistant`/`car`, også lesing; ingen allowlist) ELLER til en handling hvis definisjon ikke eksplisitt sier
     // `autonomy_bindable` (DEFAULT-DENY) avvises ved BINDING med en stabil årsakskode. Ingen oppslagsfunksjon = ingenting er bindbart (fail-closed).
     const bindBlock = autonomyBindBlocker(value.tool_id, value.action, this.definitionLookup);
     if (bindBlock !== null) throw new SituationActActionForbiddenError(bindBlock.tool_id, bindBlock.action, bindBlock.code);
