@@ -56,7 +56,7 @@ const BASE_BACKOFF_MS = 500;
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 
 import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
-import { expectAccessToken, expectArray, expectCurrency, expectDecimalMinorUnits, expectId, expectRecord, expectStatus, readJsonBody, ProviderResponseInvalidError, type ResponseContext } from "./provider-response.ts";
+import { expectAccessToken, expectArray, expectCurrency, expectDecimalMinorUnits, expectId, expectRecord, expectStatus, optionalCurrency, readJsonBody, type ResponseContext } from "./provider-response.ts";
 
 export type NeonomicsEnvironment = "sandbox" | "production";
 
@@ -131,7 +131,12 @@ export interface NeonomicsBalance {
 
 export interface NeonomicsTransaction {
   id: string;
-  status: "pending" | "booked";
+  /**
+   * `unknown` (WP-FIN2 fiks-runde 1, FIX-5): leverandøren sendte en status vi ikke kjenner (`rejected`/`information`/`cancelled`/`reserved` ...) eller ingen status. Elementet FEILER IKKE hele siden
+   * (da stoppet ett avvikende element paginering og synk hver sveiperunde), men settes i KARANTENE av `BankingService.syncTransactions`: lagres som `pending` med flagget
+   * `BANK_TRANSACTION_STATUS_UNKNOWN` og bokføres/avstemmes aldri før leverandøren sender en kjent status. Før K7 bokførte `main` alt ikke-`pending` som `booked` (feil).
+   */
+  status: "pending" | "booked" | "unknown";
   /** Positiv = kredit (inn), negativ = debet (ut) hos de fleste PSD2-banker - transporten normaliserer til eksplisitt retning + absolutt beløp. */
   amountOre: number;
   direction: "debit" | "credit";
@@ -326,7 +331,8 @@ export class NeonomicsTransport implements NeonomicsGateway {
         id: expectId(a, "id", ctx),
         accountName: this.optionalString(a, "accountName"),
         accountNumber: this.optionalString(a, "accountNumber"),
-        currency: typeof a["currency"] === "string" ? (a["currency"] as string).toUpperCase() : null,
+        // FIX-6: valuta er valgfri (fraværende = `null`; kjent PARTIAL, `banking-service.ts` har `?? "NOK"`), men en oppgitt valuta MÅ være tre bokstaver (aldri «», «NOKK» eller et tall lagret som valuta).
+        currency: optionalCurrency(a, "currency", ctx)?.toUpperCase() ?? null,
         accountType: this.optionalString(a, "accountType")
       };
     });
@@ -354,8 +360,9 @@ export class NeonomicsTransport implements NeonomicsGateway {
     const list = wrapper === null ? (body as unknown[]) : expectArray(wrapper["transactions"], ctx, "transactions");
     const transactions: NeonomicsTransaction[] = list.map((item) => {
       const t = expectRecord(item, ctx, "transaction");
-      const status = expectStatus(t, "status", ctx).toLowerCase();
-      if (status !== "pending" && status !== "booked") throw new ProviderResponseInvalidError(ctx.operation, "status_unknown", false);
+      // FIX-5: kun `pending`/`booked` (uavhengig av store/små bokstaver) er kjent; alt annet (ukjent verdi, manglende felt, feil type) er `unknown` = karantene i tjenesten (aldri stille `booked`).
+      const rawStatus = typeof t["status"] === "string" ? t["status"].toLowerCase() : "";
+      const status: NeonomicsTransaction["status"] = rawStatus === "pending" || rawStatus === "booked" ? rawStatus : "unknown";
       const signedOre = expectDecimalMinorUnits(t, "amount", ctx, decimalToMinorUnits, { allowNegative: true });
       return {
         id: expectId(t, "id", ctx),

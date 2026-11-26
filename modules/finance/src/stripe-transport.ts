@@ -60,7 +60,7 @@ const BASE_BACKOFF_MS = 500;
 import { toOreInteger } from "./ore.ts";
 
 import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
-import { ProviderResponseInvalidError, expectArray, expectCurrency, expectId, expectMinorUnits, expectRecord, expectStatus, optionalText, readJsonBody, type ResponseContext } from "./provider-response.ts";
+import { ProviderResponseInvalidError, expectArray, expectCurrency, expectId, expectMinorUnits, expectRecord, expectStatus, optionalId, optionalStatus, optionalText, readJsonBody, type ResponseContext } from "./provider-response.ts";
 
 export class StripeApiError extends Error {
   constructor(
@@ -131,8 +131,10 @@ export interface StripeRefundObject {
   object: "refund";
   amount: number;
   currency: string;
-  status: string;
-  payment_intent: string;
+  /** `null` når Stripe ikke sender status (koden har `?? "provider_acknowledged"`-fallback; første webhook/oppfrisking avgjør). WP-FIN2 fiks-runde 1, FIX-2. */
+  status: string | null;
+  /** Ikke brukt av tjenesten; `null` når fraværende/`null` (Stripe kan sende `null`, `unverified`). */
+  payment_intent: string | null;
   reason: string | null;
 }
 
@@ -207,17 +209,21 @@ export class StripeTransport {
     };
   }
 
-  /** WP-FIN2 (K7): samme for refusjoner (id, `object: "refund"`, status, beløp, valuta, intensjons-id, valgfri `reason`). */
+  /**
+   * WP-FIN2 (K7): samme for refusjoner - men fra fiks-runde 1 (FIX-2) kun det koden BRUKER er påkrevd: `id` (lagres som `provider_ref`), `amount` og `currency` (ekkosjekken mot det vi ba om). `status` har
+   * `??`-fallback i tjenesten, og `object`/`payment_intent` leses aldri; de valideres bare HVIS de er til stede (`object` må da være «refund»; `status`/`payment_intent` kan være `null`, nullbarhet er
+   * `unverified`, D-41). Et felt som er til stede, men ugyldig, er fortsatt `outcome_unknown`.
+   */
   private refundFrom(body: unknown, ctx: ResponseContext): StripeRefundObject {
     const raw = expectRecord(body, ctx);
-    if (raw["object"] !== "refund") throw new ProviderResponseInvalidError(ctx.operation, raw["object"] === undefined ? "object_missing" : "object_mismatch", ctx.mutation);
+    if (raw["object"] !== undefined && raw["object"] !== null && raw["object"] !== "refund") throw new ProviderResponseInvalidError(ctx.operation, "object_mismatch", ctx.mutation);
     return {
       id: expectId(raw, "id", ctx),
       object: "refund",
       amount: expectMinorUnits(raw, "amount", ctx),
       currency: expectCurrency(raw, "currency", ctx),
-      status: expectStatus(raw, "status", ctx),
-      payment_intent: expectId(raw, "payment_intent", ctx),
+      status: optionalStatus(raw, "status", ctx),
+      payment_intent: optionalId(raw, "payment_intent", ctx),
       reason: optionalText(raw, "reason", ctx, 64)
     };
   }

@@ -57,7 +57,7 @@ const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
 
 import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
-import { expectAccessToken, expectArray, expectId, expectRecord, optionalText, readJsonBody, type ResponseContext } from "./provider-response.ts";
+import { expectAccessToken, expectArray, expectId, expectRecord, optionalText, readJsonBody, type ResponseContext, expectNumericId } from "./provider-response.ts";
 
 export class FikenApiError extends Error {
   constructor(
@@ -235,16 +235,30 @@ export class FikenTransport {
     });
   }
 
+  /**
+   * WP-FIN2 fiks-runde 1 (FIX-6): de tre Fiken-LESERNE var `as T` uten noen feltsjekk (K7 dekket dem ikke). Nå: svaret MÅ være en liste av objekter der id-feltet (`contactId`/`bankAccountId`/
+   * `journalEntryId`: positivt heltall) er til stede og gyldig - en HTML-200, et objekt eller en liste med ugyldige elementer er en typet feil (`provider_response_invalid:<operasjon>:<kode>`),
+   * aldri en stille tom liste. Elementene returneres UENDRET (alle felt bevares, f.eks. bilagslinjene `fiken-posting-reader.ts` summerer); bare id-feltet valideres. Fikens svarform er `unverified` (D-41).
+   */
+  private async readList<T>(path: string, operation: string, idField: string): Promise<T[]> {
+    const ctx: ResponseContext = { operation, mutation: false };
+    return expectArray(await this.request<unknown>("GET", path, undefined, undefined, operation), ctx).map((item) => {
+      const record = expectRecord(item, ctx, "item");
+      expectNumericId(record, idField, ctx);
+      return record as T;
+    });
+  }
+
   async listContacts(): Promise<FikenContact[]> {
-    return this.request("GET", `/companies/${this.companySlug}/contacts`);
+    return this.readList<FikenContact>(`/companies/${this.companySlug}/contacts`, "fiken.list_contacts", "contactId");
   }
 
   async listBankAccounts(): Promise<FikenBankAccount[]> {
-    return this.request("GET", `/companies/${this.companySlug}/bankAccounts`);
+    return this.readList<FikenBankAccount>(`/companies/${this.companySlug}/bankAccounts`, "fiken.list_bank_accounts", "bankAccountId");
   }
 
   async listJournalEntries(): Promise<FikenJournalEntry[]> {
-    return this.request("GET", `/companies/${this.companySlug}/journalEntries`);
+    return this.readList<FikenJournalEntry>(`/companies/${this.companySlug}/journalEntries`, "fiken.list_journal_entries", "journalEntryId");
   }
 
   /**

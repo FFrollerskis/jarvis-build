@@ -21,7 +21,8 @@ import {
 const DELETE = Symbol("delete");
 type Path = readonly string[];
 type FieldKind = "id" | "amount" | "decimal" | "currency" | "status" | "object" | "nested_record";
-interface Field { readonly path: Path; readonly kind: FieldKind; readonly name?: string }
+/** `optional`: fiks-runde 1 (FIX-1/FIX-2) - feltet brukes ikke av koden; fraværende/null/tom er GYLDIG, men et felt som er til stede og ugyldig feiler fortsatt (dekket i `fin2-minimal-response-contract.test.ts`). */
+interface Field { readonly path: Path; readonly kind: FieldKind; readonly name?: string; readonly optional?: boolean }
 interface Method {
   readonly name: string;
   readonly mutation: boolean;
@@ -33,6 +34,8 @@ interface Method {
   readonly fields: readonly Field[];
   /** Hele kroppen er en liste (ikke et objekt). */
   readonly bodyIsArray?: boolean;
+  /** JSON `null` som kropp er et tomt svar (livssyklus-PATCH, FIX-1) og aksepteres. */
+  readonly nullBodyOk?: boolean;
   /** Listefeltet som bærer elementene (path til listen), og elementenes felter relativt. */
   readonly listPath?: Path;
 }
@@ -111,25 +114,35 @@ const METHODS: readonly Method[] = [
     name: "stripe.createRefund", mutation: true, operation: "stripe.create_refund", valid: stripeRefund,
     call: () => stripe().createRefund({ stripePaymentIntentId: "pi_123", amountOre: 2_500, idempotencyKey: "k" }),
     expect: (r) => expect(r).toMatchObject({ id: "re_123", amount: 2_500, status: "succeeded", payment_intent: "pi_123" }),
-    fields: [{ path: ["id"], kind: "id" }, { path: ["amount"], kind: "amount" }, { path: ["currency"], kind: "currency" }, { path: ["status"], kind: "status" }, { path: ["payment_intent"], kind: "id" }, { path: ["object"], kind: "object" }]
+    fields: [{ path: ["id"], kind: "id" }, { path: ["amount"], kind: "amount" }, { path: ["currency"], kind: "currency" }, { path: ["status"], kind: "status", optional: true }, { path: ["payment_intent"], kind: "id", optional: true }, { path: ["object"], kind: "object", optional: true }]
   },
   {
     name: "stripe.getRefund", mutation: false, operation: "stripe.get_refund", valid: stripeRefund,
     call: () => stripe().getRefund("re_123"),
     expect: (r) => expect(r).toMatchObject({ id: "re_123", amount: 2_500 }),
-    fields: [{ path: ["id"], kind: "id" }, { path: ["amount"], kind: "amount" }, { path: ["currency"], kind: "currency" }, { path: ["status"], kind: "status" }, { path: ["payment_intent"], kind: "id" }, { path: ["object"], kind: "object" }]
+    fields: [{ path: ["id"], kind: "id" }, { path: ["amount"], kind: "amount" }, { path: ["currency"], kind: "currency" }, { path: ["status"], kind: "status", optional: true }, { path: ["payment_intent"], kind: "id", optional: true }, { path: ["object"], kind: "object", optional: true }]
   },
   // --- Vipps ----------------------------------------------------------------------------------------------------------------------------
+  // FIX-2 (fiks-runde 1): `createPayment` krever kun `reference`; `state`/`amount` er valgfrie (valideres hvis til stede). `getPayment` er STRENG (oppfriskingen leser state og beløp). capture/cancel/refund er
+  // bekreftelser (tjenesten leser ikke svaret): kun `reference` (hvis til stede) valideres - resten er dekket i `fin2-minimal-response-contract.test.ts`.
   ...([
     ["createPayment", true, () => vipps().createPayment({ amountOre: 10_000, currency: "NOK", reference: "fin-pi-1", paymentDescription: "x", returnUrl: "https://x.test", idempotencyKey: "k" })],
-    ["getPayment", false, () => vipps().getPayment("fin-pi-1")],
-    ["capturePayment", true, () => vipps().capturePayment({ reference: "fin-pi-1", amountOre: 5_000, currency: "NOK", idempotencyKey: "k" })],
-    ["cancelPayment", true, () => vipps().cancelPayment("fin-pi-1", "k")],
-    ["refundPayment", true, () => vipps().refundPayment({ reference: "fin-pi-1", amountOre: 5_000, currency: "NOK", idempotencyKey: "k" })]
+    ["getPayment", false, () => vipps().getPayment("fin-pi-1")]
   ] as const).map(([name, mutation, call]): Method => ({
     name: `vipps.${name}`, mutation, operation: `vipps.${name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)}`, valid: vippsPayment, call,
     expect: (r) => expect(r).toMatchObject({ reference: "fin-pi-1", state: "AUTHORIZED", amount: { currency: "NOK", value: 10_000 } }),
-    fields: [{ path: ["reference"], kind: "id" }, { path: ["state"], kind: "status" }, { path: ["amount"], kind: "nested_record" }, { path: ["amount", "value"], kind: "amount" }, { path: ["amount", "currency"], kind: "currency" }]
+    fields: name === "createPayment"
+      ? [{ path: ["reference"], kind: "id" }, { path: ["state"], kind: "status", optional: true }, { path: ["amount"], kind: "nested_record", optional: true }, { path: ["amount", "value"], kind: "amount" }, { path: ["amount", "currency"], kind: "currency" }]
+      : [{ path: ["reference"], kind: "id" }, { path: ["state"], kind: "status" }, { path: ["amount"], kind: "nested_record" }, { path: ["amount", "value"], kind: "amount" }, { path: ["amount", "currency"], kind: "currency" }]
+  })),
+  ...([
+    ["capturePayment", () => vipps().capturePayment({ reference: "fin-pi-1", amountOre: 5_000, currency: "NOK", idempotencyKey: "k" })],
+    ["cancelPayment", () => vipps().cancelPayment("fin-pi-1", "k")],
+    ["refundPayment", () => vipps().refundPayment({ reference: "fin-pi-1", amountOre: 5_000, currency: "NOK", idempotencyKey: "k" })]
+  ] as const).map(([name, call]): Method => ({
+    name: `vipps.${name}`, mutation: true, operation: `vipps.${name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)}`, valid: vippsPayment, call,
+    expect: (r) => expect(r).toEqual({ reference: "fin-pi-1" }),
+    fields: [{ path: ["reference"], kind: "id", optional: true }]
   })),
   // --- Neonomics ------------------------------------------------------------------------------------------------------------------------
   {
@@ -157,7 +170,8 @@ const METHODS: readonly Method[] = [
     valid: { transactions: [{ id: "tx-1", status: "BOOKED", amount: "-99.00", currency: "nok", bookingDate: "2026-11-25" }], nextPageToken: "p2" },
     call: () => neonomics().listTransactions("sess-1", "acc-1", null),
     expect: (r) => expect(r).toMatchObject({ transactions: [{ id: "tx-1", status: "booked", amountOre: 9_900, direction: "debit", currency: "NOK" }], nextPageToken: "p2" }),
-    fields: [{ path: ["transactions", "0", "id"], kind: "id" }, { path: ["transactions", "0", "status"], kind: "status" }, { path: ["transactions", "0", "amount"], kind: "decimal" }, { path: ["transactions", "0", "currency"], kind: "currency" }]
+    // FIX-5: ukjent/manglende `status` feiler ikke siden (karantene), så feltet står ikke i tabellen - se `fin2-minimal-response-contract.test.ts` og `fin2-bank-status-quarantine.test.ts`.
+    fields: [{ path: ["transactions", "0", "id"], kind: "id" }, { path: ["transactions", "0", "amount"], kind: "decimal" }, { path: ["transactions", "0", "currency"], kind: "currency" }]
   },
   {
     name: "neonomics.initiateDomesticPayment", mutation: true, operation: "neonomics.initiate_domestic_payment", valid: { id: "pay-1", status: "PDNG" },
@@ -181,7 +195,10 @@ const METHODS: readonly Method[] = [
   ] as const).map(([name, mutation, call]): Method => ({
     name: `wallester.${name}`, mutation, operation: `wallester.${name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)}`, valid: { id: "wc-1", status: "Active", masked_card_number: "…4321", account_id: "acc-1" }, call,
     expect: (r) => expect(r).toMatchObject({ id: "wc-1", status: "Active", maskedCardNumber: "…4321" }),
-    fields: [{ path: ["id"], kind: "id" }, { path: ["status"], kind: "status" }]
+    // FIX-1 (fiks-runde 1): livssyklusverbene (PATCH) bruker kun `status`; id står i URL-en. Fraværende id/status og JSON `null` er gyldig (`status: "unknown"`); til stede-men-ugyldig feiler fortsatt.
+    ...(["createCard", "getCard"].includes(name)
+      ? { fields: [{ path: ["id"], kind: "id" as const }, { path: ["status"], kind: "status" as const }] }
+      : { fields: [{ path: ["id"], kind: "id" as const, optional: true }, { path: ["status"], kind: "status" as const, optional: true }], nullBodyOk: true })
   })),
   {
     name: "wallester.listAuthorizations", mutation: false, operation: "wallester.list_authorizations",
@@ -232,10 +249,15 @@ describe("K7: gyldige svar passerer (kontroll) - strengheten avviser ikke det so
 describe("K7: tabelltest - hvert felt x (mangler / null / tom / feil type / negativ / brøk / ugyldig)", () => {
   for (const method of METHODS) {
     for (const field of method.fields) {
+      const expectAccepted = async (method: Method): Promise<void> => {
+        const outcome = await method.call().then(() => null, (e: unknown) => e);
+        expect(outcome, `${method.name}: et valgfritt felt som mangler skal IKKE gi ugyldig svar`).toBeNull();
+      };
       if (field.kind === "object") {
         for (const [label, value, suffix] of [["mangler", DELETE, "object_missing"], ["feil objekttype", "balance", "object_mismatch"]] as const) {
-          it(`${method.name}: ${field.path.join(".")} ${label}`, async () => {
+          it(`${method.name}: ${field.path.join(".")} ${label}${field.optional && value === DELETE ? " -> akseptert (valgfritt)" : ""}`, async () => {
             route(setAt(method.valid, field.path, value));
+            if (field.optional && value === DELETE) return expectAccepted(method);
             expectInvalid(await method.call().catch((e: unknown) => e), method, suffix);
           });
         }
@@ -243,16 +265,19 @@ describe("K7: tabelltest - hvert felt x (mangler / null / tom / feil type / nega
       }
       if (field.kind === "nested_record") {
         for (const [label, value, suffix] of [["mangler", DELETE, "_missing"], ["feil type", "tekst", "_wrong_type"], ["liste", [], "_wrong_type"]] as const) {
-          it(`${method.name}: ${field.path.join(".")} (objekt) ${label}`, async () => {
+          it(`${method.name}: ${field.path.join(".")} (objekt) ${label}${field.optional && value === DELETE ? " -> akseptert (valgfritt)" : ""}`, async () => {
             route(setAt(method.valid, field.path, value));
+            if (field.optional && value === DELETE) return expectAccepted(method);
             expectInvalid(await method.call().catch((e: unknown) => e), method, suffix);
           });
         }
         continue;
       }
       for (const bad of BAD[field.kind]) {
-        it(`${method.name}: ${field.path.join(".")} (${field.kind}) = ${bad.v === DELETE ? "<mangler>" : JSON.stringify(bad.v)} -> ${bad.suffix}`, async () => {
+        const accepted = field.optional === true && (bad.suffix === "missing" || bad.suffix === "empty");
+        it(`${method.name}: ${field.path.join(".")} (${field.kind}) = ${bad.v === DELETE ? "<mangler>" : JSON.stringify(bad.v)} -> ${accepted ? "akseptert (valgfritt)" : bad.suffix}`, async () => {
           route(setAt(method.valid, field.path, bad.v));
+          if (accepted) return expectAccepted(method);
           expectInvalid(await method.call().catch((e: unknown) => e), method, bad.suffix);
         });
       }
@@ -268,9 +293,12 @@ describe("K7: hele kroppen - null / feil type / ikke-JSON", () => {
     for (const [label, body, suffix] of badBodies) {
       // `listTransactions` godtar BÅDE en liste og et objekt med `transactions` - en tom liste er en gyldig tom side (dekket separat under).
       if (method.name === "neonomics.listTransactions" && label === "liste") continue;
-      it(`${method.name}: kropp = ${label}`, async () => {
+      const nullAccepted = method.nullBodyOk === true && label === "null";
+      it(`${method.name}: kropp = ${label}${nullAccepted ? " -> akseptert (tomt svar)" : ""}`, async () => {
         route(body);
-        expectInvalid(await method.call().catch((e: unknown) => e), method, suffix);
+        const outcome = await method.call().catch((e: unknown) => e);
+        if (nullAccepted) return expect(outcome, `${method.name}: JSON null er et tomt svar`).not.toBeInstanceOf(ProviderResponseInvalidError);
+        expectInvalid(outcome, method, suffix);
       });
     }
     it(`${method.name}: kropp som ikke er JSON`, async () => {
@@ -290,9 +318,9 @@ describe("K7: hele kroppen - null / feil type / ikke-JSON", () => {
     expect(await neonomics().listTransactions("s", "a", null)).toEqual({ transactions: [], nextPageToken: null });
   });
 
-  it("Neonomics-transaksjoner: ukjent status avvises (aldri stille `booked`); kreditt/debet følger fortegnet", async () => {
+  it("Neonomics-transaksjoner: ukjent status er `unknown` = karantene (aldri stille `booked`, og feiler ikke siden - FIX-5); kreditt/debet følger fortegnet", async () => {
     route([{ id: "t1", status: "weird", amount: "5.00", currency: "NOK" }]);
-    expect(((await neonomics().listTransactions("s", "a", null).catch((e: unknown) => e)) as ProviderResponseInvalidError).code).toBe("status_unknown");
+    expect((await neonomics().listTransactions("s", "a", null)).transactions.map((t) => [t.id, t.status])).toEqual([["t1", "unknown"]]);
     route([{ id: "t1", status: "pending", amount: "5", currency: "NOK" }, { id: "t2", status: "booked", amount: "-0.05", currency: "eur" }]);
     const page = await neonomics().listTransactions("s", "a", null);
     expect(page.transactions.map((t) => [t.id, t.status, t.amountOre, t.direction, t.currency])).toEqual([["t1", "pending", 500, "credit", "NOK"], ["t2", "booked", 5, "debit", "EUR"]]);

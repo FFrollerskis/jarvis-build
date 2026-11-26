@@ -46,6 +46,12 @@ function missing(value: unknown): boolean {
   return value === undefined || value === null;
 }
 
+/**
+ * WP-FIN2 fiks-runde 1 (FIX-6): strengene «undefined», «null» og «NaN» er resultatet av `String(<manglende verdi>)` et sted i kjeden - aldri en ekte id, status eller valuta. De består
+ * `safeProviderId`/`safeToken` (lovlige tegn), så de avvises her (uavhengig av store/små bokstaver). Fuzz (B F7): 0,02-0,4 % av genererte svar slapp tidligere gjennom.
+ */
+const SENTINEL_STRING = /^(?:undefined|null|nan)$/i;
+
 /** Kroppen (eller et nøstet felt) må være et vanlig JSON-objekt - ikke `null`, liste eller primitiv. */
 export function expectRecord(value: unknown, ctx: ResponseContext, field = "body"): Record<string, unknown> {
   if (missing(value)) return invalid(ctx, `${field}_missing`);
@@ -65,7 +71,23 @@ export function expectId(record: Record<string, unknown>, field: string, ctx: Re
   if (missing(value)) return invalid(ctx, `${field}_missing`);
   if (value === "") return invalid(ctx, `${field}_empty`);
   if (typeof value !== "string") return invalid(ctx, `${field}_wrong_type`);
+  if (SENTINEL_STRING.test(value)) return invalid(ctx, `${field}_invalid`);
   return safeProviderId(value) ?? invalid(ctx, `${field}_invalid`);
+}
+
+/**
+ * Valgfritt id-felt (WP-FIN2 fiks-runde 1, FIX-1/FIX-2): fraværende (`undefined`/`null`/tom streng = «ikke oppgitt») gir `null`; TIL STEDE må det være en trygg id (som `expectId`).
+ * Brukes der koden ikke trenger feltet (f.eks. `id` i svaret på en PATCH som allerede adresserer kortet i URL-en) - et ubrukt felt skal aldri gjøre en utført handling til «ukjent utfall».
+ */
+export function optionalId(record: Record<string, unknown>, field: string, ctx: ResponseContext): string | null {
+  const value = record[field];
+  return missing(value) || value === "" ? null : expectId(record, field, ctx);
+}
+
+/** Valgfritt objekt-felt: fraværende (`undefined`/`null`) gir `null`; til stede må det være et vanlig objekt. */
+export function optionalRecord(record: Record<string, unknown>, field: string, ctx: ResponseContext): Record<string, unknown> | null {
+  const value = record[field];
+  return missing(value) ? null : expectRecord(value, ctx, field);
 }
 
 /** Beløp i minste enhet fra leverandøren: trygt, ikke-negativt heltall (`parseMinorUnitsStrict`) - aldri `Number()`-coercion, aldri en stille 0. */
@@ -102,7 +124,12 @@ export function expectCurrency(record: Record<string, unknown>, field: string, c
   if (missing(value)) return invalid(ctx, `${field}_missing`);
   if (value === "") return invalid(ctx, `${field}_empty`);
   if (typeof value !== "string") return invalid(ctx, `${field}_wrong_type`);
-  return /^[A-Za-z]{3}$/.test(value) ? value : invalid(ctx, `${field}_invalid`);
+  return /^[A-Za-z]{3}$/.test(value) && !SENTINEL_STRING.test(value) ? value : invalid(ctx, `${field}_invalid`);
+}
+
+/** Valgfri valutakode: fraværende (`undefined`/`null`) gir `null`; til stede må den være gyldig (`expectCurrency`: tom streng, feil type og feil format avvises). Returneres UENDRET. */
+export function optionalCurrency(record: Record<string, unknown>, field: string, ctx: ResponseContext): string | null {
+  return missing(record[field]) ? null : expectCurrency(record, field, ctx);
 }
 
 /** Status/tilstandsstreng (`safeToken`: 1-64 tegn av `[A-Za-z0-9_.-]`). Aldri en stille standardstatus. */
@@ -111,7 +138,35 @@ export function expectStatus(record: Record<string, unknown>, field: string, ctx
   if (missing(value)) return invalid(ctx, `${field}_missing`);
   if (value === "") return invalid(ctx, `${field}_empty`);
   if (typeof value !== "string") return invalid(ctx, `${field}_wrong_type`);
+  if (SENTINEL_STRING.test(value)) return invalid(ctx, `${field}_invalid`);
   return safeToken(value) ?? invalid(ctx, `${field}_invalid`);
+}
+
+/** Valgfri status (som `optionalId`): fraværende/tom = `null`; til stede må den være en trygg status (`expectStatus`). */
+export function optionalStatus(record: Record<string, unknown>, field: string, ctx: ResponseContext): string | null {
+  const value = record[field];
+  return missing(value) || value === "" ? null : expectStatus(record, field, ctx);
+}
+
+/**
+ * Bekreftelse av en modifikasjon (capture/cancel/refund; WP-FIN2 fiks-runde 1, FIX-2): tjenesten leser IKKE svaret på disse kallene - en 2xx fra leverandøren ER utfallet (Idempotency-Key slår
+ * sammen gjentakelser). Et strengere svar enn koden bruker gjorde en capture/refusjon som allerede hadde flyttet penger til «ukjent utfall», og en retry ga samme feil. Kravet er derfor
+ * kun: kroppen er et objekt (ikke en tom/ikke-JSON/liste-kropp fra en mellomtjener), og en `reference` som er til stede må være trygg OG lik den forespurte (aldri en bekreftelse for en annen betaling).
+ * Returnerer alltid den FORESPURTE referansen. Ukjente/ubrukte felt (`state`, `amount`, `aggregate`, `pspReference` ...) ignoreres bevisst.
+ */
+export function acknowledgedFrom(body: unknown, ctx: ResponseContext, reference: string): { reference: string } {
+  const raw = expectRecord(body, ctx);
+  const echoed = optionalId(raw, "reference", ctx);
+  if (echoed !== null && echoed !== reference) return invalid(ctx, "reference_mismatch");
+  return { reference };
+}
+
+/** Numerisk id (Fiken: `contactId`/`bankAccountId`/`journalEntryId` er positive heltall): tall eller siffer-streng, positivt og trygt heltall. Mangler/ugyldig gir hver sin kode. */
+export function expectNumericId(record: Record<string, unknown>, field: string, ctx: ResponseContext): number {
+  const value = record[field];
+  if (missing(value)) return invalid(ctx, `${field}_missing`);
+  const n = typeof value === "number" ? value : typeof value === "string" && /^\d{1,15}$/.test(value) ? Number(value) : Number.NaN;
+  return Number.isSafeInteger(n) && n > 0 ? n : invalid(ctx, `${field}_invalid`);
 }
 
 /** Valgfri tekst (navn m.m.): fraværende = `null`; tilstedeværende MÅ være en streng (ellers ugyldig svar), avkortet til `max` tegn. */

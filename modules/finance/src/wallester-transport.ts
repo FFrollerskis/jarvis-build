@@ -67,7 +67,7 @@ const RECORDS_COUNT = 100;
 
 import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
 import { parseMinorUnitsStrict } from "./ore.ts";
-import { ProviderResponseInvalidError, expectArray, expectId, expectRecord, expectStatus, type ResponseContext } from "./provider-response.ts";
+import { ProviderResponseInvalidError, expectArray, expectId, expectRecord, expectStatus, optionalId, optionalStatus, type ResponseContext } from "./provider-response.ts";
 
 /**
  * WP-F1 (D-462, JARVIS-020/070): beløp og valuta fra leverandøren leses STRENGT - aldri `Number(x ?? 0)` (som gjorde et manglende beløp til 0, tekst til NaN og brøk til en
@@ -298,12 +298,21 @@ export class WallesterTransport implements WallesterGateway {
     throw lastError ?? new WallesterApiError("wallester_api_failed_unknown", 0, false);
   }
 
-  /** WP-FIN2 (K7): kort-id og status er PÅKREVD i svaret (aldri `String(undefined)` som provider-kort-id og aldri en stille `"unknown"`-status fra et manglende felt). */
-  private mapCard(body: unknown, ctx: ResponseContext): WallesterCardObject {
-    const raw = expectRecord(body, ctx);
+  /**
+   * WP-FIN2 (K7): kort-id og status er PÅKREVD i svaret (aldri `String(undefined)` som provider-kort-id og aldri en stille `"unknown"`-status fra et manglende felt) - for `createCard`/`getCard`,
+   * der kortet lagres med dem.
+   *
+   * FIX-1 (fiks-runde 1): LIVSSYKLUSVERBENE (`lifecycleOf` = forespurt kort-id; PATCH activate/block/unblock/close) bruker KUN `status` til `provider_state`, og kortets id står allerede i URL-en;
+   * `request()` sier selv at et PATCH-svar kan være tomt. En 2xx betyr at Wallester HAR utført verbet - et strengere svarkrav gjorde nødbremsen (`freeze_card`) til `outcome_unknown` mens kortet sto
+   * `active` lokalt. Derfor: tom/ufullstendig kropp er gyldig og gir `status: "unknown"` (samme verdi som `main` og runbook §11.3 A.2; tjenesten lagrer `provider_state = 'unconfirmed'` og
+   * `sync_card_state` bekrefter etterpå), `id` fra forespørselen. Felt som ER til stede valideres fortsatt (feil type/ugyldig = `outcome_unknown`), og ikke-JSON/liste/tekst-kropper feiler lukket.
+   */
+  private mapCard(body: unknown, ctx: ResponseContext, lifecycleOf?: string): WallesterCardObject {
+    const lifecycle = lifecycleOf !== undefined;
+    const raw = lifecycle && (body === null || body === undefined) ? {} : expectRecord(body, ctx);
     return {
-      id: expectId(raw, "id", ctx),
-      status: expectStatus(raw, "status", ctx),
+      id: lifecycle ? (optionalId(raw, "id", ctx) ?? lifecycleOf) : expectId(raw, "id", ctx),
+      status: lifecycle ? (optionalStatus(raw, "status", ctx) ?? "unknown") : expectStatus(raw, "status", ctx),
       maskedCardNumber: str(raw["masked_card_number"]) ?? str(raw["maskedCardNumber"]),
       accountId: str(raw["account_id"]) ?? str(raw["accountId"]),
       tokenizationStatus: str(raw["tokenization_status"]) ?? str(raw["tokenizationStatus"])
@@ -378,22 +387,22 @@ export class WallesterTransport implements WallesterGateway {
   // Business kortlivssyklus-verb (eier-levert primærkilde): PATCH, IKKE POST.
   async activateCard(providerCardId: string): Promise<WallesterCardObject> {
     const ctx: ResponseContext = { operation: "wallester.activate_card", mutation: true };
-    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/activate`, {}), ctx);
+    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/activate`, {}), ctx, providerCardId);
   }
 
   async blockCard(providerCardId: string): Promise<WallesterCardObject> {
     const ctx: ResponseContext = { operation: "wallester.block_card", mutation: true };
-    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/block`, {}), ctx);
+    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/block`, {}), ctx, providerCardId);
   }
 
   async unblockCard(providerCardId: string): Promise<WallesterCardObject> {
     const ctx: ResponseContext = { operation: "wallester.unblock_card", mutation: true };
-    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/unblock`, {}), ctx);
+    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/unblock`, {}), ctx, providerCardId);
   }
 
   async closeCard(providerCardId: string): Promise<WallesterCardObject> {
     const ctx: ResponseContext = { operation: "wallester.close_card", mutation: true };
-    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/close`, {}), ctx);
+    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/close`, {}), ctx, providerCardId);
   }
 
   /**

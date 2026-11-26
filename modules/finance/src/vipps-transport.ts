@@ -79,7 +79,9 @@ const TOKEN_REFRESH_SKEW_MS = 60_000;
 import { toOreInteger } from "./ore.ts";
 
 import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
-import { expectAccessToken, expectCurrency, expectId, expectMinorUnits, expectRecord, expectStatus, readJsonBody, type ResponseContext } from "./provider-response.ts";
+import {
+  ProviderResponseInvalidError, acknowledgedFrom, expectAccessToken, expectCurrency, expectId, expectMinorUnits, expectRecord, expectStatus, optionalRecord, optionalStatus, readJsonBody, type ResponseContext
+} from "./provider-response.ts";
 
 export type VippsEnvironment = "test" | "production";
 
@@ -121,6 +123,21 @@ export interface VippsPaymentObject {
   amount: VippsAmount;
 }
 
+/**
+ * Svaret på `createPayment` (WP-FIN2 fiks-runde 1, FIX-2): kun `reference` er påkrevd. Dokumentert opprettelsesrespons er `{ reference, redirectUrl }` (`unverified`, D-41); `state` og `amount` er `null`
+ * når leverandøren ikke sendte dem (kolonnene er nullable - første webhook/oppfrisking fyller dem) og validert når de er der.
+ */
+export interface VippsCreatedPayment {
+  reference: string;
+  state: string | null;
+  amount: VippsAmount | null;
+}
+
+/** Bekreftelsen på capture/cancel/refund: tjenesten leser ikke svaret (en 2xx er utfallet), så kun den forespurte referansen returneres (se `acknowledgedFrom`). */
+export interface VippsAcknowledgement {
+  reference: string;
+}
+
 export interface CreateVippsPaymentInput {
   amountOre: number;
   /** Store bokstaver (`"NOK"`) - Vipps forventer SAMME casing, ingen konvertering (i motsetning til Stripe). */
@@ -148,11 +165,11 @@ export interface VippsModificationInput {
  * access-token-livssyklusen).
  */
 export interface VippsPaymentWriter {
-  createPayment(input: CreateVippsPaymentInput): Promise<VippsPaymentObject>;
+  createPayment(input: CreateVippsPaymentInput): Promise<VippsCreatedPayment>;
   getPayment(reference: string): Promise<VippsPaymentObject>;
-  capturePayment(input: VippsModificationInput): Promise<VippsPaymentObject>;
-  cancelPayment(reference: string, idempotencyKey: string): Promise<VippsPaymentObject>;
-  refundPayment(input: VippsModificationInput): Promise<VippsPaymentObject>;
+  capturePayment(input: VippsModificationInput): Promise<VippsAcknowledgement>;
+  cancelPayment(reference: string, idempotencyKey: string): Promise<VippsAcknowledgement>;
+  refundPayment(input: VippsModificationInput): Promise<VippsAcknowledgement>;
   /** D-242: connector-helsesjekk-probe, se `VippsTransport.checkCredentials()` sin doc-kommentar. */
   checkCredentials(): Promise<void>;
 }
@@ -246,10 +263,10 @@ export class VippsTransport implements VippsPaymentWriter {
   }
 
   /**
-   * WP-FIN2 (K7): et Vipps-betalingssvar er gyldig KUN med `reference` (trygg id), `state` (status) og `amount` {`value` (heltall i minste enhet), `currency` (tre bokstaver)} - feltene Jarvis
-   * lagrer og avstemmer mot. Mangler/ugyldig: mutasjon = `outcome_unknown:provider_response_invalid:<kode>`, lesing = typet feil. MERK (`unverified`, D-41): Vipps' dokumentasjon (søkeutdrag) sier
-   * at opprett-svaret bærer `reference` og `redirectUrl`; at `state`/`amount` også følger med er IKKE verifisert. Avviker en ekte leverandør, feiler dette LUKKET (ukjent utfall) - aldri en
-   * gjettet tilstand eller et beløp lagret som leverandørens. Må avklares mot sandkasse ved aktivering (`BLOCKED_EXTERNAL`).
+   * WP-FIN2 (K7): et Vipps-LESESVAR (`getPayment`) er gyldig KUN med `reference` (trygg id), `state` (status) og `amount` {`value` (heltall i minste enhet), `currency` (tre bokstaver)} - feltene
+   * oppfriskingen lagrer og avstemmer mot. Mangler/ugyldig: typet feil (lesing, ingen bivirkning). Fiks-runde 1 (FIX-2): `createPayment` (`createdPaymentFrom`) og capture/cancel/refund
+   * (`acknowledgedFrom`) bruker egne, smalere kontrakter - tjenesten leser ikke svaret på de tre siste, og opprett-svaret er dokumentert som `{ reference, redirectUrl }` (`unverified`, D-41;
+   * må avklares mot sandkasse ved aktivering, `BLOCKED_EXTERNAL`).
    */
   private paymentFrom(body: unknown, ctx: ResponseContext): VippsPaymentObject {
     const raw = expectRecord(body, ctx);
@@ -261,9 +278,26 @@ export class VippsTransport implements VippsPaymentWriter {
     };
   }
 
-  async createPayment(input: CreateVippsPaymentInput): Promise<VippsPaymentObject> {
+  /**
+   * FIX-2 (fiks-runde 1): `reference` er det eneste påkrevde feltet (den lagres som `provider_ref`) og må være lik den forespurte (Jarvis' `payment_intent_id`; en annen referanse ville gjort alle senere
+   * kall og webhooks til feil betaling). `state` og `amount` valideres HVIS de er til stede, ellers `null` (lagres som NULL; første webhook/oppfrisking fyller dem). `unverified` (D-41): dokumentert svar er
+   * `{ reference, redirectUrl }`.
+   */
+  private createdPaymentFrom(body: unknown, ctx: ResponseContext, reference: string): VippsCreatedPayment {
+    const raw = expectRecord(body, ctx);
+    const echoed = expectId(raw, "reference", ctx);
+    if (echoed !== reference) throw new ProviderResponseInvalidError(ctx.operation, "reference_mismatch", ctx.mutation);
+    const amount = optionalRecord(raw, "amount", ctx);
+    return {
+      reference: echoed,
+      state: optionalStatus(raw, "state", ctx),
+      amount: amount === null ? null : { currency: expectCurrency(amount, "currency", ctx), value: expectMinorUnits(amount, "value", ctx) }
+    };
+  }
+
+  async createPayment(input: CreateVippsPaymentInput): Promise<VippsCreatedPayment> {
     const ctx: ResponseContext = { operation: "vipps.create_payment", mutation: true };
-    return this.paymentFrom(
+    return this.createdPaymentFrom(
       await this.request(
         ctx,
         "POST",
@@ -278,7 +312,8 @@ export class VippsTransport implements VippsPaymentWriter {
         },
         input.idempotencyKey
       ),
-      ctx
+      ctx,
+      input.reference
     );
   }
 
@@ -287,9 +322,9 @@ export class VippsTransport implements VippsPaymentWriter {
     return this.paymentFrom(await this.request(ctx, "GET", `/epayment/v1/payments/${encodeURIComponent(reference)}`), ctx);
   }
 
-  async capturePayment(input: VippsModificationInput): Promise<VippsPaymentObject> {
+  async capturePayment(input: VippsModificationInput): Promise<VippsAcknowledgement> {
     const ctx: ResponseContext = { operation: "vipps.capture_payment", mutation: true };
-    return this.paymentFrom(
+    return acknowledgedFrom(
       await this.request(
         ctx,
         "POST",
@@ -297,18 +332,19 @@ export class VippsTransport implements VippsPaymentWriter {
         { modificationAmount: { currency: input.currency, value: toOreInteger(input.amountOre) } },
         input.idempotencyKey
       ),
-      ctx
+      ctx,
+      input.reference
     );
   }
 
-  async cancelPayment(reference: string, idempotencyKey: string): Promise<VippsPaymentObject> {
+  async cancelPayment(reference: string, idempotencyKey: string): Promise<VippsAcknowledgement> {
     const ctx: ResponseContext = { operation: "vipps.cancel_payment", mutation: true };
-    return this.paymentFrom(await this.request(ctx, "POST", `/epayment/v1/payments/${encodeURIComponent(reference)}/cancel`, undefined, idempotencyKey), ctx);
+    return acknowledgedFrom(await this.request(ctx, "POST", `/epayment/v1/payments/${encodeURIComponent(reference)}/cancel`, undefined, idempotencyKey), ctx, reference);
   }
 
-  async refundPayment(input: VippsModificationInput): Promise<VippsPaymentObject> {
+  async refundPayment(input: VippsModificationInput): Promise<VippsAcknowledgement> {
     const ctx: ResponseContext = { operation: "vipps.refund_payment", mutation: true };
-    return this.paymentFrom(
+    return acknowledgedFrom(
       await this.request(
         ctx,
         "POST",
@@ -316,7 +352,8 @@ export class VippsTransport implements VippsPaymentWriter {
         { modificationAmount: { currency: input.currency, value: toOreInteger(input.amountOre) } },
         input.idempotencyKey
       ),
-      ctx
+      ctx,
+      input.reference
     );
   }
 }
