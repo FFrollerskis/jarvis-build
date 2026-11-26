@@ -3,6 +3,7 @@
 Gjelder: `finance.submit_payment_intent`, `finance_stripe.submit_refund`, `finance_vipps.submit_capture`, `finance_vipps.submit_refund` (de fire handlingene som flytter penger),
 samt avstemming, webhooks og ukjent utfall. Kilder: D-375 (klasse D-minimumspipeline), D-392 (finansintegritet), D-228 (Stripe testmodus), Q-47 (a), D-462 (WP-F1), CLAUDE.md regel 2/8/11.
 Prinsipp: **strengeste sikkerhetsregel vinner.** Ingen pengehandling kan nås av modellen, og ingen kan utføres uten hele kjeden under.
+**WP-FIN2 (D-486, 2026-11-26):** penge-tilstand, barne-idempotens, kortinnsending, strenge leverandørsvar, kallsignal/frister og revisjonen av ledgerrestene står i **§11** (alt `NOT VERIFIED` mot ekte leverandør).
 
 ## 0. Status i ett blikk
 
@@ -12,8 +13,15 @@ Prinsipp: **strengeste sikkerhetsregel vinner.** Ingen pengehandling kan nås av
 | Dobbeltbetalingsvern (reservasjon + lease, leverandørens Idempotency-Key, 23 t-vindu, ukjent utfall) | **Bygget og testet** (samtidighet mot ekte Postgres) | `wpf1-double-pay-service.test.ts`, `wpf1-d-chain.test.ts` B-D |
 | Eierens vei (preview -> bundet bekreftelse -> step-up-godkjenning) | **Bygget og testet** mot ekte API-server, ToolGateway, ConfirmationStore og FinanceService | `apps/api/test/wpf1-finance-actions-route.test.ts` |
 | Binding av bekreftelsen til **beløp + valuta + mottaker** og uforanderlige pengekolonner (DB-trigger) | **Bygget og testet** | `wpf1-immutable-money.test.ts`, route-test G, `wpf1-d-chain.test.ts` J |
-| Webhook-herding (Stripe, Vipps, Neonomics, Wallester) | **Bygget og testet** | `wpf1-webhook-hardening.test.ts`, `wpf1-webhook-status-mapping.test.ts` |
-| Leverandørlesing uten DB-transaksjon/radlås (JARVIS-019) | **Bygget og testet** | `wpf1-refresh-no-lock.test.ts` |
+| Webhook-herding (Stripe, Vipps, Neonomics, Wallester) | **Bygget og testet** | `modules/finance/test/wpf1-webhook-hardening.test.ts`, `apps/api/test/wpf1-webhook-status-mapping.test.ts` (stien manglet tidligere her; filen ligger i `apps/api/test/`) |
+| Leverandørlesing uten DB-transaksjon/radlås (JARVIS-019) | **Bygget og testet** for Stripe/Vipps/Neonomics; **utvidet av WP-FIN2 (K1) til hele `modules/finance/src`** (kort-, bank-, spend-tjenestene) - kildevakt + kjøretidsprobe | `wpf1-refresh-no-lock.test.ts`, `fin2-no-provider-io-in-tx.test.ts` (50), `fin2-no-lock-card-bank.test.ts` (5) |
+| **WP-FIN2 (D-486)** Vipps penge-tilstand (K5): capture-oppgjør + `captured`-hendelse + full-oppgjørssjekk i ÉN transaksjon; aldri `cancelled` med oppgjorte/uavklarte captures | **Bygget og testet** (ekte Postgres, testdobler). Hva Vipps' cancel betyr etter delvis capture er `unverified`; «delvis oppgjort» som egen tilstand er eierens valg og er IKKE bygget | `fin2-vipps-money-state.test.ts` (22) |
+| WP-FIN2 barne-idempotens (K4): Stripe-refusjon, Vipps-capture, Vipps-refusjon | **Bygget og testet**: samme nøkkel + annen intensjon/beløp/valuta/årsak = `IdempotencyKeyConflictError` (felt, aldri verdier), begge baner, samtidige kall | `fin2-child-idempotency.test.ts` (24) |
+| WP-FIN2 Wallester `submit_card` (K8): reserve-then-execute, flagg `CARD_SUBMIT_OUTCOME_UNKNOWN`, `idempotent_external: false` | **PARTIAL**: bygget og testet; Wallesters oppførsel er `unverified`; manuell disposisjon er admin-SQL (§11.3), ikke et verktøy (K10) | `fin2-card-submit-reservation.test.ts` (19) |
+| WP-FIN2 strenge leverandørsvar (K7): manglende/ugyldig id, beløp, valuta eller status i et 2xx-svar | **Bygget og testet** (tabelltest alle transportmetoder). Vipps `createPayment` krever `state`/`amount` i svaret (fail-closed; dokumentert svar er `{reference, redirectUrl}` - `unverified`, trenger sandbox) | `fin2-provider-response-strict.test.ts` (564), `fin2-provider-response-service.test.ts` (5) |
+| WP-FIN2 finanstransportene i gatewayens kallsignal (K2) og frist på preflight/re-arm (K3) | **Bygget og testet** (hengende lokal server, én forespørsel, ingen retry etter frist, ledger `unverified`); `JARVIS_TOOL_CALL_ABORT=off` = som før | `fin2-finance-transport-abort` (24), `fin2-finance-gateway-abort` (7), `fin2-call-signal-guard` (8), `modules/tool-gateway/test/fin2-k3-preflight-deadline.test.ts` (5) |
+| WP-FIN2 Stripe `payment_failed` -> senere `succeeded` (K6) | **PARTIAL**: dagens oppførsel låst + `anomaly_flagged`-hendelse `provider_succeeded_after_local_failed`; **selve tilstandsendringen er DEFERRED** (eierens valg, Q-forslag i §11.4) | `fin2-stripe-failed-then-succeeded.test.ts` (9) |
+| WP-FIN2 småfunn (K9): `card_id` i autorisasjonsoppslag, `tenant_id` i flagg-hjelperne, oppfriskingssti for Stripe-refusjon | **Bygget og testet** | `fin2-small-findings.test.ts` (12) |
 | Uavhengig sikkerhetsreview av PR #321 (M-F1…M-F3, F4–F12 og testgap) | **M-F1–M-F3, F4–F9 og testgapene rettet og mutasjonssjekket**; F10–F12 bevisst IKKE bygget om, dokumentert ærlig i §9 | `wpf1-review-fixes.test.ts`, `wpf1-immutable-money.test.ts` (D/E), `wpf1-gateway-extensions.test.ts` (F/G), `modules/erasure/test/wpf1-finance-reconciliation-erasure.test.ts`, `modules/core/test/wpf1-confirmation-store-guards.test.ts` |
 | Deterministisk avstemming + sveip + `finance.get_reconciliation_status` | **Bygget og testet; DORMANT** uten Fiken-credentials (Fiken-delen) | `wpf1-reconciliation.test.ts` |
 | **Live-verifisert mot ekte leverandør** | **KUN Stripe testmodus** (D-228, `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW`) - og det var FØR WP-F1. Den nye kjeden er IKKE kjørt mot noen ekte leverandør. | Se §8 for kommandoer |
@@ -84,9 +92,12 @@ Dette gjelder også når leverandørkallet **lyktes** (svaret er mottatt), men n
 | Leverandør | Hva som kan gjøres | Hva eieren gjør |
 |---|---|---|
 | Stripe, Vipps (har Idempotency-Key) | Etter at leasen (2 min) er utløpt og **innenfor 23 timer fra første forsøk** kan innsendingen gjenopptas med SAMME leverandørnøkkel (ny forespørsel + godkjenning) - leverandøren slår sammen kallene, ingen dobbel effekt. Utenfor vinduet: `submit_window_expired_reconcile_required` | Sjekk leverandørens dashbord (Stripe: Payments/Refunds, Vipps-portalen) FØR gjenopptakelse. Utenfor 23 t: bekreft hos leverandøren, deretter manuell disposisjon (se under) |
+| Wallester (`submit_card`, ingen verifisert Idempotency-Key) | **Aldri** automatisk gjenopptakelse. Jarvis reserverer innsendingen FØR kallet (markør `submitted_at` på kortet); et parallelt kall får `submit_in_flight`, et ukjent utfall gir flagget `CARD_SUBMIT_OUTCOME_UNKNOWN` og `submit_outcome_unknown_reconcile_required` (WP-FIN2 K8) | Sjekk i Wallester om det finnes et kort med referansen = Jarvis' `card_id` (`card-...`). Så admin-SQL i **§11.3** (frigi eller knytt kortet) - ikke et verktøy |
 | Fiken, Neonomics (ingen Idempotency-Key) | **Aldri** automatisk gjenopptakelse (`submit_outcome_unknown_reconcile_required`) | Fiken: søk i Fiken etter markøren `[J:<12 tegn>]` (står i bilagsteksten; de 12 tegnene er starten på intensjons-id-en etter `fin-pi-`). Finnes bilaget: det er postert - ikke send på nytt. Neonomics: sjekk betalingsstatus hos banken |
 
 **Manuell disposisjon (ikke bygget som verktøy - bevisst):** tilstandsmaskinen tillater kun `submitted -> provider_acknowledged|failed`, og det finnes ingen verktøyhandling som setter leverandør-ID/utfall etter et ukjent utfall (en slik handling ville la en påstand overstyre pengesannheten). Inntil et eget, step-up-bundet `resolve_submit_outcome` er besluttet (se «Åpne spørsmål» i sluttrapporten) gjør eieren/operatøren dispositionen direkte i databasen som admin-rolle, etter å ha verifisert hos leverandøren, og dokumenterer den i `payment_intent_events`. ALDRI opprett en ny intensjon for samme betaling før den første er bekreftet ikke-gjennomført.
+
+**Vipps `cancel` med oppgjorte eller uavklarte captures (WP-FIN2 K5):** en eksplisitt `cancel` avvises uten leverandørkall med `cancel_blocked_by_captures:<id>:<settled_captures|capture_outcome_unresolved>`; en webhook/oppfrisking som sier `TERMINATED/EXPIRED/CANCELLED/ABORTED` flagger `PROVIDER_STATE_CONFLICT` (+ én `anomaly_flagged`-hendelse) og intensjonen blir stående, slik at `createVippsRefund` fortsatt kan refundere pengene som er tatt. Hva Vipps selv gjør med en cancel etter delvis capture er `unverified` (se §11.5).
 
 Avstemmingen (§6) viser alle slike intensjoner som `submit_outcome_unknown`, og - for Fiken - finner bilaget igjen via markøren (`fiken_posting_unlinked`, «utfallet kan avklares») når Fiken-lesing er aktiv.
 
@@ -130,6 +141,8 @@ Rapporten (`finance.get_reconciliation_status`, klasse A; for eieren: `POST /fin
 * Signatur/autentisering FØR noe lagres: Stripe (`t=...,v1=...` HMAC + 300 s toleranse), Vipps (HMAC + innholds-hash; **ingen tidsvindu** fordi Vipps' retry er lengre enn et trygt replay-vindu), Neonomics (`x-api-key`), Wallester (Basic). Ugyldig signatur/autentisering gir `400 invalid_signature` (Stripe) eller `401` (Vipps, Neonomics, Wallester), og ingenting lagres.
 * **Replay:** hendelsesnøkkel (`evt_...` / idempotensnøkkel / betalings-id+status) er primærnøkkel - samme hendelse igjen = `duplicate`, aldri anvendt to ganger; en eldre hendelse overskriver aldri nyere tilstand (ordens-vokter per leverandør, ISO 20022-rangering for Neonomics).
 * **Innhold er ubetrodd data:** strengt heltall i minste enhet (NaN/Infinity/negative/brøk/for stort avvises), trygge id-er, gyldig dato (2000-2100), tre-bokstavs valuta; ingen `Number()`-coercion, ingen «EUR»-standard.
+* **Stripe `payment_intent.payment_failed` er terminal i Jarvis, men ikke hos Stripe (WP-FIN2 K6):** et mislykket forsøk lar PaymentIntent stå i `requires_payment_method`, og kunden kan prøve igjen. Et senere `succeeded` blir `WEBHOOK_STATE_CONFLICT`, Jarvis-raden står `failed`, og pengene er mottatt. Tilstandsmaskinen er IKKE endret; i stedet skrives én `anomaly_flagged`-hendelse (`provider_succeeded_after_local_failed`, kun status/id) og avviket vises i attention-køen (`payment_intent_anomaly`). Oppfriskingssveipet leser ikke `failed`-intensjoner, så kun webhooken (eller en manuell oppfrisking) avdekker det. Eierens steg: §11.3.
+* **Stripe-refusjon har nå en oppfriskingssti (K9c):** `refreshStripeRefundState` (tre faser, `getRefund` utenfor transaksjon) kjøres av `syncPendingStripePayments` for refusjoner i `provider_acknowledged` - en tapt `refund.*`-webhook gjør ikke lenger en refusjon `pending` for alltid.
 * Permanent ugyldig innhold lagres som dødbrev `rejected` (kort årsakskode, aldri innholdet; ikke-identifiserbar nyttelast under `malformed:<sha256>`) og besvares **200** - ingen evig retry. `failed_retryable` = **502** (leverandøren prøver igjen; retry behandler hendelsen på nytt). Tilstanden hentes uansett inn igjen av den planlagte oppfriskingen.
 
 ## 8. Verifisering (hva er bevist, hva må eieren kjøre)
@@ -148,6 +161,7 @@ Rapporten (`finance.get_reconciliation_status`, klasse A; for eieren: `POST /fin
 * **`mcp_zapier.call_tool` - forblir DEFERRED.** Handlingen er per D-350 en vilkårlig, dynamisk oppdaget Zapier-handling: Jarvis kan ikke vite hva et gitt verktøy gjør, og det finnes ingen deterministisk fersk lesing, målvalidering eller readback som beviser at «riktig ting skjedde». Uten dem er kjeden ikke komplett (regel 2/11: ikke-implementert kapabilitet merkes DEFERRED, aldri stille utelatt).
 * **`microsoft_outlook.send_mail` - forblir DEFERRED.** Graph `sendMail` returnerer 202 uten melding-ID. Utkast-først-mønsteret (opprett utkast med egendefinert `x-`-header -> send utkastet -> les Sent Items) er den riktige veien, og offisiell Graph-dokumentasjon (via søk; direkte henting var blokkert) bekrefter: `POST /me/messages` støtter `internetMessageHeaders` (kun ved opprettelse, `x-`-prefiks), `POST /me/messages/{id}/send` gir 202 uten kropp og er asynkron (kopien i Sent Items kan komme sent), og `Prefer: IdType="ImmutableId"` finnes. **Men:** dokumentasjonen er selvmotsigende om meldings-ID-en overlever sending, og når `internetMessageId` tildeles på et utkast er ikke dokumentert - begge må verifiseres mot en ekte tenant før postcondition kan bygges. Ingen ekte Outlook-konto finnes her.
 * **Fiken API-form er ikke verifisert:** `POST /generalJournalEntries` kan returnere JSON med `journalEntryId` eller kun `Location` uten kropp. Transporten tolker begge konservativt (id fra kroppen, ellers fra en `Location` som ender på `/journalEntries/<tall>` eller `/generalJournalEntries/<tall>`); uten sikker id er utfallet UKJENT (`outcome_unknown:`, §4) - aldri en gjettet id og aldri en ny postering. Paginering på `GET /journalEntries` er ikke bekreftet (header- eller parameterbasert), og vi vet ikke om svaret bærer posteringslinjer. `generalJournalEntries` har ingen Idempotency-Key.
+* **WP-FIN2 K10 - eksplisitt DEFERRED** (detaljer og Q-forslag i §11.4): `resolve_submit_outcome` (manuell disposisjon, krever step-up = WP-S1/JARVIS-111) og avstemming på forespørsel (F1/H1); uforanderlige kontraktversjoner (`modules/agreements`, trenger migrasjon); Neonomics `direction`; Fiken request-/responsform og paginering; Vipps webhook-tidsvindu; kill switch uten `FOR SHARE`; `maxPages` uten tak (`card-service.ts:621/625/656`); strammere zod-skjema for Wallester-kortgrenser (bevis i §11.4).
 * **Ingen verktøy for manuell disposisjon av ukjent utfall** (§4) - bevisst; forslag til `resolve_submit_outcome` (step-up, bundet, med bevis-tekst og revisjonsspor) ligger som åpent spørsmål.
 * Vipps: ingen tidsvindu på `x-ms-date` (replay stoppes av dedupe + ordens-vokter). Vipps' idempotensvindu er ikke verifisert (behandles konservativt som 23 t).
 * Wallester: beløpsenhet og webhook-skjema ikke verifisert mot primærkilden; strengt avvisende.
@@ -174,3 +188,88 @@ Rapporten (`finance.get_reconciliation_status`, klasse A; for eieren: `POST /fin
 * `tool_failed:outcome_unknown:provider_call_completed_local_write_failed:...`: leverandøren har SVART, men Jarvis fikk ikke lagret det - følg §4 (sjekk leverandørens dashbord før noe gjøres på nytt).
 * `finance_money_row_delete_forbidden:<tabell>` / `finance_money_column_immutable:<tabell>.<kolonne>` (`23514`): bevisst avvist av migrasjon 101 - se §9.
 * Funn i avstemmingen: `finance.get_reconciliation_status`; åpne loops i attention-køen (`payment_intent_anomaly`).
+
+## 11. WP-FIN2 (D-486) - pengesikkerhet i `modules/finance`: revisjon av ledgerrestene og det som ble bygget
+
+Status: **PARTIAL.** Bygget og testet mot ekte embedded Postgres (app-rolle, RLS) med testdobler for leverandørene; **`NOT VERIFIED` mot ekte leverandør** (ingenting her er `VERIFIED`). Leverandørfakta som ikke er lest i primærdokumentasjonen er `unverified` (D-41). Gren `claude/wp-fin2-finance-integrity` (fra `main` `71a31d8b`); ingen migrasjon (151/152 ubrukt), ingen ny leverandør, ingen UI, ingen endring av tilstandsmaskinens terminalregler.
+
+### 11.1 K1 - ledgerradenes «Åpent»-punkter mot `main` (LUKKET FØR / LUKKET HER / DEFERRED)
+
+| Ledger | Punkt (som skrevet / funnet) | Status | Kode | Test |
+|---|---|---|---|---|
+| 018 | Finanstransportene er ikke koblet til kallsignalet (`WPK_LEDGER_REMNANTS` §3) | **LUKKET HER** (K2) | `http.ts:25` `financeFetch`, `:32` `financeBackoff`; alle `*-transport.ts` + `*tool-transport.ts` (`adoptCallSignal`); `fiken-transport.ts:127` delt token-utveksling (`detachFromCallSignal` + `raceCallSignal`) | `fin2-finance-transport-abort`, `fin2-finance-gateway-abort`, `fin2-call-signal-guard` |
+| 018 | Preflight og `revalidateAfterRearm` uten frist/signal (`WPK_LEDGER_REMNANTS` §3) | **LUKKET HER** (K3; delt kode, 15+/2-) | `modules/tool-gateway/src/gateway.ts:1560` `invokePreflight` | `modules/tool-gateway/test/fin2-k3-preflight-deadline.test.ts` |
+| 019 | `refresh*`/`sync*` (Stripe, Vipps, Neonomics) i transaksjon | **LUKKET FØR** (WP-F1/D-462; radens «Åpent» var utdatert) | `service.ts:1387`, `:2115`, `:2878` (tre faser), `:1924` | `wpf1-refresh-no-lock.test.ts` |
+| 019 | card-/banking-/spend-tjenester i transaksjon | **Koden var lukket FØR; bevisgapet lukket HER** (K1). Kildevakten fant ÉN ekte rest: `cancelVippsPayment` slo opp Vipps-credentials i `prepare`, under radlåsen - flyttet før transaksjonen | `service.ts:2460`; `card-service.ts` (`sync*`, `submitCard`, livssyklus, `updateSpendPolicy`); `banking-service.ts` (`createConsent`, `verifyConsent`, `sync*`) | `fin2-no-provider-io-in-tx.test.ts`, `fin2-no-lock-card-bank.test.ts` |
+| 019 | `submitVippsCapture`: `captured`-hendelse + full-oppgjørssjekk i en ANDRE transaksjon (feil = intensjon står i `provider_acknowledged`) | **LUKKET HER** (K5a) | `service.ts:2323` (`apply`: intensjonslås -> capture -> hendelse -> `checkVippsFullSettlement` `:2402`, én tx) | `fin2-vipps-money-state.test.ts` |
+| 020 | Wallester-/banking-webhooks ikke gjennomgått | **LUKKET FØR** (D-462) | `webhook-guard.ts` | `wpf1-webhook-hardening.test.ts`, `apps/api/test/wpf1-webhook-status-mapping.test.ts` |
+| 020 | `cancelled` med oppgjorte captures (`cancelVippsPayment`, `applyVippsPaymentOutcome` `TERMINATED/...`) | **LUKKET HER** (K5b) | `service.ts:1985` `capturedFundsStatus`, `:2002` `flagCancelConflict`, `:2033`, `:2460` | `fin2-vipps-money-state.test.ts` |
+| 020 | Stripe `payment_failed` -> senere `succeeded` | **PARTIAL** (K6): låst + hendelse; tilstandsendring **DEFERRED** | `service.ts:1312` `recordSucceededAfterLocalFailed` (kalt fra `:1229`) | `fin2-stripe-failed-then-succeeded.test.ts` |
+| 070 | `Number()`-coercions i webhook-parsere; Wallester-webhook | **LUKKET FØR** (D-462) | `webhook-guard.ts`, `*-webhook.ts` | `wpf1-webhook-hardening.test.ts` |
+| 070 | `Number(...)` på pengeparametre i verktøytransportene | **PARTIAL** (K10-bevis i §11.4): spend-skjemaene fanger det; Wallester-kortgrensene er kun `z.number()` - databasen er bunnlinjen | `wallester-tool-transport.ts:84`, `spend-transport.ts:31` | `fin2-money-param-schemas.test.ts` |
+| 072 | `submit_payment_intent` krever Fiken-credential også for Stripe/Vipps | **LUKKET FØR** | `integrations.ts:1950` `credential_ref_resolver` | `wpf1-*` |
+| 072 | Barn-idempotens: refusjon/capture returnerer stille en eksisterende rad for `(tenant, nøkkel)` | **LUKKET HER** (K4) | `service.ts:302` `resolveChildIdempotency`; `:1601`, `:2273`, `:2519` | `fin2-child-idempotency.test.ts` |
+| 097 | Fiken-token per forespørsel | **LUKKET FØR** (D-398) | `fiken-transport.ts:127` | `d398-finance-minor.test.ts` |
+| 097 | Neonomics-rekkefølge (ankomsttid) | **LUKKET FØR** (D-462, ISO 20022-rangering) | `banking-types.ts:198` | `wpf1-webhook-hardening.test.ts`, `neonomics-service.test.ts` |
+| 097 | Wallester-oppslag av autorisasjon uten `card_id` | **LUKKET HER** (K9a) | `card-service.ts:697` | `fin2-small-findings.test.ts` |
+| 097 | Leverandørsvar leses uten feltsjekk (`String(raw.id)`, `?? "0"`, `?? "NOK"`, `?? "PDNG"`, `as T`) | **LUKKET HER** (K7), unntatt `banking-service.ts:246` (kontovaluta `?? "NOK"`, se under) | `provider-response.ts`; `*-transport.ts` | `fin2-provider-response-strict.test.ts`, `fin2-provider-response-service.test.ts` |
+| 097 | Uforanderlige kontraktversjoner | **DEFERRED** (trenger migrasjon i `modules/agreements`; ikke uten eierens/leads ord) | - | - |
+| (funn) | `submit_card` er merket idempotent uten Idempotency-Key og kunne gi duplikatkort | **LUKKET HER** (K8; `PARTIAL` fordi Wallester er `unverified`) | `card-service.ts:257` `submitCard`, `:326`, `:345`; `integrations.ts:2616` (`idempotent_external: false`) | `fin2-card-submit-reservation.test.ts` |
+| (funn) | `appendChainAnomalyFlags`/`appendAnomalyFlags` (+ Vipps- og bank-variantene) uten `tenant_id`-predikat | **LUKKET HER** (K9b; bank-varianten er et tillegg av samme funnklasse) | `service.ts:967`, `:1329`, `:2751`; `banking-service.ts:602` | `fin2-small-findings.test.ts` (inkl. kildevakt) |
+| (funn) | Stripe-refusjon har ingen oppfriskingssti | **LUKKET HER** (K9c) | `service.ts:1730` `refreshStripeRefundState`, `:1924` | `fin2-small-findings.test.ts` |
+
+**Restpunkter funnet under revisjonen (ærlig):** (1) `banking-service.ts:246` setter kontovaluta til `"NOK"` når Neonomics-kontoen ikke oppgir valuta (`neonomics-transport.ts` `listAccounts` returnerer `null`); saldoer har strengt validert valuta. Neonomics kontoskjema er `unverified` - `PARTIAL`, eierens/D-41-avklaring. (2) Oppfriskingssveipet leser ikke `failed`-intensjoner (§7). (3) Vipps `createPayment` er strengere enn dokumentert (§11.5).
+
+### 11.2 Hva som ble bygget (rød-først-bevis: antall tester som feilet mot gammel semantikk)
+
+* **K5** Vipps penge-tilstand: 13 av 21 røde mot `main`. **K4** barne-idempotens: 16 av 24. **K8** kortinnsending: 11 av 17 (fire samtidige kall ga tre leverandørkall). **K7** strenge svar: 539 av 564. **K2** kallsignal: 19 av 24 med gammel `financeFetch`-semantikk. **K6**: 3 av 9 (seks er låsetester). **K9**: 11 av 12. **K3**: 5 av 5 mot `main` sin `gateway.ts` (tre henger til testfristen).
+* Alle nye leverandørkall-baner følger samme prinsipp: **markør/reservasjon committet FØR kallet, kallet UTEN åpen transaksjon, svaret lagres i en ny kort transaksjon; ukjent utfall = `outcome_unknown:` -> ledger `unverified`**. En abort (gateway-tidsavbrudd) er alltid ukjent utfall for en mutasjon og ingen feil for en lesing.
+* Kildevakter (AST/regex med negative kontroller, så de ikke kan bli stille tomme): `fin2-no-provider-io-in-tx.test.ts` (ingen leverandør-I/O eller credential-oppslag inne i `withMemoryTransaction`/`prepare`/`apply`), `fin2-call-signal-guard.test.ts` (ingen rå `fetch`/`AbortSignal.timeout`/uavbrytbar `sleep` i `modules/finance/src`; eksakt antall `financeFetch`-kallesteder), kildevakten i `fin2-small-findings.test.ts` (ingen `UPDATE ... anomaly_flags` uten `tenant_id`).
+
+### 11.3 Eierens manuelle trinn (admin-SQL; ingen verktøy - K10)
+
+Alle SQL-setningene under er kjørt mot ekte Postgres i testene (`fin2-card-submit-reservation.test.ts`, «K8 runbook»). Kjør dem kun som databaseadministrator, **etter** at du har sjekket hos leverandøren, og noter hvem/når i revisjonsloggen.
+
+**A. Kortinnsending med ukjent utfall (`CARD_SUBMIT_OUTCOME_UNKNOWN`, `submit_outcome_unknown_reconcile_required`).** Åpne Wallester og søk etter et kort med ekstern referanse = Jarvis' `card_id` (`card-...`).
+
+1. Wallester har **IKKE** kortet - frigi reservasjonen; neste `submit_card` (ny bekreftelse) lager nøyaktig ett kort:
+   ```sql
+   UPDATE provider_cards SET submitted_at = NULL, anomaly_flags = anomaly_flags - 'CARD_SUBMIT_OUTCOME_UNKNOWN', updated_at = now()
+    WHERE tenant_id = '<tenant>' AND card_id = '<card-...>' AND state = 'draft' AND provider_card_id IS NULL;
+   ```
+2. Wallester **HAR** kortet - knytt det til raden (aldri en ny innsending), og kjør så `sync_card_state` (henter status/maskert nummer):
+   ```sql
+   UPDATE provider_cards SET provider_card_id = '<id fra Wallester>', provider_account_id = '<konto-id>', provider_state = 'unknown', state = 'pending_provider',
+          anomaly_flags = anomaly_flags - 'CARD_SUBMIT_OUTCOME_UNKNOWN', updated_at = now()
+    WHERE tenant_id = '<tenant>' AND card_id = '<card-...>' AND state = 'draft' AND provider_card_id IS NULL;
+   ```
+3. Usikker? La flagget stå. Et flagget kort blir aldri sendt inn på nytt av Jarvis, og vises i attention-køen (`provider_cards` med avviksflagg).
+
+**B. Stripe-betaling er mottatt, men Jarvis har den som `failed`** (hendelse `anomaly_flagged` med `reason = provider_succeeded_after_local_failed`; flagget `WEBHOOK_STATE_CONFLICT`):
+1. Åpne betalingen i Stripe Dashboard og bekreft status `succeeded` (pengene er mottatt).
+2. **Ikke send ny betaling** og **ikke refunder via Jarvis**: `create_refund` krever `settled`, og raden står `failed`. En eventuell refusjon gjøres i Stripe Dashboard.
+3. Bokfør/avstem manuelt. Det finnes ingen verktøyhandling som setter intensjonen til `settled` (tilstandsmaskinen er uendret, §11.4). Flagget blir stående som synlig avvik.
+
+**C. Vipps `cancel` avvist (`cancel_blocked_by_captures:...`) eller `PROVIDER_STATE_CONFLICT`:** intensjonen har oppgjorte eller uavklarte captures. Sjekk captures i Vipps-portalen; en refusjon (`finance_vipps.submit_refund`) krever `settled`-capture og går som vanlig. Avklar uavklarte captures (`capture_outcome_unresolved`) før noe avsluttes.
+
+### 11.4 DEFERRED (K10) og Q-forslag (til eieren; ingen er bygget)
+
+| Punkt | Status | Begrunnelse / forslag |
+|---|---|---|
+| `resolve_submit_outcome` (manuell disposisjon som verktøy) og avstemming på forespørsel (F1/H1) | **DEFERRED** | Krever step-up/eier-binding (WP-S1/JARVIS-111, utenfor omfang). Admin-SQL i §11.3 er den midlertidige veien. |
+| **Q-forslag K5b:** «delvis oppgjort» som egen Vipps-tilstand | **Eierens valg** | I dag blir intensjonen stående når captures finnes (aldri `cancelled`). Spørsmål: skal en intensjon som er delvis captured og så avsluttet hos Vipps få en egen sluttilstand? Hva Vipps' cancel gjør etter delvis capture er `unverified` (§11.5). |
+| **Q-forslag K6:** `payment_failed` som ikke-terminal for Stripe | **Eierens valg** | Alternativ (a): `failed` først når Stripe sier `canceled`/utløp, `payment_failed` er bare observasjon; (b) beholde dagens terminale `failed` men tillate `failed -> settled` kun fra Stripe-hendelsen `succeeded` (en ny tilstandsmaskin-kant); (c) uendret + sveipet leser også `failed`-intensjoner de siste N dagene. Dagens oppførsel er låst av `fin2-stripe-failed-then-succeeded.test.ts`. |
+| **Q-forslag K8:** Wallester-deduplisering og manuell disposisjon | **Eierens valg / `unverified`** | Hvis Wallester dokumenterer en idempotensnøkkel eller oppslag på `external_reference` kan innsendingen gjøres gjenopptakbar uten eierens sjekk. Inntil da: reservasjon + admin-SQL (§11.3 A). |
+| Uforanderlige kontraktversjoner (`modules/agreements`) | **DEFERRED** | Trenger migrasjon; ikke uten eierens/leads ord. |
+| Neonomics `direction`; Fiken request-/responsform og paginering; Vipps webhook-tidsvindu; kill switch uten `FOR SHARE` | **DEFERRED** | Uendret fra §9 (leverandørform er `unverified`). |
+| `maxPages` uten tak (`card-service.ts:621/625/656`) | **DEFERRED** | Egen liten oppgave: tak + varsel når taket nås. |
+| Wallester-kortgrenser: zod-skjema `z.number()` (`integrations.ts` `create_card`/`update_spend_policy`) | **DEFERRED** (delt kode) | **Beviset ble delvis:** spend-skjemaene (`finance_spend.*`) er `.int().positive()` og fanger fraksjon/0/negativt/streng/NaN/Infinity; Wallester-grensene fanger kun streng/NaN - fraksjon, 0, negativt og Infinity passerer zod. Databasen (`bigint` + `CHECK > 0`) avviser dem FØR noe sendes til Wallester (`fin2-money-param-schemas.test.ts`), men som rå DB-feil. Forslag: `.int().positive()` i skjemaet (liten endring i delt `integrations.ts`). |
+| `banking-service.ts:246` kontovaluta `?? "NOK"` | **PARTIAL** | Se §11.1. |
+
+### 11.5 Leverandørfakta (`unverified` til primærdokumentasjonen er lest i sin helhet)
+
+* **Stripe** (`VERIFIED_SEARCH_SNIPPET`, `docs.stripe.com` var ikke hentbar direkte): en mislykket betalingsforsøk lar PaymentIntent gå tilbake til `requires_payment_method`; kunden kan prøve på nytt og betalingen kan senere lykkes. Derav K6.
+* **Vipps ePayment** (`VERIFIED_SEARCH_SNIPPET`): `cancel` etter en delvis capture frigir det som ikke er captured (irreversibelt), og refusjon kan bare gjøres opp til captured beløp. Derav K5b (cancel er avvist så lenge captures finnes). Dokumentert opprettelsesrespons er `reference` + `redirectUrl`; Jarvis krever i tillegg `state`/`amount` i `createPayment`-svaret og feiler lukket (`outcome_unknown:provider_response_invalid:...`) hvis de mangler - **må sjekkes mot Vipps' sandbox** før aktivering (`BLOCKED_EXTERNAL`).
+* **Wallester** finnes kun som eier-levert kilde (hodet i `wallester-transport.ts`): alt Wallester-spesifikt (idempotens på `external_reference`, svarformer, beløpsenhet) er `unverified`.
+* **Ikke kjørt mot noen ekte leverandør:** hele WP-FIN2-pakken er `NOT VERIFIED` mot Stripe, Vipps, Neonomics, Wallester og Fiken.
+

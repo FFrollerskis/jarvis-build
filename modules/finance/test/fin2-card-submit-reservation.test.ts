@@ -291,3 +291,51 @@ describe("K8: reservasjonens levetid og lagringsfeil etter leverandørsvar", () 
     expect((await cardEvents(card.card_id)).map((e) => e.event_type)).toContain("submitted");
   });
 });
+
+describe("K8 runbook: eierens manuelle disposisjon etter ukjent utfall (admin-SQL som står i FINANCE_D_CHAIN.md §11)", () => {
+  const timeoutGateway = (): CardGateway => {
+    const gw = new CardGateway();
+    gw.onCreate = async () => { throw timeoutError(); };
+    return gw;
+  };
+
+  it("A: Wallester har IKKE kortet -> frigi reservasjonen (submitted_at = NULL, fjern flagget): neste innsending går gjennom og gir NØYAKTIG ett kort til", async () => {
+    const gw = timeoutGateway();
+    const cards = cardService(gw);
+    const card = await draft(cards);
+    await expect(cards.submitCard(TENANT, "business", card.card_id)).rejects.toBeInstanceOf(ProviderOutcomeUnknownError);
+    await expect(cards.submitCard(TENANT, "business", card.card_id)).rejects.toBeInstanceOf(AmbiguousProviderResponseError);
+    expect(gw.createCalls).toHaveLength(1);
+    // eierens steg - nøyaktig som i runbooken, etter å ha sjekket hos Wallester at det IKKE finnes et kort med denne referansen:
+    const released = await adminPool.query(
+      `UPDATE provider_cards SET submitted_at = NULL, anomaly_flags = anomaly_flags - 'CARD_SUBMIT_OUTCOME_UNKNOWN', updated_at = now()
+        WHERE tenant_id = $1 AND card_id = $2 AND state = 'draft' AND provider_card_id IS NULL`, [TENANT, card.card_id]
+    );
+    expect(released.rowCount).toBe(1);
+    gw.onCreate = async () => ({ id: `wcard-${randomUUID()}`, status: "active", maskedCardNumber: "…4321", accountId: "wacc-fin2", tokenizationStatus: null });
+    const done = await cards.submitCard(TENANT, "business", card.card_id);
+    expect(done.provider_card_id).not.toBeNull();
+    expect(gw.createCalls).toHaveLength(2);
+    expect((await cardRow(card.card_id)).anomaly_flags).not.toContain("CARD_SUBMIT_OUTCOME_UNKNOWN");
+  });
+
+  it("B: Wallester HAR kortet -> knytt det til raden (provider-id + konto, pending_provider, fjern flagget) og la sync hente resten: aldri en ny innsending", async () => {
+    const gw = timeoutGateway();
+    const cards = cardService(gw);
+    const card = await draft(cards);
+    await expect(cards.submitCard(TENANT, "business", card.card_id)).rejects.toBeInstanceOf(ProviderOutcomeUnknownError);
+    const providerId = `wcard-existing-${randomUUID()}`;
+    const linked = await adminPool.query(
+      `UPDATE provider_cards SET provider_card_id = $3, provider_account_id = $4, provider_state = 'unknown', state = 'pending_provider',
+              anomaly_flags = anomaly_flags - 'CARD_SUBMIT_OUTCOME_UNKNOWN', updated_at = now()
+        WHERE tenant_id = $1 AND card_id = $2 AND state = 'draft' AND provider_card_id IS NULL`, [TENANT, card.card_id, providerId, "wacc-fin2"]
+    );
+    expect(linked.rowCount).toBe(1);
+    (gw as unknown as { getCard: unknown }).getCard = async (): Promise<WallesterCardObject> => ({ id: providerId, status: "active", maskedCardNumber: "…9999", accountId: "wacc-fin2", tokenizationStatus: null });
+    const synced = await cards.syncCardState(TENANT, "business", card.card_id);
+    expect(synced.state).toBe("active");
+    expect(synced.masked_card_number).toBe("…9999");
+    expect((await cards.submitCard(TENANT, "business", card.card_id)).provider_card_id).toBe(providerId); // allerede innsendt: ingen nytt leverandørkall
+    expect(gw.createCalls).toHaveLength(1);
+  });
+});
