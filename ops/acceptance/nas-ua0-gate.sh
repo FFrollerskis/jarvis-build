@@ -3,6 +3,7 @@
 #   ops/acceptance/nas-ua0-gate.sh                # kjør mot kjørende compose-stack (fra repoets rot på NAS)
 #   JARVIS_ACCEPTANCE_DRY_RUN=1 ops/acceptance/nas-ua0-gate.sh   # skriv kun sjekklisten (ingen docker)
 # Valgfritt miljø: JARVIS_BACKUP_DIR (mappen nas-backup.sh skriver til), JARVIS_COMPOSE_FILE, JARVIS_ACCEPTANCE_OUT_DIR (evidensmappe; standard ops/acceptance/out).
+# Kun for test: JARVIS_ACCEPTANCE_BACKUP_STATUS_CMD (kjørbar fil som erstatter ops/backup/nas-schedule.sh i C13), JARVIS_ACCEPTANCE_BACKUP_STATUS_TIMEOUT_SEC (standard 120), JARVIS_ACCEPTANCE_NODE_BIN (standard node).
 # Leser aldri .env og skriver aldri passord/tokens: Postgres nås via lokal socket i containeren (ingen passord), og kun antall/navn/tilstand rapporteres.
 # Utdata: stdout + ops/acceptance/out/nas-ua0-gate-<tid>.md (git-ignorert). Exit 1 hvis minst én sjekk er FAIL; UNKNOWN/WARN er IKKE bestått.
 # Ærlighet: «PASS» betyr bare at DENNE målingen var som forventet akkurat nå - ikke at en UA-port er lukket.
@@ -28,7 +29,7 @@ record() { # id status detail
   printf '%-22s %-8s %s\n' "$id" "$status" "$detail"
 }
 
-CHECKS=(C01_compose_services C02_migrations_applied C03_pgvector_hnsw C04_schema_features C05_api_health C06_local_model C07_chat_cost_24h C08_provider_failures_24h C09_ev0_boot C10_backup_freshness C11_rls_tables C12_container_hardening)
+CHECKS=(C01_compose_services C02_migrations_applied C03_pgvector_hnsw C04_schema_features C05_api_health C06_local_model C07_chat_cost_24h C08_provider_failures_24h C09_ev0_boot C10_backup_freshness C11_rls_tables C12_container_hardening C13_backup_status C14_watchdog_alive)
 
 if [ "$DRY" = "1" ]; then
   echo "TØRRKJØRING - sjekklisten (ingen docker kjøres):"
@@ -143,6 +144,71 @@ done
 if echo "$hard" | grep -q "AVVIK"; then record C12_container_hardening FAIL "$hard"
 elif echo "$hard" | grep -q "ukjent"; then record C12_container_hardening UNKNOWN "$hard"
 else record C12_container_hardening PASS "$hard"; fi
+
+# C13 (WP-OPS2a K5): backup-status fra backup-skriptets EGET statusskript (`nas-schedule.sh <mappe> status --json`): exit 0 frisk = PASS, 3 forfalt = FAIL, 4 restore-verifisering / 5 off-site = WARN, alt annet = UNKNOWN.
+# Kun koder og tall når skjermen og evidensfilen: JSON-en er ubetrodd data og leses med en lukket mal (tilstander fra faste lister, tall, årsakskoder uten settnavn) - aldri fritekst. Gaten leser ingenting selv.
+NODE_BIN="${JARVIS_ACCEPTANCE_NODE_BIN:-node}"
+BACKUP_STATUS_CMD="${JARVIS_ACCEPTANCE_BACKUP_STATUS_CMD:-$ROOT/ops/backup/nas-schedule.sh}"
+BACKUP_STATUS_TIMEOUT="${JARVIS_ACCEPTANCE_BACKUP_STATUS_TIMEOUT_SEC:-120}"
+[[ "$BACKUP_STATUS_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$BACKUP_STATUS_TIMEOUT" -ge 1 ] && [ "$BACKUP_STATUS_TIMEOUT" -le 900 ] || BACKUP_STATUS_TIMEOUT=120
+PARSE_BACKUP_STATUS='
+let s = "";
+process.stdin.on("data", (c) => { s += c; }).on("end", () => {
+  let j;
+  try { j = JSON.parse(s); } catch { console.log("INVALID"); return; }
+  if (typeof j !== "object" || j === null || Array.isArray(j)) { console.log("INVALID"); return; }
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? String(Math.round(v * 10) / 10) : "?");
+  const pick = (v, list) => (typeof v === "string" && list.includes(v) ? v : "?");
+  const code = (r) => {
+    if (typeof r !== "string") return null;
+    const [a, b] = r.split(":");
+    if (!/^[a-z][a-z0-9_.]{0,60}$/.test(a)) return null;
+    return b !== undefined && /^[a-z_]{1,40}$/.test(b) ? a + ":" + b : a;
+  };
+  const reasons = (Array.isArray(j.reasons) ? j.reasons : []).map(code).filter((x) => x !== null).slice(0, 6).join(",");
+  console.log(["OK", "ec=" + (Number.isInteger(j.exit_code) ? j.exit_code : "?"), "age_h=" + num(j.backup && j.backup.age_hours),
+    "verify=" + pick(j.restore_verify && j.restore_verify.state, ["not_configured", "never_run", "ok", "failed"]),
+    "offsite=" + pick(j.offsite && j.offsite.state, ["not_configured", "pending", "ok", "failed"]), "reasons=" + (reasons || "-")].join(" "));
+});'
+if [ -z "${JARVIS_BACKUP_DIR:-}" ]; then record C13_backup_status UNKNOWN "sett JARVIS_BACKUP_DIR til mappen nas-backup.sh skriver til"
+elif ! command -v "$NODE_BIN" >/dev/null 2>&1; then record C13_backup_status UNKNOWN "node finnes ikke på verten (status-kommandoen og tolkningen trenger node)"
+else
+  if command -v timeout >/dev/null 2>&1; then
+    status_json="$(timeout "$BACKUP_STATUS_TIMEOUT" "$BACKUP_STATUS_CMD" "$JARVIS_BACKUP_DIR" status --json </dev/null 2>/dev/null)"; status_rc=$?
+  else
+    status_json="$("$BACKUP_STATUS_CMD" "$JARVIS_BACKUP_DIR" status --json </dev/null 2>/dev/null)"; status_rc=$?
+  fi
+  parsed="$(printf '%s' "$status_json" | "$NODE_BIN" -e "$PARSE_BACKUP_STATUS" 2>/dev/null)"
+  if [ "$status_rc" = "124" ]; then record C13_backup_status UNKNOWN "tidsavbrudd etter ${BACKUP_STATUS_TIMEOUT} s (status-kommandoen svarte ikke)"
+  elif [[ "$parsed" != OK\ * ]]; then record C13_backup_status UNKNOWN "status-JSON kunne ikke tolkes (exit $status_rc)"
+  else
+    ec="${parsed#OK ec=}"; ec="${ec%% *}"
+    detail="exit=$status_rc ${parsed#OK ec=* }"
+    if [ "$ec" != "?" ] && [ "$ec" != "$status_rc" ]; then record C13_backup_status UNKNOWN "exit-koden ($status_rc) og status-JSON (exit_code $ec) er uenige"
+    else
+      case "$status_rc" in
+        0) record C13_backup_status PASS "$detail";;
+        3) record C13_backup_status FAIL "$detail";;
+        4|5) record C13_backup_status WARN "$detail";;
+        *) record C13_backup_status UNKNOWN "uventet exit $status_rc: $detail";;
+      esac
+    fi
+  fi
+fi
+
+# C14 (WP-OPS2a K5): vakthunden tikker. Raden `incident_producer_runs`/`watchdog` skrives av worker-broen KUN når JARVIS_INCIDENT_PRODUCERS_ENABLED=true; uten rad er svaret UNKNOWN (aldri PASS).
+# PASS opptil 300 s siden siste tikk, WARN opptil 900 s, FAIL over det. Kun tall.
+wd_age="$(psqlq "SELECT floor(extract(epoch FROM (now() - max(last_started_at))))::bigint FROM incident_producer_runs WHERE producer = 'watchdog'" | tr -d '[:space:]')"
+if ! [[ "$wd_age" =~ ^-?[0-9]+$ ]]; then
+  if [ -z "$(psqlq 'SELECT 1')" ]; then record C14_watchdog_alive UNKNOWN "fikk ikke kontakt med databasen"
+  else record C14_watchdog_alive UNKNOWN "ingen vakthund-tikk registrert (incident-produsentene er AV, eller worker har aldri tikket)"; fi
+elif [ "$wd_age" -lt -60 ]; then record C14_watchdog_alive UNKNOWN "siste tikk er datert ${wd_age#-} s frem i tid (klokkeavvik mellom worker og database) - alderen kan ikke bevises"
+else
+  [ "$wd_age" -lt 0 ] && wd_age=0
+  if [ "$wd_age" -le 300 ]; then record C14_watchdog_alive PASS "siste vakthund-tikk for $wd_age s siden (grense 300 s)"
+  elif [ "$wd_age" -le 900 ]; then record C14_watchdog_alive WARN "siste vakthund-tikk for $wd_age s siden (over 300 s, under 900 s)"
+  else record C14_watchdog_alive FAIL "siste vakthund-tikk for $wd_age s siden (over 900 s) - worker står, henger eller er stoppet"; fi
+fi
 
 write_evidence() {
   echo "# UA-0 NAS-akseptanse - $STAMP"

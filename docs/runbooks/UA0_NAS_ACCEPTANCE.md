@@ -9,8 +9,9 @@ cd /volume1/jarvisbuild-data/jarvisbuild
 git pull
 JARVIS_BACKUP_DIR=<mappen nas-backup.sh skriver til> ops/acceptance/nas-ua0-gate.sh
 ```
-Uten `JARVIS_BACKUP_DIR` blir backup-sjekken `UNKNOWN`. Tørrkjøring (ingen docker): `JARVIS_ACCEPTANCE_DRY_RUN=1 ops/acceptance/nas-ua0-gate.sh`.
-Skriptet leser aldri `.env` og skriver aldri passord; Postgres nås via lokal socket i containeren. Evidensfilen havner i `ops/acceptance/out/` (git-ignorert).
+Uten `JARVIS_BACKUP_DIR` blir backup-sjekkene (C10 og C13) `UNKNOWN`. Tørrkjøring (ingen docker): `JARVIS_ACCEPTANCE_DRY_RUN=1 ops/acceptance/nas-ua0-gate.sh`.
+Skriptet leser aldri `.env` og skriver aldri passord; Postgres nås via lokal socket i containeren. C13 kaller backup-skriptet `ops/backup/nas-schedule.sh <mappe> status --json` (det leser sitt EGET oppsett, som backup-tikket gjør); gaten viser kun koder og tall fra svaret.
+Evidensfilen havner i `ops/acceptance/out/` (git-ignorert).
 Lim utskriften (eller filen) inn i chatten, så vurderer jeg den.
 
 ## Hva sjekkes
@@ -28,6 +29,13 @@ Lim utskriften (eller filen) inn i chatten, så vurderer jeg den.
 | C10 | backup er ≤ 25 t gammel, og ukryptert `stray/` er borte (D-370) |
 | C11 | tabellene uten RLS er NØYAKTIG de 9 dokumenterte globale (ellers FAIL) |
 | C12 | api/worker kjører ikke som root, read-only rotfs, `cap_drop: ALL` |
+| C13 | backup-status fra backup-skriptets eget statusskript (`nas-schedule.sh <mappe> status --json`, WP-OPS2a): exit 0 = `PASS`, 3 (backupen er forfalt) = `FAIL`, 4 (restore-verifisering feilet/for gammel) og 5 (off-site feilet/for gammel) = `WARN`, alt annet (konfig, kommando mangler, ugyldig JSON, tidsavbrudd, uenighet mellom exit-kode og JSON) = `UNKNOWN`. Uten `JARVIS_BACKUP_DIR` eller `node` på verten: `UNKNOWN`. Detaljen er kun koder og tall |
+| C14 | vakthunden tikker (WP-OPS2a): alder på siste rad i `incident_producer_runs` for `watchdog`. Opptil 300 s = `PASS`, opptil 900 s = `WARN`, over 900 s = `FAIL`. Ingen rad = `UNKNOWN` («incident-produsentene er AV, eller worker har aldri tikket»): raden skrives kun med `JARVIS_INCIDENT_PRODUCERS_ENABLED=true` |
+
+## C13 og C14: hva de krever og hva de ikke beviser
+- **C13** beviser at backup-skriptet SELV melder frisk/forfalt akkurat nå. Det er ikke en restore-test og ikke bevis for at kopiene virker (det er restore-verifiseringen som svarer på det, og den vises som `verify=` i detaljen). `verify=never_run` uten at noe feiler gir `exit=0` og `PASS`: kjør `nas-restore-verify.sh` (runbooken for backup, §6) og se `verify=ok`.
+- **C14** krever at incident-produsentene er på. Er de AV (standard), er C14 `UNKNOWN` - ikke et funn om at vakthunden er død. Slå dem på bevisst (`JARVIS_INCIDENT_PRODUCERS_ENABLED=true`, se `docs/runbooks/WPOPS2A_WATCHDOG.md`), eller bruk den eksterne heartbeaten for vakthunden (`JARVIS_WATCHDOG_HEARTBEAT_URL`) som ikke avhenger av dem.
+- Begge er `NOT VERIFIED` til du har kjørt gaten på NAS-en og lest utskriften.
 
 ## Tolkning
 - `PASS` = målingen var som forventet akkurat nå. Det er **ikke** det samme som at en UA-port er lukket.

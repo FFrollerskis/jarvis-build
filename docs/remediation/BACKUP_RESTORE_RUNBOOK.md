@@ -283,7 +283,7 @@ ops/backup/acceptance-ops.sh report <backup-mappe>        # kun les status
 | `O08` | RPO verste tilfelle mot ditt mål |
 | `D01`–`D04` | restore til scratch lik manifestet (tabeller + eksakte radtall) **utført av dette tikket** (D01 krever handlingen `verify`, `reported_by=local` og en suksess nyere enn drillens start - en gammel grønn statusfil godtas ikke, og D02-D04 feiler da også), målt RTO, målt RPO, fersk kvittering til NAS (D04) |
 
-**Exit:** `0` = alt bestått · `1` = minst én `FAIL` · `3` = ingen `FAIL`, men noe er `NOT_CONFIGURED`/`UNKNOWN` - **ikke lukket**. Evidensen (uten hemmeligheter) skrives til `ops/acceptance/out/ops-acceptance-<modus>-<tid>.md` (git-ignorert); lim utskriften inn i chatten. `ops/acceptance/nas-ua0-gate.sh` er uendret (C10 sjekker fortsatt kun alder ≤ 25 t); en fremtidig `C13` kan lese `ops/backup/…/status --json`, men er bevisst ikke lagt inn her for å unngå konflikt med andre UA-0-endringer.
+**Exit:** `0` = alt bestått · `1` = minst én `FAIL` · `3` = ingen `FAIL`, men noe er `NOT_CONFIGURED`/`UNKNOWN` - **ikke lukket**. Evidensen (uten hemmeligheter) skrives til `ops/acceptance/out/ops-acceptance-<modus>-<tid>.md` (git-ignorert); lim utskriften inn i chatten. `ops/acceptance/nas-ua0-gate.sh` har i tillegg til C10 (kun alder ≤ 25 t) nå `C13_backup_status` (WP-OPS2a): den kjører `ops/backup/nas-schedule.sh <backup-mappe> status --json` og mapper exit-koden (`0` = `PASS`, `3` forfalt = `FAIL`, `4` restore-verifisering og `5` off-site = `WARN`, alt annet `UNKNOWN`); detaljen viser kun koder og tall. C13 er `NOT VERIFIED` til gaten er kjørt på NAS-en (`docs/runbooks/UA0_NAS_ACCEPTANCE.md`).
 
 ## 6.8 Feilsøking
 
