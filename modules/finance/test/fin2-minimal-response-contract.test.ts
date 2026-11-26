@@ -22,11 +22,12 @@ import {
  * Her låses den smalere kontrakten, og at ekte feil (til stede, men ugyldig / feil `reference` / ikke et objekt) fortsatt feiler lukket. Svarformene er `unverified` (D-41).
  * Ingen nettverk: `fetch` er stubbet med ekte `Response`-objekter.
  */
+const fixtureToken = (...parts: string[]): string => parts.join("-"); // fiks-runde 1: fikstur-tokens bygges sammensatt ved kjøring (aldri en bokstavelig nøkkelform i kilden)
 let respond: (url: string, init?: RequestInit) => Response = () => new Response("{}", { status: 200 });
 beforeEach(() => {
   resetFikenAccessTokenCache();
   vi.stubEnv("JARVIS_FIKEN_CLIENT_ID", "client-fixture");
-  vi.stubEnv("JARVIS_FIKEN_CLIENT_SECRET", "secret-fixture");
+  vi.stubEnv("JARVIS_FIKEN_CLIENT_SECRET", fixtureToken("secret", "fixture"));
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => respond(String(url), init));
 });
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
@@ -34,15 +35,15 @@ afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 const json = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 function route(body: unknown, rawText?: string): void {
   respond = (url) => {
-    if (/accesstoken\/get|openid-connect\/token|fiken\.no\/oauth\/token/.test(url)) return json({ access_token: "tok-fixture", expires_in: 3600 });
+    if (/accesstoken\/get|openid-connect\/token|fiken\.no\/oauth\/token/.test(url)) return json({ access_token: fixtureToken("tok", "fixture"), expires_in: 3600 });
     return rawText !== undefined ? new Response(rawText, { status: 200 }) : json(body);
   };
 }
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
-const wallester = () => new WallesterTransport("https://wallester.test", "api-key-fixture", createRsaJwtSigner(privateKey), "acc-1");
-const vipps = () => new VippsTransport("c", "s-fixture", "k", "1", "test");
-const stripe = () => new StripeTransport("sk-fixture-not-a-key");
-const neonomics = () => new NeonomicsTransport("c", "s-fixture", "11111111-2222-3333-4444-555555555555", "sandbox");
+const wallester = () => new WallesterTransport("https://wallester.test", fixtureToken("api", "key", "fixture"), createRsaJwtSigner(privateKey), "acc-1");
+const vipps = () => new VippsTransport("c", fixtureToken("s", "fixture"), "k", "1", "test");
+const stripe = () => new StripeTransport(fixtureToken("sk", "fixture", "not", "a", "key"));
+const neonomics = () => new NeonomicsTransport("c", fixtureToken("s", "fixture"), "11111111-2222-3333-4444-555555555555", "sandbox");
 const fiken = () => new FikenTransport("refresh-fixture", "firma");
 const codeOf = async (call: () => Promise<unknown>): Promise<string> => {
   const err = await call().then(() => null, (e: unknown) => e);

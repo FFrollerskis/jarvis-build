@@ -85,8 +85,11 @@ describe("FIX-8: kort med en innsending uten svar overflates etter at leasen er 
 
   it("et kort som HAR leverandør-id (innsendingen fikk svar) og ikke er flagget gir ingen loop, uansett alder", async () => {
     const answered = await card({ submittedAgo: "2 days", providerCardId: `wc-${randomUUID().slice(0, 8)}`, state: "pending_provider" });
+    // forsvar i dybden: selv en (inkonsistent) rad som er `draft` men HAR leverandør-id regnes aldri som «innsending uten svar»
+    const inconsistent = await card({ submittedAgo: "2 days", providerCardId: `wc-${randomUUID().slice(0, 8)}`, state: "draft" });
     await openLoops.detectCardAnomalies(TENANT, "business");
     expect(await loopFor(answered)).toBeUndefined();
+    expect(await loopFor(inconsistent)).toBeUndefined();
   });
 
   it("et flagget kort gir fortsatt loopen med flaggene i teksten (uendret oppførsel)", async () => {

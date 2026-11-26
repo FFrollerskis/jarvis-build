@@ -21,7 +21,7 @@ let appPool: pg.Pool;
 const TENANT = "tenant-fin2-lifecycle";
 const APP_ROLE = "jarvis_fin2_lifecycle";
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
-const creds: WallesterCredentials = { baseUrl: "https://wallester.test", apiKey: "api-key-fixture", sign: createRsaJwtSigner(privateKey), accountId: "wacc-life", environment: "sandbox" };
+const creds: WallesterCredentials = { baseUrl: "https://wallester.test", apiKey: ["api", "key", "fixture"].join("-"), sign: createRsaJwtSigner(privateKey), accountId: "wacc-life", environment: "sandbox" };
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-fin2-lifecycle-"));

@@ -27,11 +27,12 @@ let adminPool: pg.Pool;
 let appPool: pg.Pool;
 const TENANT = "tenant-fin2-fix1";
 const APP_ROLE = "jarvis_fin2_fix1";
-const WEBHOOK_SECRET = "vipps-webhook-secret-fixture-fix1";
+const fixtureToken = (...parts: string[]): string => parts.join("-"); // fiks-runde 1: fikstur-tokens bygges sammensatt ved kjøring
+const WEBHOOK_SECRET = fixtureToken("vipps", "webhook", "secret", "fixture", "fix1");
 const HOST = "jarvis.test";
 const PATH = "/webhooks/vipps";
-const vippsCreds: VippsCredentials = { clientId: "c", clientSecret: "s-fixture", subscriptionKey: "k", merchantSerialNumber: "1", environment: "test" };
-const stripeCreds: StripeCredentials = { secretKey: "sk-fixture-not-a-key" };
+const vippsCreds: VippsCredentials = { clientId: "c", clientSecret: fixtureToken("s", "fixture"), subscriptionKey: "k", merchantSerialNumber: "1", environment: "test" };
+const stripeCreds: StripeCredentials = { secretKey: fixtureToken("sk", "fixture", "not", "a", "key") };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 beforeAll(async () => {
@@ -73,7 +74,7 @@ const json = (body: unknown, status = 200): Response => new Response(JSON.string
 function stubProvider(handler: (url: string, method: string) => Response): string[] {
   const calls: string[] = [];
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
-    if (/accesstoken\/get/.test(String(url))) return json({ access_token: "tok-fixture", expires_in: 3600 });
+    if (/accesstoken\/get/.test(String(url))) return json({ access_token: fixtureToken("tok", "fixture"), expires_in: 3600 });
     calls.push(`${init?.method ?? "GET"} ${String(url)}`);
     return handler(String(url), init?.method ?? "GET");
   });

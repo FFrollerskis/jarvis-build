@@ -307,11 +307,12 @@ describe("K8 runbook: eierens manuelle disposisjon etter ukjent utfall (admin-SQ
     await expect(cards.submitCard(TENANT, "business", card.card_id)).rejects.toBeInstanceOf(ProviderOutcomeUnknownError);
     await expect(cards.submitCard(TENANT, "business", card.card_id)).rejects.toBeInstanceOf(AmbiguousProviderResponseError);
     expect(gw.createCalls).toHaveLength(1);
-    // eierens steg - nøyaktig som i runbooken, etter å ha sjekket hos Wallester at det IKKE finnes et kort med denne referansen:
-    const released = await adminPool.query(
-      `UPDATE provider_cards SET submitted_at = NULL, anomaly_flags = anomaly_flags - 'CARD_SUBMIT_OUTCOME_UNKNOWN', updated_at = now()
-        WHERE tenant_id = $1 AND card_id = $2 AND state = 'draft' AND provider_card_id IS NULL`, [TENANT, card.card_id]
-    );
+    // eierens steg - nøyaktig som i runbooken (§11.3 A.1, med alderspredikatet fra fiks-runde 1: aldri frigi en innsending som kan pågå fortsatt), etter å ha sjekket hos Wallester at det IKKE finnes et kort med denne referansen:
+    const a1 = `UPDATE provider_cards SET submitted_at = NULL, anomaly_flags = anomaly_flags - 'CARD_SUBMIT_OUTCOME_UNKNOWN', updated_at = now()
+        WHERE tenant_id = $1 AND card_id = $2 AND state = 'draft' AND provider_card_id IS NULL AND submitted_at < now() - interval '5 minutes'`;
+    expect((await adminPool.query(a1, [TENANT, card.card_id])).rowCount).toBe(0); // FRISK reservasjon (< 5 minutter): ingenting frigis
+    await adminPool.query("UPDATE provider_cards SET submitted_at = now() - interval '10 minutes' WHERE card_id = $1", [card.card_id]); // tiden går (leasen er 120 s; vent minst 2 minutter før A.1)
+    const released = await adminPool.query(a1, [TENANT, card.card_id]);
     expect(released.rowCount).toBe(1);
     gw.onCreate = async () => ({ id: `wcard-${randomUUID()}`, status: "active", maskedCardNumber: "…4321", accountId: "wacc-fin2", tokenizationStatus: null });
     const done = await cards.submitCard(TENANT, "business", card.card_id);
