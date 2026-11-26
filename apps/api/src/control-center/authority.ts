@@ -278,6 +278,13 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
       if (pausesR.ok) for (const p of pausesR.value) pausedDomains.set(p.domain, p);
       const allPaused = pausedDomains.has("*");
       if (autonomyR.ok) {
+        // WP-G4b K2 (verifikasjon): «Tilbakekall autonomi» fjerner KUN den domenebrede raden. Uten en domenebred rad finnes det ikke noe tak (`autonomy-scope.ts`), så AKTIVERTE regel-/kategoribindinger i samme (rom, domene) står igjen og
+        // utfører fortsatt selv. Knappeteksten må si det: ellers lover den «Jarvis utfører ingenting selv i domenet» mens smale bindinger fortsatt virker (eierens nødventil ville vært misvisende).
+        const scopedLeft = new Map<string, string[]>();
+        for (const r of autonomyR.value.rows) {
+          if (r.scope_key === undefined || r.scope_key === "*" || !r.enabled) continue;
+          scopedLeft.set(`${r.memory_space_id}:${r.domain}`, [...(scopedLeft.get(`${r.memory_space_id}:${r.domain}`) ?? []), r.scope_key]);
+        }
         const items: ControlItem[] = autonomyR.value.rows.map((p) => {
           const paused = allPaused || pausedDomains.has(p.domain);
           // Gjennomgang av PR #316 (M-1): kan domene-pausene ikke leses, VET vi ikke om en aktiv binding er stanset - da er den ukjent (aldri «i orden»), og faktaet sier null i stedet for «ikke pauset».
@@ -290,12 +297,15 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
           // WP-G4b K1 (D-484): en lagret binding til en handling som ikke (lenger) er bindbar til autonom ACT (fysisk, eller definisjonen erklærer ikke `autonomy_bindable`) utføres ALDRI og slettes aldri; den vises her så eieren ser
           // at den ikke virker. Kun når definisjonen er kjent i registeret (eller handlingen er fysisk): en ukjent handling i en ren test-/delvis-oppsett gir ingen påstand.
           const notBindable = deps.toolGateway.get(p.tool_id, p.action) !== undefined || autonomyActionBlocker(p.tool_id, p.action) !== null ? autonomyBindBlocker(p.tool_id, p.action, (t, a) => deps.toolGateway.get(t, a)) : null;
+          const remaining = scopedLeft.get(`${p.memory_space_id}:${p.domain}`) ?? [];
           if (deps.autonomyRevoke === true && ownSpace && !scoped) {
             actions.push(controlAction({
               id: `authority.revoke_autonomy:${p.memory_space_id}:${p.domain}`, label: `Tilbakekall autonomi: ${p.domain}`, endpoint: "/executive/mutate",
               body: { action: "revoke_autonomy_binding", parameters: { domain: p.domain } },
               risk_class: riskOf(deps.toolGateway, "executive", "revoke_autonomy_binding"), requires_step_up: actionRequiresStepUp("revoke_autonomy_binding"), reversible: false,
-              description_no: `Fjerner bindingen som lar Jarvis utføre ${p.tool_id}.${p.action} selv i domenet «${p.domain}» (rommet ${p.memory_space_id}). Uten binding utfører Jarvis ingenting selv i domenet (fail-closed): situasjoner blir liggende som forslag til du handler. Parametrene til bindingen slettes og lagres ikke.`,
+              description_no: `Fjerner bindingen som lar Jarvis utføre ${p.tool_id}.${p.action} selv i domenet «${p.domain}» (rommet ${p.memory_space_id}). ${remaining.length === 0
+                ? "Uten binding utfører Jarvis ingenting selv i domenet (fail-closed): situasjoner blir liggende som forslag til du handler."
+                : `OBS: ${remaining.length} aktivert regel-/kategoribinding${remaining.length === 1 ? "" : "er"} i samme domene (${remaining.join(", ")}) berøres IKKE og utfører fortsatt selv; fjern ${remaining.length === 1 ? "den" : "dem"} med situations.clear_autonomy_policy (rule/category).`} Parametrene til bindingen slettes og lagres ikke.`,
               rollback_no: "Kan ikke angres herfra: bind domenet på nytt med situations.set_autonomy_policy (handling og parametre må da gis på nytt).",
               section_id: "autonomy", item_id: `${p.memory_space_id}:${p.domain}`
             }));
@@ -303,7 +313,7 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
           return controlItem({
             id: itemId, label: `${p.domain} (${p.memory_space_id})${scoped ? ` · ${scopeKey}` : ""}`, status: pauseUnknown ? "UNKNOWN" : p.enabled && (paused || notBindable !== null) ? "WARN" : "OK", observed_at: p.updated_at,
             detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${scoped ? ` · gjelder KUN skopet ${scopeKey} (resten av domenet er uberørt; fjernes med situations.clear_autonomy_policy)` : ""}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${notBindable !== null ? ` · UTFØRES IKKE autonomt (${notBindable.code === "physical_action_not_bindable" ? "fysisk/kritisk handling" : "definisjonen erklærer ikke handlingen bindbar til autonom ACT"}); bindingen er ikke slettet - fjern eller erstatt den` : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
-            facts: { tool: p.tool_id, action: p.action, ...(scoped ? { scope: scopeKey } : {}), risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id, ...(notBindable !== null ? { not_bindable: notBindable.code } : {}) }
+            facts: { tool: p.tool_id, action: p.action, ...(scoped ? { scope: scopeKey } : {}), ...(!scoped && remaining.length > 0 ? { scoped_bindings_active: remaining.length } : {}), risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id, ...(notBindable !== null ? { not_bindable: notBindable.code } : {}) }
           });
         });
         items.sort(bySeverityThenLabel);

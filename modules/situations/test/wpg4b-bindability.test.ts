@@ -35,7 +35,8 @@ describe("A: autonomyBindBlocker er fysisk-først og DEFAULT-DENY (fail-closed v
   });
 
   it("ugyldige erklæringer teller ikke: `true`, tom/kort begrunnelse, liste, feil type", () => {
-    for (const declared of [true, "ja", 1, [], { reason: "" }, { reason: "   " }, { reason: "for kort" }, { reason: "x".repeat(AUTONOMY_REASON_MIN_CHARS - 1) }, { reason: 5 }, { why: REASON }, null]) {
+    // en liste er aldri en erklæring, heller ikke en liste som bærer en `reason`-egenskap (kun `[]` ble testet før, og for den gir `reason`-sjekken null uansett: uten `Array.isArray` ville en slik liste sluppet gjennom)
+    for (const declared of [true, "ja", 1, [], Object.assign([], { reason: REASON }), { reason: "" }, { reason: "   " }, { reason: "for kort" }, { reason: "x".repeat(AUTONOMY_REASON_MIN_CHARS - 1) }, { reason: 5 }, { why: REASON }, null]) {
       expect(autonomyBindBlocker("t", "a", lookup({ "t.a": { autonomy_bindable: declared } }))?.code, JSON.stringify(declared)).toBe("action_not_bindable");
       expect(autonomyBindabilityOf({ autonomy_bindable: declared }), JSON.stringify(declared)).toBeNull();
     }
