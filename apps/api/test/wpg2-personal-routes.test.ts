@@ -115,7 +115,9 @@ function harness(opts: {
   const index = personalActionIndex(HOME_CRITICAL_OPS.map((op) => ({ domain: "home" as const, toolId: "home-assistant", op })));
   const actions: PersonalActionsDeps = {
     executor: { pool: {} as never, gateway: { execute: gatewayExecute, get: () => ({}) } as never, journal: { list: journalList } as never, index },
-    domains: new Map([["home", { toolId: "home-assistant", readAction: HOME_CRITICAL_READ_ACTION }]]), run: run as never
+    domains: new Map([["home", { toolId: "home-assistant", readAction: HOME_CRITICAL_READ_ACTION }]]), run: run as never,
+    // WP-G2c: avstemmingen har egne ruteprøver (`wpg2c-reconcile-routes.test.ts`); denne selen finnes kun fordi typen krever den.
+    reconcile: (async () => { calls.push("reconcile"); throw new Error("personal_action_not_found"); }) as never
   };
   const identity = opts.identity ?? owner;
   const body = opts.body ?? {};

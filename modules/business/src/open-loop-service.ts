@@ -4,7 +4,7 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import { canonicalStringify } from "@jarvis/contracts";
 import type { AttentionQueueEntry, BusinessOpenLoop, LoopResolutionOutcome, OpenLoopPriority, OpenLoopType, SweepResult } from "./open-loop-types.ts";
-import { MANUAL_RESOLUTION_OUTCOMES, classifyAttentionBucket, deterministicLoopConfidence } from "./open-loop-types.ts";
+import { MANUAL_RESOLUTION_OUTCOMES, classifyAttentionBucket, deterministicLoopConfidence, isFinanceDerivedLoopType } from "./open-loop-types.ts";
 import { churnDetectionKey, churnNextAction, describeChurnRisk } from "./churn-rules.ts";
 import { ChurnService } from "./churn-service.ts";
 import {
@@ -961,20 +961,28 @@ export class OpenLoopService {
         });
         if (result === "inserted") detected++; else updated++;
       }
+      // WP-FIN2 fiks-runde 1 (FIX-8): i tillegg til kort med avviksflagg overflates et kort med en INNSENDING UTEN SVAR som er eldre enn leasen (120 s i `CardService`; her 5 minutter med margin): `submitCard`
+      // reserverer markøren `submitted_at` FØR Wallester-kallet, og krasjer prosessen midt i kallet står kortet som `draft` uten leverandør-id og UTEN flagg - uten dette ble det aldri synlig før
+      // eieren prøvde å sende det inn igjen. Rent lesende; markøren ryddes av eierens avklaring (FINANCE_D_CHAIN §11.3 A) og loopen lukkes da selv (`autoResolveStale`).
       const { rows: cardRows } = await client.query(
-        `SELECT card_id, name, anomaly_flags FROM provider_cards WHERE tenant_id = $1 AND jsonb_array_length(anomaly_flags) > 0`,
+        `SELECT card_id, name, anomaly_flags FROM provider_cards
+          WHERE tenant_id = $1 AND (jsonb_array_length(anomaly_flags) > 0
+             OR (state = 'draft' AND provider_card_id IS NULL AND submitted_at IS NOT NULL AND submitted_at < now() - interval '5 minutes'))`,
         [tenantId]
       );
       for (const row of cardRows as Array<{ card_id: string; name: string; anomaly_flags: string[] }>) {
         const detectionKey = `card_anomaly_attention:card:${row.card_id}`;
         currentKeys.push(detectionKey);
+        const unansweredSubmit = row.anomaly_flags.length === 0;
         const result = await upsertOpenLoop(client, {
           open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
           company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
           activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
           loop_type: "card_anomaly_attention", detection_key: detectionKey,
-          reason: `Kort «${row.name}» (${row.card_id}) har uløste kortavvik: ${row.anomaly_flags.join(", ")}`,
-          next_action: `Undersøk kort ${row.card_id}`,
+          reason: unansweredSubmit
+            ? `Kort «${row.name}» (${row.card_id}) har en innsending til Wallester uten svar (reservasjonen er eldre enn 5 minutter - prosessen kan ha stoppet midt i kallet). Utfallet er ukjent`
+            : `Kort «${row.name}» (${row.card_id}) har uløste kortavvik: ${row.anomaly_flags.join(", ")}`,
+          next_action: unansweredSubmit ? `Sjekk hos Wallester om det finnes et kort med referanse ${row.card_id} før noe sendes inn på nytt (FINANCE_D_CHAIN §11.3 A)` : `Undersøk kort ${row.card_id}`,
           priority: "high", owner_person_id: null, due_at: null
         });
         if (result === "inserted") detected++; else updated++;
@@ -1110,7 +1118,7 @@ export class OpenLoopService {
    * WP-D2 (JARVIS-045): kalibreringsrapport - forutsagt confidence mot faktisk utfall, samlet og per loop-type (treffrate, gap, Brier, pålitelighetsbøtter). Ren lesing. Kun loops
    * åpnet de siste `sinceDays` dagene (standard 365). Umerkede utfall (`condition_cleared`, lukket uten utfall) og åpne loops telles separat - aldri som treff eller bom.
    */
-  async calibrationReport(tenantId: string, memorySpace: MemorySpace, options: { sinceDays?: number } = {}): Promise<CalibrationReport> {
+  async calibrationReport(tenantId: string, memorySpace: MemorySpace, options: { sinceDays?: number; /** WP-N1b: utelat finansavledede løkketyper (tall per type og samlet bygges på resten). Uten valget: som før. */ excludeFinanceDerived?: boolean } = {}): Promise<CalibrationReport> {
     const sinceDays = Math.min(Math.max(Math.trunc(options.sinceDays ?? 365), 7), 1095);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       // Levende rader (åpnet i vinduet) + tidligere MERKEDE lukkinger av loops som siden er gjenåpnet (closure_history, vindu på lukketidspunktet): uten det ville «avvist, men vilkåret
@@ -1124,11 +1132,14 @@ export class OpenLoopService {
           WHERE l.tenant_id = $1 AND (h.e->>'closed_at')::timestamptz > now() - make_interval(days => $2)`,
         [tenantId, sinceDays]
       );
-      const observations = (rows as Array<{ loop_type: string; confidence: number | null; status: string; resolution_outcome: LoopResolutionOutcome | null }>).map((r): CalibrationObservation => ({
-        loop_type: r.loop_type,
-        confidence: r.confidence,
-        outcome: (r.status === "open" ? "open" : r.resolution_outcome ?? "unlabelled") as LoopOutcome
-      }));
+      const observations = (rows as Array<{ loop_type: string; confidence: number | null; status: string; resolution_outcome: LoopResolutionOutcome | null }>)
+        // WP-N1b: finansavledede løkketyper utelates FØR rapporten bygges, så samlet tall, per-type-rader og notater ikke bærer dem (en skymodell skal aldri se antall eller utfall for finansløkker).
+        .filter((r) => options.excludeFinanceDerived !== true || !isFinanceDerivedLoopType(r.loop_type))
+        .map((r): CalibrationObservation => ({
+          loop_type: r.loop_type,
+          confidence: r.confidence,
+          outcome: (r.status === "open" ? "open" : r.resolution_outcome ?? "unlabelled") as LoopOutcome
+        }));
       return buildCalibrationReport(observations);
     });
   }

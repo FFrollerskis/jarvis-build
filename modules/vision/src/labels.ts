@@ -47,6 +47,9 @@ export function normalizeObjectLabel(raw: unknown): string | null {
  * Merk (review delta D1): begge CHECK-ene er skrevet UTEN locale-avhengige POSIX-klasser. Den milde CHECK-ens bokstavkrav er «noe annet enn ASCII-sifre, -mellomrom og -tegnsetting» (ikke-ASCII tegn som ikke
  * er forbudt teller som bokstavlike), så databasen er et NETT som aldri er strengere enn normaliseringen; denne JS-regelen er (Unicode-bevisst) STRAMMERE for en etikett av KUN ikke-ASCII tegnsetting/symboler
  * («»), som skjemaet derfor avviser før databasen ser den. Bevist med sveip over alle kodepunkt i to locales (g3-label-locale.test.ts).
+ * JARVIS-114 (k) - ACCEPTED/PINNED (WP-G3b, D-485): dette ett-veis-avviket er BEVISST IKKE lukket med en ny migrasjon. Å matche `\p{P}\p{S}` i SQL krever en eksplisitt, Unicode-versjonsbundet kodepunkttabell som ikke kan bevises i produksjonens locale
+ * (`en_US.UTF-8` er NOT VERIFIED, JARVIS-114 l), og en forskjell ville gjøre databasen STRENGERE enn skjemaet i enkelte kodepunkt - den farlige retningen (JS godtar, databasen avviser med 23514 og ruller tilbake hele hendelsen). Dagens løsere nett kan ikke
+ * gi den feilen, og gapet kan ikke nås fra noen skrivevei i appen (skjemaet er porten). Nålen er `modules/vision/test/g3b-label-gap-pin.test.ts` (nøyaktig gap, ingen skrivevei, databasen godtar den). Endres regelen, CHECK-en eller gapet, må punktet vurderes på nytt.
  * Merk (review delta2 A-E1): ORD TELLES PÅ ASCII-MELLOMROM (U+0020) I BÅDE JS OG DATABASEN. Et Unicode-mellomrom (NBSP, U+2003, U+3000 ...) er en vanlig tegnverdi, ikke et skille og ikke noe `btrim` fjerner; JS sin
  * `trim()`/`\s` ville telt det annerledes (en etikett av et NBSP, et ASCII-mellomrom og så «a b c d» ga fire ord i JS og fem i databasen: skjemaet godtok, CHECK-en avviste, og skrivingen feilet med 23514).
  * Tab..CR (U+0009-000D) er forbudt uansett, så ASCII-mellomrom er det eneste skillet som kan forekomme i en etikett som passerer tegnklassen.

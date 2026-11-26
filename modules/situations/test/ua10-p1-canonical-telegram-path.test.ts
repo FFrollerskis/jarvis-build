@@ -17,6 +17,7 @@ import { DomainPauseRegistry } from "../src/domain-pause.ts";
 import { computeInformNotifyKey, SituationEngine } from "../src/service.ts";
 import { runSituationSweep } from "../src/sweep.ts";
 import type { Situation } from "../src/types.ts";
+import { TEST_BINDABLE, lookupFrom } from "./support/bindable.ts";
 
 /**
  * REGRESJONSVAKT for HOST-FUNN run_id `2105bb7d` (D-160 I, 2026-09-17):
@@ -113,6 +114,9 @@ async function seedHighPriorityLoop(): Promise<string> {
   return id;
 }
 
+// WP-G4b K1: bind-tid-oppslaget mot den SISTE gatewayen testen bygde (motoren er felles; produksjonens oppslag er `toolGateway.get`).
+let currentGateway: ToolGateway | undefined;
+
 function buildGateway(telegramTransport: ToolTransport, actuator: FakeActuatorTransport): ToolGateway {
   // PRODUKSJONENS secret-kjede (main.ts) - EnvSecretProvider løser JARVIS_TELEGRAM_TOKEN fra env.
   const gateway = new ToolGateway(appPool, policy, new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider()));
@@ -124,8 +128,10 @@ function buildGateway(telegramTransport: ToolTransport, actuator: FakeActuatorTr
     idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000,
     credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, output_trust: "internal", transport: actuator,
     preflight_action: "read_state",
-    postcondition_predicate: (after) => (after as { done: boolean } | null)?.done === true
+    postcondition_predicate: (after) => (after as { done: boolean } | null)?.done === true,
+    autonomy_bindable: TEST_BINDABLE
   });
+  currentGateway = gateway;
   return gateway;
 }
 
@@ -172,7 +178,7 @@ beforeAll(async () => {
   });
   domainPauses = new DomainPauseRegistry(appPool, { owner_person_id: OWNER });
   await domainPauses.restore();
-  engine = new SituationEngine(appPool, domainPauses, { owner_person_id: OWNER });
+  engine = new SituationEngine(appPool, domainPauses, { owner_person_id: OWNER }, { definitionLookup: lookupFrom(() => currentGateway) });
   openLoops = new OpenLoopService(appPool);
 }, 240_000);
 

@@ -34,7 +34,9 @@ describe("A: grunnregler - kanal, konto, mottaker", () => {
     expect(r.allowed).toBe(true);
     expect(r.final_text).toBe(`Hei, møtet er flyttet til 14:00.\n\n${DEFAULT_AI_DISCLOSURE_TEXT}`);
     expect(r.disclosure_applied).toBe(true);
-    expect(r.content_sha256).toMatch(/^[0-9a-f]{64}$/);
+    // K1: policyen hasher ikke selv (en usaltet hash er ordbok-gjettbar); den leverer det kanoniske innholdet, og trakten beregner HMAC-hashen med pepperen (se `content-hash.test.ts`)
+    expect(r.content_canonical).toBe(`Hei, møtet er flyttet til 14:00.\n\n${DEFAULT_AI_DISCLOSURE_TEXT}`);
+    expect(r).not.toHaveProperty("content_sha256");
     expect(r.recipient_proof.method).toBe("identity_link");
   });
 
@@ -50,6 +52,11 @@ describe("A: grunnregler - kanal, konto, mottaker", () => {
     expect(normalizeRecipient("whatsapp", "4790000000")).toEqual({ ok: true, value: "+4790000000" });
     expect(normalizeRecipient("sms", "4790000000").ok).toBe(false);
     expect(normalizeRecipient("discord", SNOWFLAKE).ok).toBe(true);
+    expect(normalizeRecipient("discord", `0${SNOWFLAKE}`), "FIX-4 (runde 2): en snowflake har aldri ledende null (en utfylt form ville fått en annen avmeldingsnøkkel)").toEqual({ ok: false, code: "recipient_not_a_discord_id" });
+    expect(normalizeRecipient("discord", "9".repeat(20)).ok).toBe(true);
+    expect(normalizeRecipient("discord", "1".repeat(21)).ok).toBe(false);
+    expect(normalizeRecipient("discord", "1".repeat(17)).ok).toBe(true);
+    expect(normalizeRecipient("discord", "1".repeat(16)).ok).toBe(false);
     expect(normalizeRecipient("teams", "chat:19:abc_def@thread.v2").ok).toBe(true);
     expect(normalizeRecipient("teams", "kari@firma.no").ok).toBe(false);
   });
@@ -305,6 +312,60 @@ describe("I: utgående samtale (regler)", () => {
     expect(evaluateOutboundPolicy(call(), recent, config(), NIGHT).denial_codes).toContain("outside_call_window");
     expect(evaluateOutboundPolicy(call(), state({ recipient_opted_out: true }), config(), NOON).denial_codes).toContain("recipient_opted_out");
     expect(evaluateOutboundPolicy(call({ purpose: "marketing" }), state(), config(), NOON).denial_codes).toContain("marketing_blocked_reservation_register_unverified");
+  });
+});
+
+describe("I2: ringevinduet utelukker søndager og norske helligdager (WP-G1c g2); stille timer for meldinger er uendret", () => {
+  const call = (over: Partial<OutboundRequest> = {}): OutboundRequest => ({
+    kind: "call", channel: "phone", account_ref: "+4791000000", recipient: "+4790000000", purpose: "transactional", content: { text: "Jeg ringer for å bekrefte timen din i morgen." }, ...over
+  });
+  const decision = (at: string, req: OutboundRequest = call()) => evaluateOutboundPolicy(req, state(), config(), new Date(at));
+  // klokkeslettet er alltid midt i vinduet (12:00 lokal tid); kun DAGEN varierer
+  const SUNDAY = "2026-11-29T11:00:00Z";
+  const WEEKDAY = "2026-11-25T11:00:00Z"; // onsdag
+
+  it("en vanlig hverdag og en lørdag midt i vinduet er tillatt; en søndag er avslått med en egen kode (og kun den)", () => {
+    expect(decision(WEEKDAY).allowed).toBe(true);
+    expect(decision("2026-11-28T11:00:00Z").allowed).toBe(true); // lørdag
+    const sunday = decision(SUNDAY);
+    expect(sunday.allowed).toBe(false);
+    expect(codes(sunday)).toEqual(["call_closed_sunday_or_holiday"]);
+    expect(sunday.rules.filter((r) => r.rule === "call_window").map((r) => `${r.outcome}:${r.code}`)).toEqual(["deny:call_closed_sunday_or_holiday"]);
+  });
+
+  it("norske helligdager på ukedager er avslått: nyttårsdag, skjærtorsdag, langfredag, 2. påskedag, 1. mai, 17. mai (søndag i 2026), Kristi himmelfart, 2. pinsedag, 1. og 2. juledag", () => {
+    for (const day of ["2026-01-01", "2026-04-02", "2026-04-03", "2026-04-06", "2026-05-01", "2026-05-14", "2026-05-17", "2026-05-25", "2026-12-25", "2026-12-26", "2027-05-17", "2025-05-17"]) {
+      expect(codes(decision(`${day}T11:00:00Z`)), day).toEqual(["call_closed_sunday_or_holiday"]);
+    }
+  });
+
+  it("dagen før og etter en helligdag er åpen (påskeaften er lørdag, dagen etter 2. påskedag er tirsdag)", () => {
+    for (const day of ["2026-04-04", "2026-04-07", "2026-05-18", "2026-12-24", "2026-12-31"]) expect(decision(`${day}T11:00:00Z`).allowed, day).toBe(true);
+  });
+
+  it("begge reglene evalueres (ingen kortslutning): en søndag UTENFOR vinduet gir begge kodene", () => {
+    const r = decision("2026-11-29T22:30:00Z"); // søndag 23:30 lokal tid
+    expect(codes(r)).toEqual(["call_closed_sunday_or_holiday", "outside_call_window"]);
+  });
+
+  it("dagen avgjøres av LOKAL dato (Europe/Oslo), ikke UTC: søndag 23:30 lokal tid er en søndag, mandag 00:30 lokal tid er det ikke (selv om UTC-datoen sier søndag)", () => {
+    expect(codes(decision("2026-11-29T22:30:00Z"))).toContain("call_closed_sunday_or_holiday");
+    expect(codes(decision("2026-11-29T23:30:00Z"))).not.toContain("call_closed_sunday_or_holiday"); // mandag 00:30 lokal tid (utenfor vinduet, men ikke en søndag)
+  });
+
+  it("anropsvinduet kan ikke omgås av en fersk innkommende melding på en søndag (samme regel som tidsvinduet)", () => {
+    const recent = evaluateOutboundPolicy(call(), state({ last_inbound_at: new Date(new Date(SUNDAY).getTime() - 60_000).toISOString() }), config(), new Date(SUNDAY));
+    expect(codes(recent)).toEqual(["call_closed_sunday_or_holiday"]);
+  });
+
+  it("MELDINGER er uendret: en SMS en søndag eller en helligdag midt på dagen er tillatt (stille timer gjelder klokkeslett, ikke kalenderdag)", () => {
+    for (const at of [SUNDAY, "2026-12-25T11:00:00Z", "2026-05-17T10:00:00Z"]) {
+      const r = evaluateOutboundPolicy(sms(), state(), config(), new Date(at));
+      expect(r.allowed, at).toBe(true);
+      expect(r.denial_codes, at).toEqual([]);
+    }
+    // og stille timer gjelder fortsatt for meldinger, også en vanlig hverdag
+    expect(codes(evaluateOutboundPolicy(sms(), state(), config(), NIGHT))).toContain("quiet_hours");
   });
 });
 

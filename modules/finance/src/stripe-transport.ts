@@ -59,7 +59,8 @@ const BASE_BACKOFF_MS = 500;
 
 import { toOreInteger } from "./ore.ts";
 
-import { financeSignal, isRetrySafe } from "./http.ts";
+import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
+import { ProviderResponseInvalidError, expectArray, expectCurrency, expectId, expectMinorUnits, expectRecord, expectStatus, optionalId, optionalStatus, optionalText, readJsonBody, type ResponseContext } from "./provider-response.ts";
 
 export class StripeApiError extends Error {
   constructor(
@@ -72,10 +73,6 @@ export class StripeApiError extends Error {
     super(message);
     this.name = "StripeApiError";
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Tolerant, avkortet (200 tegn) sanering av Stripe sin feilrespons - ALDRI rå kropp/headere logget (samme presedens som `classifyFikenErrorBody`). */
@@ -134,8 +131,10 @@ export interface StripeRefundObject {
   object: "refund";
   amount: number;
   currency: string;
-  status: string;
-  payment_intent: string;
+  /** `null` når Stripe ikke sender status (koden har `?? "provider_acknowledged"`-fallback; første webhook/oppfrisking avgjør). WP-FIN2 fiks-runde 1, FIX-2. */
+  status: string | null;
+  /** Ikke brukt av tjenesten; `null` når fraværende/`null` (Stripe kan sende `null`, `unverified`). */
+  payment_intent: string | null;
   reason: string | null;
 }
 
@@ -162,11 +161,11 @@ export interface CreateStripeRefundApiInput {
 export class StripeTransport {
   constructor(private readonly secretKey: string) {}
 
-  private async request<T>(method: string, path: string, form?: Record<string, string | number | boolean | Record<string, string | boolean> | undefined>, idempotencyKey?: string): Promise<T> {
+  private async request(ctx: ResponseContext, method: string, path: string, form?: Record<string, string | number | boolean | Record<string, string | boolean> | undefined>, idempotencyKey?: string): Promise<unknown> {
     let lastError: StripeApiError | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const response = await fetch(`${STRIPE_API_BASE}${path}`, {
-        signal: financeSignal(),
+      // WP-FIN2 (K2): `financeFetch` kaller `throwIfAborted()` FØR forespørselen og setter taket sammen med gatewayens kallsignal.
+      const response = await financeFetch(`${STRIPE_API_BASE}${path}`, {
         method,
         headers: {
           authorization: `Bearer ${this.secretKey}`,
@@ -177,16 +176,56 @@ export class StripeTransport {
         ...(form !== undefined ? { body: encodeStripeForm(form) } : {})
       });
       if (response.ok) {
-        return (await response.json()) as T;
+        // WP-FIN2 (K7): kroppen valideres strengt av den aktuelle metoden (aldri `as T` uten feltsjekk).
+        return readJsonBody(response, ctx);
       }
       const rawBody = await response.text().catch(() => "");
       const { summary, errorType } = classifyStripeErrorBody(rawBody);
       const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, idempotencyKey !== undefined);
       lastError = new StripeApiError(`stripe_api_failed_${response.status}:${summary}`, response.status, retryable, errorType);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
-      await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+      await financeBackoff(BASE_BACKOFF_MS * 2 ** (attempt - 1));
     }
     throw lastError ?? new StripeApiError("stripe_api_failed_unknown", 0, false, null);
+  }
+
+  /**
+   * WP-FIN2 (K7): et PaymentIntent-svar er gyldig KUN med id, `object: "payment_intent"`, status, beløp (heltall i minste enhet) og valuta (tre bokstaver). Mangler/ugyldig ->
+   * `ProviderResponseInvalidError` (mutasjon: `outcome_unknown:provider_response_invalid:<kode>`, lesing: typet feil). Aldri en lagret «undefined» eller en stille standardverdi.
+   */
+  private paymentIntentFrom(body: unknown, ctx: ResponseContext): StripePaymentIntentObject {
+    const raw = expectRecord(body, ctx);
+    if (raw["object"] !== "payment_intent") throw new ProviderResponseInvalidError(ctx.operation, raw["object"] === undefined ? "object_missing" : "object_mismatch", ctx.mutation);
+    const lastError = raw["last_payment_error"];
+    const lastErrorRecord = lastError === undefined || lastError === null ? null : expectRecord(lastError, ctx, "last_payment_error");
+    return {
+      id: expectId(raw, "id", ctx),
+      object: "payment_intent",
+      amount: expectMinorUnits(raw, "amount", ctx),
+      currency: expectCurrency(raw, "currency", ctx),
+      status: expectStatus(raw, "status", ctx),
+      metadata: typeof raw["metadata"] === "object" && raw["metadata"] !== null && !Array.isArray(raw["metadata"]) ? (raw["metadata"] as Record<string, string>) : {},
+      ...(lastErrorRecord !== null ? { last_payment_error: (() => { const message = optionalText(lastErrorRecord, "message", ctx, 500); return message !== null ? { message } : {}; })() } : {})
+    };
+  }
+
+  /**
+   * WP-FIN2 (K7): samme for refusjoner - men fra fiks-runde 1 (FIX-2) kun det koden BRUKER er påkrevd: `id` (lagres som `provider_ref`), `amount` og `currency` (ekkosjekken mot det vi ba om). `status` har
+   * `??`-fallback i tjenesten, og `object`/`payment_intent` leses aldri; de valideres bare HVIS de er til stede (`object` må da være «refund»; `status`/`payment_intent` kan være `null`, nullbarhet er
+   * `unverified`, D-41). Et felt som er til stede, men ugyldig, er fortsatt `outcome_unknown`.
+   */
+  private refundFrom(body: unknown, ctx: ResponseContext): StripeRefundObject {
+    const raw = expectRecord(body, ctx);
+    if (raw["object"] !== undefined && raw["object"] !== null && raw["object"] !== "refund") throw new ProviderResponseInvalidError(ctx.operation, "object_mismatch", ctx.mutation);
+    return {
+      id: expectId(raw, "id", ctx),
+      object: "refund",
+      amount: expectMinorUnits(raw, "amount", ctx),
+      currency: expectCurrency(raw, "currency", ctx),
+      status: optionalStatus(raw, "status", ctx),
+      payment_intent: optionalId(raw, "payment_intent", ctx),
+      reason: optionalText(raw, "reason", ctx, 64)
+    };
   }
 
   /**
@@ -198,39 +237,51 @@ export class StripeTransport {
    * `succeeded` her.
    */
   async createPaymentIntent(input: CreateStripePaymentIntentInput): Promise<StripePaymentIntentObject> {
-    return this.request<StripePaymentIntentObject>(
-      "POST",
-      "/payment_intents",
-      {
-        amount: toOreInteger(input.amountOre),
-        currency: input.currency.toLowerCase(),
-        "automatic_payment_methods[enabled]": true,
-        "automatic_payment_methods[allow_redirects]": "never",
-        ...Object.fromEntries(Object.entries(input.metadata).map(([k, v]) => [`metadata[${k}]`, v]))
-      },
-      input.idempotencyKey
+    const ctx: ResponseContext = { operation: "stripe.create_payment_intent", mutation: true };
+    return this.paymentIntentFrom(
+      await this.request(
+        ctx,
+        "POST",
+        "/payment_intents",
+        {
+          amount: toOreInteger(input.amountOre),
+          currency: input.currency.toLowerCase(),
+          "automatic_payment_methods[enabled]": true,
+          "automatic_payment_methods[allow_redirects]": "never",
+          ...Object.fromEntries(Object.entries(input.metadata).map(([k, v]) => [`metadata[${k}]`, v]))
+        },
+        input.idempotencyKey
+      ),
+      ctx
     );
   }
 
   async getPaymentIntent(stripePaymentIntentId: string): Promise<StripePaymentIntentObject> {
-    return this.request<StripePaymentIntentObject>("GET", `/payment_intents/${encodeURIComponent(stripePaymentIntentId)}`);
+    const ctx: ResponseContext = { operation: "stripe.get_payment_intent", mutation: false };
+    return this.paymentIntentFrom(await this.request(ctx, "GET", `/payment_intents/${encodeURIComponent(stripePaymentIntentId)}`), ctx);
   }
 
   async createRefund(input: CreateStripeRefundApiInput): Promise<StripeRefundObject> {
-    return this.request<StripeRefundObject>(
-      "POST",
-      "/refunds",
-      {
-        payment_intent: input.stripePaymentIntentId,
-        amount: toOreInteger(input.amountOre),
-        ...(input.reason !== undefined ? { reason: input.reason } : {})
-      },
-      input.idempotencyKey
+    const ctx: ResponseContext = { operation: "stripe.create_refund", mutation: true };
+    return this.refundFrom(
+      await this.request(
+        ctx,
+        "POST",
+        "/refunds",
+        {
+          payment_intent: input.stripePaymentIntentId,
+          amount: toOreInteger(input.amountOre),
+          ...(input.reason !== undefined ? { reason: input.reason } : {})
+        },
+        input.idempotencyKey
+      ),
+      ctx
     );
   }
 
   async getRefund(stripeRefundId: string): Promise<StripeRefundObject> {
-    return this.request<StripeRefundObject>("GET", `/refunds/${encodeURIComponent(stripeRefundId)}`);
+    const ctx: ResponseContext = { operation: "stripe.get_refund", mutation: false };
+    return this.refundFrom(await this.request(ctx, "GET", `/refunds/${encodeURIComponent(stripeRefundId)}`), ctx);
   }
 
   /**
@@ -241,6 +292,17 @@ export class StripeTransport {
    * connectoren uten å måtte opprette en reell PaymentIntent/Refund.
    */
   async getBalance(): Promise<StripeBalanceObject> {
-    return this.request<StripeBalanceObject>("GET", "/balance");
+    const ctx: ResponseContext = { operation: "stripe.get_balance", mutation: false };
+    const raw = expectRecord(await this.request(ctx, "GET", "/balance"), ctx);
+    if (raw["object"] !== "balance") throw new ProviderResponseInvalidError(ctx.operation, raw["object"] === undefined ? "object_missing" : "object_mismatch", false);
+    // Saldobeløp er fortegnsbærende (negativ saldo er gyldig) - kun heltall i minste enhet og tre-bokstavs valuta kreves.
+    const entries = (field: "available" | "pending"): Array<{ amount: number; currency: string }> =>
+      expectArray(raw[field], ctx, field).map((item) => {
+        const entry = expectRecord(item, ctx, `${field}_entry`);
+        const amount = entry["amount"];
+        if (typeof amount !== "number" || !Number.isSafeInteger(amount)) throw new ProviderResponseInvalidError(ctx.operation, `${field}_amount_invalid`, false);
+        return { amount, currency: expectCurrency(entry, "currency", ctx) };
+      });
+    return { object: "balance", available: entries("available"), pending: entries("pending") };
   }
 }

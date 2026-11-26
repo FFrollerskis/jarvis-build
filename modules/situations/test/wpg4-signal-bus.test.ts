@@ -22,6 +22,7 @@ import { SubscriptionRegistry, SubscriptionUnauthorizedError } from "../src/subs
 import { SituationsTransport, situationsToolDefinitions } from "../src/transport.ts";
 import type { VisionObservation } from "../src/vision-bridge.ts";
 import type { HealthObservation, DailyPoint } from "../src/health-bridge.ts";
+import { TEST_BINDABLE, lookupFrom } from "./support/bindable.ts";
 
 /**
  * WP-G4 (D-466): ende-til-ende-bevis mot en EKTE Postgres (NOSUPERUSER/NOBYPASSRLS-rolle, FORCE RLS), ekte `SituationEngine`, ekte `ToolGateway`/`PolicyGateway`: abonnementsregister, inntaksbuss, pause (domene og hel motor),
@@ -125,7 +126,7 @@ beforeAll(async () => {
   });
   domainPauses = new DomainPauseRegistry(appPool, { owner_person_id: OWNER });
   await domainPauses.restore();
-  engine = new SituationEngine(appPool, domainPauses, { owner_person_id: OWNER });
+  engine = new SituationEngine(appPool, domainPauses, { owner_person_id: OWNER }, { definitionLookup: lookupFrom(() => gateway) });
   registry = new SubscriptionRegistry(appPool, { owner_person_id: OWNER });
 }, 240_000);
 
@@ -135,12 +136,12 @@ beforeEach(async () => {
   gateway = new ToolGateway(appPool, policy, secrets);
   gateway.register({
     tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }), capability_class: "B", scopes: [], reversible: true,
-    rollback_procedure: "send correction", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram
+    rollback_procedure: "send correction", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram, autonomy_bindable: TEST_BINDABLE
   });
   gateway.register({
     tool_id: "test_actuator", action: "close", description: "test", input_schema: record({ situation_id: z.string() }), capability_class: "D", scopes: [], reversible: true,
     rollback_procedure: "open", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuator,
-    preflight_action: "read_state", postcondition_predicate: (after) => (after as { done: boolean } | null)?.done === true
+    preflight_action: "read_state", postcondition_predicate: (after) => (after as { done: boolean } | null)?.done === true, autonomy_bindable: TEST_BINDABLE
   });
   for (const tool of situationsToolDefinitions(new SituationsTransport(engine, domainPauses))) gateway.register(tool);
   const tenants = `'${TENANT_A}','${TENANT_B}'`;

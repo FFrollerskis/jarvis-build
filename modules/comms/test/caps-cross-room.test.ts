@@ -12,6 +12,12 @@ const BASIS = { purpose_basis: "existing_customer_relationship" } as const;
 const sends = () => chain.twilio.calls.filter((c) => c.op === "send").length;
 const params = (recipient: string, account_ref: string): Record<string, JsonValue> => ({ channel: "sms", account_ref, recipient, purpose: "transactional", text: "Hei, timen din er bekreftet.", ...BASIS });
 const codes = (r: Awaited<ReturnType<Chain["act"]>>): string[] => (!r.ok && r.status === "denied" ? [...r.denial_codes] : []);
+/** Autoriser en SMS-konto i `business` og returner kontoens id (trengs for å tilbakekalle den). */
+const authorizeOne = async (account_ref: string): Promise<string> => {
+  const r = await chain.act("authorize_account", { channel: "sms", account_ref, provider: "twilio" }, chain.key("g1auth"));
+  if (!r.ok || typeof r.external_id !== "string") throw new Error(`authorize ${account_ref}: ${JSON.stringify(r)}`);
+  return r.external_id;
+};
 
 beforeAll(async () => {
   chain = await startChain("g1cr", { JARVIS_COMMS_MAX_PER_ACCOUNT_HOUR: "4" }, { rateLimitPerMinute: 1_000_000, lenientToolLimits: true });
@@ -88,6 +94,35 @@ describe("A-H2 rest: per-mottaker-døgntaket gjelder på tvers av rom", () => {
     const fifth = await chain.act("send", params(chain.phone(), "+4796000000"), chain.key("ca5"));
     expect(codes(fifth)).toContain("rate_limit_account_hour");
     for (let i = 0; i < 3; i++) expect((await chain.act("send", params(chain.phone(), "+4797000000"), chain.key("cb"), projectOwner)).ok, `B ${i}`).toBe(true);
+  });
+
+  it("WP-G1c g1: kontotaket teller PER KONTO på tvers av rom - en konto som tilbakekalles i `business` og autoriseres på nytt i `project` beholder telleren (ingen ny blankett)", async () => {
+    const acct = "+4780000000";
+    const accountId = await authorizeOne(acct);
+    for (let i = 0; i < 3; i++) expect((await chain.act("send", params(chain.phone(), acct), chain.key("g1a"))).ok, `business ${i}`).toBe(true);
+    // tilbakekall i `business`, autoriser i `project`: samme (kanal, konto) i et annet rom
+    const revoked = await chain.act("revoke_account", { account_id: accountId }, chain.key("g1r"));
+    expect(revoked.ok, JSON.stringify(revoked)).toBe(true);
+    await authorizeAll(chain, [["sms", acct, "twilio"]], projectOwner);
+    // grensen er 4/time (testoppsettet): tre er brukt i `business`, så EN til i `project`, og den femte avslås - uavhengig av rommet
+    expect((await chain.act("send", params(chain.phone(), acct), chain.key("g1b"), projectOwner)).ok).toBe(true);
+    const fifth = await chain.act("send", params(chain.phone(), acct), chain.key("g1c"), projectOwner);
+    expect(codes(fifth), JSON.stringify(fifth)).toContain("rate_limit_account_hour");
+    // policyens tørrkjøring (samme tall som håndhevelsen) ser det også, og telleren er DEN SAMME fra begge rom
+    expect(await chain.store.countAccountHour("tenant-g1-a", "business", "sms", acct)).toBe(4);
+    expect(await chain.store.countAccountHour("tenant-g1-a", "project", "sms", acct)).toBe(4);
+  });
+
+  it("WP-G1c g1: 10 SAMTIDIGE sendinger fra den omautoriserte kontoen i `project` gir aldri flere enn taket totalt (kontolåsen er ikke per rom)", async () => {
+    const acct = "+4780000001";
+    const accountId = await authorizeOne(acct);
+    for (let i = 0; i < 2; i++) expect((await chain.act("send", params(chain.phone(), acct), chain.key("g1d"))).ok).toBe(true);
+    expect((await chain.act("revoke_account", { account_id: accountId }, chain.key("g1e"))).ok).toBe(true);
+    await authorizeAll(chain, [["sms", acct, "twilio"]], projectOwner);
+    const before = sends();
+    const rs = await Promise.all(Array.from({ length: 10 }, () => chain.act("send", params(chain.phone(), acct), chain.key("g1f"), projectOwner)));
+    expect(rs.filter((r) => r.ok)).toHaveLength(2); // 4 i alt (taket) - 2 allerede brukt i `business`
+    expect(sends() - before).toBe(2);
   });
 
   it("gjenspillingsvernet er tenant-bredt: samme brukernøkkel i et ANNET rom med en annen konto er en kollisjon (ingen sending, aldri `ok + deduplicated` uten effekt)", async () => {

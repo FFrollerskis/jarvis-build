@@ -263,6 +263,24 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
 ];
 
 /**
+ * WP-G4b K4 (D-484, JARVIS-115 d): «lokal» er en ETIKETT på profilen, og for de tre identitetene som er lokale kun ved KONFIGURASJON (`local_llm`, `gemma_local`, `ollama`) er den bare sann så lenge det konfigurerte
+ * endepunktet faktisk er lokalt. Oppstartsvakten (`apps/api/src/local-model-endpoints.ts`, bak `JARVIS_LOCAL_MODEL_URL_GUARD=on`) kaller denne når URL-en er ugyldig/offentlig: profilen blir `cloud`, og ALLE som leser
+ * `locality` ser det (ruteren, `ModelGateway`s kjøringslåser, `servedByCloudModel` og dermed utførelseslåsen for finans, chat-jobbene, kontrollsentrene) - det finnes ingen egen liste å huske å oppdatere.
+ * Ren nedgradering: aldri `cloud` -> `local`, og det finnes bevisst INGEN motsatt funksjon i produksjonskoden (en `cloud -> local`-primitiv ville vært en måte å gjøre en identitet «lokal» igjen uten en ny oppstartsvurdering; testene
+ * har sin egen tilbakestilling i `apps/api/test/wpg4b-local-model-guard.test.ts`). Muterer profilobjektene (som `CapabilityRegistry` og `DEFAULT_PROFILES`-forbrukerne deler); kalles kun ved oppstart, før en gateway brukes. Returnerer om noe ble endret.
+ */
+export function demoteLocalProfileToCloud(provider: string, profiles: ModelProfile[] = DEFAULT_PROFILES): boolean {
+  let changed = false;
+  for (const profile of profiles) {
+    if (profile.provider === provider && profile.locality === "local") {
+      profile.locality = "cloud";
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
  * WP-G3 (D-465): lokal visjonsmodell for kamerabilder (UA-9). SAMME `LocalOpenAiCompatibleAdapter` som `local_llm`, registrert under en egen identitet med `{ vision: true }` - kun når
  * `JARVIS_VISION_ENABLED=on` og `JARVIS_VISION_CLASSIFIER=on` og `JARVIS_VISION_LOCAL_URL` er satt (se apps/api/src/main.ts).
  *

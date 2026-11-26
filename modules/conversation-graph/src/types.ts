@@ -105,6 +105,11 @@ export interface LinkExclusiveIdentifiersInput {
   match_method: ChannelLinkMatchMethod;
   display_name?: string;
   created_by_person_id?: string;
+  /**
+   * WP-G1c (D-481, JARVIS-112 f1): kilde-id-ene (`external_id` med samme `source_type`) EIEREN uttrykkelig har godtatt at denne kilden deler identitet med (en godtatt kontaktkonflikt). Bare disse unntas fra «en ANNEN kilde eier allerede identiteten»-kontrollen;
+   * enhver annen eier er fortsatt en konflikt, og identifikatorer som peker på ULIKE identiteter er alltid en konflikt (en sammenslåing er en egen, reversibel eier-handling). Utelatt/tom = nøyaktig som før.
+   */
+  allow_shared_with?: readonly string[];
 }
 
 export type LinkExclusiveIdentifiersResult =

@@ -3,6 +3,7 @@ import type { ToolDefinition } from "./gateway.ts";
 import { CHAT_READ_TIER, CHAT_READ_TIER_KEYS, OPTIONAL_TIER_KEYS } from "./chat-read-tier.ts";
 import { CHAT_DELEGATE_TIER, CHAT_DELEGATE_TIER_KEYS, DELEGATE_WRITE_KEYS } from "./chat-delegate-tier.ts";
 import { CHAT_ACT_TIER, CHAT_ACT_TIER_KEYS } from "./chat-act-tier.ts";
+import { AUTONOMY_REASON_MIN_CHARS, autonomyBindabilityOf } from "./autonomy-bindable.ts";
 
 /**
  * Del 3 (JARVIS-002/015/028): ÉTT sentralt capability-/tool-manifest. Hver registrert handling får en manifest-oppføring AVLEDET fra
@@ -44,6 +45,15 @@ export interface ToolManifestEntry {
   surfaces: Surface[];
   /** Identitetsfelt (tenant/person/space) som står i inndata-skjemaet - skal aldri være modellstyrt (se scope-binding). */
   scope_fields: string[];
+  /**
+   * WP-G4b K1 (D-484): har DEFINISJONEN erklært handlingen bindbar til autonom ACT (`autonomy_bindable`)? DEFAULT-DENY: `false` = ikke bindbar. `true` betyr kun at den ERKLÆRER det - om begrunnelsen er gyldig
+   * (`autonomy_reason !== null`) og om erklæringen er tillatt (navnerom, effekt, step-up) felles `assertManifestInvariants` hvis ikke.
+   */
+  autonomy_bindable: boolean;
+  /** Den gyldige begrunnelsen (`autonomyBindabilityOf`), ellers `null`. */
+  autonomy_reason: string | null;
+  /** Krever definisjonen step-up (enhetssignert eier-økt)? Hører til invarianten: en step-up-handling kan aldri utføres av den autonome identiteten. */
+  step_up_required: boolean;
 }
 
 export type ToolManifest = ReadonlyMap<string, ToolManifestEntry>;
@@ -317,6 +327,12 @@ export const SURFACE_TOOL_GRANTS: Readonly<Record<Surface, ReadonlyArray<{ tool_
 /** Boot-/test-port: modellflater kan kun inneholde dette (alt ellers er en ModelSurface-brudd). */
 export const QUARANTINE_WRITE_KEYS: ReadonlySet<string> = new Set([k("memory", "propose")]);
 
+/**
+ * WP-G4b K1: de fysiske navnerommene der en definisjon aldri kan erklæres bindbar til autonom ACT. SAMME to navnerom som `PHYSICAL_NAMESPACES` i `modules/situations/src/autonomy-guard.ts` (der selve vakten bor; en test
+ * pinner at settene er like - tool-gateway kan ikke importere situasjonsmodulen).
+ */
+export const AUTONOMY_FORBIDDEN_NAMESPACES: ReadonlySet<string> = new Set(["home-assistant", "car"]);
+
 export class ToolManifestViolationError extends Error {
   constructor(readonly violations: string[]) {
     super(`tool-manifest brutt: ${violations.join("; ")}`);
@@ -355,7 +371,10 @@ export function buildToolManifest(defs: ReadonlyArray<ToolDefinition>): ToolMani
       recovery: def.reversible && def.rollback_procedure.trim().length > 0 ? "documented" : "none",
       output_trust: def.output_trust,
       surfaces: grants.get(key) ?? [],
-      scope_fields: scopeFieldsOf(def)
+      scope_fields: scopeFieldsOf(def),
+      autonomy_bindable: def.autonomy_bindable !== undefined,
+      autonomy_reason: autonomyBindabilityOf(def)?.reason ?? null,
+      step_up_required: def.step_up_required === true
     });
   }
   return manifest;
@@ -414,6 +433,14 @@ export function assertManifestInvariants(manifest: ToolManifest, options: { igno
       if (entry.surfaces.includes("telegram") && entry.effect !== "read") violations.push(`${entry.key}: Telegram er read-only`);
       if (entry.surfaces.includes("voice") && entry.effect !== "read") violations.push(`${entry.key}: tale er read-only`);
       if (entry.surfaces.includes("background") && entry.effect !== "read") violations.push(`${entry.key}: bakgrunnsjobber er read-only`);
+    }
+    // WP-G4b K1 (D-484): en definisjon som ERKLÆRER seg bindbar til autonom ACT skal ha en reell begrunnelse og kan aldri stå i et fysisk navnerom, ha effekt pay/control/delete (CLAUDE.md regel 8: ingen destruktive handlinger
+    // uten eksplisitt bekreftelse) eller kreve step-up (den autonome identiteten har ingen enhetssignert økt, så bindingen kunne aldri lykkes). Å åpne en slik handling krever en bevisst endring av DENNE invarianten med en beslutning.
+    if (entry.autonomy_bindable) {
+      if (entry.autonomy_reason === null) violations.push(`${entry.key}: autonomy_bindable krever en begrunnelse på minst ${AUTONOMY_REASON_MIN_CHARS} tegn (en ugyldig erklæring gjør handlingen IKKE bindbar)`);
+      if (AUTONOMY_FORBIDDEN_NAMESPACES.has(entry.tool_id)) violations.push(`${entry.key}: fysiske navnerom kan aldri erklæres bindbare til autonom ACT`);
+      if (entry.effect === "pay" || entry.effect === "control" || entry.effect === "delete") violations.push(`${entry.key}: effekt «${entry.effect}» kan aldri erklæres bindbar til autonom ACT`);
+      if (entry.step_up_required) violations.push(`${entry.key}: en handling med step-up kan ikke utføres av den autonome identiteten og kan ikke erklæres bindbar`);
     }
   }
   if (!options.ignoreUnregisteredGrants) {

@@ -155,6 +155,11 @@ export class PaymentIntentNotNeonomicsError extends Error {
  * / overflates via de to nye OpenLoop-reglene (042_neonomics.sql).
  */
 export type BankAnomalyType =
+  /**
+   * WP-FIN2 fiks-runde 1 (FIX-5): banken sendte en transaksjon med ukjent/manglende status. Raden er i KARANTENE (lagret som `pending`, aldri bokført/avstemt) til en kjent status kommer; flagget fjernes da av
+   * `syncTransactions` (settes og fjernes IKKE av avviksveipen: den eier kun `UNMATCHED_*`/`UNEXPECTED_LARGE_DEBIT`/`BANK_DUPLICATE_TRANSACTION`).
+   */
+  | "BANK_TRANSACTION_STATUS_UNKNOWN"
   | "BANK_DUPLICATE_TRANSACTION"
   | "BANK_TRANSACTION_CORRECTION_CONFLICT"
   | "UNMATCHED_BANK_DEBIT"

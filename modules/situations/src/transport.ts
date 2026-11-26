@@ -118,15 +118,24 @@ export class SituationsTransport implements ToolTransport {
             ...(parameters["parameters"] !== undefined ? { parameters: parameters["parameters"] as Record<string, JsonValue> } : {}),
             ...(parameters["enabled"] !== undefined ? { enabled: parameters["enabled"] === true } : {}),
             // WP-G4: valgfri utløpstid. Feltet finnes KUN i skjemaet når `JARVIS_SITUATION_SIGNALS=on` (se `situationsToolDefinitions`); uten flagget avvises det som `invalid_parameters` før denne koden nås.
-            ...(typeof parameters["expires_at"] === "string" ? { expires_at: parameters["expires_at"] } : {})
+            ...(typeof parameters["expires_at"] === "string" ? { expires_at: parameters["expires_at"] } : {}),
+            // WP-G4b K2: valgfritt skop (én regel ELLER én kategori); samme gating (kun med hovedbryteren). Utelatt = hele domenet (som før).
+            ...(typeof parameters["rule"] === "string" ? { rule: parameters["rule"] } : {}),
+            ...(typeof parameters["category"] === "string" ? { category: parameters["category"] } : {})
           },
           actor
         );
         return { external_id: `${row.tenant_id}:${row.memory_space_id}:${row.domain}`, data: row as unknown as JsonValue };
       }
       case "clear_autonomy_policy": {
-        const removed = await this.engine.clearAutonomyPolicy(tenantId, memorySpace, requireString(parameters, "domain"), actor);
-        return { data: { removed } };
+        // WP-G4b K2 + fiks-runde 1 (FIX-2/2b, Q-G4-15): uten `rule`/`category` er dette et DOMENEBREDT TILBAKEKALL som fjerner ALLE bindinger i (rom, domene) - den brede og alle regel-/kategoribindinger; med ett av dem akkurat den
+        // ene regel-/kategoribindingen (den brede står). `removed_scopes` sier nøyaktig hva som ble fjernet (skopnøkler, aldri innhold).
+        const scope = {
+          ...(typeof parameters["rule"] === "string" ? { rule: parameters["rule"] } : {}),
+          ...(typeof parameters["category"] === "string" ? { category: parameters["category"] } : {})
+        };
+        const removedScopes = await this.engine.clearAutonomyPolicyScopes(tenantId, memorySpace, requireString(parameters, "domain"), actor, scope);
+        return { data: { removed: removedScopes.length > 0, removed_scopes: removedScopes } };
       }
       case "release_stuck_act_claim": {
         // Hele identiteten er den betrodde context-identiteten - motoren sjekker scope + sovereign-eier mot DEN, aldri mot parametre.
@@ -168,6 +177,8 @@ const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as 
 export interface SituationsToolOptions {
   /** WP-G4: gi `set_autonomy_policy` et valgfritt `expires_at` (utløpstid på eierens binding). Standard (utelatt) = skjemaet er identisk med main. */
   autonomyExpiry?: boolean;
+  /** WP-G4b K2: gi `set_autonomy_policy` og `clear_autonomy_policy` valgfrie `rule`/`category` (skop for bindingen). Standard (utelatt) = skjemaene er identiske med main. */
+  autonomyScope?: boolean;
 }
 
 export function situationsToolDefinitions(transport: SituationsTransport, options: SituationsToolOptions = {}): ToolDefinition[] {
@@ -207,9 +218,13 @@ export function situationsToolDefinitions(transport: SituationsTransport, option
       { quiet_hours_start_utc: z.number().nullable().optional(), quiet_hours_end_utc: z.number().nullable().optional(), resuppress_hours: z.number().optional() },
       "sett forrige verdier tilbake"),
     control("set_autonomy_policy", "Bind (eller erstatt) eierens auto-ACT-handling for ett domene",
-      { domain: z.string(), tool_id: z.string(), action: z.string(), parameters: z.record(z.unknown()).optional(), enabled: z.boolean().optional(), ...(options.autonomyExpiry === true ? { expires_at: z.string().optional() } : {}) },
+      { domain: z.string(), tool_id: z.string(), action: z.string(), parameters: z.record(z.unknown()).optional(), enabled: z.boolean().optional(), ...(options.autonomyExpiry === true ? { expires_at: z.string().optional() } : {}), ...(options.autonomyScope === true ? { rule: z.string().optional(), category: z.string().optional() } : {}) },
       "clear_autonomy_policy"),
-    control("clear_autonomy_policy", "Fjern eierens auto-ACT-binding for ett domene", { domain: z.string() }, "set_autonomy_policy med forrige verdier"),
+    control("clear_autonomy_policy",
+      options.autonomyScope === true
+        ? "Fjern eierens auto-ACT-binding(er) for ett domene: UTEN rule/category = domenebredt tilbakekall som fjerner ALLE bindinger i domenet (den brede og alle regel-/kategoribindinger); MED rule eller category akkurat den ene skopede bindingen (den brede står)"
+        : "Fjern eierens auto-ACT-binding for ett domene",
+      { domain: z.string(), ...(options.autonomyScope === true ? { rule: z.string().optional(), category: z.string().optional() } : {}) }, "set_autonomy_policy med forrige verdier"),
     control("release_stuck_act_claim", "Frigjør en fastlåst ACT-claim (kun sovereign eier, kun uten bevis)",
       { situation_id: z.string() }, "ingen - frigjøring skjer kun når ingen ekstern effekt er bevist")
   ];

@@ -4,7 +4,7 @@ import { PgApprovalStore } from "@jarvis/core";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, type ExecutiveServiceOptions } from "@jarvis/executive";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { DomainPauseRegistry, SituationEngine, SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
-import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
+import { ToolGateway, firstWaveTools, type SecretProvider } from "@jarvis/tool-gateway";
 import { createAutonomyAudit } from "../src/autonomy-audit.ts";
 import { createControlCenterRegistry } from "../src/control-center/register.ts";
 import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
@@ -30,6 +30,10 @@ const idFor = (person: string, tenant: string, extra: Partial<IdentityContext> =
 const owner = idFor(OWNER, TENANT_A);
 const FAKE = `${["sk", "ant", "api03"].join("-")}-${"FALSKNOKKELFORTEST".concat("0123456789ABCDEF")}`;
 
+// WP-G4b K1: bind-tid-oppslaget mot de EKTE produksjonsdefinisjonene (`business.create_followup` erklærer seg bindbar).
+const PRODUCTION_DEFS = new Map(firstWaveTools({}).map((d) => [`${d.tool_id}:${d.action}`, d] as const));
+const productionLookup = (t: string, a: string) => PRODUCTION_DEFS.get(`${t}:${a}`);
+
 let engine: SituationEngine;
 let gateway: ToolGateway;
 
@@ -52,7 +56,7 @@ const auditRows = async (tenant: string): Promise<Array<{ audit_id: string; type
 
 async function bind(tenant: string, space: "personal" | "business", domain: string, over: { parameters?: Record<string, unknown>; enabled?: boolean } = {}): Promise<void> {
   const actor = tenant === TENANT_B ? OWNER_B : OWNER;
-  const eng = tenant === TENANT_B ? new SituationEngine(db.appPool, new DomainPauseRegistry(db.appPool, { owner_person_id: OWNER_B }), { owner_person_id: OWNER_B }) : engine;
+  const eng = tenant === TENANT_B ? new SituationEngine(db.appPool, new DomainPauseRegistry(db.appPool, { owner_person_id: OWNER_B }), { owner_person_id: OWNER_B }, { definitionLookup: productionLookup }) : engine;
   await eng.setAutonomyPolicy(tenant, space, { domain, tool_id: "business", action: "create_followup", parameters: (over.parameters ?? { kanal: "web" }) as never, enabled: over.enabled ?? true }, actor);
 }
 
@@ -61,7 +65,7 @@ beforeAll(async () => {
   await seedTenants(db.adminPool, [{ tenant_id: TENANT_A, person_id: OWNER }, { tenant_id: TENANT_B, person_id: OWNER_B }]);
   await db.adminPool.query("INSERT INTO people (person_id, display_name) VALUES ($1, $1)", [MEMBER]);
   await db.adminPool.query("INSERT INTO person_tenants (person_id, tenant_id, role) VALUES ($1, $2, 'member')", [MEMBER, TENANT_A]);
-  engine = new SituationEngine(db.appPool, new DomainPauseRegistry(db.appPool, { owner_person_id: OWNER }), { owner_person_id: OWNER });
+  engine = new SituationEngine(db.appPool, new DomainPauseRegistry(db.appPool, { owner_person_id: OWNER }), { owner_person_id: OWNER }, { definitionLookup: productionLookup });
   gateway = wire(createAutonomyAudit(db.appPool));
 }, 240_000);
 

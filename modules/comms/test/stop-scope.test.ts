@@ -32,7 +32,8 @@ const denies = async (parsed: ParsedOutbound, ctx = chain.ctx) => (await chain.f
 const optRows = async (hash: string) => (await chain.db.admin.query("SELECT channel, account_ref, status, source, memory_space_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 ORDER BY created_at", [TENANT_A, hash])).rows as Array<Record<string, string>>;
 
 beforeAll(async () => {
-  chain = await startChain("g1stps", { JARVIS_COMMS_WEBHOOKS: "twilio", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: BASE });
+  // Marginen 0 = ren sekvensmodell (en START løfter alt med lavere sekvens): denne testen legger inn en STOP og straks en START og forventer at START løfter. Tie-marginen (STOP vinner innenfor 5 s) er bevist i `stop-start-overlap.test.ts`.
+  chain = await startChain("g1stps", { JARVIS_COMMS_WEBHOOKS: "twilio", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: BASE }, { startTieMarginMs: 0 });
   chain.setNow(new Date(NOW * 1000));
   webhooks = new CommsWebhookService({ store: chain.store, graph: chain.graph, config: chain.config, secrets: { get: async (ref) => (ref === WEBHOOK_SECRET_REFS.twilio ? TWILIO_TOKEN : null) }, clock: chain.now });
   await authorizeAll(chain, [["sms", "+4791000000", "twilio"], ["sms", "+4792000000", "telnyx"], ["phone", "+4791000000", "twilio"], ["whatsapp", "109876543210", "meta_whatsapp"], ["slack", "T0AAAAAAAA", "slack"]]);

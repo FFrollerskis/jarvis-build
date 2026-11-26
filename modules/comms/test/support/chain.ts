@@ -4,9 +4,9 @@ import { ConversationGraphService } from "@jarvis/conversation-graph";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type ClassDNotification, type SecretProvider } from "@jarvis/tool-gateway";
 import {
-  CommsStore, CommsTransport, GoogleContacts, MeetingService, OutboundFunnel, commsToolDefinitions, executeCommsOwnerAction, parseCommsConfig, type AdapterMap, type CommsConfig, type FunnelContext, type MarketingBasisPort, type OwnerActionResult
+  CommsStore, CommsTransport, GoogleContacts, MeetingService, OutboundFunnel, commsToolDefinitions, createContentHasher, executeCommsOwnerAction, parseCommsConfig, type AdapterMap, type CommsConfig, type FunnelContext, type MarketingBasisPort, type OwnerActionResult
 } from "../../src/index.ts";
-import { OWNER, TENANT_A, scriptedAdapter, startCommsDb, type AdapterCall, type CommsDb } from "./harness.ts";
+import { OWNER, TENANT_A, TEST_PEPPER, scriptedAdapter, startCommsDb, type AdapterCall, type CommsDb } from "./harness.ts";
 
 /**
  * Felles oppsett for tester som går gjennom HELE eierkjeden (embedded Postgres med RLS, ekte ToolGateway med klasse D-pipeline, ekte policy, ekte eier-rute-logikk) med skriptbare falske leverandør-adaptere. Brukes av
@@ -38,7 +38,14 @@ export interface Chain {
 
 export interface ChainOptions {
   readonly marketing?: MarketingBasisPort;
+  /** K1: pepperen traktens HMAC-hasher bruker (standard: en falsk testverdi). `null` = manglende pepper (fail-closed: ingen utsendelse). En funksjon gir en pepper som kan endres under testen (rotasjon). */
+  readonly pepper?: string | null | (() => string | null);
   readonly rateLimitPerMinute?: number;
+  /**
+   * FIX-3 (WP-G1c fiks-runde 1): tie-marginen en START må ha til en STOP for å løfte den (millisekunder, databasens klokke). Utelatt = produksjonsstandarden (`START_TIE_MARGIN_MS`, 5 s). `0` = ren sekvensmodell (en START løfter alt med lavere
+   * sekvens uansett tid): brukes av tester som legger inn en STOP og så straks en START og forventer at den løfter, og av sekvens-orakelet.
+   */
+  readonly startTieMarginMs?: number;
   /** Løfter gatewayens per-verktøy-grense (autorisering/avmelding har 10-20/min) for tester som kjører mange handlinger raskt etter hverandre. */
   readonly lenientToolLimits?: boolean;
   /**
@@ -52,7 +59,7 @@ export async function startChain(prefix: string, env: Record<string, string> = {
   const db = await startCommsDb(prefix);
   let current = new Date("2026-11-17T11:00:00Z"); // 12:00 Oslo
   const clock = () => current;
-  const store = new CommsStore(db.app, clock);
+  const store = new CommsStore(db.app, clock, options.startTieMarginMs !== undefined ? { startTieMarginMs: options.startTieMarginMs } : {});
   const graph = new ConversationGraphService(db.app);
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms,slack,phone,whatsapp", JARVIS_COMMS_CALLS: "on", JARVIS_COMMS_VENDOR_READS: "on", ...env });
   const twilio = scriptedAdapter("twilio");
@@ -64,7 +71,8 @@ export async function startChain(prefix: string, env: Record<string, string> = {
     (a as unknown as { call: unknown }).call = async (req: Record<string, unknown>, cred: string) => { a.calls.push({ op: "call", request: { ...req }, credential: cred } satisfies AdapterCall); return { provider_message_id: `CA-${a.calls.length}` }; };
   }
   const adapters: AdapterMap = { twilio, telnyx, slack, meta_whatsapp: whatsapp };
-  const funnel = new OutboundFunnel({ store, graph, adapters, config, clock, ...(options.marketing !== undefined ? { marketing: options.marketing } : {}) });
+  const pepperOf = (): string | null => (typeof options.pepper === "function" ? options.pepper() : options.pepper === undefined ? TEST_PEPPER : options.pepper);
+  const funnel = new OutboundFunnel({ store, graph, adapters, config, clock, contentHasher: async () => createContentHasher(pepperOf()), ...(options.marketing !== undefined ? { marketing: options.marketing } : {}) });
   const killSwitch = new KillSwitch();
   const controls = new OwnerControls(killSwitch);
   const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, controls, authority: { owner_person_id: OWNER, owner_tenants: [TENANT_A] } });

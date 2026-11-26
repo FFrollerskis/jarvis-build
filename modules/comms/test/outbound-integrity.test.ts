@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ProviderRejectedError, parseSendParams, recipientHash, requestFingerprint, scopedIdempotencyKey } from "../src/index.ts";
-import { TENANT_A } from "./support/harness.ts";
+import { ProviderRejectedError, createContentHasher, parseSendParams, recipientHash, requestFingerprint, scopedIdempotencyKey } from "../src/index.ts";
+import { TENANT_A, TEST_PEPPER } from "./support/harness.ts";
 import { authorizeAll, startChain, type Chain } from "./support/chain.ts";
 
 /**
@@ -165,9 +165,10 @@ describe("A-M5: idempotensnøkkelen er bundet til forespørselen", () => {
     expect(sends()).toHaveLength(1);
   });
 
-  it("fingeravtrykket skiller alt eieren kan sette, og er likt for samme forespørsel uavhengig av id", () => {
+  it("fingeravtrykket (HMAC, v2) skiller alt eieren kan sette, og er likt for samme forespørsel uavhengig av id", () => {
+    const hasher = createContentHasher(TEST_PEPPER)!;
     const base = { request_id: "req-fp-0001", channel: "sms", account_ref: "+4791000000", recipient: "+4790000001", purpose: "transactional", text: "Hei" };
-    const fp = (over: Record<string, unknown>) => { const r = parseSendParams({ ...base, ...over }); if (!r.ok) throw new Error(r.code); return requestFingerprint(r.value.request); };
+    const fp = (over: Record<string, unknown>) => { const r = parseSendParams({ ...base, ...over }); if (!r.ok) throw new Error(r.code); return requestFingerprint(r.value.request, hasher, TENANT_A); };
     expect(fp({})).toBe(fp({ request_id: "req-fp-9999" }));
     for (const over of [{ recipient: "+4790000002" }, { text: "Hei!" }, { purpose: "agreed" }, { account_ref: "+4792000000" }, { purpose_basis: "recipient_requested_contact" }, { purpose_basis_note: "x" }, { thread_ref: "t1" }]) {
       expect(fp(over), JSON.stringify(over)).not.toBe(fp({}));
