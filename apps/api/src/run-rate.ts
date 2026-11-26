@@ -3,7 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
-import { financeWithheldMarker, isFinanceConnectorId, withholdFinanceFromCurrentModel, type ToolDefinition, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
+import { financeWithheldMarker, isKnownNonFinanceConnectorId, withholdFinanceFromCurrentModel, type ToolDefinition, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 
 /**
  * D-421 (UA0-RUNRATE): run-rate - hva Jarvis faktisk koster (modell per leverandør/formål/dag, prognose for måneden) og hva connectorene koster i
@@ -116,15 +116,16 @@ export class RunRateService {
   }
 
   /**
-   * WP-N1b fiks-runde 1 (FIX-5): vedlikeholdsloggen for en SKY-/ukjent modell - UTEN finanskoblinger, og uten å lese kostnadsdata i det hele tatt. Finanskoblingene filtreres i SQL FØR `LIMIT` (en tillatelsesliste over de koblings-id-ene som
-   * KJENT ikke er finans, `isFinanceConnectorId`: fail-closed, så en id som dukker opp underveis utelates): ellers ville nye finansrader stjålet plassene i `recent` (LIMIT 5) og tømt skyens liste mens summen var uendret - et orakel for at
-   * finansvedlikehold finnes. Summen (`minutes_30d`) regnes på de SAMME radene som `by_connector`. Fritekst-begrunnelsen (`reason`) holdes tilbake (`null`): eieren har skrevet den, og ukjent innhold regnes som finans (samme regel som `owner_control`).
-   * Alt i ÉN transaksjon (RLS, én øyeblikkstilstand).
+   * WP-N1b fiks-runde 1 (FIX-5) + fiks-runde 2 (FIX-A): vedlikeholdsloggen for en SKY-/ukjent modell - UTEN finanskoblinger, og uten å lese kostnadsdata i det hele tatt. Finanskoblingene filtreres i SQL FØR `LIMIT`. `connector_id` er FRI TEKST
+   * (eieren skriver den: `record_connector_maintenance`), så filteret er en ekte TILLATELSESLISTE (`isKnownNonFinanceConnectorId`: kun id-er som EKSAKT er en kjent ikke-finanskobling i connector-registeret slipper gjennom; alt annet - også `bankid`,
+   * `regnskap`, `sparebank1`, `paypal` og ukjente navn uten finanspreg - er finansavledet, strengeste regel, og utelates; en svarteliste over stammer ville aldri fanget dem): ellers ville nye finansrader stjålet plassene i `recent` (LIMIT 5)
+   * og tømt skyens liste mens summen var uendret - et orakel for at finansvedlikehold finnes. Summen (`minutes_30d`) regnes på de SAMME radene som `by_connector`. Fritekst-begrunnelsen (`reason`) holdes tilbake (`null`): eieren har skrevet
+   * den, og ukjent innhold regnes som finans (samme regel som `owner_control`). Alt i ÉN transaksjon (RLS, én øyeblikkstilstand).
    */
   async maintenanceWithoutFinance(tenantId: string): Promise<{ minutes_30d: number; by_connector: Array<{ connector_id: string; events: number; minutes: number }>; recent: Array<{ connector_id: string; event_kind: string; minutes: number; reason: null; occurred_at: string }> }> {
     return withTenantTransaction(this.pool as pg.Pool, tenantId, async (client) => {
       const known = (await client.query("SELECT DISTINCT connector_id FROM connector_maintenance_log")).rows as Array<{ connector_id: string }>;
-      const allowed = known.map((r) => r.connector_id).filter((id) => !isFinanceConnectorId(id));
+      const allowed = known.map((r) => r.connector_id).filter((id) => isKnownNonFinanceConnectorId(id));
       const by_connector = (await client.query(
         `SELECT connector_id, count(*)::int AS events, coalesce(sum(minutes), 0)::int AS minutes
            FROM connector_maintenance_log WHERE occurred_at >= now() - interval '30 days' AND connector_id = ANY($1::text[]) GROUP BY connector_id ORDER BY minutes DESC, connector_id LIMIT 30`, [allowed]

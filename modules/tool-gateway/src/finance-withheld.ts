@@ -9,7 +9,8 @@ import { isFinancialNamespace } from "./tool-manifest.ts";
  *  - ÉTT nøytralt, innholdsfritt merke (`financeWithheldMarker`): `finance_withheld: true` + en kort norsk merknad UTEN sifre, id-er, tellinger eller leverandørnavn (låst av `wpn1b-finance-withheld-note.test.ts`).
  *    Merket settes ALLTID for en sky-/ukjent modell (uavhengig av om det finnes noe finansavledet å holde tilbake), så merket selv aldri røper om finansdata finnes.
  *  - gjenkjenning av finanskoblinger og -legitimasjon (`isFinanceConnectorId`, `isFinanceCredentialRef`) utledet av SAMME connector-register som resten av systemet (`category: "finance"`) + finans-navnerommene
- *    (`isFinancialNamespace`), FAIL-CLOSED på ordstammene (en referanse som nevner en finansleverandør regnes som finansavledet selv om registeret ikke kjenner den).
+ *    (`isFinancialNamespace`), FAIL-CLOSED på ordstammene (en referanse som nevner en finansleverandør regnes som finansavledet selv om registeret ikke kjenner den). Svartelisten alene er IKKE nok for fritekst-id-er som eieren skriver
+ *    (`bankid`, `regnskap`, `sparebank1`, ...): der brukes TILLATELSESLISTEN `isKnownNonFinanceConnectorId`/`isKnownNonFinanceCredentialRef` (fiks-runde 2, FIX-A): kun en id registeret kjenner som ikke-finans slipper til en sky-/ukjent modell.
  *  - situasjonsdomenene som er finansavledede (`spend`): `situations`-broen (`domainForLoopType`) legger ALLE finans-løkketypene og AI-kostnads-spiken i dette domenet; en test pinner at settet her og broen er enige.
  */
 
@@ -58,6 +59,28 @@ export function isFinanceCredentialRef(ref: unknown): boolean {
   const trimmed = ref.trim();
   if (trimmed === "") return false;
   return FINANCE_CREDENTIAL_REFS.has(trimmed) || FINANCE_STEM.test(trimmed);
+}
+
+const NON_FINANCE_CONNECTORS = CONNECTOR_REGISTRY.filter((c) => c.category !== "finance");
+/** Id-ene (og live-test-verktøy-id-ene) til ALLE ikke-finanskoblinger i registeret: den KJENTE ikke-finans-mengden (en tillatelsesliste, ikke en svarteliste). */
+const KNOWN_NON_FINANCE_CONNECTOR_IDS: ReadonlySet<string> = new Set(NON_FINANCE_CONNECTORS.flatMap((c) => [c.id, ...(c.live_test !== undefined ? [c.live_test.tool_id] : [])]));
+/** Credential-referansene (også de valgfrie) til ALLE ikke-finanskoblinger i registeret. */
+const KNOWN_NON_FINANCE_CREDENTIAL_REFS: ReadonlySet<string> = new Set(NON_FINANCE_CONNECTORS.flatMap((c) => [...c.credential_refs, ...(c.optional_credential_refs ?? [])]));
+
+/**
+ * WP-N1b fiks-runde 2 (FIX-A, «ukjent = finansavledet», Q-64 pkt 1 / D-477): en TILLATELSESLISTE for FRITEKST-id-er (`connector_maintenance_log.connector_id`, `owner_controls.freeze_connector`: begge fri tekst skrevet av eieren).
+ * `isFinanceConnectorId` er en SVARTELISTE (registerets finanskoblinger + ordstammer): den fanger aldri `bankid`, `regnskap`, `stripeapi`, `sparebank1`, `paypal`, `klarna`, `tripletex`, `visma`, `faktura`, `mystripe` o.l., som verken står i
+ * registeret eller har stammen som eget ord. Her er svaret motsatt: en id er KJENT ikke-finans KUN når den er EKSAKT en id (eller live-test-verktøy-id) til en ikke-finanskobling i connector-registeret OG heller ikke treffer svartelisten.
+ * Alt annet (ukjent navn, annen skrivemåte, ikke-streng, tom streng) regnes som finansavledet og holdes tilbake fra en sky-/ukjent modell; lokal modell og eier ser alt som før. Strengt eksakt treff (ingen trim/små bokstaver): gatewayen
+ * sammenligner frosne id-er eksakt, så `GitHub`/` github` er en ANNEN, ukjent id.
+ */
+export function isKnownNonFinanceConnectorId(id: unknown): boolean {
+  return typeof id === "string" && KNOWN_NON_FINANCE_CONNECTOR_IDS.has(id) && !isFinanceConnectorId(id);
+}
+
+/** Samme tillatelsesliste for credential-referanser (`owner_controls` tilbakekall: fri tekst): kun en EKSAKT referanse til en ikke-finanskobling i registeret (også valgfrie) er kjent; alt annet er finansavledet for en sky-/ukjent modell. */
+export function isKnownNonFinanceCredentialRef(ref: unknown): boolean {
+  return typeof ref === "string" && KNOWN_NON_FINANCE_CREDENTIAL_REFS.has(ref) && !isFinanceCredentialRef(ref);
 }
 
 /**

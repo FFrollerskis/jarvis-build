@@ -5,7 +5,7 @@ import {
   type GoldenSuiteControl, type GoldenSuiteRunResult
 } from "@jarvis/executive";
 import type { KillSwitch, OwnerControls } from "@jarvis/policy";
-import { isFinanceConnectorId, isFinanceCredentialRef, isFinanceDerivedSituationDomain, type ToolGateway } from "@jarvis/tool-gateway";
+import { isFinanceDerivedSituationDomain, isKnownNonFinanceConnectorId, isKnownNonFinanceCredentialRef, type ToolGateway } from "@jarvis/tool-gateway";
 import { actionRequiresStepUp } from "../step-up.ts";
 import { readDomainPauses, readFinanceKillSwitch } from "./authority.ts";
 import {
@@ -188,7 +188,8 @@ export function createSecurityCenter(deps: SecurityCenterDeps): ControlCenterDef
       // Gjennomgang M2 (H2): går rapporten til en SKYmodell (`restrictFinance`), leses og vises ingenting fra finansdomenet - hverken finans-nødbryteren, revisjonsrader om finansverktøy eller finans-gjenopprettinger.
       const restrict = ctx.restrictFinance === true;
       // FIX-1 (fiks-runde 1): med begrenset-vakten PÅ er frosne koblinger/tilbakekalte credentials listet med id/referanse i `detail_no` og telt (`frozen_now`/`revoked_now`/`stopped_credentials`) - finansavledet metadata som aldri skal til en skymodell.
-      // Filteret er FAIL-CLOSED (`isFinanceConnectorId`/`isFinanceCredentialRef`: ukjent = finans) og settes FØR listene brukes, så både navnene og tellingene bygges på resten.
+      // Filteret er en TILLATELSESLISTE (fiks-runde 2, FIX-A: `isKnownNonFinanceConnectorId`/`isKnownNonFinanceCredentialRef` - kun EKSAKT kjente ikke-finanskoblinger/-referanser i registeret slipper gjennom; ukjent, også uten ordstamme som
+      // `bankid`/`sparebank1`, = finans) og settes FØR listene brukes, så både navnene og tellingene bygges på resten.
       const strict = restrict && deps.financeGuard === true;
       const [aggR, triggerR, killR, controlsR, financeR, pausesR] = await Promise.all([
         settle(() => readSecurityAggregates(deps.pool, tenantId, nowMs, { restrictFinance: restrict })),
@@ -198,7 +199,7 @@ export function createSecurityCenter(deps: SecurityCenterDeps): ControlCenterDef
           const frozen = await deps.ownerControls.listFrozenConnectorsDurable();
           const revoked = await deps.ownerControls.listRevokedCredentialsDurable();
           return strict
-            ? { frozen: frozen.filter((f) => !isFinanceConnectorId(f.connector_id)), revoked: revoked.filter((r) => !isFinanceCredentialRef(r.credential_ref)) }
+            ? { frozen: frozen.filter((f) => isKnownNonFinanceConnectorId(f.connector_id)), revoked: revoked.filter((r) => isKnownNonFinanceCredentialRef(r.credential_ref)) }
             : { frozen, revoked };
         }),
         restrict ? Promise.resolve(null) : settle(() => readFinanceKillSwitch(deps.pool, tenantId)),

@@ -1,7 +1,7 @@
 import type { FrozenConnectorEntry, KillSwitchState, OwnerControlState, RevokedCredentialEntry } from "@jarvis/owner-controls";
 import type { SituationAutonomyPolicy } from "@jarvis/situations";
 import {
-  financeWithheldMarker, isFinanceConnectorId, isFinanceCredentialRef, isFinanceDerivedSituationDomain, isFinanceToolId,
+  financeWithheldMarker, isFinanceConnectorId, isFinanceDerivedSituationDomain, isFinanceToolId, isKnownNonFinanceConnectorId, isKnownNonFinanceCredentialRef,
   type ConnectorStatus, type FinanceWithheldMarker
 } from "@jarvis/tool-gateway";
 import { composeSloReport } from "./slo/report.ts";
@@ -14,7 +14,11 @@ import type { CapabilityStatus } from "./types.ts";
  * Hvert resultat får det nøytrale merket (`finance_withheld: true` + fast merknad), også når ingenting ble fjernet, så merket aldri røper om noe fantes.
  */
 
-/** `owner_control` slik en SKYmodell ser det: finansavledede koblinger/legitimasjon er borte, og ALLE fritekst-begrunnelser (eierens egne ord, kan nevne finans) er holdt tilbake (`reason: null`). */
+/**
+ * `owner_control` slik en SKYmodell ser det: KUN kjente ikke-finanskoblinger og -referanser er med, og ALLE fritekst-begrunnelser (eierens egne ord, kan nevne finans) er holdt tilbake (`reason: null`). `connector_id` og `credential_ref` er FRI TEKST
+ * (`owner_controls.freeze_connector`/`revoke_credential`: `z.string()`), så filteret er en TILLATELSESLISTE (fiks-runde 2, FIX-A: `isKnownNonFinanceConnectorId`/`isKnownNonFinanceCredentialRef`): en id registeret ikke kjenner som ikke-finans
+ * (også `bankid`, `sparebank1`, `paypal` eller et navn uten finanspreg) er finansavledet, strengeste regel, og utelates.
+ */
 export interface OwnerControlStateForCloud {
   kill_switch: Omit<KillSwitchState, "reason"> & { reason: null };
   frozen_connectors: Array<Omit<FrozenConnectorEntry, "reason"> & { reason: null }>;
@@ -26,8 +30,8 @@ export interface OwnerControlStateForCloud {
 export function shapeOwnerControlForCloud(state: OwnerControlState): OwnerControlStateForCloud {
   return {
     kill_switch: { ...state.kill_switch, reason: null },
-    frozen_connectors: state.frozen_connectors.filter((f) => !isFinanceConnectorId(f.connector_id)).map((f) => ({ ...f, reason: null })),
-    revoked_credentials: state.revoked_credentials.filter((r) => !isFinanceCredentialRef(r.credential_ref)).map((r) => ({ ...r, reason: null })),
+    frozen_connectors: state.frozen_connectors.filter((f) => isKnownNonFinanceConnectorId(f.connector_id)).map((f) => ({ ...f, reason: null })),
+    revoked_credentials: state.revoked_credentials.filter((r) => isKnownNonFinanceCredentialRef(r.credential_ref)).map((r) => ({ ...r, reason: null })),
     reasons_withheld: true
   };
 }
