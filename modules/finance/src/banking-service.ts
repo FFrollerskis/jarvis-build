@@ -33,6 +33,9 @@ import { defaultNeonomicsGatewayFactory } from "./service.ts";
  * `ambiguous` - aldri stille auto-lukket.
  */
 
+/** Flagget på en transaksjon i karantene (ukjent/manglende leverandørstatus; WP-FIN2 fiks-runde 1, FIX-5). */
+const BANK_STATUS_UNKNOWN_FLAG: BankAnomalyType = "BANK_TRANSACTION_STATUS_UNKNOWN";
+
 /** Deterministiske konstanter for avviks-/avstemmingsreglene - dokumentert, aldri skjult-tilfeldige. */
 export const RECONCILE_DATE_WINDOW_DAYS = 3;
 export const UNMATCHED_FLAG_AGE_DAYS = 3;
@@ -316,7 +319,7 @@ export class BankingService {
    * - Sen ankomst/backfill: samme idempotente vei - rekkefølge spiller
    *   ingen rolle.
    */
-  async syncTransactions(tenantId: string, memorySpace: MemorySpace, bankAccountId: string, opts: { maxPages?: number } = {}): Promise<{ inserted: number; transitioned: number; corrections_flagged: number; pages: number }> {
+  async syncTransactions(tenantId: string, memorySpace: MemorySpace, bankAccountId: string, opts: { maxPages?: number } = {}): Promise<{ inserted: number; transitioned: number; corrections_flagged: number; quarantined: number; pages: number }> {
     const { account, consent } = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(`SELECT * FROM bank_accounts WHERE tenant_id = $1 AND bank_account_id = $2`, [tenantId, bankAccountId]);
       const acc = rows[0] as BankAccount | undefined;
@@ -329,6 +332,7 @@ export class BankingService {
     let inserted = 0;
     let transitioned = 0;
     let correctionsFlagged = 0;
+    let quarantined = 0;
     let pages = 0;
     let pageToken: string | null = null;
     do {
@@ -336,18 +340,24 @@ export class BankingService {
       pages++;
       await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
         for (const tx of page.transactions) {
+          // Fiks-runde 1 (FIX-5): en transaksjon med ukjent/manglende leverandørstatus feiler ikke lenger hele siden (ett avvikende element stoppet paginering og synk hver sveiperunde). Den settes i
+          // KARANTENE: lagres som `pending` (aldri `booked`: bokføring og avstemming leser kun `booked`) med flagget `BANK_TRANSACTION_STATUS_UNKNOWN`, som overflates i attention-køen
+          // (`bank_transactions` med avviksflagg). Sender banken senere en kjent status, går raden den vanlige veien (`pending` -> `booked`) og flagget fjernes.
+          const quarantine = tx.status === "unknown";
           const { rows } = await client.query(
             `INSERT INTO bank_transactions
                (bank_transaction_id, tenant_id, memory_space_id, bank_account_id, provider_transaction_id, status, direction,
-                amount_ore, currency, booking_date, value_date, counterparty_name, reference_text, bank_transaction_code)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                amount_ore, currency, booking_date, value_date, counterparty_name, reference_text, bank_transaction_code, anomaly_flags)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
              ON CONFLICT (tenant_id, provider, provider_transaction_id) DO NOTHING
              RETURNING bank_transaction_id`,
-            [`bank-tx-${randomUUID()}`, tenantId, memorySpace, bankAccountId, tx.id, tx.status, tx.direction,
-              tx.amountOre, tx.currency, tx.bookingDate, tx.valueDate, tx.counterpartyName, tx.referenceText, tx.bankTransactionCode]
+            [`bank-tx-${randomUUID()}`, tenantId, memorySpace, bankAccountId, tx.id, quarantine ? "pending" : tx.status, tx.direction,
+              tx.amountOre, tx.currency, tx.bookingDate, tx.valueDate, tx.counterpartyName, tx.referenceText, tx.bankTransactionCode,
+              JSON.stringify(quarantine ? [BANK_STATUS_UNKNOWN_FLAG] : [])]
           );
           if (rows.length > 0) {
             inserted++;
+            if (quarantine) quarantined++;
             continue;
           }
           const { rows: existingRows } = await client.query(
@@ -356,6 +366,19 @@ export class BankingService {
           );
           const existing = existingRows[0] as BankTransaction | undefined;
           if (!existing) continue;
+          if (quarantine) {
+            // Aldri overskriv eller bokfør på en ukjent status (også ikke en allerede booket rad): kun synlig flagg.
+            await this.appendBankAnomalyFlags(client, tenantId, existing.bank_transaction_id, [BANK_STATUS_UNKNOWN_FLAG]);
+            quarantined++;
+            continue;
+          }
+          if (existing.anomaly_flags.includes(BANK_STATUS_UNKNOWN_FLAG)) {
+            // Banken har nå sendt en kjent status: selv-korrigerende, som de øvrige avviksflaggene.
+            await client.query(
+              `UPDATE bank_transactions SET anomaly_flags = anomaly_flags - '${BANK_STATUS_UNKNOWN_FLAG}', updated_at = now() WHERE tenant_id = $1 AND bank_transaction_id = $2`,
+              [tenantId, existing.bank_transaction_id]
+            );
+          }
           const economicallyChanged = Number(existing.amount_ore) !== tx.amountOre || existing.currency !== tx.currency || existing.direction !== tx.direction;
           if (existing.status === "booked" && economicallyChanged) {
             await this.appendBankAnomalyFlags(client, tenantId, existing.bank_transaction_id, ["BANK_TRANSACTION_CORRECTION_CONFLICT"]);
@@ -378,7 +401,7 @@ export class BankingService {
     await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       await client.query(`UPDATE bank_accounts SET last_synced_at = now(), updated_at = now() WHERE tenant_id = $1 AND bank_account_id = $2`, [tenantId, bankAccountId]);
     });
-    return { inserted, transitioned, corrections_flagged: correctionsFlagged, pages };
+    return { inserted, transitioned, corrections_flagged: correctionsFlagged, quarantined, pages };
   }
 
   async listBankTransactions(tenantId: string, memorySpace: MemorySpace, filter: { bank_account_id?: string; reconciliation_state?: string; limit?: number } = {}): Promise<BankTransaction[]> {

@@ -402,14 +402,20 @@ export class CardService {
     // propagerer og etterlater kanonisk tilstand URØRT (§6).
     const providerResult = await providerCall(gw, prepared.card.provider_card_id!);
 
+    // Fiks-runde 1 (FIX-1): en 2xx fra Wallester betyr at verbet ER utført, også når svaret ikke bærer en status (PATCH-svar kan være tomme; transporten gir da `unknown`). Måltilstanden anvendes
+    // alltid lokalt (nødbremsen `freeze_card` skal aldri la kortet stå `active` mens Wallester har blokkert det), men `provider_state` settes til `unconfirmed` i stedet for en oppdiktet leverandørstatus,
+    // og hendelsen merkes `confirmed: false`. Ingen flagg: en tom bekreftelse er en mulig, forventet svarform (`unverified`), og `sync_card_state`/Wallester-sveipet (`wallester-sweep.ts`) henter den
+    // faktiske statusen og flagger avvik (`CARD_PROVIDER_STATE_CONFLICT`).
+    const confirmed = providerResult.status !== "unknown";
+    const providerState = confirmed ? providerResult.status : "unconfirmed";
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const timestampColumn = target === "active" ? "activated_at" : target === "frozen" ? "frozen_at" : "closed_at";
       const { rows } = await client.query(
         `UPDATE provider_cards SET state = $3, provider_state = $4, ${timestampColumn} = now(), last_synced_at = now(), updated_at = now()
          WHERE tenant_id = $1 AND card_id = $2 RETURNING *`,
-        [tenantId, cardId, target, providerResult.status]
+        [tenantId, cardId, target, providerState]
       );
-      await this.logCardEvent(client, tenantId, memorySpace, cardId, eventType, { provider_state: providerResult.status }, actorPersonId);
+      await this.logCardEvent(client, tenantId, memorySpace, cardId, eventType, { provider_state: providerState, ...(confirmed ? {} : { confirmed: false }) }, actorPersonId);
       return rowToCard(rows[0] as Record<string, unknown>);
     });
   }
