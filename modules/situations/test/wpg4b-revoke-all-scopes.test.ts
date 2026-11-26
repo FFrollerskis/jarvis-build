@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolDefinition, ToolTransport } from "@jarvis/tool-gateway";
-import { SituationAutonomyUnauthorizedError } from "../src/service.ts";
+import { SituationAutonomyUnauthorizedError, SituationEngine } from "../src/service.ts";
 import { NOW, OWNER, TENANT_A, TENANT_B, identity, record, startG4Db, type G4Db } from "./support/wpg4-db.ts";
 import { TEST_BINDABLE } from "./support/bindable.ts";
 
@@ -150,6 +150,21 @@ describe("FIX-2/2b: domenebredt tilbakekall fjerner ALLE bindinger i domenet (ek
     await insertRow(ROW_RULE, "rv_rule", "active", { space: "business" });
     await insertRow(ROW_RULE, "rv_rule", "active", { tenant: TENANT_B });
     expect(await revokeDomain()).toBe(true);
+    expect(await scopes("home")).toEqual(["infra/*"]);
+    expect(await scopes("business")).toEqual([`home/${ROW_RULE}`, "home/*"].sort());
+    expect(await scopes("home", TENANT_B)).toEqual([`home/${ROW_RULE}`]);
+  });
+
+  it("isolasjonen hviler ikke på radnivåsikkerhet (RLS) alene: en tilkobling UTEN RLS (eierrollen) fjerner med domenebredt tilbakekall fortsatt kun (tenant, rom, domene) - SQL-filtrene er et eget lag", async () => {
+    await insertRow("*", "rv_dom", "active");
+    await insertRow(ROW_RULE, "rv_rule", "active");
+    await insertRow("*", "rv_dom", "active", { domain: "infra" });
+    await insertRow("*", "rv_dom", "active", { space: "business" });
+    await insertRow(ROW_RULE, "rv_rule", "active", { space: "business" });
+    await insertRow(ROW_RULE, "rv_rule", "active", { tenant: TENANT_B });
+    // Samme motor, men på superuser-poolen: RLS gjelder ikke, så KUN `WHERE tenant_id AND memory_space_id AND domain` holder de andre radene urørt.
+    const noRls = new SituationEngine(db.adminPool, db.domainPauses, { owner_person_id: OWNER });
+    expect(await noRls.clearAutonomyPolicy(TENANT_A, "home", "home", OWNER)).toBe(true);
     expect(await scopes("home")).toEqual(["infra/*"]);
     expect(await scopes("business")).toEqual([`home/${ROW_RULE}`, "home/*"].sort());
     expect(await scopes("home", TENANT_B)).toEqual([`home/${ROW_RULE}`]);
