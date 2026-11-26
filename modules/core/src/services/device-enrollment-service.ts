@@ -319,7 +319,10 @@ export class DeviceEnrollmentService {
           const label = request.enrollment.kind === "device_proof" && target !== null ? target.label : decided.device_kind;
           written = await this.deps.devices.registerDeviceOn(client, request, {
             device_id: request.device.device_id, kind: label, public_key_pem: request.device.public_key_pem,
-            device_kind: decided.device_kind, device_kind_source: decided.device_kind_source
+            device_kind: decided.device_kind, device_kind_source: decided.device_kind_source,
+            // Enheten fantes ikke da reglene ble vurdert (ingen låst målrad): skrivingen er en ren innsetting. En rad som dukket opp i mellomtiden (samtidig innrulling av samme `device_id`) overskrives ALDRI med en
+            // type/nøkkel reglene ikke er vurdert mot (samtidig kappløp kunne ellers omgått «device_proof endrer aldri typen» og «lavtillits-enhet kan ikke re-nøkle høytillits-enhet»); den taper med `device_owned_by_other_principal`.
+            ...(target === null ? { insert_only: true } : {})
           });
         } catch (err) {
           if (err instanceof RevokedDeviceKeyError) throw new EnrollmentDenial("key_revoked");

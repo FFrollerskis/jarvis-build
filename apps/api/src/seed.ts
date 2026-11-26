@@ -38,19 +38,20 @@ export async function seedOwner(pool: pg.Pool, owner: OwnerConfig): Promise<void
   await pool.query("INSERT INTO tenants (tenant_id,name,kind) VALUES ($1,$2,'person') ON CONFLICT DO NOTHING", [tenant, name]);
   await pool.query("INSERT INTO people (person_id,display_name) VALUES ($1,$2) ON CONFLICT DO NOTHING", [person, name]);
   await pool.query("INSERT INTO person_tenants (person_id,tenant_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", [person, tenant]);
+  // WP-S1 (JARVIS-111): seed-radene får en eksplisitt, lukket enhetstype (`device_kind`, kilde `trusted_provisioning` = server-side kode). Ingen av dem har en nøkkel og kan derfor ikke autorisere noe uansett type.
   await pool.query(
-    "INSERT INTO devices (device_id,tenant_id,person_id,kind) VALUES ('jarvis-core',$1,$2,'service') ON CONFLICT DO NOTHING",
+    "INSERT INTO devices (device_id,tenant_id,person_id,kind,device_kind,device_kind_source) VALUES ('jarvis-core',$1,$2,'service','service','trusted_provisioning') ON CONFLICT DO NOTHING",
     [tenant, person]
   );
   await pool.query(
-    "INSERT INTO devices (device_id,tenant_id,person_id,kind) VALUES ($1,$2,$3,'voice') ON CONFLICT DO NOTHING",
+    "INSERT INTO devices (device_id,tenant_id,person_id,kind,device_kind,device_kind_source) VALUES ($1,$2,$3,'voice','voice_gateway','trusted_provisioning') ON CONFLICT DO NOTHING",
     [voiceDevice, tenant, person]
   );
   // D-395 (JARVIS-092): `dev-web` er en delt demo-enhet (nettleserne bruker per-nettleser-ID siden D-252) - den seedes IKKE i produksjon
   // (`JARVIS_ENV=production`). Raden har ingen offentlig nøkkel og kan ikke autentisere, men en produksjonsdatabase skal ikke bære demo-rader.
   if (!isProductionEnv(process.env["JARVIS_ENV"])) {
     await pool.query(
-      "INSERT INTO devices (device_id,tenant_id,person_id,kind) VALUES ('dev-web',$1,$2,'web') ON CONFLICT DO NOTHING",
+      "INSERT INTO devices (device_id,tenant_id,person_id,kind,device_kind,device_kind_source) VALUES ('dev-web',$1,$2,'web','web_browser','trusted_provisioning') ON CONFLICT DO NOTHING",
       [tenant, person]
     );
   }

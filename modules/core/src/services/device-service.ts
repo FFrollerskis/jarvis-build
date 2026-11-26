@@ -72,6 +72,12 @@ export interface RegisterDeviceInput {
   /** Typen serveren har bestemt. Uten den utledes typen av etiketten (kun betrodd server-side seeding/tester; `DeviceEnrollmentService` gir alltid en eksplisitt type). */
   device_kind?: DeviceKind;
   device_kind_source?: DeviceKindSource;
+  /**
+   * WP-S1: kalleren har vurdert innrullingsreglene mot at enheten IKKE fantes (ingen låst målrad), så skrivingen MÅ være en ren innsetting: en rad som dukket opp i mellomtiden (en samtidig innrulling av samme `device_id`)
+   * gir 0 rader (`false`) i stedet for å bli overskrevet med en type/nøkkel kalleren aldri vurderte mot den raden. Uten dette kunne et samtidig kappløp omgå «`device_proof` endrer aldri typen» og
+   * «lavtillits-enhet kan ikke re-nøkle høytillits-enhet». Utelatt = som før (innsetting eller oppdatering).
+   */
+  insert_only?: boolean;
 }
 
 export interface LockedDeviceKey {
@@ -136,14 +142,17 @@ export class DeviceService {
       // WP-S1: typen (`device_kind`) og hvem som bestemte den skrives KUN herfra. Databasevakten (migrasjon 149, `devices_kind_guard`) avviser enhver annen UPDATE som endrer typen; variabelen settes
       // KUN rett rundt denne ene setningen og nullstilles umiddelbart (den er transaksjonslokal). Kalleren har allerede vurdert innrullingsreglene (`DeviceEnrollmentService`) eller er betrodd (`registerDeviceTrusted`).
       await client.query("SELECT set_config('jarvis.device_kind_change', 'on', true)");
-      result = await client.query(
-        `INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem, device_kind, device_kind_source)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (device_id) DO UPDATE
+      const conflict = device.insert_only === true
+        ? "ON CONFLICT (device_id) DO NOTHING"
+        : `ON CONFLICT (device_id) DO UPDATE
            SET public_key_pem = EXCLUDED.public_key_pem, kind = EXCLUDED.kind,
                device_kind = EXCLUDED.device_kind, device_kind_source = EXCLUDED.device_kind_source
          WHERE devices.tenant_id = EXCLUDED.tenant_id AND devices.person_id = EXCLUDED.person_id
-           AND devices.revoked_at IS NULL
+           AND devices.revoked_at IS NULL`;
+      result = await client.query(
+        `INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem, device_kind, device_kind_source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ${conflict}
          RETURNING device_id`,
         [device.device_id, principal.tenant_id, principal.person_id, device.kind, device.public_key_pem, resolved.device_kind, resolved.device_kind_source]
       );

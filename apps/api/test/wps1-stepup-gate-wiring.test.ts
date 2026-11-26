@@ -215,3 +215,41 @@ describe("E: miljøoppsett - modusen når api-containeren (og ingen andre), og e
     expect(example).not.toMatch(/^JARVIS_STEPUP_CHANNEL_BINDING=/m);
   });
 });
+
+describe("F: KUN innrullingsstien setter enhetstype - ingen annen produksjonskode skriver `devices` eller lager billetter", () => {
+  /** Alle produksjonsfiler (ikke test/node_modules) som inneholder `needle`, som repo-relative stier. */
+  function filesWith(needle: RegExp): string[] {
+    const found: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        if (entry === "node_modules" || entry === "test" || entry === "dist" || entry === ".git") continue;
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) { walk(full); continue; }
+        if (!/\.(ts|mjs)$/.test(entry) || entry.endsWith(".d.ts")) continue;
+        if (needle.test(readFileSync(full, "utf8"))) found.push(full.slice(ROOT.length + 1));
+      }
+    };
+    for (const root of ["apps", "modules", "packages", "ops"]) walk(join(ROOT, root));
+    return found.sort();
+  }
+
+  it("rå skriving til devices: seed (eksplisitt type), DeviceService (innrulling/tilbakekalling) og en vertsskript som setter inn en nøkkelløs syntetisk rad (aldri en nøkkel, så ingen autorisasjon)", () => {
+    expect(filesWith(/INSERT INTO devices/)).toEqual([
+      "apps/api/src/seed.ts", "modules/core/src/services/device-service.ts", "modules/executive/scripts/d174-executive-control-surface-live.ts"
+    ]);
+    expect(filesWith(/UPDATE devices/)).toEqual(["modules/core/src/services/device-service.ts"]);
+  });
+
+  it("registerDeviceOn/registerDeviceTrusted kalles kun fra DeviceService og DeviceEnrollmentService (den ENESTE nettverksnære veien); billetter lages kun av eier-CLI-en via createEnrollmentTicket", () => {
+    expect(filesWith(/registerDeviceOn\(/)).toEqual(["modules/core/src/services/device-enrollment-service.ts", "modules/core/src/services/device-service.ts"]);
+    expect(filesWith(/registerDeviceTrusted\(/)).toEqual(["modules/core/src/services/device-service.ts"]);
+    expect(filesWith(/createEnrollmentTicket\(/)).toEqual(["apps/api/src/enroll-ticket-main.ts", "modules/core/src/services/device-enrollment-service.ts"]);
+  });
+
+  it("tillatelsen til å endre typen (`jarvis.device_kind_change`) settes av nøyaktig én kodevei: registerDeviceOn", () => {
+    expect(filesWith(/jarvis\.device_kind_change/)).toEqual(["modules/core/src/services/device-service.ts"]);
+    const service = read("modules/core/src/services/device-service.ts");
+    expect(service.split("jarvis.device_kind_change").length - 1).toBe(2); // sett på, og nullstilt igjen i `finally`
+  });
+});
+

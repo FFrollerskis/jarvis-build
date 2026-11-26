@@ -117,10 +117,10 @@ export function applyStepUpBindingGate(source: Readonly<Record<string, string | 
 
 /** Status for `/infra/status` og oppstartsloggen: ingen verdier, kun modus, ugyldig verdi og blokkerte flaggnavn. */
 export interface StepUpBindingStatus {
-  mode: StepUpBindingMode;
-  enforced: boolean;
-  invalid_value: string | null;
-  blocked: Array<{ flag: string; group: string; reason: string }>;
+  readonly mode: StepUpBindingMode;
+  readonly enforced: boolean;
+  readonly invalid_value: string | null;
+  readonly blocked: ReadonlyArray<{ readonly flag: string; readonly group: string; readonly reason: string }>;
 }
 
 export function describeStepUpBinding(gate: Pick<StepUpBindingGate, "setting" | "blocked">): StepUpBindingStatus {

@@ -367,6 +367,19 @@ describe("WP-S1 K1 D: databasevakten - typen kan kun endres via registerDeviceOn
     await expect(asApp((c) => c.query("UPDATE devices SET device_kind = 'mac', device_kind_source = 'trusted_provisioning' WHERE device_id = $1", [id]))).rejects.toThrow(/device_kind_change_not_authorized/);
   });
 
+  it("tillatelsen som registerDeviceOn setter er borte igjen etter skrivingen: en UPDATE av typen i SAMME transaksjon rett etterpå avvises", async () => {
+    const id = fresh("dev-d-reset");
+    const seed = { person_id: PERSON, tenant_id: TENANT, memory_space_id: "personal", session_id: "sess-seed-reset", device_id: "seed-reset", channel: "system", auth_strength: "active" } as const;
+    void seed;
+    await asApp(async (c) => {
+      expect(await devices.registerDeviceOn(c, { tenant_id: TENANT, person_id: PERSON }, { device_id: id, kind: "x", public_key_pem: pem(generateKeyPairSync("ed25519")), device_kind: "watch" })).toBe(true);
+      await expect(c.query("SAVEPOINT s1")).resolves.toBeDefined();
+      await expect(c.query("UPDATE devices SET device_kind = 'iphone', device_kind_source = 'trusted_provisioning' WHERE device_id = $1", [id])).rejects.toThrow(/device_kind_change_not_authorized/);
+      await c.query("ROLLBACK TO SAVEPOINT s1");
+    });
+    expect(await row(id)).toMatchObject({ device_kind: "watch" });
+  });
+
   it("oppdateringer som IKKE endrer typen (nøkkelrotasjon, tilbakekalling) rammes ikke av vakten", async () => {
     const id = fresh("dev-d-other");
     await addDevice(id, "watch");
@@ -444,8 +457,108 @@ describe("WP-S1 K3 E: samtidighet - ingen vranglås og ingen tapt typeendring", 
     })();
     const [enrolled, revoked] = await Promise.all([enrollP, revokeP]);
     expect(revoked).toBe(true);
-    expect(enrolled.ok === true || enrolled.reason === "device_revoked").toBe(true);
+    // utfallene: innrullingen vant (ok), eller tilbakekallingen ble sett (enheten eller nøkkelen er tilbakekalt: `device_revoked`/`key_revoked`, avhengig av hvilket av de to ulåste sjekkene som så den først) - aldri noe annet
+    expect(enrolled.ok === true || ["device_revoked", "key_revoked"].includes(enrolled.reason), JSON.stringify(enrolled)).toBe(true);
     expect((await row(id))?.revoked_at).not.toBeNull();
     expect(await enforce.enroll(request(id, k, await ticketFor("iphone")))).toEqual({ ok: false, reason: "device_revoked" });
   });
+
+  it("E4: tilbakekalling som committer i vinduet ETTER den ulåste sjekken men FØR målraden låses: innrullingen ser den (device_revoked), ikke et misvisende «eid av en annen»", async () => {
+    const id = fresh("dev-e-revwin");
+    await addDevice(id, "legacy_unknown");
+    const k = keys.get(id) as ReturnType<typeof generateKeyPairSync>;
+    const holder = await adminPool.connect();
+    let pending: Promise<DeviceEnrollmentResult> | undefined;
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT 1 FROM devices WHERE device_id = $1 FOR UPDATE", [id]); // radlås: tilbakekallingen er «underveis»
+      pending = enforce.enroll(request(id, generateKeyPairSync("ed25519"), await ticketFor("iphone")));
+      await new Promise((r) => setTimeout(r, 300)); // innrullingen har gjort de ulåste sjekkene (ikke tilbakekalt ennå) og venter nå på radlåsen
+      await holder.query("UPDATE devices SET revoked_at = now(), revoked_reason = 'e4', public_key_pem = NULL WHERE device_id = $1", [id]);
+      await holder.query("COMMIT");
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+    expect(await pending).toEqual({ ok: false, reason: "device_revoked" });
+    expect(await row(id)).toMatchObject({ device_kind: "legacy_unknown" });
+    void k;
+  });
+
+  it("E5: en billett uten type bevarer typen slik den står ETTER en samtidig endring (ingen tapt oppdatering): målraden leses under radlås", async () => {
+    const id = fresh("dev-e-lost");
+    await addDevice(id, "legacy_unknown");
+    const k = keys.get(id) as ReturnType<typeof generateKeyPairSync>;
+    const holder = await adminPool.connect();
+    let pending: Promise<DeviceEnrollmentResult> | undefined;
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT set_config('jarvis.device_kind_change', 'on', true)");
+      await holder.query("UPDATE devices SET device_kind = 'mac', device_kind_source = 'enrollment_ticket' WHERE device_id = $1", [id]); // en samtidig typeendring (uncommittet)
+      pending = plain.enroll(request(id, k, await ticketFor(undefined)));
+      await new Promise((r) => setTimeout(r, 300));
+      await holder.query("COMMIT");
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+    expect((await pending)?.ok).toBe(true);
+    expect(await row(id)).toMatchObject({ device_kind: "mac", device_kind_source: "enrollment_ticket" }); // IKKE nedgradert til det enrollment så før den ventet
+  });
 });
+
+
+describe("WP-S1 K3 F: en ny enhet skrives som ren innsetting - et samtidig kappløp kan ikke overstyre regler som ikke er vurdert mot den raden", () => {
+  async function raceAgainstUncommittedInsert(buildEnrollment: (deviceId: string) => Promise<unknown>): Promise<{ id: string; ownerKey: ReturnType<typeof generateKeyPairSync>; result: DeviceEnrollmentResult }> {
+    const id = fresh("dev-f-race");
+    const ownerKey = generateKeyPairSync("ed25519");
+    const holder = await adminPool.connect();
+    let pending: Promise<DeviceEnrollmentResult> | undefined;
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT set_config('jarvis.device_kind_change', 'on', true)");
+      await holder.query(
+        "INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem, device_kind, device_kind_source) VALUES ($1, $2, $3, 'iphone', $4, 'iphone', 'enrollment_ticket')",
+        [id, TENANT, PERSON, pem(ownerKey)]
+      );
+      // innrullingen ser IKKE den ucommitede raden (målraden er `null` => «ny enhet»), og må vente på innsettingen
+      pending = enforce.enroll(await buildEnrollment(id)) as Promise<DeviceEnrollmentResult>;
+      await new Promise((r) => setTimeout(r, 300));
+      await holder.query("COMMIT");
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+    return { id, ownerKey, result: await (pending as Promise<DeviceEnrollmentResult>) };
+  }
+
+  it("device_proof som «oppretter» en enhet som samtidig ble opprettet som iphone: taper (device_owned_by_other_principal), typen OG nøkkelen til den som kom først er uendret", async () => {
+    const authorizing = fresh("dev-f-watch");
+    await addDevice(authorizing, "watch");
+    const attackerKey = generateKeyPairSync("ed25519");
+    const { id, ownerKey, result } = await raceAgainstUncommittedInsert(async (deviceId) => request(deviceId, attackerKey, proofFrom(authorizing)));
+    expect(result).toEqual({ ok: false, reason: "device_owned_by_other_principal" });
+    expect(await row(id)).toMatchObject({ device_kind: "iphone", device_kind_source: "enrollment_ticket" });
+    expect((await row(id))?.public_key_pem?.trim()).toBe(pem(ownerKey).trim());
+  });
+
+  it("billett uten type (ikke angitt) som «oppretter» en enhet som samtidig ble opprettet med en type: taper i stedet for å nedgradere den, og billetten er ikke brukt opp", async () => {
+    const t = await ticketFor(undefined);
+    const { id, result } = await raceAgainstUncommittedInsert(async (deviceId) => request(deviceId, generateKeyPairSync("ed25519"), t));
+    expect(result).toEqual({ ok: false, reason: "device_owned_by_other_principal" });
+    expect(await row(id)).toMatchObject({ device_kind: "iphone" });
+    const consumed = (await adminPool.query("SELECT consumed_at FROM device_enrollment_tickets WHERE consumed_device_id = $1", [id])).rows;
+    expect(consumed).toEqual([]); // hele transaksjonen rullet tilbake: billetten kan brukes på nytt
+  });
+
+  it("en device_id som tilhører en ANNEN person i samme tenant eller en annen tenant lekker aldri: samme avslag som før, ingen overskriving", async () => {
+    const other = fresh("dev-f-other");
+    await adminPool.query("INSERT INTO tenants (tenant_id, name, kind) VALUES ('tenant-s1e-b', 'S1E B', 'person') ON CONFLICT DO NOTHING");
+    await adminPool.query("INSERT INTO people (person_id, display_name) VALUES ('person-s1e-b', 'B') ON CONFLICT DO NOTHING");
+    await adminPool.query("INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-s1e-b', 'tenant-s1e-b') ON CONFLICT DO NOTHING");
+    await adminPool.query("INSERT INTO devices (device_id, tenant_id, person_id, kind, device_kind, device_kind_source) VALUES ($1, 'tenant-s1e-b', 'person-s1e-b', 'x', 'iphone', 'trusted_provisioning')", [other]);
+    expect(await enforce.enroll(request(other, generateKeyPairSync("ed25519"), await ticketFor("watch")))).toEqual({ ok: false, reason: "device_owned_by_other_principal" });
+    expect(await row(other)).toMatchObject({ device_kind: "iphone" });
+  });
+});
+

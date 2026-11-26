@@ -3,7 +3,7 @@ import {
   controlAction, controlItem, controlSection, unknownControlSection,
   type ControlAction, type ControlCenterBuildContext, type ControlCenterDefinition, type ControlCenterParts, type ControlItem, type ControlSection, type ControlStatus
 } from "@jarvis/executive";
-import { CANONICAL_GITHUB_REPO, LEGACY_GITHUB_REPOS, githubRepoAliasKey, parseGithubRepoSlug } from "@jarvis/contracts";
+import { CANONICAL_GITHUB_REPO, LEGACY_GITHUB_REPOS, deviceKindHoldsStepUpChannel, githubRepoAliasKey, parseGithubRepoSlug } from "@jarvis/contracts";
 import type { PolicyAuditSinkStats } from "@jarvis/core";
 import { budgetConfigFromEnv } from "@jarvis/model-gateway";
 import { resolveAuthorityMode, type AuthorityConfig, type InfraExecutionGate, type KillSwitch, type OwnerControls, type PolicyAuditStats } from "@jarvis/policy";
@@ -40,11 +40,15 @@ import {
 const NON_HEALTH_SPACES = ["personal", "business", "project", "home", "guest", "shared"] as const;
 const MAX_DEVICES = 60;
 
-export interface DeviceRow { device_id: string; person_id: string; kind: string; created_at: string | null; revoked_at: string | null; role: string; active_grants: number; last_grant_at: string | null }
+export interface DeviceRow {
+  device_id: string; person_id: string; kind: string; created_at: string | null; revoked_at: string | null; role: string; active_grants: number; last_grant_at: string | null;
+  /** WP-S1 (JARVIS-111): den lukkede enhetstypen serveren har satt (`devices.device_kind`) og hvem som bestemte den. Utelatt = ikke rapportert (eldre rader/fixturer): vises da ikke. */
+  device_kind?: string; device_kind_source?: string
+}
 
 export async function readDevices(pool: ControlCenterPool, tenantId: string, nowMs: number): Promise<DeviceRow[]> {
   const rows = await tenantRead(pool, tenantId, (query) => query(
-    `SELECT d.device_id, d.person_id, d.kind, d.created_at, d.revoked_at, coalesce(pt.role, 'ukjent') AS role,
+    `SELECT d.device_id, d.person_id, d.kind, d.device_kind, d.device_kind_source, d.created_at, d.revoked_at, coalesce(pt.role, 'ukjent') AS role,
             (SELECT (count(*))::int FROM session_grants g WHERE g.tenant_id = d.tenant_id AND g.device_id = d.device_id AND g.revoked_at IS NULL AND g.expires_at > $2) AS active_grants,
             (SELECT max(g.issued_at) FROM session_grants g WHERE g.tenant_id = d.tenant_id AND g.device_id = d.device_id) AS last_grant_at
        FROM devices d LEFT JOIN person_tenants pt ON pt.person_id = d.person_id AND pt.tenant_id = d.tenant_id
@@ -55,7 +59,8 @@ export async function readDevices(pool: ControlCenterPool, tenantId: string, now
   ));
   return rows.map((r) => ({
     device_id: String(r["device_id"]), person_id: String(r["person_id"]), kind: String(r["kind"]), created_at: toIso(r["created_at"]), revoked_at: toIso(r["revoked_at"]),
-    role: String(r["role"]), active_grants: Number(r["active_grants"] ?? 0), last_grant_at: toIso(r["last_grant_at"])
+    role: String(r["role"]), active_grants: Number(r["active_grants"] ?? 0), last_grant_at: toIso(r["last_grant_at"]),
+    ...(typeof r["device_kind"] === "string" ? { device_kind: r["device_kind"] } : {}), ...(typeof r["device_kind_source"] === "string" ? { device_kind_source: r["device_kind_source"] } : {})
   }));
 }
 
@@ -245,10 +250,15 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
             detail_no: [
               revokedDevice ? `tilbakekalt ${rel(d.revoked_at)}` : `${d.active_grants} aktive grants`,
               delegated ? "tilhører en annen person (delegert tilgang)" : "din enhet",
+              // WP-S1: typen serveren har satt, og om den er utledet av en gammel etikett (ikke verifisert av deg) eller valgt av deg via billett. `legacy_unknown` kan aldri gi step-up i enforce.
+              d.device_kind === undefined ? "" : `type ${d.device_kind}${d.device_kind_source === undefined ? "" : ` (${d.device_kind_source})`}${d.device_kind === "legacy_unknown" ? " - kan ikke gi step-up i enforce, rull inn på nytt med type" : ""}`,
               current ? "DENNE enheten (kan ikke tilbakekalles herfra)" : "",
               d.last_grant_at ? `sist innlogget ${rel(d.last_grant_at)}` : "aldri innlogget"
             ].filter((x) => x !== "").join(" · "),
-            facts: { kind: d.kind, person_id: d.person_id, role: d.role, delegated, revoked: revokedDevice, active_grants: d.active_grants, enrolled_at: d.created_at, last_grant_at: d.last_grant_at, current_device: current }
+            facts: {
+              kind: d.kind, person_id: d.person_id, role: d.role, delegated, revoked: revokedDevice, active_grants: d.active_grants, enrolled_at: d.created_at, last_grant_at: d.last_grant_at, current_device: current,
+              ...(d.device_kind !== undefined ? { device_kind: d.device_kind, step_up_capable: deviceKindHoldsStepUpChannel(d.device_kind), ...(d.device_kind_source !== undefined ? { device_kind_source: d.device_kind_source } : {}) } : {})
+            }
           }));
           if (!revokedDevice && !current) {
             actions.push(controlAction({
