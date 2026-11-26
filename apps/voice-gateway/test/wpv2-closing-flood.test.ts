@@ -215,7 +215,7 @@ describe("FIX-1 (F10): etter at close-rammen er sendt tåles bare et lite budsje
     expect(logs.filter((l) => l.includes("voice_closed_peer_flood"))).toEqual([]);
   });
 
-  it("en AVVIST tilkobling (1013 voice_busy) som ikke svarer på close og flommer: termineres straks - ikke først etter svarfristen - og eieren berøres ikke", async () => {
+  it.each<FrameKind>(["text", "binary", "ping", "pong"])("en AVVIST tilkobling (1013 voice_busy) som ikke svarer på close og flommer med %s-rammer: termineres straks - ikke først etter svarfristen - og eieren berøres ikke", async (kind) => {
     gateway = await startGateway({ limits: { maxConnections: 1, maxConnectionsPerPeer: 10, refusedCloseGraceMs: 60_000 } });
     const owner = await new TestClient(gateway.url).connect();
     await owner.startProven(); // bevist = aldri utkastet: nye tilkoblinger avvises
@@ -225,7 +225,7 @@ describe("FIX-1 (F10): etter at close-rammen er sendt tåles bare et lite budsje
     expect(receivedClose(refused)).toEqual({ code: 1013, reason: "voice_busy" });
     expect(await connections(gateway)).toBe(2);
     const floodStarted = Date.now();
-    await floodUntilClosed(refused, frameOf("text"), 4000);
+    await floodUntilClosed(refused, frameOf(kind), 4000);
     await untilConnections(gateway, 1, 4000);
     expect(Date.now() - floodStarted).toBeLessThan(1500); // kun eieren er igjen (svarfristen er satt til 60 s)
     owner.send({ type: "voice_settings", settings: {} });
