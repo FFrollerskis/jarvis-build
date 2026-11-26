@@ -24,6 +24,7 @@ import { Gate, StripeFake, VippsFake } from "./wpf1-fakes.ts";
  *   FIX-A  stale-CREATED-sveipet fanger en intensjon fra `createPayment` i dokumentert minimalform (status og statustidspunkt = NULL) når innsendingen er eldre enn 24 t, og ikke før.
  *   FIX-B  `submitVippsCapture.prepare` krever også at intensjonens LOKALE tilstand tillater capture (`provider_acknowledged`): en oppfrisking som melder AUTHORIZED etter lokal cancel skriver
  *          `provider_status` tilbake, og da avvises capturen likevel (typet feil, ingen reservasjon, ingen leverandørkall).
+ *   FIX-D  `flagCancelConflict` skriver én hendelse pr. (intensjon, årsak): ulike årsaker gir ulike hendelser.
  * Ingen nettverk: `fetch` er stubbet, resten er testdobler.
  */
 let stop: (() => Promise<void>) | undefined;
@@ -712,4 +713,34 @@ describe("FIX-B (fiks-runde 2): submitVippsCapture krever lokal tilstand provide
     expect(violations).toEqual([]);
     expect(cancelledRounds).toBeGreaterThan(0); // proben har faktisk nådd cancel + tilbakeskrivingen (ikke en tom kjøring)
   }, 120_000);
+});
+
+// === Fiks-runde 2 / FIX-D (testhull): konflikthendelsen er pr. (intensjon, årsak) ============================================================
+describe("FIX-D (fiks-runde 2): flagCancelConflict skriver én hendelse pr. (intensjon, årsak) - ulike årsaker gir ulike hendelser", () => {
+  it("TERMINATED, CANCELLED og EXPIRED etter en delvis capture gir tre hendelser (én pr. årsak); gjentakelser gir ingen flere, intensjonen blir aldri cancelled", async () => {
+    const vipps = new VippsFake();
+    const svc = fakeService(vipps);
+    const intent = await authorizedIntent(svc, 10_000);
+    const capture = await draftCapture(svc, intent.payment_intent_id, 2_500);
+    await svc.submitVippsCapture(TENANT, "business", capture.capture_id);
+    const reasons = async (): Promise<string[]> => (await conflictEvents(intent.payment_intent_id)).map((e) => String(e.metadata["reason"])).sort();
+    const refreshAs = async (state: string): Promise<void> => { vipps.paymentState = { state }; await svc.refreshVippsPaymentState(TENANT, "business", intent.payment_intent_id); };
+
+    expect((await webhook(svc, intent.payment_intent_id, "TERMINATED")).status).toBe("processed");
+    expect(await reasons()).toEqual(["provider_reported_TERMINATED"]);
+    expect((await webhook(svc, intent.payment_intent_id, "CANCELLED")).status).toBe("processed");
+    expect(await reasons()).toEqual(["provider_reported_CANCELLED", "provider_reported_TERMINATED"]); // ny årsak = ny hendelse, selv om flagget og en annen hendelse alt finnes
+    await refreshAs("EXPIRED");
+    expect(await reasons()).toEqual(["provider_reported_CANCELLED", "provider_reported_EXPIRED", "provider_reported_TERMINATED"]);
+
+    // gjentakelser av hver årsak (webhook og oppfrisking): fortsatt én hendelse pr. årsak
+    await webhook(svc, intent.payment_intent_id, "TERMINATED");
+    await webhook(svc, intent.payment_intent_id, "CANCELLED");
+    await refreshAs("TERMINATED");
+    await refreshAs("CANCELLED");
+    await refreshAs("EXPIRED");
+    expect(await reasons()).toEqual(["provider_reported_CANCELLED", "provider_reported_EXPIRED", "provider_reported_TERMINATED"]);
+    for (const e of await conflictEvents(intent.payment_intent_id)) expect(e.metadata).toMatchObject({ captures: "settled_captures" });
+    expect((await intentRow(intent.payment_intent_id)).state).toBe("provider_acknowledged");
+  });
 });

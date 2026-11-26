@@ -92,6 +92,16 @@ describe("FIX-8: kort med en innsending uten svar overflates etter at leasen er 
     expect(await loopFor(inconsistent)).toBeUndefined();
   });
 
+  it("draft-vernet: et kort som IKKE er draft (pending_provider/active/frozen/closed) uten leverandør-id og uten flagg, med en gammel reservasjonsmarkør, gir ingen loop; kontroll: samme rad som draft gir loop", async () => {
+    // fiks-runde 2 (FIX-D): markøren `submitted_at` kan stå igjen på et kort som siden er avsluttet/endret lokalt (f.eks. lukket uten at innsendingen noen gang fikk svar) - det er ikke lenger en «innsending uten svar»
+    const nonDraft: string[] = [];
+    for (const state of ["pending_provider", "active", "frozen", "closed"]) nonDraft.push(await card({ submittedAgo: "10 minutes", state, name: `Ikke-draft ${state}` }));
+    const draft = await card({ submittedAgo: "10 minutes", name: "Draft-kontroll" });
+    await openLoops.detectCardAnomalies(TENANT, "business");
+    for (const id of nonDraft) expect(await loopFor(id), id).toBeUndefined();
+    expect((await loopFor(draft))?.reason).toMatch(/innsending til Wallester uten svar/);
+  });
+
   it("et flagget kort gir fortsatt loopen med flaggene i teksten (uendret oppførsel)", async () => {
     const id = await card({ submittedAgo: "10 minutes", flags: ["CARD_SUBMIT_OUTCOME_UNKNOWN"] });
     await openLoops.detectCardAnomalies(TENANT, "business");
