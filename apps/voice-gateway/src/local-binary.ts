@@ -82,9 +82,12 @@ export class AvailabilityCache {
  * Dreper HELE prosessgruppen `proc` leder (krever `detached: true` ved spawn), ALDRI kun selve PID-en: en wrapper-script/binær kan
  * ha barneprosesser som arver stdout-pipen - å drepe bare toppen lar pipen stå åpen (Node ser aldri `close`) og et kall henger til
  * barnet gir opp. `ESRCH` (allerede borte) svelges bevisst - det er det forventede, harmløse utfallet.
+ *
+ * FIX-4 (runde 2): en prosess som er drept av et SIGNAL har `exitCode === null` men `signalCode` satt - begge sjekkes, ellers kunne en forsinket SIGKILL
+ * (opptrappings-tidtakere) treffe en fremmed prosessgruppe som har overtatt den gamle pid-en.
  */
 export function killProcessGroup(proc: ReturnType<typeof spawn>, signal: NodeJS.Signals = "SIGTERM"): void {
-  if (proc.exitCode !== null || proc.pid === undefined || (signal === "SIGTERM" && proc.killed)) {
+  if (proc.exitCode !== null || proc.signalCode !== null || proc.pid === undefined || (signal === "SIGTERM" && proc.killed)) {
     return;
   }
   try {
