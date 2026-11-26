@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
-import { isUnknownOutcomeReason, type DockerMutationAction, type ToolGateway } from "@jarvis/tool-gateway";
+import { isAcceptedButUnverifiedReason, isUnknownOutcomeReason, type DockerMutationAction, type ToolGateway } from "@jarvis/tool-gateway";
 import { computeStateDiff } from "./diff.ts";
 import type { InfraExecution, InfraOperationalOutcome } from "./types.ts";
 
@@ -70,7 +70,8 @@ function determineOutcome(
   failureReason?: string
 ): InfraOperationalOutcome {
   // WP-K (uavhengig delta-review L-1): et UKJENT utfall (gateway-tidsavbrudd, `outcome_unknown:...`, rad som står reservert) er ikke «ingenting skjedde» - ledgeren står `unverified`, så journalen sier UNKNOWN, ikke FAILED.
-  if (!executeOk) return failureReason !== undefined && isUnknownOutcomeReason(failureReason) ? "UNKNOWN" : "FAILED";
+  // WP-T1 K6 (JARVIS-105): det samme gjelder et utfall leverandøren AKSEPTERTE men gatewayen ikke kunne bekrefte (`postcondition_mismatch`, `postcondition_unverified:readback_failed` m.fl.): handlingen kan være utført, tilstanden er ikke bekreftet.
+  if (!executeOk) return failureReason !== undefined && (isUnknownOutcomeReason(failureReason) || isAcceptedButUnverifiedReason(failureReason)) ? "UNKNOWN" : "FAILED";
   if (!after || typeof after !== "object" || Array.isArray(after)) return "UNKNOWN";
   const state = after as Record<string, unknown>;
   if (action === "redeploy_container") {
@@ -151,7 +152,8 @@ export async function executeInfraMutation(
   });
 
   // Et ukjent utfall har en før-tilstand i ledgeren (preflight kjørte) og trenger den for recovery (samme som `executeCloudMutation`); en vanlig feil har ingenting å lese.
-  const unknownOutcome = !result.ok && isUnknownOutcomeReason(result.reason);
+  // WP-T1 K6: også et akseptert-men-uverifisert utfall (ledger `unverified`) har før-/etter-tilstand i ledgeren, og recovery trenger før-tilstanden.
+  const unknownOutcome = !result.ok && (isUnknownOutcomeReason(result.reason) || isAcceptedButUnverifiedReason(result.reason));
   const { before, after, key_collision } = result.ok || unknownOutcome
     ? await readToolExecutionState(deps.pool, input.tenant_id, input.idempotency_key, { tool_id: "docker", action: input.action })
     : { before: null, after: null, key_collision: false };

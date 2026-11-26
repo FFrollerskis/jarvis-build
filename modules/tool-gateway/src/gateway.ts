@@ -574,6 +574,15 @@ export function isUnknownOutcomeReason(reason: string): boolean {
 }
 
 /**
+ * WP-T1 K6 (JARVIS-105): leverandøren AKSEPTERTE mutasjonen, men etterbetingelsen kunne ikke bekreftes eller holdt ikke (`postcondition_mismatch`, `postcondition_unverified:readback_failed`/`:target_missing`/`:predicate_error`/
+ * `:no_provider_id`, ...): ledgeren står `unverified`. Utfallet er da ikke «feilet» (ingenting skjedde) - handlingen KAN være utført, og tilstanden er ikke bekreftet. Journalen for Docker-mutasjoner (`modules/incidents`)
+ * brukte tidligere `isUnknownOutcomeReason` alene og skrev slike utfall som FAILED; den bruker nå denne i tillegg. Endrer ingen `postcondition_reason`-streng og ikke `isUnknownOutcomeReason` (andre forbrukere er festet til den).
+ */
+export function isAcceptedButUnverifiedReason(reason: string): boolean {
+  return reason.startsWith("postcondition_");
+}
+
+/**
  * WP-K (review M1): klasse C/D-mutasjoner som IKKE er idempotente hos leverandøren (`idempotent_external: false`). En uavklart transportfeil (`TimeoutError`/`AbortError`, nullstilt socket etter sending, `fetch failed`)
  * betyr at leverandøren KAN ha utført mutasjonen - da er utfallet ukjent (`unverified`), aldri `failed`, ellers re-armer et samme-nøkkel-replay raden og sender POST-en en gang til. Klasse A (lesing) har ingen ledger,
  * idempotente mutasjoner tåler en retry, og klasse B (intern/reversibel bokføring og varsler) er bevisst utenfor (se runbook).
