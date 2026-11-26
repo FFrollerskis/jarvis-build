@@ -1,5 +1,10 @@
 {
+  "schema_version": 2,
   "constitution_id": "jarvis-evolution-constitution",
+  "version": 2,
+  "issued_at": "2026-11-26T00:00:00.000Z",
+  "issued_by": "UNSIGNED-DRAFT-awaiting-owner-signature",
+  "notes": "UTKAST - eier MÅ vurdere før signering: alle verdier under budget_caps er konservative startverdier, ikke beslutninger. Kostnadstak er i øre pr. kalendermåned (de fem kategoriene summerer til totalen), eier-tid er i minutter pr. uke. Sett issued_by til en nøytral rolle-ID (aldri et personnavn: repoet er offentlig), fjern denne merknaden, øk version ved senere endringer og signer offline (docs/runbooks/EV0_CONSTITUTION_SIGNING.md).",
   "e1_allowlist": [
     "config/charlie-personality.json"
   ],
@@ -11,8 +16,6 @@
     "read_break_glass_key",
     "grant_self_root"
   ],
-  "issued_at": "2026-10-05T00:00:00.000Z",
-  "issued_by": "UNSIGNED-DRAFT-awaiting-owner-signature",
   "protected_paths": [
     {
       "kind": "prefix",
@@ -87,12 +90,18 @@
       "value": "ops/break-glass/"
     }
   ],
-  "schema_version": 1,
-  "version": 1,
   "budget_caps": {
     "max_auto_merges_per_day": 5,
     "max_deploys_per_day": 3,
+    "max_deploys_per_hour": 1,
     "max_owner_proposals_per_day": 10,
-    "max_evolution_cost_ore_per_month": 10000
+    "max_evolution_cost_ore_per_month": 10000,
+    "max_radar_cost_ore_per_month": 2000,
+    "max_eval_cost_ore_per_month": 3000,
+    "max_redteam_cost_ore_per_month": 1500,
+    "max_shadow_cost_ore_per_month": 1500,
+    "max_review_cost_ore_per_month": 2000,
+    "owner_time_budget_minutes_per_week": 240,
+    "max_owner_minutes_per_autonomous_change": 15
   }
 }

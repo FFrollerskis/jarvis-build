@@ -968,7 +968,11 @@ describe("K: endringsregisteret (EV-0, D-408) koblet inn i tjenesten", () => {
 
 describe("L: budsjettlås for automatiske merger (EV-0, D-409)", () => {
   const DIGEST = "f".repeat(64);
-  const caps = (n: number) => ({ max_auto_merges_per_day: n, max_deploys_per_day: 5, max_owner_proposals_per_day: 5, max_evolution_cost_ore_per_month: 1000 });
+  const caps = (n: number) => ({
+    max_auto_merges_per_day: n, max_deploys_per_day: 5, max_deploys_per_hour: 2, max_owner_proposals_per_day: 5, max_evolution_cost_ore_per_month: 1000,
+    max_radar_cost_ore_per_month: 200, max_eval_cost_ore_per_month: 300, max_redteam_cost_ore_per_month: 100, max_shadow_cost_ore_per_month: 100, max_review_cost_ore_per_month: 300,
+    owner_time_budget_minutes_per_week: 120, max_owner_minutes_per_autonomous_change: 10
+  });
 
   it("L1: grensen er nådd -> raden blir stående pending_ci (ikke feilet), eieren varsles ÉN gang, revisjon DENY, GitHub aldri kalt for merge", async () => {
     const requestId = await insertRequest();

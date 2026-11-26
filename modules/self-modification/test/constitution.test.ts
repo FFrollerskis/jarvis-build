@@ -39,7 +39,7 @@ const code = (fn: () => unknown): string => {
 describe("A: verifisering - fail-closed", () => {
   it("A1: gyldig signatur + festet nøkkel -> Constitution med versjon og digest", () => {
     const c = verifyOk();
-    expect(c.version).toBe(1);
+    expect(c.version).toBe(2);
     expect(c.digest).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -72,7 +72,8 @@ describe("A: verifisering - fail-closed", () => {
   });
 
   it("A7: rollback-vern - lavere versjon enn minVersion avvises", () => {
-    expect(code(() => verifyOk(repoManifest(), keypair(), { minVersion: 2 }))).toBe("constitution_rollback");
+    expect(code(() => verifyOk(repoManifest(), keypair(), { minVersion: 3 }))).toBe("constitution_rollback");
+    expect(code(() => verifyOk(repoManifest(), keypair(), { minVersion: 2 }))).toBe("no_error");
     expect(code(() => verifyOk(repoManifest(), keypair(), { minVersion: 1 }))).toBe("no_error");
   });
 
@@ -185,7 +186,7 @@ describe("D: repoets manifest og signeringsverktøy", () => {
     const base = { manifestPath: join(dir, "m.json"), signaturePath: join(dir, "s.sig"), publicKeyPath: join(dir, "k.pem"), pinnedPublicKeySha256: kp.fp };
     await expect(loadConstitution(base)).rejects.toMatchObject({ code: "constitution_unsigned" });
     await writeFile(join(dir, "s.sig"), `${signed(manifest, kp)}\n`);
-    await expect(loadConstitution(base)).resolves.toMatchObject({ version: 1 });
+    await expect(loadConstitution(base)).resolves.toMatchObject({ version: 2 });
     await expect(loadConstitution({ ...base, manifestPath: join(dir, "nope.json") })).rejects.toMatchObject({ code: "constitution_missing" });
   });
 });

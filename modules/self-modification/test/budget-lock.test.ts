@@ -7,7 +7,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import { BUDGET_HARD_CEILINGS, BudgetLock, ChangeLedger, ConstitutionError, buildConstitution, startOfUtcDay, type LedgerCounter } from "../src/index.ts";
+import { BUDGET_HARD_CEILINGS, BudgetLock, ChangeLedger, ConstitutionError, buildConstitution, startOfUtcDay, type BudgetCaps, type LedgerCounter } from "../src/index.ts";
 
 /** EV-0 (D-409): budsjettlåser - ren logikk + ekte Postgres (telling fra endringsregisteret). */
 const repoManifest = (): Record<string, unknown> =>
@@ -16,7 +16,11 @@ const code = (fn: () => unknown): string => {
   try { fn(); } catch (err) { return (err as ConstitutionError).code ?? `other:${(err as Error).message}`; }
   return "no_error";
 };
-const CAPS = { max_auto_merges_per_day: 2, max_deploys_per_day: 1, max_owner_proposals_per_day: 3, max_evolution_cost_ore_per_month: 1000 };
+const CAPS: BudgetCaps = {
+  max_auto_merges_per_day: 2, max_deploys_per_day: 1, max_deploys_per_hour: 1, max_owner_proposals_per_day: 3, max_evolution_cost_ore_per_month: 1000,
+  max_radar_cost_ore_per_month: 200, max_eval_cost_ore_per_month: 300, max_redteam_cost_ore_per_month: 100, max_shadow_cost_ore_per_month: 100, max_review_cost_ore_per_month: 300,
+  owner_time_budget_minutes_per_week: 120, max_owner_minutes_per_autonomous_change: 10
+};
 const fixed = (iso: string) => () => new Date(iso);
 const counter = (n: number): LedgerCounter => ({ countSince: async () => n });
 

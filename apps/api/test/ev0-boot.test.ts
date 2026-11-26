@@ -34,7 +34,8 @@ describe("checkEv0Boot", () => {
   it("A2: signert + festet nøkkel -> verified med versjon og digest", async () => {
     const { dir, fp } = await signedDir();
     const r = await checkEv0Boot({ pool: emptyLedgerPool as never, pinnedPublicKeySha256: fp, configDir: dir });
-    expect(r.constitution).toMatchObject({ status: "verified", version: 1 });
+    // K8 (WP-EV0): versjonen følger repoets manifest (v2 etter herdingen) - oppstartssjekken er uendret, bare kjent med den nye versjonen.
+    expect(r.constitution).toMatchObject({ status: "verified", version: 2 });
     expect((r.constitution as { digest: string }).digest).toMatch(/^[0-9a-f]{64}$/);
   });
 

@@ -60,40 +60,83 @@ export const REQUIRED_PROTECTED_PROBES: readonly string[] = [
   "ops/break-glass/freeze-jarvis.sh"
 ];
 
+/** Kostnadskategorier for Evolution-motoren (HF2 kap. 29): hver har et eget månedstak i det signerte manifestet; totalen har `max_evolution_cost_ore_per_month`. */
+export const EVOLUTION_COST_CATEGORIES = ["radar", "eval", "redteam", "shadow", "review"] as const;
+export type EvolutionCostCategory = (typeof EVOLUTION_COST_CATEGORIES)[number];
+
+/** Hvilket `budget_caps`-felt som er taket (øre pr. kalendermåned) for hver kategori. */
+export const CATEGORY_CAP_KEYS = {
+  radar: "max_radar_cost_ore_per_month",
+  eval: "max_eval_cost_ore_per_month",
+  redteam: "max_redteam_cost_ore_per_month",
+  shadow: "max_shadow_cost_ore_per_month",
+  review: "max_review_cost_ore_per_month"
+} as const satisfies Record<EvolutionCostCategory, string>;
+
+const capInt = z.number().int().min(0);
+
 /**
- * EV-0 budsjettlåser (plan kap. 6): grenser for hvor mye Evolution-motoren kan gjøre uten eieren. Ligger i det SIGNERTE manifestet - altså
+ * EV-0 budsjettlåser (plan kap. 6 og 29): grenser for hvor mye Evolution-motoren kan gjøre uten eieren. Ligger i det SIGNERTE manifestet - altså
  * kan Evolution aldri heve dem selv (E3 `raise_own_authority_or_budget_limits`); å heve en grense krever at eieren signerer et nytt manifest offline.
+ * Manifestet er KILDEN (øre/minutter); `docs/PROJECT_STATUS.md` er kun en generert visning (WP-EV0, PC2). Hvert felt er påkrevd - ingen stille standard.
  */
 export const BudgetCapsSchema = z
   .object({
     /** Automatiske (E1) merger pr. UTC-døgn. */
-    max_auto_merges_per_day: z.number().int().min(0),
+    max_auto_merges_per_day: capInt,
     /** Deploys (alle klasser) pr. UTC-døgn. */
-    max_deploys_per_day: z.number().int().min(0),
+    max_deploys_per_day: capInt,
+    /** Deploys (alle klasser) pr. hel UTC-time (HF2 kap. 15: deploybudsjett pr. time OG døgn). Kan ikke overstige døgnet. */
+    max_deploys_per_hour: capInt,
     /** Nye E2-forslag som sendes til eieren pr. UTC-døgn (eierens tid er et budsjett). */
-    max_owner_proposals_per_day: z.number().int().min(0),
-    /** Evolution-kost (modell/research) pr. kalendermåned, i øre. */
-    max_evolution_cost_ore_per_month: z.number().int().min(0)
+    max_owner_proposals_per_day: capInt,
+    /** TOTAL Evolution-kost (modell/research) pr. kalendermåned, i øre. Kategoritakene under summerer til høyst dette. */
+    max_evolution_cost_ore_per_month: capInt,
+    /** Kategori-tak pr. kalendermåned, i øre (se `CATEGORY_CAP_KEYS`): radar, eval, red team, shadow/canary, uavhengig review. */
+    max_radar_cost_ore_per_month: capInt,
+    max_eval_cost_ore_per_month: capInt,
+    max_redteam_cost_ore_per_month: capInt,
+    max_shadow_cost_ore_per_month: capInt,
+    max_review_cost_ore_per_month: capInt,
+    /** Eierens tidsbudsjett for Evolution (godkjenninger, merking, review, styring), minutter pr. UTC-ISO-uke (mandag 00:00). */
+    owner_time_budget_minutes_per_week: capInt,
+    /** Maks eier-minutter pr. autonom endring (summert over endringens levetid). Kan ikke overstige ukebudsjettet. */
+    max_owner_minutes_per_autonomous_change: capInt
   })
   .strict();
 export type BudgetCaps = z.infer<typeof BudgetCapsSchema>;
 
-/** Harde tak i koden: selv et signert manifest kan ikke sette grensene høyere (`constitution_weakened`). */
+/**
+ * Harde tak i koden: selv et signert manifest kan ikke sette grensene høyere (`constitution_weakened`). Evolution totalt ≤ 1000 kr/mnd
+ * (ADR-001 §2.3 pkt 4: 3000 kr/mnd for hele Jarvis). Hvert felt MÅ ha et tak (testet: nøklene er identiske med skjemaets).
+ * Kategoritakene har samme tak som totalen: det som binder er summeregelen (kategorier ≤ total), ikke et eget kategoritak.
+ */
 export const BUDGET_HARD_CEILINGS: Readonly<BudgetCaps> = Object.freeze({
   max_auto_merges_per_day: 20,
   max_deploys_per_day: 10,
+  max_deploys_per_hour: 3,
   max_owner_proposals_per_day: 50,
-  max_evolution_cost_ore_per_month: 100_000
+  max_evolution_cost_ore_per_month: 100_000,
+  max_radar_cost_ore_per_month: 100_000,
+  max_eval_cost_ore_per_month: 100_000,
+  max_redteam_cost_ore_per_month: 100_000,
+  max_shadow_cost_ore_per_month: 100_000,
+  max_review_cost_ore_per_month: 100_000,
+  owner_time_budget_minutes_per_week: 600,
+  max_owner_minutes_per_autonomous_change: 60
 });
 
 export const ConstitutionManifestSchema = z
   .object({
-    schema_version: z.literal(1),
+    /** 2 = WP-EV0 (HF2 EV-0): kategori-tak, eier-tid og deploys pr. time. Format 1 (4 felt) ble aldri signert og avvises. */
+    schema_version: z.literal(2),
     constitution_id: z.string().min(1).max(80),
     /** Monoton økende; kjøretiden nekter nedgradering mot `minVersion` (rollback-vern). */
     version: z.number().int().min(1),
     issued_at: z.string().datetime(),
     issued_by: z.string().min(1).max(80),
+    /** Fri tekst som signeres sammen med resten (f.eks. utkast-merknad). Aldri maskinlest som regel. */
+    notes: z.string().min(1).max(2000).optional(),
     protected_paths: z.array(PathRuleSchema).min(1).max(200),
     /** Eksakte stier som kan gi E1 (canary). Må være delmengde av den hardkodede `ZERO_REVIEW_ALLOWLIST`. */
     e1_allowlist: z.array(z.string().min(1).max(200)).max(20),
@@ -183,6 +226,14 @@ export function buildConstitution(raw: unknown): Constitution {
 
   for (const key of Object.keys(BUDGET_HARD_CEILINGS) as Array<keyof BudgetCaps>) {
     if (manifest.budget_caps[key] > BUDGET_HARD_CEILINGS[key]) throw new ConstitutionError("constitution_weakened", `budget_above_ceiling:${key}`);
+  }
+  // Koherens (etter takene, så et tak-brudd alltid vinner): manifestet må ikke love mer enn det selv tillater.
+  const caps = manifest.budget_caps;
+  const categorySum = EVOLUTION_COST_CATEGORIES.reduce((n, c) => n + caps[CATEGORY_CAP_KEYS[c]], 0);
+  if (categorySum > caps.max_evolution_cost_ore_per_month) throw new ConstitutionError("constitution_invalid", "budget_categories_exceed_total");
+  if (caps.max_deploys_per_hour > caps.max_deploys_per_day) throw new ConstitutionError("constitution_invalid", "deploys_per_hour_above_per_day");
+  if (caps.max_owner_minutes_per_autonomous_change > caps.owner_time_budget_minutes_per_week) {
+    throw new ConstitutionError("constitution_invalid", "owner_change_minutes_above_weekly_budget");
   }
 
   const e1 = new Set(manifest.e1_allowlist);
