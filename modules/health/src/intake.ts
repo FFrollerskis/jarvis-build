@@ -19,8 +19,15 @@ import { isPlausibleObservedAt, validateHealthObservation } from "./validation.t
  *  - SLETTING: HealthKit kan slette og erstatte prøver (f.eks. hvilepuls) og slår sammen delprøver; appen sender slettede `uuid`-er i `deleted_external_sample_ids`, og de fjernes fra personens egne rader.
  *  - REVISJON uten innhold: én `health.intake_batch`-rad med KUN antall og metrikktyper (aldri verdier, prøve-id-er eller tidspunkt). Helsedata er begrenset (SECRET_RESTRICTED): ingen modell, prompt, logg eller verktøy ser dem - denne tjenesten har
  *    ingen avhengighet til modellgatewayen og er ikke registrert som noe verktøy.
- * Kjent begrensning (ikke skjult): kumulative metrikker (`steps`, `active_energy_kcal`, `exercise_minutes`) kan slås sammen av HealthKit (nye uuid-er). Mottar vi ikke slettingen av de gamle prøvene, telles de dobbelt; appen må sende
- * `deleted_external_sample_ids` (HKDeletedObject, midlertidig i HealthKit) eller sende lukkede intervaller. `DEFERRED`: serverside-deteksjon av overlappende kumulative prøver.
+ * Kjente begrensninger (ikke skjult; WP-G2c, D-483, JARVIS-113 e/5). ALLE er `DEFERRED`: de krever appen (`BLOCKED_EXTERNAL`), og en prøve bærer bare `observed_at` (ikke start/slutt eller HealthKit-kilde), så serveren kan ikke oppdage dem selv og
+ * gjetter aldri hvilke prøver som er slått sammen. Appens kontrakt (uverifisert mot en ekte enhet - appen finnes ikke):
+ *  1. SAMMENSLÅING gjelder ALLE metrikker, ikke bare de kumulative (`steps`, `active_energy_kcal`, `exercise_minutes`): HealthKit kan slå sammen eller erstatte prøver også for `heart_rate` (og erstatte f.eks. hvilepuls) under NYE uuid-er. Mottar vi ikke
+ *     slettingen av de gamle prøvene (`deleted_external_sample_ids`, HKDeletedObject - midlertidig i HealthKit), blir både gamle og nye stående (og `steps_today` dobbelttelles). Appen MÅ sende slettingene sammen med erstatningen.
+ *  2. SØVN er en SUM uten egen uuid (`sleep_duration_minutes` = `sleepAnalysis` summert av appen). Appen lager id-en selv, og den MÅ endres når summen endres: samme id med en annen verdi er `conflict` for alltid (prøver er uforanderlige, den nye
+ *     verdien lagres aldri). Kontrakt: versjonert id (f.eks. `sleep:<natt>:<hash av de underliggende uuid-ene>`), og forrige versjons id sendes i `deleted_external_sample_ids` i SAMME batch. Rekkefølgen i en batch er innsettinger FØRST og slettinger
+ *     SIST, i én transaksjon: en id som står i begge listene gir en slettet rad.
+ *  3. SKRITT fra iPhone og Watch overlapper: sender appen råprøver fra begge, summeres de dobbelt i `steps_today` (familievisningen). Appen skal sende HealthKits DEDUPLISERTE statistikk (`HKStatisticsCollectionQuery`, kilder slått sammen etter prioritet)
+ *     i lukkede intervaller i stedet for råprøver.
  */
 export const HEALTH_INTAKE_SOURCE_TYPE = "apple_health";
 /** Begrenset av `MAX_JSON_BODY_BYTES` (64 KiB) i API-et: 250 prøver à ~150 byte + 250 slettinger à ~40 byte holder seg trygt under (se testen); appen deler opp større mengder i flere kall. */

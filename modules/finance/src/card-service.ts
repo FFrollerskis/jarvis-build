@@ -19,7 +19,8 @@ import {
   type CardType,
   type ProviderCard
 } from "./card-types.ts";
-import { FinanceKillSwitchActiveError, InvalidWebhookSignatureError } from "./types.ts";
+import { AmbiguousProviderResponseError, FinanceKillSwitchActiveError, InvalidWebhookSignatureError, ProviderOutcomeUnknownError, SubmitInFlightError } from "./types.ts";
+import { SUBMIT_INFLIGHT_LEASE_MS, classifyProviderFailure, type ProviderFailureClass } from "./submit-guard.ts";
 import { malformedWebhookKey, rejectionCode } from "./webhook-guard.ts";
 
 /**
@@ -129,14 +130,36 @@ function rowToPolicy(row: Record<string, unknown>): CardSpendPolicy {
   };
 }
 
+/** WP-FIN2 (K8): avviksflagget som markerer en kortinnsending med ukjent utfall (se `CardAnomalyType`). */
+const CARD_SUBMIT_UNKNOWN_FLAG = "CARD_SUBMIT_OUTCOME_UNKNOWN";
+
+export interface CardServiceOptions {
+  /** Overstyrer hvor lenge en kortreservasjon regnes som pågående (kun tester/drift-tuning) - standard `SUBMIT_INFLIGHT_LEASE_MS`. */
+  submitLeaseMs?: number;
+}
+
+/**
+ * WP-FIN2 (K8): feilklassifisering for `createCard`. Wallester-transporten kaster `wallester_physical_card_delivery_fields_unavailable` (HTTP-status 0) FØR noe sendes for fysiske kort -
+ * entydig «ikke utført». Alt annet følger den delte finansregelen (`classifyProviderFailure`): 4xx unntatt 408/409 og 429 = ikke utført; tidsavbrudd/avbrudd/5xx/408/409/uklassifisert = UKJENT.
+ */
+function classifyCardSubmitFailure(err: unknown): ProviderFailureClass {
+  if (err instanceof WallesterApiError && err.message === "wallester_physical_card_delivery_fields_unavailable") return "not_executed";
+  return classifyProviderFailure(err);
+}
+
 export class CardService {
+  private readonly submitLeaseMs: number;
+
   constructor(
     private readonly pool: pg.Pool,
     private readonly credentialsProvider: WallesterCredentialsProvider = { getCredentials: async () => null },
     private readonly gatewayFactory: WallesterGatewayFactory = defaultWallesterGatewayFactory,
     private readonly webhookAuthProvider: WallesterWebhookBasicAuthProvider = () => null,
-    private readonly tenantResolver: WallesterTenantResolver = () => null
-  ) {}
+    private readonly tenantResolver: WallesterTenantResolver = () => null,
+    options: CardServiceOptions = {}
+  ) {
+    this.submitLeaseMs = options.submitLeaseMs ?? SUBMIT_INFLIGHT_LEASE_MS;
+  }
 
   private async gateway(tenantId: string): Promise<WallesterGateway> {
     const credentials = await this.credentialsProvider.getCredentials(tenantId);
@@ -218,46 +241,125 @@ export class CardService {
   }
 
   /**
-   * Provider-innsending (spend-muliggjørende -> kill-switch-gated, §11).
-   * Idempotent: allerede innsendt kort (provider_card_id satt) returneres
-   * uendret UTEN nytt provider-kall - retry kan ALDRI skape duplikatkort
-   * (§5); kanonisk card_id sendes som ekstern referanse slik at et
-   * usikkert utfall kan gjenfinnes hos provider. En provider-feil
-   * etterlater kortet i draft (kanonisk tilstand endres ALDRI av en feil).
+   * Provider-innsending (spend-muliggjørende -> kill-switch-gated, §11). Idempotent: allerede innsendt kort (provider_card_id satt) returneres uendret UTEN nytt provider-kall;
+   * kanonisk card_id sendes som ekstern referanse slik at et usikkert utfall kan gjenfinnes hos provider.
+   *
+   * WP-FIN2 (D-486, K8) - RESERVE-THEN-EXECUTE (som refusjoner/captures): fase 1 (kort transaksjon, kortraden låst) validerer og RESERVERER (`submitted_at` på kortet, tilstand `draft`,
+   * ingen `provider_card_id` = «innsending pågår/ukjent») og committer FØR leverandørkallet; fase 2 kaller Wallester UTEN åpen DB-transaksjon; fase 3 lagrer svaret. Tidligere ble raden kun låst
+   * og committet FØR kallet uten markør, så to samtidige kall (eller en retry etter tidsavbrudd) kunne opprette to kort. Wallesters egen deduplisering på `external_reference` er `unverified`,
+   * så sikringen er Jarvis' egen reservasjon - ingen oppslag mot leverandøren:
+   *   - et parallelt kall ser reservasjonen: yngre enn leasen = `submit_in_flight`; eldre (prosessen døde) eller flagget = `submit_outcome_unknown_reconcile_required` (aldri en automatisk ny innsending),
+   *   - UKJENT utfall (tidsavbrudd/avbrudd/5xx/408/409/uklassifisert, eller kortet ble opprettet men lagringen feilet) = flagget `CARD_SUBMIT_OUTCOME_UNKNOWN` + `ProviderOutcomeUnknownError`
+   *     (`outcome_unknown:` -> ledger `unverified`); flagget fjernes kun når en senere innsending faktisk får Wallesters svar (eieren har da avklart saken hos Wallester),
+   *   - entydig avvisning (4xx unntatt 408/409, 429, feil før sending) rydder markøren: kortet er et rent `draft` og en korrigert retry er trygg.
+   * Manuell disposisjon av et flagget kort er IKKE et verktøy (K10, krever step-up = WP-S1): eieren avklarer hos Wallester og retter raden som admin (`FINANCE_D_CHAIN.md` §11).
    */
   async submitCard(tenantId: string, memorySpace: MemorySpace, cardId: string, actorPersonId?: string): Promise<ProviderCard> {
     const prepared = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const card = await this.requireCard(client, tenantId, cardId, true);
       if (card.provider_card_id !== null) return { card, policy: null, submit: false };
       if (card.state !== "draft") throw new CardInvalidStateError(cardId, card.state, "pending_provider");
+      await this.assertSubmitNotReserved(client, tenantId, card);
       await this.assertKillSwitchInactive(client, tenantId);
       const { rows } = await client.query(`SELECT * FROM card_spend_policies WHERE tenant_id = $1 AND card_id = $2`, [tenantId, cardId]);
+      // RESERVER: committes av `withMemoryTransaction` FØR leverandørkallet. Raden er låst, så en samtidig innsending ser markøren først når denne transaksjonen er ferdig.
+      await client.query(
+        `UPDATE provider_cards SET submitted_at = now(), updated_at = now() WHERE tenant_id = $1 AND card_id = $2 AND state = 'draft' AND provider_card_id IS NULL`,
+        [tenantId, cardId]
+      );
       return { card, policy: rows.length > 0 ? rowToPolicy(rows[0] as Record<string, unknown>) : null, submit: true };
     });
     if (!prepared.submit) return prepared.card;
 
-    const gw = await this.gateway(tenantId);
-    const providerCard = await gw.createCard({
-      externalReference: cardId,
-      name: prepared.card.name,
-      type: prepared.card.card_type,
-      currency: prepared.card.currency,
-      cardholderName: null,
-      limits: this.policyToLimits(prepared.policy)
-    });
+    // Credential-oppslaget (kan være et nettverkskall) skjer UTENFOR transaksjon og FØR noe sendes: feiler det, er ingenting sendt - reservasjonen frigis og feilen kastes som før.
+    let gw: WallesterGateway;
+    try {
+      gw = await this.gateway(tenantId);
+    } catch (err) {
+      await this.settleFailedSubmit(tenantId, memorySpace, cardId, "not_executed", "call").catch(() => undefined);
+      throw err;
+    }
 
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const mapped = mapWallesterCardState(providerCard.status);
-      const nextState: CardState = mapped === "active" ? "active" : "pending_provider";
-      const { rows } = await client.query(
-        `UPDATE provider_cards SET provider_card_id = $3, provider_account_id = $4, provider_state = $5, masked_card_number = $6,
-           wallet_tokenization_status = $7, state = $8, submitted_at = now(), activated_at = CASE WHEN $8 = 'active' THEN now() ELSE activated_at END,
-           last_synced_at = now(), updated_at = now()
-         WHERE tenant_id = $1 AND card_id = $2 RETURNING *`,
-        [tenantId, cardId, providerCard.id, providerCard.accountId, providerCard.status, providerCard.maskedCardNumber, providerCard.tokenizationStatus, nextState]
+    let providerCard: Awaited<ReturnType<WallesterGateway["createCard"]>>;
+    try {
+      providerCard = await gw.createCard({
+        externalReference: cardId,
+        name: prepared.card.name,
+        type: prepared.card.card_type,
+        currency: prepared.card.currency,
+        cardholderName: null,
+        limits: this.policyToLimits(prepared.policy)
+      });
+    } catch (err) {
+      const failureClass = classifyCardSubmitFailure(err);
+      await this.settleFailedSubmit(tenantId, memorySpace, cardId, failureClass, "call").catch((cleanupErr) => {
+        console.error(JSON.stringify({ msg: "card_submit_cleanup_failed", card_id: cardId, error: (cleanupErr as Error).message.slice(0, 120) }));
+      });
+      if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(cardId, (err instanceof Error ? err.message : String(err)).replace(/^outcome_unknown:/, "").slice(0, 110), err);
+      throw err;
+    }
+
+    try {
+      return await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+        const mapped = mapWallesterCardState(providerCard.status);
+        const nextState: CardState = mapped === "active" ? "active" : "pending_provider";
+        const { rows } = await client.query(
+          `UPDATE provider_cards SET provider_card_id = $3, provider_account_id = $4, provider_state = $5, masked_card_number = $6,
+             wallet_tokenization_status = $7, state = $8, submitted_at = now(), activated_at = CASE WHEN $8 = 'active' THEN now() ELSE activated_at END,
+             anomaly_flags = anomaly_flags - '${CARD_SUBMIT_UNKNOWN_FLAG}', last_synced_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND card_id = $2 RETURNING *`,
+          [tenantId, cardId, providerCard.id, providerCard.accountId, providerCard.status, providerCard.maskedCardNumber, providerCard.tokenizationStatus, nextState]
+        );
+        await this.logCardEvent(client, tenantId, memorySpace, cardId, "submitted", { provider_card_id: providerCard.id, provider_state: providerCard.status }, actorPersonId);
+        return rowToCard(rows[0] as Record<string, unknown>);
+      });
+    } catch (applyErr) {
+      // Leverandøren HAR opprettet kortet (vi har svaret), men lagringen feilet: UKJENT utfall lokalt, aldri en vanlig feil som kan prøves på nytt (ville opprettet et ANDRE kort).
+      await this.settleFailedSubmit(tenantId, memorySpace, cardId, "unknown", "local_write").catch((cleanupErr) => {
+        console.error(JSON.stringify({ msg: "card_submit_cleanup_failed", card_id: cardId, phase: "after_provider_call", error: (cleanupErr as Error).message.slice(0, 120) }));
+      });
+      throw new ProviderOutcomeUnknownError(cardId, `provider_call_completed_local_write_failed:${applyErr instanceof Error ? applyErr.message : String(applyErr)}`.slice(0, 110), applyErr);
+    }
+  }
+
+  /** WP-FIN2 (K8): en reservert eller flagget kortinnsending skal aldri kalle Wallester på nytt. Kalles med kortraden låst. */
+  private async assertSubmitNotReserved(client: pg.PoolClient, tenantId: string, card: ProviderCard): Promise<void> {
+    if (card.anomaly_flags.includes(CARD_SUBMIT_UNKNOWN_FLAG)) throw new AmbiguousProviderResponseError(card.card_id, "submit_outcome_unknown_reconcile_required");
+    if (card.submitted_at === null) return;
+    // Tid måles av databasen (`clock_timestamp()`), aldri av applikasjonsklokken, slik at flere prosesser er enige (samme prinsipp som `readSubmitAges`).
+    const { rows } = await client.query(
+      `SELECT (EXTRACT(EPOCH FROM (clock_timestamp() - submitted_at)) * 1000)::bigint AS age_ms FROM provider_cards WHERE tenant_id = $1 AND card_id = $2`,
+      [tenantId, card.card_id]
+    );
+    const ageMs = (rows[0] as { age_ms: string | null } | undefined)?.age_ms;
+    if (ageMs !== null && ageMs !== undefined && Number(ageMs) < this.submitLeaseMs) throw new SubmitInFlightError(card.card_id);
+    // Reservert, men uten svar etter at leasen er utløpt: prosessen døde eller svaret uteble - utfallet er ukjent og Wallester har ingen verifisert Idempotency-Key.
+    throw new AmbiguousProviderResponseError(card.card_id, "submit_outcome_unknown_reconcile_required");
+  }
+
+  /**
+   * WP-FIN2 (K8): rydder etter en innsending som ikke ga et kort. `not_executed` = leverandøren har entydig ikke opprettet noe: markøren fjernes og kortet er et rent draft (ingen flagg).
+   * `unknown` = utfallet er uavklart: markøren BEHOLDES, flagget `CARD_SUBMIT_OUTCOME_UNKNOWN` settes og en `provider_error`-hendelse skrives (kun fase/utfall - aldri leverandørtekst).
+   * Egen transaksjon på egen tilkobling; kalleren svelger og logger en sekundærfeil (den opprinnelige feilen skjules aldri).
+   */
+  private async settleFailedSubmit(
+    tenantId: string, memorySpace: MemorySpace, cardId: string, failureClass: ProviderFailureClass, cause: "call" | "local_write"
+  ): Promise<void> {
+    await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      if (failureClass === "not_executed") {
+        await client.query(
+          `UPDATE provider_cards SET submitted_at = NULL, updated_at = now() WHERE tenant_id = $1 AND card_id = $2 AND state = 'draft' AND provider_card_id IS NULL`,
+          [tenantId, cardId]
+        );
+        return;
+      }
+      const flagged = await client.query(
+        `UPDATE provider_cards SET anomaly_flags = (SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(anomaly_flags || '["${CARD_SUBMIT_UNKNOWN_FLAG}"]'::jsonb) AS v), updated_at = now()
+         WHERE tenant_id = $1 AND card_id = $2 AND provider_card_id IS NULL`,
+        [tenantId, cardId]
       );
-      await this.logCardEvent(client, tenantId, memorySpace, cardId, "submitted", { provider_card_id: providerCard.id, provider_state: providerCard.status }, actorPersonId);
-      return rowToCard(rows[0] as Record<string, unknown>);
+      // Flagges kun når kortet FAKTISK er uten leverandørsvar: er svaret allerede lagret (samtidig avklaring) finnes det intet ukjent utfall å varsle om.
+      if ((flagged.rowCount ?? 0) === 1) await this.logCardEvent(client, tenantId, memorySpace, cardId, "provider_error", { phase: "submit", outcome: "unknown", cause });
     });
   }
 
@@ -300,14 +402,25 @@ export class CardService {
     // propagerer og etterlater kanonisk tilstand URØRT (§6).
     const providerResult = await providerCall(gw, prepared.card.provider_card_id!);
 
+    // Fiks-runde 1 (FIX-1): en 2xx fra Wallester betyr at verbet ER utført, også når svaret ikke bærer en status (PATCH-svar kan være tomme; transporten gir da `unknown`). Måltilstanden anvendes
+    // alltid lokalt (nødbremsen `freeze_card` skal aldri la kortet stå `active` mens Wallester har blokkert det), men `provider_state` settes til `unconfirmed` i stedet for en oppdiktet leverandørstatus,
+    // og hendelsen merkes `confirmed: false`. Ingen flagg: en tom bekreftelse er en mulig, forventet svarform (`unverified`).
+    // Fiks-runde 2 (FIX-C): bekreftelsen etterpå er IKKE lik for alle verb.
+    //  - activate/block/unblock: kortet er ikke `closed`, så nattsveipet (`wallester-sweep.ts`) kjører `syncCardState` og leverandørens faktiske status vinner (en gyldig overgang snur tilstanden stille, uten flagg).
+    //  - close: kortet er nå `closed` (terminal), og nattsveipet HOPPER OVER lukkede kort (`listCards(..., includeClosed = false)`). En `close` med tom 2xx som Wallester ikke utførte blir derfor stående
+    //    `closed` + `unconfirmed` UTEN flagg til noen kjører `sync_card_state` manuelt (som flagger avviket `CARD_PROVIDER_STATE_CONFLICT`, aldri en stille gjenoppliving). Samme som `main`.
+    //    Å la sveipet hente `closed` + `unconfirmed` er DEFERRED: det forutsetter at Wallester serverer lukkede kort og at `Closing` (mellomtilstand, avbildes til `frozen`) ikke er en falsk konflikt for et
+    //    lokalt lukket kort - begge `unverified` (D-41). Se FINANCE_D_CHAIN §11.7.
+    const confirmed = providerResult.status !== "unknown";
+    const providerState = confirmed ? providerResult.status : "unconfirmed";
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const timestampColumn = target === "active" ? "activated_at" : target === "frozen" ? "frozen_at" : "closed_at";
       const { rows } = await client.query(
         `UPDATE provider_cards SET state = $3, provider_state = $4, ${timestampColumn} = now(), last_synced_at = now(), updated_at = now()
          WHERE tenant_id = $1 AND card_id = $2 RETURNING *`,
-        [tenantId, cardId, target, providerResult.status]
+        [tenantId, cardId, target, providerState]
       );
-      await this.logCardEvent(client, tenantId, memorySpace, cardId, eventType, { provider_state: providerResult.status }, actorPersonId);
+      await this.logCardEvent(client, tenantId, memorySpace, cardId, eventType, { provider_state: providerState, ...(confirmed ? {} : { confirmed: false }) }, actorPersonId);
       return rowToCard(rows[0] as Record<string, unknown>);
     });
   }
@@ -589,10 +702,10 @@ export class CardService {
     tx: { id: string; authorizationId: string | null; type: "purchase" | "refund" | "reversal" | "fee" | "unknown"; amountOre: number; currency: string; merchantName: string | null; merchantCategoryCode: string | null; channel: string; transactionAt: string | null; settledAt: string | null },
     count: (n: { inserted: number; corrections: number }) => void
   ): Promise<void> {
-    // Deterministisk autorisasjon<->oppgjør-lenking (§9).
+    // Deterministisk autorisasjon<->oppgjør-lenking (§9). WP-FIN2 (D-486, K9a): kun mot autorisasjoner på SAMME kort - et oppgjør som peker på et annet korts autorisasjon lenkes ikke (tidligere ingen `card_id`-predikat).
     let authorizationRowId: string | null = null;
     if (tx.authorizationId) {
-      const auth = await client.query(`SELECT authorization_id, status, amount_ore FROM card_authorizations WHERE tenant_id = $1 AND provider_authorization_id = $2`, [tenantId, tx.authorizationId]);
+      const auth = await client.query(`SELECT authorization_id, status, amount_ore FROM card_authorizations WHERE tenant_id = $1 AND provider_authorization_id = $2 AND card_id = $3`, [tenantId, tx.authorizationId, cardId]);
       if (auth.rows.length > 0) authorizationRowId = (auth.rows[0] as { authorization_id: string }).authorization_id;
     }
     const flags: string[] = [];

@@ -8,6 +8,7 @@ import type { PolicyAuditSinkStats } from "@jarvis/core";
 import { budgetConfigFromEnv } from "@jarvis/model-gateway";
 import { resolveAuthorityMode, type AuthorityConfig, type InfraExecutionGate, type KillSwitch, type OwnerControls, type PolicyAuditStats } from "@jarvis/policy";
 import { allowedReposFromEnv } from "@jarvis/tasks";
+import { autonomyBindBlocker } from "@jarvis/situations";
 import {
   assertManifestInvariants, buildToolManifest, configuredGithubRepo, githubReposUnlocked, parseDockerMutationTargets, parseGceMutationTargets,
   ToolManifestViolationError, type ToolGateway, type ToolManifestEntry
@@ -58,21 +59,21 @@ export async function readDevices(pool: ControlCenterPool, tenantId: string, now
   }));
 }
 
-export interface AutonomyRow { memory_space_id: string; domain: string; tool_id: string; action: string; enabled: boolean; updated_at: string | null }
+export interface AutonomyRow { memory_space_id: string; domain: string; /** WP-G4b K2: `*` = hele domenet (alle eldre bindinger), `rule:<kilde>:<type>` eller `category:<navn>`. Utelatt = `*`. */ scope_key?: string; tool_id: string; action: string; enabled: boolean; updated_at: string | null }
 export interface AutonomyRead { rows: AutonomyRow[]; health_count: number; situation_domains: string[] }
 
 /** Autonomi-policyer (kun handlingens NAVN, aldri parametrene) og domenene situasjoner finnes i. `health` leses kun som antall (isolert rom). */
 export async function readAutonomy(pool: ControlCenterPool, tenantId: string): Promise<AutonomyRead> {
   const main = await tenantSpaceRead(pool, tenantId, NON_HEALTH_SPACES, async (query) => ({
     policies: await query(
-      `SELECT memory_space_id, domain, tool_id, action, enabled, updated_at FROM situation_autonomy_policies WHERE tenant_id = $1 ORDER BY domain, memory_space_id LIMIT 100`, [tenantId]
+      `SELECT memory_space_id, domain, scope_key, tool_id, action, enabled, updated_at FROM situation_autonomy_policies WHERE tenant_id = $1 ORDER BY domain, memory_space_id, scope_key LIMIT 100`, [tenantId]
     ),
     domains: await query(`SELECT DISTINCT domain FROM situations WHERE tenant_id = $1 ORDER BY domain LIMIT 60`, [tenantId])
   }));
   const health = await tenantSpaceRead(pool, tenantId, ["health"], (query) => query(`SELECT (count(*))::int AS n FROM situation_autonomy_policies WHERE tenant_id = $1`, [tenantId]));
   return {
     rows: main.policies.map((r) => ({
-      memory_space_id: String(r["memory_space_id"]), domain: String(r["domain"]), tool_id: String(r["tool_id"]), action: String(r["action"]),
+      memory_space_id: String(r["memory_space_id"]), domain: String(r["domain"]), scope_key: typeof r["scope_key"] === "string" && r["scope_key"] !== "" ? r["scope_key"] : "*", tool_id: String(r["tool_id"]), action: String(r["action"]),
       enabled: Boolean(r["enabled"]), updated_at: toIso(r["updated_at"])
     })),
     health_count: Number(health[0]?.["n"] ?? 0),
@@ -277,31 +278,53 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
       if (pausesR.ok) for (const p of pausesR.value) pausedDomains.set(p.domain, p);
       const allPaused = pausedDomains.has("*");
       if (autonomyR.ok) {
+        // WP-G4b fiks-runde 1 (FIX-2/2b, Q-G4-15): «Tilbakekall autonomi» er et DOMENEBREDT tilbakekall: det fjerner ALLE bindinger i (rom, domene) - den domenebrede OG alle regel-/kategoribindinger - i samme transaksjon
+        // (`executive.revoke_autonomy_binding` -> `situations.clear_autonomy_policy` uten skop), så ingen smal binding kan utføre noe etterpå før eieren eksplisitt binder på nytt. Derfor er det ÉN knapp per (rom, domene) med
+        // minst én rad (også når det kun finnes smale rader), og teksten lister alt som fjernes. En enkelt smal binding kan fortsatt fjernes alene med situations.clear_autonomy_policy (rule/category).
+        const groups = new Map<string, typeof autonomyR.value.rows>();
+        for (const r of autonomyR.value.rows) groups.set(`${r.memory_space_id}:${r.domain}`, [...(groups.get(`${r.memory_space_id}:${r.domain}`) ?? []), r]);
         const items: ControlItem[] = autonomyR.value.rows.map((p) => {
           const paused = allPaused || pausedDomains.has(p.domain);
           // Gjennomgang av PR #316 (M-1): kan domene-pausene ikke leses, VET vi ikke om en aktiv binding er stanset - da er den ukjent (aldri «i orden»), og faktaet sier null i stedet for «ikke pauset».
           const pauseUnknown = !pausesR.ok && p.enabled;
           const ownSpace = p.memory_space_id === ctx.identity.memory_space_id;
-          if (deps.autonomyRevoke === true && ownSpace) {
-            actions.push(controlAction({
-              id: `authority.revoke_autonomy:${p.memory_space_id}:${p.domain}`, label: `Tilbakekall autonomi: ${p.domain}`, endpoint: "/executive/mutate",
-              body: { action: "revoke_autonomy_binding", parameters: { domain: p.domain } },
-              risk_class: riskOf(deps.toolGateway, "executive", "revoke_autonomy_binding"), requires_step_up: actionRequiresStepUp("revoke_autonomy_binding"), reversible: false,
-              description_no: `Fjerner bindingen som lar Jarvis utføre ${p.tool_id}.${p.action} selv i domenet «${p.domain}» (rommet ${p.memory_space_id}). Uten binding utfører Jarvis ingenting selv i domenet (fail-closed): situasjoner blir liggende som forslag til du handler. Parametrene til bindingen slettes og lagres ikke.`,
-              rollback_no: "Kan ikke angres herfra: bind domenet på nytt med situations.set_autonomy_policy (handling og parametre må da gis på nytt).",
-              section_id: "autonomy", item_id: `${p.memory_space_id}:${p.domain}`
-            }));
-          }
+          // WP-G4b K2: en regel-/kategoribinding har egen rad (og egen id).
+          const scopeKey = p.scope_key ?? "*";
+          const scoped = scopeKey !== "*";
+          const itemId = scoped ? `${p.memory_space_id}:${p.domain}:${scopeKey}` : `${p.memory_space_id}:${p.domain}`;
+          // WP-G4b K1 (D-484): en lagret binding til en handling som ikke (lenger) er bindbar til autonom ACT (fysisk, definisjonen erklærer ikke `autonomy_bindable`, eller handlingen er ikke registrert i det hele tatt) utføres ALDRI
+          // og slettes aldri; den vises her så eieren ser at den ikke virker. FIX-10 (review A LOW-3 / B L5): en UKJENT handling gir også WARN (motoren nekter den uansett; tidligere stod den som OK her).
+          const known = deps.toolGateway.get(p.tool_id, p.action) !== undefined;
+          const notBindable = autonomyBindBlocker(p.tool_id, p.action, (t, a) => deps.toolGateway.get(t, a));
+          const inDomain = groups.get(`${p.memory_space_id}:${p.domain}`) ?? [p];
           return controlItem({
-            id: `${p.memory_space_id}:${p.domain}`, label: `${p.domain} (${p.memory_space_id})`, status: pauseUnknown ? "UNKNOWN" : p.enabled && paused ? "WARN" : "OK", observed_at: p.updated_at,
-            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
-            facts: { tool: p.tool_id, action: p.action, risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id }
+            id: itemId, label: `${p.domain} (${p.memory_space_id})${scoped ? ` · ${scopeKey}` : ""}`, status: pauseUnknown ? "UNKNOWN" : p.enabled && (paused || notBindable !== null) ? "WARN" : "OK", observed_at: p.updated_at,
+            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${scoped ? ` · gjelder KUN skopet ${scopeKey} (resten av domenet er uberørt; «Tilbakekall autonomi» for domenet fjerner den sammen med resten, eller den fjernes alene med situations.clear_autonomy_policy)` : ""}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${notBindable !== null ? ` · UTFØRES IKKE autonomt (${notBindable.code === "physical_action_not_bindable" ? "fysisk/kritisk handling" : known ? "definisjonen erklærer ikke handlingen bindbar til autonom ACT" : "handlingen er ikke registrert i verktøyregisteret (ukjent verktøy/handling)"}); bindingen er ikke slettet - fjern eller erstatt den` : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
+            facts: { tool: p.tool_id, action: p.action, ...(scoped ? { scope: scopeKey } : {}), ...(!scoped && inDomain.length > 1 ? { bindings_in_domain: inDomain.length } : {}), risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id, ...(notBindable !== null ? { not_bindable: notBindable.code } : {}) }
           });
         });
+        if (deps.autonomyRevoke === true) {
+          const scopeOf = (r: { scope_key?: string | undefined }): string => r.scope_key ?? "*";
+          for (const group of groups.values()) {
+            const first = group[0]!;
+            if (first.memory_space_id !== ctx.identity.memory_space_id) continue;
+            const ordered = [...group].sort((a, b) => (scopeOf(a) === "*" ? "" : scopeOf(a)).localeCompare(scopeOf(b) === "*" ? "" : scopeOf(b), "en"));
+            const hasBroad = ordered.some((r) => scopeOf(r) === "*");
+            // Løftet står FØRST (beskrivelsen kappes ved 400 tegn); selve skoplisten sist.
+            actions.push(controlAction({
+              id: `authority.revoke_autonomy:${first.memory_space_id}:${first.domain}`, label: `Tilbakekall autonomi: ${first.domain}`, endpoint: "/executive/mutate",
+              body: { action: "revoke_autonomy_binding", parameters: { domain: first.domain } },
+              risk_class: riskOf(deps.toolGateway, "executive", "revoke_autonomy_binding"), requires_step_up: actionRequiresStepUp("revoke_autonomy_binding"), reversible: false,
+              description_no: `Fjerner ${ordered.length === 1 ? "bindingen" : `ALLE ${ordered.length} bindingene`} i domenet «${first.domain}» (rommet ${first.memory_space_id}): etterpå utfører Jarvis ingenting selv i domenet (fail-closed) før du binder på nytt. Før-bildet (inkl. parametre) skrives til revisjonssporet først. Gjelder: ${ordered.map((r) => (scopeOf(r) === "*" ? "hele domenet" : scopeOf(r))).join(", ")}.`,
+              rollback_no: "Kan ikke angres herfra: bind domenet på nytt med situations.set_autonomy_policy (én gang per skop; handling og parametre står i før-bildet i revisjonsraden `autonomy_binding.revoke_requested`).",
+              section_id: "autonomy", item_id: hasBroad ? `${first.memory_space_id}:${first.domain}` : `${first.memory_space_id}:${first.domain}:${scopeOf(ordered[0]!)}`
+            }));
+          }
+        }
         items.sort(bySeverityThenLabel);
         sections.push(controlSection({
           id: "autonomy", title_no: "Delegert autonomi (Jarvis handler selv)", source: "situation_autonomy_policies (tenant + minnerom-RLS; parametre vises aldri)", observed_at: nowIso,
-          summary_no: `${items.length} autonomi-bindinger (${autonomyR.value.rows.filter((p) => p.enabled).length} aktive)${autonomyR.value.health_count > 0 ? `; ${autonomyR.value.health_count} i health-rommet (isolert, ikke listet)` : ""}. Pause domenet under «Pauser og tilbakekall» for å stanse auto-ACT; ${deps.autonomyRevoke === true ? "«Tilbakekall autonomi» fjerner selve bindingen (kun i økta sitt eget rom; bindinger i health-rommet er isolert og kan ikke tilbakekalles herfra)." : "tilbakekall av selve bindingen er DEFERRED (ingen rute)."}`,
+          summary_no: `${items.length} autonomi-bindinger (${autonomyR.value.rows.filter((p) => p.enabled).length} aktive)${autonomyR.value.health_count > 0 ? `; ${autonomyR.value.health_count} i health-rommet (isolert, ikke listet)` : ""}. Pause domenet under «Pauser og tilbakekall» for å stanse auto-ACT; ${deps.autonomyRevoke === true ? "«Tilbakekall autonomi» fjerner selve bindingen og alle regel-/kategoribindinger i samme domene (kun i økta sitt eget rom; bindinger i health-rommet er isolert og kan ikke tilbakekalles herfra)." : "tilbakekall av selve bindingen er DEFERRED (ingen rute)."}`,
           items
         }));
       } else {

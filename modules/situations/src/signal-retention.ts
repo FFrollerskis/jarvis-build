@@ -63,6 +63,16 @@ const clampDays = (value: number | null | undefined, fallback: number): number =
   value === null || value === undefined || !Number.isFinite(value) ? fallback : Math.min(365, Math.max(1, Math.floor(value)));
 
 /**
+ * Det EFFEKTIVE vinduet (dager) en signalsituasjon i et kilde-domene med egen oppbevaring (kamera/vision, helse) overlever: `min(grunnvindu, kildens egen oppbevaring)`, begge klemt til 1-365; uten kildepolicy (`null`/utelatt) gjelder
+ * grunnvinduet selv. ÉN definisjon: sveipet (`retireSignalSituations`) bruker den, og eierens vision-rute (WP-G3b fiks-runde 1, F1) regner en forkorting av kameravinduet mot DEN - grunnvinduet er `JARVIS_SITUATION_LOG_RETENTION_DAYS`
+ * (7-365, standard 30), ikke rutens standard (30), så en forlengelse mot standarden kan likevel forkorte det sveipet bruker.
+ */
+export function signalSituationWindowDays(baseDays: number | undefined, sourceDays: number | null | undefined): number {
+  const base = clampDays(baseDays, DEFAULT_SITUATION_RETENTION_DAYS);
+  return Math.min(base, clampDays(sourceDays, base));
+}
+
+/**
  * Én eller begge oppryddingsstegene feilet. Begge forsøkes ALLTID (se `retireSignalSituations`); feilen kastes først etter det, med hvilke steg som feilet og hva som likevel lyktes. Meldingen er en kort kode uten innhold
  * (`signal_retention_failed:delete`, `...:resolve`, `...:delete.resolve`); den underliggende databasefeilen ligger i `cause`.
  */
@@ -90,7 +100,7 @@ export async function retireSignalSituations(pool: pg.Pool, tenantId: string, me
   const nowMs = options.nowMs ?? Date.now();
   const resolveHours = Math.min(24 * 30, Math.max(1, Math.floor(options.resolveAfterHours ?? DEFAULT_RESOLVE_AFTER_HOURS)));
   const base = clampDays(options.retentionDays, DEFAULT_SITUATION_RETENTION_DAYS);
-  const days = { home: base, vision: Math.min(base, clampDays(options.visionDays, base)), health: Math.min(base, clampDays(options.healthDays, base)) };
+  const days = { home: base, vision: signalSituationWindowDays(options.retentionDays, options.visionDays), health: signalSituationWindowDays(options.retentionDays, options.healthDays) };
   const iso = (daysAgo: number): string => new Date(nowMs - daysAgo * 86_400_000).toISOString();
   const done = { resolved: 0, deleted: 0 };
   const failed: Array<"delete" | "resolve"> = [];

@@ -6,6 +6,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
+import { DEFAULT_PROFILES, demoteLocalProfileToCloud } from "@jarvis/model-gateway";
 import { RunRateService, RunRateTransport, renderRunRateNo, runRateToolDefinitions } from "../src/run-rate.ts";
 
 /** D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger mot ekte Postgres (RLS som jarvis_app, append-only). */
@@ -62,6 +63,33 @@ describe("RunRateService (ekte Postgres)", () => {
     expect(r.daily.length).toBeGreaterThanOrEqual(5);
     expect(r.not_measured.join(" ")).toContain("STT/TTS");
   });
+  it("WP-G4b/N1b-integrasjon (L3): visningens `local` følger per-kall-lokaliteten - en identitet K4-vakten har demotert til sky vises som sky og teller i sky-andelen; `local_vision` forblir lokal", async () => {
+    const T2 = "tenant-rr-demote";
+    await admin.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${T2}','RR demote','person') ON CONFLICT DO NOTHING`);
+    for (const [provider, ore] of [["ollama", 40], ["local_vision", 0]] as const) {
+      await admin.query(
+        `INSERT INTO cost_events (at, tenant_id, kind, amount_ore, provider, model, purpose, success, input_tokens, output_tokens)
+         VALUES (now() - interval '3 hours', $1, $2, $3, $4, 'm', 'CHAT', true, 10, 5)`,
+        [T2, `model:${provider}`, ore, provider]
+      );
+    }
+    const touched = DEFAULT_PROFILES.filter((p) => p.provider === "ollama");
+    const original = touched.map((p) => p.locality);
+    try {
+      const before = await new RunRateService(app).report(T2);
+      expect(before.by_provider.find((p) => p.provider === "ollama")).toMatchObject({ local: true });
+      expect(before.by_provider.find((p) => p.provider === "local_vision")).toMatchObject({ local: true });
+      expect(before.cloud_share_30d).toBe(0);
+      expect(demoteLocalProfileToCloud("ollama")).toBe(true);
+      const after = await new RunRateService(app).report(T2);
+      expect(after.by_provider.find((p) => p.provider === "ollama")).toMatchObject({ local: false });
+      expect(after.by_provider.find((p) => p.provider === "local_vision")).toMatchObject({ local: true });
+      expect(after.cloud_share_30d).toBe(1);
+    } finally {
+      touched.forEach((p, i) => Object.assign(p, { locality: original[i] }));
+    }
+  });
+
   it("norsk oppsummering sier kostnad, prognose, sky-andel, hva som ikke er målt", async () => {
     const r = await new RunRateService(app).report(T);
     expect(r.summary_no).toContain("Månedsprognose");

@@ -289,7 +289,13 @@ export class SupportService {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       let ticket: SupportTicket | undefined;
       let ticketCreated = false;
-      if (input.source_thread_id) {
+      if (input.ticket_id !== undefined) {
+        // WP-P3 K3 (JARVIS-104): en INTERN id (kun `SupportEmailService.reply()`) peker på et EKSISTERENDE ticket - også et manuelt ticket uten kildeinstans/-tråd. Raden leses på (tenant_id, ticket_id) under RLS/rom;
+        // mangler den, kastes det og det OPPRETTES ALDRI noe (ellers ville svaret havnet på et nytt «skygge-ticket»). Tråd-oppslaget under hoppes over.
+        const byId = await client.query(`SELECT * FROM support_tickets WHERE tenant_id = $1 AND ticket_id = $2`, [tenantId, input.ticket_id]);
+        ticket = byId.rows[0] as SupportTicket | undefined;
+        if (!ticket) throw new Error("support_ticket_not_found");
+      } else if (input.source_thread_id) {
         const existing = await client.query(
           `SELECT * FROM support_tickets WHERE tenant_id = $1 AND source_type = $2 AND source_instance_id = $3 AND source_thread_id = $4`,
           [tenantId, input.source_type, input.source_instance_id, input.source_thread_id]

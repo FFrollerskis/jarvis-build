@@ -38,6 +38,8 @@ interface Scenario {
   confirmations?: Array<Record<string, unknown>> | Error;
   env?: Record<string, string | undefined>;
   flags?: { class_d_pipeline_enforced: boolean; credential_binding_active: boolean } | "absent";
+  /** WP-H2: tilby «Tilbakekall autonomi» per binding (`JARVIS_CONTROL_AUTONOMY_REVOKE=on`). Standard AV (som H0). */
+  autonomyRevoke?: boolean;
 }
 
 const dev = (device_id: string, person_id: string, over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -49,7 +51,7 @@ function build(scn: Scenario = {}): { pool: ScriptedPool; run: () => Promise<Con
     { match: /FROM devices d/, rows: scn.devices ?? [dev("dev-current", "person-owner"), dev("dev-phone", "person-owner"), dev("dev-delegate", "person-delegate", { active_grants: 2 }), dev("dev-old", "person-owner", { revoked_at: ago(50 * H), active_grants: 0 })] },
     { match: /SELECT DISTINCT domain FROM situations/, rows: (scn.situationDomains ?? ["finance", "support"]).map((domain) => ({ domain })) },
     { match: /AS n FROM situation_autonomy_policies/, rows: [{ n: scn.healthPolicies ?? 0 }] },
-    { match: /FROM situation_autonomy_policies/, rows: scn.policies ?? [{ memory_space_id: "business", domain: "finance", tool_id: "finance_spend", action: "sync_internal_spend", enabled: true, updated_at: ago(30 * H) }] },
+    { match: /FROM situation_autonomy_policies/, rows: scn.policies ?? [{ memory_space_id: "business", domain: "finance", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) }] },
     { match: /FROM situation_domain_pauses/, rows: scn.pauses ?? [] },
     { match: /FROM finance_kill_switch/, rows: scn.finance ?? [] },
     { match: /FROM action_confirmations/, rows: scn.confirmations ?? [] }
@@ -60,6 +62,7 @@ function build(scn: Scenario = {}): { pool: ScriptedPool; run: () => Promise<Con
   const center = createAuthorityCenter({
     pool: pool.asPool(),
     env: scn.env ?? {},
+    ...(scn.autonomyRevoke === true ? { autonomyRevoke: true } : {}),
     ...(scn.authority === null ? {} : { authority: scn.authority ?? AUTHORITY }),
     toolGateway: {
       list: () => defs, get: (t: string, a: string) => defs.find((d) => d.tool_id === t && d.action === a),
@@ -151,10 +154,88 @@ describe("seksjonene og eier-/delegert autoritet", () => {
     const p = item(r, "autonomy", "business:finance");
     expect(p.status).toBe("WARN");
     expect(p.detail_no).toContain("PAUSET");
-    expect(p.facts).toMatchObject({ tool: "finance_spend", action: "sync_internal_spend", enabled: true, domain_paused: true, risk_class: "B" });
+    expect(p.facts).toMatchObject({ tool: "business", action: "create_followup", enabled: true, domain_paused: true, risk_class: "B" });
     expect(section(r, "autonomy").summary_no).toContain("2 i health-rommet (isolert, ikke listet)");
     const clean = await build().run();
     expect(item(clean, "autonomy", "business:finance").status).toBe("OK");
+  });
+
+  it("WP-G4b K1/K2: en lagret binding til en handling som IKKE er bindbar vises som WARN med forklaring (utføres ikke, er ikke slettet); en skopet binding har eget id og skop og er OK når handlingen er bindbar", async () => {
+    // `make.run_scenario` er registrert (klasse C) uten `autonomy_bindable` => default-deny; en fysisk handling i et fysisk navnerom er stengt uansett
+    const r = await build({ policies: [
+      { memory_space_id: "business", domain: "home", scope_key: "*", tool_id: "make", action: "run_scenario", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "business", domain: "ops", scope_key: "*", tool_id: "home-assistant", action: "lock_set", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "business", domain: "finance", scope_key: "rule:home_assistant:water_leak", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) }
+    ] }).run();
+    const blocked = item(r, "autonomy", "business:home");
+    expect(blocked.status).toBe("WARN");
+    expect(blocked.detail_no).toContain("UTFØRES IKKE autonomt");
+    expect(blocked.detail_no).toContain("definisjonen erklærer ikke handlingen bindbar");
+    expect(blocked.facts).toMatchObject({ tool: "make", action: "run_scenario", not_bindable: "action_not_bindable" });
+    const physical = item(r, "autonomy", "business:ops");
+    expect(physical.status).toBe("WARN");
+    expect(physical.detail_no).toContain("fysisk/kritisk handling");
+    expect(physical.facts).toMatchObject({ not_bindable: "physical_action_not_bindable" });
+    const scoped = item(r, "autonomy", "business:finance:rule:home_assistant:water_leak");
+    expect(scoped.status).toBe("OK");
+    expect(scoped.detail_no).toContain("gjelder KUN skopet rule:home_assistant:water_leak");
+    expect(scoped.facts).toMatchObject({ scope: "rule:home_assistant:water_leak" });
+    expect(scoped.facts).not.toHaveProperty("not_bindable");
+  });
+
+  it("WP-G4b fiks-runde 1 (FIX-10, review A LOW-3 / B L5): en lagret binding til en UKJENT handling (ikke registrert) er WARN med forklaring (ikke OK); en avslått slik rad er ikke en advarsel; bindingen er ikke slettet", async () => {
+    const r = await build({ policies: [
+      { memory_space_id: "business", domain: "ops", scope_key: "*", tool_id: "ukjent_verktoy", action: "handling", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "business", domain: "ops2", scope_key: "*", tool_id: "ukjent_verktoy", action: "handling", enabled: false, updated_at: ago(30 * H) }
+    ] }).run();
+    const unknown = item(r, "autonomy", "business:ops");
+    expect(unknown.status).toBe("WARN");
+    expect(unknown.detail_no).toContain("UTFØRES IKKE autonomt");
+    expect(unknown.detail_no).toContain("ikke registrert i verktøyregisteret");
+    expect(unknown.detail_no).toContain("ikke slettet");
+    expect(unknown.facts).toMatchObject({ not_bindable: "action_not_bindable", risk_class: "ukjent", enabled: true });
+    expect(item(r, "autonomy", "business:ops2").status).toBe("OK"); // avslått = virker ikke uansett
+    expect(section(r, "autonomy").items).toHaveLength(2);
+  });
+
+  it("WP-G4b fiks-runde 1 (FIX-2/2b): «Tilbakekall autonomi» er DOMENEBREDT: ÉN knapp per (rom, domene) som sier at ALLE bindinger i domenet fjernes (også regel-/kategoribindinger og rene smale rader); kun økta sitt eget rom tilbys", async () => {
+    const policies = [
+      { memory_space_id: "personal", domain: "home", scope_key: "*", tool_id: "telegram", action: "notify", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "personal", domain: "home", scope_key: "rule:home_assistant:water_leak", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "personal", domain: "home", scope_key: "category:opening", tool_id: "business", action: "create_followup", enabled: false, updated_at: ago(30 * H) },
+      { memory_space_id: "personal", domain: "finance", scope_key: "*", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "personal", domain: "vision", scope_key: "rule:vision:motion_detected", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "business", domain: "home", scope_key: "*", tool_id: "telegram", action: "notify", enabled: true, updated_at: ago(30 * H) }
+    ];
+    const r = await build({ autonomyRevoke: true, policies }).run();
+    // én knapp per (rom, domene) i økta sitt eget rom (`personal`); `business`-raden får ingen
+    expect(r.actions.map((a) => a.id).filter((id) => id.startsWith("authority.revoke_autonomy:")).sort()).toEqual(["authority.revoke_autonomy:personal:finance", "authority.revoke_autonomy:personal:home", "authority.revoke_autonomy:personal:vision"]);
+    const home = r.actions.find((a) => a.id === "authority.revoke_autonomy:personal:home")!;
+    expect(home).toMatchObject({ endpoint: "/executive/mutate", body: { action: "revoke_autonomy_binding", parameters: { domain: "home" } }, reversible: false, section_id: "autonomy", item_id: "personal:home" });
+    // FIX-C (delta-review, mutant D22): knappens body er NØYAKTIG `{ action, parameters: { domain } }` (toMatchObject godtar ekstra felt; et ekstra `rule`/`category`/`scope` ville gjort tilbakekallet skopet eller ugyldig). Samme for hver knapp, med SITT domene.
+    const revokeBodies = Object.fromEntries(r.actions.filter((a) => a.id.startsWith("authority.revoke_autonomy:")).map((a) => [a.id, a.body]));
+    expect(revokeBodies).toStrictEqual({
+      "authority.revoke_autonomy:personal:finance": { action: "revoke_autonomy_binding", parameters: { domain: "finance" } },
+      "authority.revoke_autonomy:personal:home": { action: "revoke_autonomy_binding", parameters: { domain: "home" } },
+      "authority.revoke_autonomy:personal:vision": { action: "revoke_autonomy_binding", parameters: { domain: "vision" } }
+    });
+    expect(home.description_no).toContain("ALLE 3 bindingene i domenet «home»");
+    expect(home.description_no).toContain("etterpå utfører Jarvis ingenting selv i domenet (fail-closed)");
+    for (const listed of ["hele domenet", "rule:home_assistant:water_leak", "category:opening"]) expect(home.description_no, listed).toContain(listed); // også den avslåtte raden fjernes
+    expect(home.description_no).not.toContain("berøres IKKE"); // den gamle merknaden (Q-G4-15) er løst
+    expect(home.rollback_no).toContain("autonomy_binding.revoke_requested");
+    expect(item(r, "autonomy", "personal:home").facts).toMatchObject({ bindings_in_domain: 3 });
+    // et domene med kun den brede raden: kort tekst uten «ALLE»
+    const finance = r.actions.find((a) => a.id === "authority.revoke_autonomy:personal:finance")!;
+    expect(finance.description_no).toContain("Fjerner bindingen i domenet «finance»");
+    expect(finance.description_no).not.toContain("ALLE");
+    expect(item(r, "autonomy", "personal:finance").facts).not.toHaveProperty("bindings_in_domain");
+    // en RENT smal rad (ingen bred) har nå også en knapp, festet til den smale raden som finnes
+    const vision = r.actions.find((a) => a.id === "authority.revoke_autonomy:personal:vision")!;
+    expect(vision.item_id).toBe("personal:vision:rule:vision:motion_detected");
+    expect(vision.description_no).toContain("rule:vision:motion_detected");
+    // uten tilbakekall-flagget finnes ingen knapp (som H0)
+    expect((await build({ policies }).run()).actions.some((a) => a.id.startsWith("authority.revoke_autonomy:"))).toBe(false);
   });
 });
 

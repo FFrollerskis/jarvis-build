@@ -55,8 +55,12 @@ const authDeps = {
 interface WebhookCall { provider: CommsWebhookProvider; req: WebhookRequest }
 function stubWebhookService(respond: (provider: CommsWebhookProvider, req: WebhookRequest) => WebhookResponse | Promise<WebhookResponse> = () => ({ status: 200, body: { received: true, events: { received: 1, inserted: 1 } } })) {
   const calls: WebhookCall[] = [];
-  const service = { handle: async (provider: CommsWebhookProvider, req: WebhookRequest) => { calls.push({ provider, req }); return respond(provider, req); } } as unknown as CommsWebhookService;
-  return { service, calls };
+  const rejected: Array<{ provider: CommsWebhookProvider; reason: string }> = [];
+  const service = {
+    handle: async (provider: CommsWebhookProvider, req: WebhookRequest) => { calls.push({ provider, req }); return respond(provider, req); },
+    noteRejectedBeforeSignature: (provider: CommsWebhookProvider, reason: string) => { rejected.push({ provider, reason }); }
+  } as unknown as CommsWebhookService;
+  return { service, calls, rejected };
 }
 
 interface GatewayCall { identity: IdentityContext; tool_id: string; action: string; parameters: Record<string, JsonValue>; idempotency_key?: string }
@@ -209,10 +213,11 @@ describe("B: signerte webhook-ruter", () => {
   });
 
   it("for stor kropp gir 413 FØR tjenesten kalles (også uten gyldig signatur); akkurat på grensen slippes gjennom", async () => {
-    const { service, calls } = stubWebhookService();
+    const { service, calls, rejected } = stubWebhookService();
     const base = await listen({ comms: { webhooks: { service, providers: new Set<CommsWebhookProvider>(["slack"]) } } });
     expect((await post(base, "/webhooks/comms/slack", Buffer.alloc(WEBHOOK_MAX_BYTES + 1, 0x61))).status).toBe(413);
     expect(calls).toHaveLength(0);
+    expect(rejected, "413 meldes til tjenesten (leverandør og årsakskode) så driften ser det").toEqual([{ provider: "slack", reason: "payload_too_large" }]);
     expect((await post(base, "/webhooks/comms/slack", Buffer.alloc(WEBHOOK_MAX_BYTES, 0x20))).status).toBe(200);
     expect(calls).toHaveLength(1);
   });
@@ -576,7 +581,8 @@ describe("D: oppkoblingen (`buildCommsRuntime`) og kildevakter", () => {
 
   it("comms-wiring.ts: utgående bygges KUN når flagget er på, webhook-tjenesten KUN med minst én leverandør, og alt-AV returnerer før noe konstrueres", () => {
     const wiring = read("../src/comms-wiring.ts");
-    expect(wiring).toMatch(/if \(!commsAnyEnabled\(config\)\) return \{ config, tools: \[\], apiDeps: \(\) => undefined, startSweeps: \(\) => undefined \};/);
+    // WP-G1c (g5): alt-AV-objektet har ett medlem til, `guardLegacyNotifyTransport`, som MÅ være identiteten (samme transport tilbake; låst av `wpg1c-legacy-notify-wiring.test.ts`).
+    expect(wiring).toMatch(/if \(!commsAnyEnabled\(config\)\) return \{ config, tools: \[\], apiDeps: \(\) => undefined, startSweeps: \(\) => undefined, guardLegacyNotifyTransport: \(_toolId, transport\) => transport \};/);
     expect(wiring.indexOf("if (!commsAnyEnabled(config))")).toBeLessThan(wiring.indexOf("new CommsStore("));
     expect(wiring).toMatch(/const funnel = config\.outbound\s*\n\s*\? new OutboundFunnel\(/);
     expect(wiring).toMatch(/const webhookService = config\.webhooks\.size > 0\s*\n\s*\? new CommsWebhookService\(/);

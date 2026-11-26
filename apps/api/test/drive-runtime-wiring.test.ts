@@ -123,15 +123,17 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
     // D-388: dropbox/onedrive/microsoft_outlook/spotify/vercel tar nå refresh-/auth-/teamId-argumenter
     // (resolver-form, samme som telegram) - teller ikke lenger som tomme konstruktører: 26→21.
-    expect(unconditionalConstructions).toHaveLength(21);
+    // WP-G1c (D-481, JARVIS-112 g5): `slack` og `discord` er pakket inn i STOP-vakten for de eldre notify-verktøyene (`commsRuntime.guardLegacyNotifyTransport`, som returnerer transporten UENDRET når alle `JARVIS_COMMS_*` er AV) og er
+    // derfor ikke lenger en nakent tom konstruktør i literalen: 21→19. Alle andre transporter er uendret.
+    expect(unconditionalConstructions).toHaveLength(19);
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
     expect(callBlock).toContain("docker: new DockerTransport()");
     expect(callBlock).toContain("gce: new GceTransport()");
     expect(callBlock).toContain("mcp_zapier: new McpZapierTransport()");
     expect(callBlock).toContain('browser: new BrowserGatewayTransport(process.env["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"] ?? "")');
     expect(callBlock).toContain("vercel: new VercelTransport(");
-    expect(callBlock).toContain("slack: new SlackTransport()");
-    expect(callBlock).toContain("discord: new DiscordTransport()");
+    expect(callBlock).toContain('slack: commsRuntime.guardLegacyNotifyTransport("slack", new SlackTransport())');
+    expect(callBlock).toContain('discord: commsRuntime.guardLegacyNotifyTransport("discord", new DiscordTransport())');
     expect(callBlock).toContain("brave_search: new BraveSearchTransport()");
     expect(callBlock).toContain("google_maps: new GoogleMapsTransport()");
     expect(callBlock).toContain("google_sheets: new GoogleSheetsTransport()");
@@ -145,15 +147,15 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toContain("microsoft_outlook: new MicrosoftOutlookTransport(microsoftGraphAuth)");
     expect(callBlock).toContain("spotify: new SpotifyTransport({");
     expect(callBlock).toMatch(/telegram: new TelegramTransport\(\(\) => readSecretProvider\.get\("JARVIS_TELEGRAM_CHAT_ID"\)\)/);
-    expect(callBlock).toMatch(/twilio: new TwilioTransport\(\s*\(\) => readSecretProvider\.get\("JARVIS_TWILIO_ACCOUNT_SID"\),\s*\(\) => readSecretProvider\.get\("JARVIS_TWILIO_FROM_NUMBER"\)\s*\)/);
+    expect(callBlock).toMatch(/twilio: commsRuntime\.guardLegacyNotifyTransport\("twilio", new TwilioTransport\(\s*\(\) => readSecretProvider\.get\("JARVIS_TWILIO_ACCOUNT_SID"\),\s*\(\) => readSecretProvider\.get\("JARVIS_TWILIO_FROM_NUMBER"\)\s*\)\)/);
     expect(callBlock).toMatch(/sentry: new SentryTransport\(\(\) => readSecretProvider\.get\("JARVIS_SENTRY_ORG_SLUG"\)\)/);
     expect(callBlock).toMatch(/grafana: new GrafanaTransport\(\(\) => readSecretProvider\.get\("JARVIS_GRAFANA_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/prometheus: new PrometheusTransport\(\(\) => readSecretProvider\.get\("JARVIS_PROMETHEUS_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/n8n: new N8nTransport\(\(\) => readSecretProvider\.get\("JARVIS_N8N_API_BASE_URL"\)\)/);
-    expect(callBlock).toMatch(/whatsapp: new WhatsAppTransport\(\(\) => readSecretProvider\.get\("JARVIS_WHATSAPP_PHONE_NUMBER_ID"\)\)/);
+    expect(callBlock).toMatch(/whatsapp: commsRuntime\.guardLegacyNotifyTransport\("whatsapp", new WhatsAppTransport\(\(\) => readSecretProvider\.get\("JARVIS_WHATSAPP_PHONE_NUMBER_ID"\)\)\)/);
     expect(callBlock).toMatch(/make: new MakeTransport\(\(\) => readSecretProvider\.get\("JARVIS_MAKE_API_BASE_URL"\)\)/);
     expect(callBlock).toContain("openai_images: new OpenAIImagesTransport()");
-    expect(callBlock).toMatch(/telnyx: new TelnyxTransport\(\(\) => readSecretProvider\.get\("JARVIS_TELNYX_FROM_NUMBER"\)\)/);
+    expect(callBlock).toMatch(/telnyx: commsRuntime\.guardLegacyNotifyTransport\("telnyx", new TelnyxTransport\(\(\) => readSecretProvider\.get\("JARVIS_TELNYX_FROM_NUMBER"\)\)\)/);
     expect(callBlock).toContain("runway: new RunwayTransport()");
     expect(callBlock).toMatch(/kling: new KlingTransport\(\(\) => readSecretProvider\.get\("JARVIS_KLING_ACCESS_KEY"\)\)/);
     expect(callBlock).toContain("google_veo: new GoogleVeoTransport()");

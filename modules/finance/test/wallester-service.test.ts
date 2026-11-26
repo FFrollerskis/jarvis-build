@@ -254,11 +254,12 @@ describe("A: kortopprettelse + idempotens", () => {
     expect(gateway.createCalls[0]!.type).toBe("disposable");
   });
 
-  it("provider-feil UNDER innsending etterlater kortet i draft - korrigert retry er trygg", async () => {
+  it("entydig avvist provider-feil (4xx) UNDER innsending etterlater kortet i draft - korrigert retry er trygg", async () => {
+    // WP-FIN2 (D-486, K8): en 5xx/tidsavbrudd er UKJENT utfall (flagg + blokkert retry, se fin2-card-submit-reservation.test.ts); kun en entydig avvisning (4xx) kan prøves på nytt.
     freshServices();
     const draft = await cards.createCard(TENANT_A, "business", { idempotency_key: `card-idem-${randomUUID()}`, name: "K", purpose: "P", card_type: "virtual" });
     gateway.onCreateCard = async () => {
-      throw new WallesterApiError("wallester_api_failed_500:boom", 500, false);
+      throw new WallesterApiError("wallester_api_failed_422:ugyldig", 422, false);
     };
     await expect(cards.submitCard(TENANT_A, "business", draft.card_id)).rejects.toThrow(WallesterApiError);
     const after = await cards.getCard(TENANT_A, "business", draft.card_id);

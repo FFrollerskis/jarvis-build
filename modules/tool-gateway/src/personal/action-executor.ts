@@ -2,8 +2,8 @@ import type pg from "pg";
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
 import { isUnknownOutcomeReason, type ToolGateway } from "../gateway.ts";
-import { PersonalActionJournal, actionRequestDigest, type ActionDomain, type ActionSource, type ActionStatus, type PersonalActionRow } from "./action-journal.ts";
-import type { CriticalOpSpec, Params } from "./critical-ops.ts";
+import { PersonalActionJournal, actionRequestDigest, jsonbSafe, type ActionDomain, type ActionSource, type ActionStatus, type PersonalActionRow } from "./action-journal.ts";
+import { zRecord, type CriticalOpSpec, type Params } from "./critical-ops.ts";
 
 /**
  * WP-G2 (D-464, UA-8): EKSEKUTOREN for eier-initierte kritiske fysiske handlinger (hjem/bil). Selve utførelsen går UTELUKKENDE via `ToolGateway.execute()` (policy, mål-autorisasjon, step-up, klasse D-kjeden med
@@ -105,6 +105,14 @@ function holdTarget(key: string): (() => void) | null {
   return () => { heldTargets.delete(key); };
 }
 
+/**
+ * Tar SAMME prosess-lokale lås som en handling mot (domene, mål) - for avstemmingen (WP-G2c): en avstemming leser målets tilstand og må aldri tolke en handling i flukt (som endrer målet akkurat nå) som beviset for en ELDRE rad.
+ * `null` = en handling (eller en annen avstemming) har målet akkurat nå; kalleren avviser da umiddelbart (`personal_action_target_busy`). Frigjøres alltid av kalleren (`finally`).
+ */
+export function holdPersonalTarget(domain: string, target: string): (() => void) | null {
+  return holdTarget(personalTargetLockKey(domain, target));
+}
+
 /** Antall mål som akkurat nå har en handling i flukt i denne prosessen (diagnostikk og tester: etter en ferdig/feilet handling skal det ikke ligge igjen noen lås). */
 export const personalTargetLocksHeld = (): number => heldTargets.size;
 
@@ -133,10 +141,14 @@ async function executeLocked(deps: PersonalActionExecutorDeps, identity: Identit
   const tenantId = identity.tenant_id;
   const space = identity.memory_space_id as MemorySpace;
 
+  // Migrasjon 144: parameterne lagres (for avstemmingen) KUN når de består handlingens strenge skjema - aldri rå klient-JSON (gatewayen avviser uansett en forespørsel som ikke består; da blir raden `failed` og trenger ikke avstemmes).
+  // ... OG bare når de tåler jsonb (NUL/ensomt surrogat gir en rå databasefeil ved INSERT i stedet for en vanlig avvisning: fiks-runde 1, LOW-2); da lagres `null`, og gatewayen avviser/avgjør forespørselen som før.
+  const validParameters = zRecord(entry.op.shape).safeParse(input.parameters).success && jsonbSafe(input.parameters);
   const begun = await deps.journal.begin(tenantId, space, {
     domain: entry.domain, tool_id: entry.toolId, action: entry.op.action, risk_class: "D", risk_direction: entry.op.direction(input.parameters), target_ref: target,
     idempotency_key: input.idempotency_key, request_digest: actionRequestDigest(entry.domain, entry.op.action, input.parameters), actor_person_id: identity.person_id, source: input.source ?? "owner_route",
-    ...(input.task_id !== undefined ? { task_id: input.task_id } : {}), session_id: input.session_id ?? identity.session_id, ...(input.trace_id !== undefined ? { trace_id: input.trace_id } : {})
+    ...(input.task_id !== undefined ? { task_id: input.task_id } : {}), session_id: input.session_id ?? identity.session_id, ...(input.trace_id !== undefined ? { trace_id: input.trace_id } : {}),
+    request_params: validParameters ? input.parameters : null
   });
   if (!begun.created && (begun.row.status === "applied" || begun.row.status === "failed")) {
     return { action: begun.row, outcome: begun.row.status === "applied" ? "SUCCESS" : "FAILED", reason: begun.row.failure_code, replayed: true };

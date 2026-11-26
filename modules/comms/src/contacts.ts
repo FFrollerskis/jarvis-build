@@ -47,6 +47,10 @@ export const ContactsDeleteSchema = z.object({ resource_name: resourceName }).st
 export const ContactsSyncSchema = z.object({ page_size: z.number().int().min(1).max(100).optional(), page_token: z.string().min(1).max(500).optional() }).strict();
 /** B-H1: tilbakekall identitetslenkene en kontakt har satt (standard), eller angre det (`restore: true`). Sletter aldri en rad, en identitet eller noe hos Google. */
 export const ContactsUnlinkSchema = z.object({ resource_name: resourceName, restore: z.boolean().optional() }).strict();
+/** K4 (JARVIS-112 f1): list lagrede konfliktforslag (standard: kun åpne). */
+export const ListContactConflictsSchema = z.object({ status: z.enum(["proposed", "accepted", "dismissed"]).optional(), limit: z.number().int().min(1).max(200).optional() }).strict();
+/** K4: eierens avgjørelse om et konfliktforslag. `accept` lenker kontakten til den delte identiteten (kun `shared_identity`; match_method forblir `contact_sync`, så mottakeren fortsatt er KALD); `dismiss` huskes. */
+export const DecideContactConflictSchema = z.object({ conflict_id: z.string().min(8).max(80), decision: z.enum(["accept", "dismiss"]) }).strict();
 /** Kilden en kontaktsynk-lenke bærer i Conversation Graph (`source_type`; `external_id` er kontaktens ressursnavn). */
 export const CONTACTS_LINK_SOURCE = "google_contacts";
 

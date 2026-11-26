@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
-import type { JsonValue, MemorySpace } from "@jarvis/contracts";
+import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
+import { writeAudit } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { redactVendorText } from "../vendor-text.ts";
 import type { RiskDirection } from "./critical-ops.ts";
@@ -10,7 +11,8 @@ import type { RiskDirection } from "./critical-ops.ts";
  * (person/tenant/memory space/kilde/task_id/session_id, regel 4). Samme modell som `growth_write_journal` (WP-D3): Jarvis' EGEN, kanoniske sannhet om «hva ble gjort» (D-64: Home Assistant/bil-API er utførere).
  *
  * IDEMPOTENS: `(tenant_id, idempotency_key)` er unik. Samme nøkkel + samme forespørsel (digest) = den eksisterende raden; samme nøkkel for NOE ANNET = `personal_action_idempotency_conflict`.
- * Terminale statuser (`applied`/`failed`) er uforanderlige (databasevakt). `outcome_unknown` kan senere avklares til `applied`/`failed`.
+ * Terminale statuser (`applied`/`failed`) er uforanderlige (databasevakt). `outcome_unknown` kan senere avklares til `applied`/`failed`: av en samtidig replay med samme nøkkel (`complete`) eller av eierens AVSTEMMING
+ * (`recordReconcile`, migrasjon 144 - `action-reconcile.ts`: kun etter at målets faktiske tilstand er lest på nytt; aldri en automatisk retry av kommandoen).
  * UBETRODD TEKST: tilstand fra utstyret/leverandøren er data. Alt som lagres går gjennom `sanitizeActionState` (dybde-/lengdegrenser, kontrolltegn fjernet, hemmeligheter -> `[REDACTED:...]`).
  */
 export type ActionDomain = "home" | "car";
@@ -23,12 +25,18 @@ export interface PersonalActionRow {
   external_id: string | null; actor_person_id: string; source: ActionSource; task_id: string | null; session_id: string | null; trace_id: string | null;
   /** Ble det umiddelbare eier-varselet levert? `null` = ikke forsøkt/ukjent; `false` + `notify_error` = handlingen står, men eieren ble IKKE varslet (retry-markør). */
   notified: boolean | null; notify_error: string | null;
+  /** Migrasjon 144: de VALIDERTE parameterne forespørselen hadde (kun det handlingens strenge skjema godtar). `null` = ikke lagret (rad fra før 144, eller forespørselen bestod ikke skjemaet): raden kan da ikke avstemmes. */
+  request_params: Record<string, JsonValue> | null;
+  /** Migrasjon 144: antall avstemmingsforsøk (0 = aldri avstemt), tidspunktet for det siste, en kort KODE for hvorfor raden ble avgjort/står, og den redigerte nåtilstanden som ble lest ved det siste forsøket. */
+  reconcile_attempts: number; reconciled_at: string | null; reconcile_basis: string | null; reconciled_state: JsonValue | null;
   requested_at: string; completed_at: string | null; created_at: string; updated_at: string;
 }
 
 export interface BeginActionInput {
   domain: ActionDomain; tool_id: string; action: string; risk_class: "C" | "D"; risk_direction: RiskDirection; target_ref: string; idempotency_key: string; request_digest: string;
   actor_person_id: string; source: ActionSource; task_id?: string; session_id?: string; trace_id?: string;
+  /** Kun parametre som BESTOD handlingens strenge skjema (aldri rå klient-JSON). Utelatt/`null` = ikke lagret. */
+  request_params?: Record<string, JsonValue> | null;
 }
 
 export interface CompleteActionInput {
@@ -72,6 +80,22 @@ export function sanitizeActionState(value: unknown, depth = 0): JsonValue {
 
 const asRow = (row: unknown): PersonalActionRow => row as PersonalActionRow;
 
+const LONE_SURROGATE = /\p{Cs}/u; // med `u`-flagget matcher `\p{Cs}` kun et ENSOMT surrogat (et gyldig par leses som ett kodepunkt)
+const textFitsJsonb = (text: string): boolean => !text.includes("\u0000") && !LONE_SURROGATE.test(text);
+/**
+ * Kan verdien lagres i en Postgres `jsonb`-kolonne? `\u0000` og ensomme surrogater (i tekst OG i nøkler, også nøstet) gir en rå databasefeil ved `INSERT` (22P05/22P02), ikke en vanlig avvisning; det samme gjør tall/strukturer
+ * som ikke lar seg serialisere (bigint, sykliske strukturer, urimelig dybde). `false` = lagre aldri (WP-G2c fiks-runde 1, LOW-2): eksekutoren lagrer da `request_params = null`, raden er ellers uendret.
+ */
+export function jsonbSafe(value: unknown, depth = 0): boolean {
+  if (depth > 16) return false;
+  if (typeof value === "string") return textFitsJsonb(value);
+  if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number" || typeof value === "function" || typeof value === "symbol") return true; // serialiseres til null/utelates
+  if (typeof value === "bigint") return false;
+  if (Array.isArray(value)) return value.every((v) => jsonbSafe(v, depth + 1));
+  if (typeof value === "object") return Object.entries(value as Record<string, unknown>).every(([k, v]) => textFitsJsonb(k) && jsonbSafe(v, depth + 1));
+  return false;
+}
+
 export class PersonalActionJournal {
   constructor(private readonly pool: pg.Pool) {}
 
@@ -80,12 +104,13 @@ export class PersonalActionJournal {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const inserted = await client.query(
         `INSERT INTO personal_action_journal
-           (action_id, tenant_id, memory_space_id, domain, tool_id, action, risk_class, risk_direction, target_ref, idempotency_key, request_digest, status, actor_person_id, source, task_id, session_id, trace_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'requested',$12,$13,$14,$15,$16)
+           (action_id, tenant_id, memory_space_id, domain, tool_id, action, risk_class, risk_direction, target_ref, idempotency_key, request_digest, status, actor_person_id, source, task_id, session_id, trace_id, request_params)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'requested',$12,$13,$14,$15,$16,$17::jsonb)
          ON CONFLICT (tenant_id, idempotency_key) DO NOTHING RETURNING *`,
         [
           `pers-act-${randomUUID()}`, tenantId, memorySpace, input.domain, input.tool_id, input.action, input.risk_class, input.risk_direction, input.target_ref.slice(0, 200), input.idempotency_key,
-          input.request_digest, input.actor_person_id, input.source, input.task_id ?? null, input.session_id ?? null, input.trace_id ?? null
+          input.request_digest, input.actor_person_id, input.source, input.task_id ?? null, input.session_id ?? null, input.trace_id ?? null,
+          input.request_params === undefined || input.request_params === null ? null : JSON.stringify(input.request_params)
         ]
       );
       if (inserted.rows[0]) return { row: asRow(inserted.rows[0]), created: true };
@@ -120,6 +145,65 @@ export class PersonalActionJournal {
       const existing = await client.query(`SELECT * FROM personal_action_journal WHERE tenant_id = $1 AND action_id = $2`, [tenantId, actionId]);
       if (!existing.rows[0]) throw new Error("personal_action_not_found");
       return asRow(existing.rows[0]);
+    });
+  }
+
+  async findById(tenantId: string, memorySpace: MemorySpace, actionId: string): Promise<PersonalActionRow | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(`SELECT * FROM personal_action_journal WHERE tenant_id = $1 AND action_id = $2`, [tenantId, actionId]);
+      return rows[0] ? asRow(rows[0]) : null;
+    });
+  }
+
+  /**
+   * Finnes det en NYERE handling mot SAMME mål (domene + mål) som kan ha endret målets tilstand (`requested`/`applied`/`outcome_unknown`; en `failed` rad endret ingenting)? Brukes av avstemmingen: en observert sluttilstand kan da ikke tilskrives den
+   * ELDRE raden. Sammenligningen skjer i databasen mot radens egen `requested_at` (mikrosekunder). Synlig innen (tenant, memory space) - samme RLS som resten av journalen.
+   */
+  async hasLaterAction(tenantId: string, memorySpace: MemorySpace, actionId: string): Promise<boolean> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT 1 FROM personal_action_journal later, personal_action_journal cur
+          WHERE cur.tenant_id = $1 AND cur.action_id = $2 AND later.tenant_id = cur.tenant_id AND later.domain = cur.domain AND later.target_ref = cur.target_ref
+            AND later.action_id <> cur.action_id AND later.requested_at > cur.requested_at AND later.status IN ('requested', 'applied', 'outcome_unknown') LIMIT 1`,
+        [tenantId, actionId]
+      );
+      return rows.length > 0;
+    });
+  }
+
+  /**
+   * Registrerer ETT avstemmingsforsøk på en `outcome_unknown`-rad (migrasjon 144): `applied`/`failed` når beviset holder, ellers raden forblir `outcome_unknown` - i alle tilfeller med tidspunkt, kort begrunnelseskode og den leste tilstanden, og
+   * en revisjonsrad (`personal.action_reconciled`, uten innhold) i SAMME transaksjon (ingen endring uten revisjon). Betinget på at raden FORTSATT er `outcome_unknown`: en samtidig avgjørelse vinner, og da returneres raden uendret (`updated: false`).
+   * Det opprinnelige `before_state`/`after_state`/`external_id` røres aldri (bevis for det som skjedde den gangen); `failure_code` settes til `reconciled_not_executed` ved `failed` og tømmes ved `applied` (en replay skal ikke vise den gamle feilkoden på en rad som nå er utført).
+   */
+  async recordReconcile(
+    identity: Pick<IdentityContext, "tenant_id" | "person_id"> & Partial<Pick<IdentityContext, "session_id" | "device_id">>,
+    memorySpace: MemorySpace,
+    actionId: string,
+    patch: { status: "applied" | "failed" | "outcome_unknown"; basis: string; observed: JsonValue | null }
+  ): Promise<{ row: PersonalActionRow; updated: boolean }> {
+    return withMemoryTransaction(this.pool, identity.tenant_id, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `UPDATE personal_action_journal
+            SET status = $3,
+                failure_code = CASE WHEN $3 = 'failed' THEN 'reconciled_not_executed' WHEN $3 = 'applied' THEN NULL ELSE failure_code END,
+                completed_at = CASE WHEN $3 = 'outcome_unknown' THEN completed_at ELSE now() END,
+                reconcile_attempts = reconcile_attempts + 1, reconciled_at = now(), reconcile_basis = $4, reconciled_state = $5::jsonb, updated_at = now()
+          WHERE tenant_id = $1 AND action_id = $2 AND status = 'outcome_unknown' RETURNING *`,
+        [identity.tenant_id, actionId, patch.status, patch.basis, patch.observed === null ? null : JSON.stringify(sanitizeActionState(patch.observed))]
+      );
+      if (!rows[0]) {
+        const current = await client.query(`SELECT * FROM personal_action_journal WHERE tenant_id = $1 AND action_id = $2`, [identity.tenant_id, actionId]);
+        if (!current.rows[0]) throw new Error("personal_action_not_found");
+        return { row: asRow(current.rows[0]), updated: false };
+      }
+      const row = asRow(rows[0]);
+      await writeAudit(client, identity, {
+        // `decision` følger utfallet (som DAV-sporet): ALLOW når raden ble avgjort (`applied`/`failed`), UNKNOWN når forsøket endte `outcome_unknown` (fiks-runde 1, I-2).
+        type: "personal.action_reconciled", decision: patch.status === "outcome_unknown" ? "UNKNOWN" : "ALLOW", reason: patch.basis, tool_id: row.tool_id, action: row.action,
+        payload: { action_id: row.action_id, domain: row.domain, target_ref: row.target_ref, result: patch.status, basis: patch.basis, attempts: row.reconcile_attempts, source: "owner_route" }
+      });
+      return { row, updated: true };
     });
   }
 

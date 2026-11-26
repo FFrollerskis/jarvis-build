@@ -10,5 +10,6 @@ export * from "./car-critical.ts";
 export * from "./autonomy-bindability.ts";
 export * from "./action-journal.ts";
 export * from "./action-executor.ts";
+export * from "./action-reconcile.ts";
 export * from "./apple-dav.ts";
 export * from "./status.ts";
