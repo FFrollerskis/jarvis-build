@@ -1015,7 +1015,7 @@ export class ToolGateway {
     const needsEvidence = (definition.capability_class === "C" || definition.capability_class === "D") && definition.preflight_action;
     if (needsEvidence) {
       try {
-        const pre = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
+        const pre = await invokePreflight(definition, request.parameters, credential, invocationContext);
         beforeState = pre.data ?? null;
         // Q-34: preflight-KALLET lyktes (kastet ikke), men for et revidert
         // klasse D-verktøy betyr et null/undefined resultat FAKTISK "mål
@@ -1330,7 +1330,7 @@ export class ToolGateway {
     definition: ToolDefinition, request: { parameters: Record<string, JsonValue> }, credential: string, invocationContext: ToolInvocationContext
   ): Promise<{ reason: string | null; beforeState: JsonValue | null }> {
     try {
-      const pre = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
+      const pre = await invokePreflight(definition, request.parameters, credential, invocationContext);
       const state = pre.data ?? null;
       if (state === null) return { reason: "preflight_target_not_found", beforeState: null };
       if (definition.preflight_target_check && !definition.preflight_target_check(state, request.parameters)) return { reason: "preflight_target_not_found", beforeState: null };
@@ -1550,4 +1550,17 @@ async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, ms: numb
   } finally {
     clearTimeout(timer!);
   }
+}
+
+/**
+ * WP-FIN2 (D-486, K3): preflight (og re-arm-lesingen) leser tilstanden FØR noe reserveres eller utføres og hadde INGEN frist - en hengende lesing holdt kallet for alltid. Nå samme `timeout_ms` og
+ * kallsignal som selve utførelsen. Tidsavbrudd gir det EKSISTERENDE utfallet av en kastet preflight (klasse D: avslag `preflight_failed:tool_timeout` før noe reserveres; klasse C: som en kastet preflight;
+ * re-arm: avslag og frigitt reservasjon) - aldri en ny utfallstype. `JARVIS_TOOL_CALL_ABORT=off` = som før (ingen frist, intet signal).
+ */
+function invokePreflight(
+  definition: ToolDefinition, parameters: Record<string, JsonValue>, credential: string, invocationContext: ToolInvocationContext
+): Promise<{ external_id?: string; data?: JsonValue }> {
+  const action = definition.preflight_action!;
+  if (!toolCallAbortEnabled()) return definition.transport.invoke(action, parameters, credential, invocationContext);
+  return withTimeout((signal) => invokeWithCallSignal(definition.transport, action, parameters, credential, invocationContext, signal), definition.timeout_ms);
 }
