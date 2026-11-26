@@ -1,6 +1,6 @@
 import type pg from "pg";
 import type { SweepFailureCollector } from "@jarvis/contracts";
-import { listBusinessTenantIds } from "@jarvis/core";
+import { listBusinessTenantIds, redactForLog } from "@jarvis/core";
 import type { FinanceService } from "./service.ts";
 import type { StripeProviderAnomalyDetectionResult } from "./types.ts";
 
@@ -36,7 +36,7 @@ export async function runStripePaymentSyncForAllTenants(pool: pg.Pool, financeSe
       // isolasjonen er UENDRET, kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
       console.error(JSON.stringify({
         msg: "stripe_sweep_tenant_failed", tenant_id: tenantId,
-        error: err instanceof Error ? err.message : String(err)
+        error: redactForLog(err instanceof Error ? err.message : String(err), 300)
       }));
       failures?.record(tenantId, err);
       results[tenantId] = { sync: { synced: 0, failed: 0 }, anomalies: { payment_intent_flags_added: 0, refund_flags_added: 0, flags_cleared: 0 } };

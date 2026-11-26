@@ -1,6 +1,6 @@
 import type pg from "pg";
 import type { SweepFailureCollector } from "@jarvis/contracts";
-import { listBusinessTenantIds } from "@jarvis/core";
+import { listBusinessTenantIds, redactForLog } from "@jarvis/core";
 import type { SpendService } from "./spend-service.ts";
 import type { SpendAnomalyDetectionResult, SpendSyncResult } from "./spend-types.ts";
 
@@ -36,7 +36,7 @@ export async function runFinanceSpendIntegritySweepForAllTenants(
       // isolasjonen er UENDRET, kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
       console.error(JSON.stringify({
         msg: "spend_sweep_tenant_failed", tenant_id: tenantId,
-        error: err instanceof Error ? err.message : String(err)
+        error: redactForLog(err instanceof Error ? err.message : String(err), 300)
       }));
       failures?.record(tenantId, err);
       results[tenantId] = {

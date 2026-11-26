@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { envHour, scheduledRunCorrelation, type RunCorrelation } from "@jarvis/contracts";
 
+import { redactForLog } from "@jarvis/core";
 /**
  * BO-05: reboot-durabel daglig scheduler. Tilstand i Postgres (scheduler_state):
  * PRIMARY KEY (job_name, run_date) gjoer claim atomisk - ved flere instanser
@@ -110,7 +111,7 @@ export class DailyScheduler {
       [this.jobName, date, this.instanceId, error.slice(0, 300)]
     );
     if ((rows[0]?.attempts ?? 0) >= MAX_ATTEMPTS) {
-      console.error(JSON.stringify({ msg: "daily_scheduler_gave_up", job_name: this.jobName, instance_id: this.instanceId, attempts: rows[0]?.attempts, error: error.slice(0, 200) }));
+      console.error(JSON.stringify({ msg: "daily_scheduler_gave_up", job_name: this.jobName, instance_id: this.instanceId, attempts: rows[0]?.attempts, error: redactForLog(error, 200) }));
     }
   }
 
@@ -144,7 +145,7 @@ export class DailyScheduler {
         msg: "daily_scheduler_tick_failed",
         job_name: this.jobName,
         instance_id: this.instanceId,
-        error: err instanceof Error ? err.message : String(err)
+        error: redactForLog(err instanceof Error ? err.message : String(err), 300)
       }));
     }), intervalMs);
     timer.unref();

@@ -27,6 +27,7 @@ import {
   NEONOMICS_STATUS_TO_JARVIS_STATE
 } from "./banking-types.ts";
 import type { BankAccount, BankConsent } from "./banking-types.ts";
+import { redactForLog } from "@jarvis/core";
 import {
   createVendor, getVendor, listVendors, bindVendorProvider, revokeVendorProviderBinding, listVendorBindings, assertValidVendorBinding,
   VendorNotFoundError,
@@ -892,7 +893,7 @@ export class FinanceService {
       if (steps.onCallError) {
         const failureClass = classifyProviderFailure(err);
         await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.onCallError!(client, prepared.plan, failureClass, err)).catch((cleanupErr) => {
-          console.error(JSON.stringify({ msg: "finance_submit_cleanup_failed", subject_id: steps.subjectId ?? null, error: (cleanupErr as Error).message.slice(0, 120) }));
+          console.error(JSON.stringify({ msg: "finance_submit_cleanup_failed", subject_id: steps.subjectId ?? null, error: redactForLog((cleanupErr as Error).message, 120) }));
         });
         if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", unknownDetail(err), err);
       }
@@ -907,7 +908,7 @@ export class FinanceService {
       // Handlinger uten reservasjonsfase (`onCallError` mangler, f.eks. Vipps-kansellering, klasse C) beholder gammel oppførsel.
       if (!steps.onCallError) throw applyErr;
       await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.onCallError!(client, prepared.plan, "unknown", applyErr)).catch((cleanupErr) => {
-        console.error(JSON.stringify({ msg: "finance_submit_cleanup_failed", subject_id: steps.subjectId ?? null, phase: "after_provider_call", error: (cleanupErr as Error).message.slice(0, 120) }));
+        console.error(JSON.stringify({ msg: "finance_submit_cleanup_failed", subject_id: steps.subjectId ?? null, phase: "after_provider_call", error: redactForLog((cleanupErr as Error).message, 120) }));
       });
       throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", `provider_call_completed_local_write_failed:${applyErr instanceof Error ? applyErr.message : String(applyErr)}`.slice(0, 110), applyErr);
     }
@@ -1008,7 +1009,7 @@ export class FinanceService {
             [tenantId, paymentIntentId]
           );
         }).catch((cleanupErr) => {
-          console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, error: (cleanupErr as Error).message.slice(0, 120) }));
+          console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, error: redactForLog((cleanupErr as Error).message, 120) }));
         });
         throw err;
       }
@@ -1071,7 +1072,7 @@ export class FinanceService {
         actor_person_id: null, metadata: { anomaly_flags: ["SUBMIT_OUTCOME_UNKNOWN"], resubmittable_with_same_key: idempotentAtProvider, cause }
       });
     }).catch((cleanupErr) => {
-      console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, cause, error: (cleanupErr as Error).message.slice(0, 120) }));
+      console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, cause, error: redactForLog((cleanupErr as Error).message, 120) }));
     });
   }
 
@@ -1942,7 +1943,7 @@ export class FinanceService {
         // kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
         console.error(JSON.stringify({
           msg: "stripe_payment_sync_failed", tenant_id: tenantId, payment_intent_id: paymentIntentId,
-          error: err instanceof Error ? err.message : String(err)
+          error: redactForLog(err instanceof Error ? err.message : String(err), 300)
         }));
         failed++;
       }
@@ -1962,7 +1963,7 @@ export class FinanceService {
       } catch (err) {
         console.error(JSON.stringify({
           msg: "stripe_refund_sync_failed", tenant_id: tenantId, refund_id: refundId,
-          error: err instanceof Error ? err.message : String(err)
+          error: redactForLog(err instanceof Error ? err.message : String(err), 300)
         }));
         failed++;
       }
@@ -2804,7 +2805,7 @@ export class FinanceService {
         // kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
         console.error(JSON.stringify({
           msg: "vipps_payment_sync_failed", tenant_id: tenantId, payment_intent_id: paymentIntentId,
-          error: err instanceof Error ? err.message : String(err)
+          error: redactForLog(err instanceof Error ? err.message : String(err), 300)
         }));
         failed++;
       }
@@ -3119,7 +3120,7 @@ export class FinanceService {
         // kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
         console.error(JSON.stringify({
           msg: "neonomics_payment_sync_failed", tenant_id: tenantId, payment_intent_id: paymentIntentId,
-          error: err instanceof Error ? err.message : String(err)
+          error: redactForLog(err instanceof Error ? err.message : String(err), 300)
         }));
         failed++;
       }

@@ -1,6 +1,7 @@
 import { detachFromCallSignal, raceCallSignal } from "./call-signal.ts";
 import { guardedFetch } from "./url-safety.ts";
 
+import { redactForLog } from "@jarvis/core";
 /**
  * D-388 (Tilkoblinger v2, JARVIS-090): felles, cachet OAuth2 `refresh_token`-utveksling for leverandører der et
  * STATISK bearer-token FAKTISK utløper etter timer (Dropbox: kortlivede access-tokens på 4 t; Microsoft Graph: 1 t).
@@ -96,7 +97,7 @@ export class AccessTokenCache {
             try {
               await this.options.persist(token.refresh_token);
             } catch (err) {
-              console.error(JSON.stringify({ msg: "oauth_refresh_token_persist_failed", provider: this.options.label ?? "unknown", error: (err as Error).message.slice(0, 200) }));
+              console.error(JSON.stringify({ msg: "oauth_refresh_token_persist_failed", provider: this.options.label ?? "unknown", error: redactForLog((err as Error).message, 200) }));
             }
           }
         }

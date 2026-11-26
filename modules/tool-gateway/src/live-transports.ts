@@ -18,6 +18,7 @@ import { createVaultFirstConfigReader, readEnvConfig, type ConfigReader, type Va
 import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
 import { abortableSleep, throwIfAborted } from "./call-signal.ts";
 
+import { redactForLog } from "@jarvis/core";
 /**
  * UA-2 P1B-A HOST FIX #1 (2026-08-16, host-funn run_id `3af67dab`): den
  * TIDLIGERE `googleAccessToken()` samlet ALLE token-endepunkt-feil til
@@ -2151,7 +2152,7 @@ export class TelegramCommandPoller {
     this.timer = setInterval(() => void this.poll().catch((err) => {
       console.error(JSON.stringify({
         msg: "telegram_poll_tick_failed",
-        error: err instanceof Error ? err.message : String(err)
+        error: redactForLog(err instanceof Error ? err.message : String(err), 300)
       }));
     }), intervalMs);
     this.timer.unref();
@@ -2170,7 +2171,7 @@ export class TelegramCommandPoller {
           this.offsetLoaded = true;
         } catch (err) {
           // Uten kjent offset ville en restart levert gamle meldinger på nytt - heller ikke polle enn å spille av.
-          this.fail({ kind: "offset_load", detail: err instanceof Error ? err.message.slice(0, 120) : "unknown" });
+          this.fail({ kind: "offset_load", detail: err instanceof Error ? redactForLog(err.message, 120) : "unknown" });
           return;
         }
       }
@@ -2225,9 +2226,9 @@ export class TelegramCommandPoller {
           console.error(JSON.stringify({
             msg: "telegram_dispatch_failed",
             update_id: update.update_id,
-            error: err instanceof Error ? err.message : String(err)
+            error: redactForLog(err instanceof Error ? err.message : String(err), 300)
           }));
-          this.fail({ kind: "dispatch_failed", detail: err instanceof Error ? err.message.slice(0, 120) : "unknown" });
+          this.fail({ kind: "dispatch_failed", detail: err instanceof Error ? redactForLog(err.message, 120) : "unknown" });
         }
         await this.advanceOffset(update.update_id + 1);
       }
@@ -2243,7 +2244,7 @@ export class TelegramCommandPoller {
     try {
       await this.options.offsetStore.save(this.offset);
     } catch (err) {
-      this.fail({ kind: "offset_save", detail: err instanceof Error ? err.message.slice(0, 120) : "unknown" });
+      this.fail({ kind: "offset_save", detail: err instanceof Error ? redactForLog(err.message, 120) : "unknown" });
     }
   }
 

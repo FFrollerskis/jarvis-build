@@ -1,6 +1,6 @@
 import type pg from "pg";
 import type { SweepFailureCollector } from "@jarvis/contracts";
-import { listBusinessTenantIds } from "@jarvis/core";
+import { listBusinessTenantIds, redactForLog } from "@jarvis/core";
 import type { BankingService } from "./banking-service.ts";
 import { BankConsentNotActiveError } from "./banking-types.ts";
 import type { FinanceService } from "./service.ts";
@@ -56,7 +56,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
           // kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
           console.error(JSON.stringify({
             msg: "neonomics_sweep_consent_verify_failed", tenant_id: tenantId, consent_id: consent.consent_id,
-            error: err instanceof Error ? err.message : String(err)
+            error: redactForLog(err instanceof Error ? err.message : String(err), 300)
           }));
           // D-442: et utløpt/ikke-aktivt samtykke er en TILSTAND eieren må handle på (flagges av `bank_consent_attention`-regelen), ikke en feil et nytt forsøk kan rette -
           // og hvert nytt forsøk ville bare kalt banken på nytt (PSD2 begrenser uovervåket kontoinformasjon).
@@ -74,7 +74,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
           // Én kontos synkfeil isoleres - isolasjonen er UENDRET, kun stillheten var feilen (D-227).
           console.error(JSON.stringify({
             msg: "neonomics_sweep_transaction_sync_failed", tenant_id: tenantId, bank_account_id: account.bank_account_id,
-            error: err instanceof Error ? err.message : String(err)
+            error: redactForLog(err instanceof Error ? err.message : String(err), 300)
           }));
           if (!(err instanceof BankConsentNotActiveError)) failures?.record(tenantId, err, `account:${account.bank_account_id}`);
         }
@@ -83,7 +83,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
       // Credential-/listefeil - fortsett til de lokale stegene. Isolasjonen er UENDRET (D-227).
       console.error(JSON.stringify({
         msg: "neonomics_sweep_consent_list_failed", tenant_id: tenantId,
-        error: err instanceof Error ? err.message : String(err)
+        error: redactForLog(err instanceof Error ? err.message : String(err), 300)
       }));
       failures?.record(tenantId, err, "consent_list");
     }
@@ -95,7 +95,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
       // Isolert - isolasjonen er UENDRET, kun stillheten var feilen (D-227).
       console.error(JSON.stringify({
         msg: "neonomics_sweep_payment_sync_failed", tenant_id: tenantId,
-        error: err instanceof Error ? err.message : String(err)
+        error: redactForLog(err instanceof Error ? err.message : String(err), 300)
       }));
       failures?.record(tenantId, err, "payments");
     }
@@ -107,7 +107,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
       // Én tenants sveipfeil velter aldri de andre - isolasjonen er UENDRET (D-227).
       console.error(JSON.stringify({
         msg: "neonomics_sweep_reconciliation_failed", tenant_id: tenantId,
-        error: err instanceof Error ? err.message : String(err)
+        error: redactForLog(err instanceof Error ? err.message : String(err), 300)
       }));
       failures?.record(tenantId, err, "reconciliation");
     }

@@ -108,8 +108,8 @@ export class ArtifactStore {
       client.query(
         `INSERT INTO artifacts (artifact_id, task_id, tenant_id, kind, name, content)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        // D-394 (JARVIS-069): artefakter (testlogger, diff) er fritekst fra en agent/prosess og kan inneholde hemmeligheter - redigeres FØR lagring.
-        [`art-${randomUUID()}`, taskId, tenantId, kind, name, scanForSecrets(content.slice(0, 100_000)).text]
+        // D-394 (JARVIS-069): artefakter (testlogger, diff) er fritekst fra en agent/prosess og kan inneholde hemmeligheter - redigeres FØR lagring. WP-SEC2 (K7b): skann FØRST (inntil 4 MiB), kutt til 100 000 tegn ETTERPÅ.
+        [`art-${randomUUID()}`, taskId, tenantId, kind, name, scanForSecrets(content.length > 4_194_304 ? content.slice(0, 4_194_304) : content).text.slice(0, 100_000)]
       )
     );
   }

@@ -23,6 +23,7 @@ import { AmbiguousProviderResponseError, FinanceKillSwitchActiveError, InvalidWe
 import { SUBMIT_INFLIGHT_LEASE_MS, classifyProviderFailure, type ProviderFailureClass } from "./submit-guard.ts";
 import { malformedWebhookKey, rejectionCode } from "./webhook-guard.ts";
 
+import { redactForLog } from "@jarvis/core";
 /**
  * UA-6 Slice 6 (D-112): kanonisk programmerbar kort-domenetjeneste
  * (Wallester-adapteret). Egen klasse ved siden av FinanceService/
@@ -293,7 +294,7 @@ export class CardService {
     } catch (err) {
       const failureClass = classifyCardSubmitFailure(err);
       await this.settleFailedSubmit(tenantId, memorySpace, cardId, failureClass, "call").catch((cleanupErr) => {
-        console.error(JSON.stringify({ msg: "card_submit_cleanup_failed", card_id: cardId, error: (cleanupErr as Error).message.slice(0, 120) }));
+        console.error(JSON.stringify({ msg: "card_submit_cleanup_failed", card_id: cardId, error: redactForLog((cleanupErr as Error).message, 120) }));
       });
       if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(cardId, (err instanceof Error ? err.message : String(err)).replace(/^outcome_unknown:/, "").slice(0, 110), err);
       throw err;
@@ -316,7 +317,7 @@ export class CardService {
     } catch (applyErr) {
       // Leverandøren HAR opprettet kortet (vi har svaret), men lagringen feilet: UKJENT utfall lokalt, aldri en vanlig feil som kan prøves på nytt (ville opprettet et ANDRE kort).
       await this.settleFailedSubmit(tenantId, memorySpace, cardId, "unknown", "local_write").catch((cleanupErr) => {
-        console.error(JSON.stringify({ msg: "card_submit_cleanup_failed", card_id: cardId, phase: "after_provider_call", error: (cleanupErr as Error).message.slice(0, 120) }));
+        console.error(JSON.stringify({ msg: "card_submit_cleanup_failed", card_id: cardId, phase: "after_provider_call", error: redactForLog((cleanupErr as Error).message, 120) }));
       });
       throw new ProviderOutcomeUnknownError(cardId, `provider_call_completed_local_write_failed:${applyErr instanceof Error ? applyErr.message : String(applyErr)}`.slice(0, 110), applyErr);
     }

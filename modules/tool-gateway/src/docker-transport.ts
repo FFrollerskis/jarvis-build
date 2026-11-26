@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { scanForSecrets } from "@jarvis/core";
+import { redactLogText } from "@jarvis/core";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
 import { abortReason, currentCallSignal } from "./call-signal.ts";
@@ -98,16 +98,8 @@ function parseInspect(stdout: string): ContainerState {
   };
 }
 
-function redactSecretsInline(text: string): string {
-  // D-394 (JARVIS-069): lokale mønstre + den sentrale skanneren (JWT, private nøkler, Stripe/Slack/AWS/Google/Telegram, passordfraser, kortnumre).
-  const local = text
-    .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer [REDACTED]")
-    .replace(/Authorization:\s*.*/gi, "Authorization: [REDACTED]")
-    .replace(/gh[pousr]_[A-Za-z0-9]{20,}/g, "[REDACTED_GITHUB_TOKEN]")
-    .replace(/sk-ant-[A-Za-z0-9\-_]{10,}/g, "[REDACTED_ANTHROPIC_KEY]")
-    .replace(/((?:[A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)\s*[:=]\s*)(\S+)/gi, "$1[REDACTED]");
-  return scanForSecrets(local).text;
-}
+/** D-394 (JARVIS-069) + WP-SEC2 (K7d): driftslogger redigeres av den felles `redactLogText` i @jarvis/core (lokale former + den sentrale skanneren) - ingen egne mønsterkopier her. */
+const redactSecretsInline = redactLogText;
 
 export class DockerTransport implements ToolTransport {
   constructor(private readonly timeoutMs = 15_000) {}

@@ -1,7 +1,7 @@
 import type pg from "pg";
 import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
-import { withTenantTransaction, writeAudit } from "@jarvis/core";
+import { clipRedacted, redactForLog, withTenantTransaction, writeAudit } from "@jarvis/core";
 import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
 import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal, toolCallAbortEnabled } from "./call-signal.ts";
 import { currentModelScope, runWithModelScope } from "./model-scope.ts";
@@ -1096,7 +1096,7 @@ export class ToolGateway {
         }
       } catch (err) {
         if (definition.capability_class === "D") {
-          return deny(`preflight_failed:${(err as Error).message.slice(0, 60)}`);
+          return deny(`preflight_failed:${clipRedacted((err as Error).message, 60)}`);
         }
       }
     }
@@ -1271,7 +1271,7 @@ export class ToolGateway {
       ? (failure.timedOut ? "unverified" : "failed")
       : postconditionVerified ? "succeeded" : "unverified";
     const finalReason = failure
-      ? (failure.timedOut ? "postcondition_unverified:tool_timeout_outcome_unknown" : `tool_failed:${failure.message.slice(0, 80)}`)
+      ? (failure.timedOut ? "postcondition_unverified:tool_timeout_outcome_unknown" : `tool_failed:${clipRedacted(failure.message, 80)}`)
       : postconditionReason;
 
     // Fase 3 - FERDIGSTILL ledger + audit i én kort transaksjon (to forsøk; feiler begge står raden som 'reserved' = fail-closed).
@@ -1287,7 +1287,7 @@ export class ToolGateway {
         if (failure) {
           // Kontrollert feil: revoked credential/timeout/providerfeil åpner ingenting.
           await writeAudit(client, request.identity, { ...corr,
-            type: "tool.failed", decision: "DENY", reason: failure.message.slice(0, 120),
+            type: "tool.failed", decision: "DENY", reason: clipRedacted(failure.message, 120),
             tool_id: request.tool_id, action: request.action,
             capability_class: definition.capability_class,
             payload: auditPayload({ credential_ref: credentialRef, outcome_unknown: failure.timedOut })
@@ -1315,7 +1315,7 @@ export class ToolGateway {
         await finalize();
         finalized = true;
       } catch (err) {
-        finalizeError = (err as Error).message.slice(0, 80);
+        finalizeError = clipRedacted((err as Error).message, 80);
       }
     }
     if (!finalized) {
@@ -1324,14 +1324,14 @@ export class ToolGateway {
       if (!failure) classDOutcome = { outcome: "unverified", external_id: external.external_id ?? null };
       else if (failure.timedOut) classDOutcome = { outcome: "unknown", external_id: null };
       const unfinalized: ToolResult = failure
-        ? { ok: false, reason: `tool_failed:${failure.message.slice(0, 80)}` }
+        ? { ok: false, reason: `tool_failed:${clipRedacted(failure.message, 80)}` }
         : { ok: false, reason: "postcondition_unverified:ledger_finalize_failed" };
       if (classDGoverned && classDOutcome) return this.notifyClassD(request, definition, classDOutcome, unfinalized, beforeState, { ...corr, ...(policyDecisionId !== undefined ? { policy_decision_id: policyDecisionId } : {}) });
       return unfinalized;
     }
     let result: ToolResult;
     if (failure) {
-      result = { ok: false, reason: `tool_failed:${failure.message.slice(0, 80)}` };
+      result = { ok: false, reason: `tool_failed:${clipRedacted(failure.message, 80)}` };
       // WP-F1: et UKJENT utfall (tidsavbrudd/`outcome_unknown`) er ikke «ingenting skjedde» - eieren varsles umiddelbart out-of-band (aldri stille).
       if (failure.timedOut) classDOutcome = { outcome: "unknown", external_id: null };
     } else {
@@ -1385,7 +1385,7 @@ export class ToolGateway {
       }
       return invalid === null ? { reason: null, beforeState: state } : { reason: `preflight_invalid:${sanitizeReasonCode(invalid)}`, beforeState: null };
     } catch (err) {
-      return { reason: `preflight_failed:${(err as Error).message.slice(0, 60)}`, beforeState: null };
+      return { reason: `preflight_failed:${clipRedacted((err as Error).message, 60)}`, beforeState: null };
     }
   }
 
@@ -1395,11 +1395,11 @@ export class ToolGateway {
       await withTenantTransaction<void>(this.pool, tenantId, async (client) => {
         await client.query(
           `UPDATE tool_executions SET status = 'failed', postcondition_reason = $2, executed_at = now() WHERE idempotency_key = $1 AND status = 'reserved'`,
-          [ledgerKey, reason.slice(0, 200)]
+          [ledgerKey, clipRedacted(reason, 200)]
         );
       });
     } catch (err) {
-      console.error(JSON.stringify({ msg: "tool_ledger_release_failed", error: err instanceof Error ? err.message.slice(0, 80) : String(err).slice(0, 80) }));
+      console.error(JSON.stringify({ msg: "tool_ledger_release_failed", error: clipRedacted(err instanceof Error ? err.message : String(err), 80) }));
     }
   }
 
@@ -1470,12 +1470,12 @@ export class ToolGateway {
       await withTenantTransaction(this.pool, request.identity.tenant_id, (client) =>
         writeAudit(client, request.identity, {
           ...(audit.task_id !== undefined ? { task_id: audit.task_id } : {}), ...(audit.trace_id !== undefined ? { trace_id: audit.trace_id } : {}),
-          type: "tool.class_d_notification_failed", decision: "ALLOW", reason: (err as Error).message.slice(0, 120),
+          type: "tool.class_d_notification_failed", decision: "ALLOW", reason: clipRedacted((err as Error).message, 120),
           tool_id: request.tool_id, action: request.action, capability_class: "D",
           payload: { external_id: outcome.external_id, ...(audit.policy_decision_id !== undefined ? { policy_decision_id: audit.policy_decision_id } : {}) }
         })
       ).catch(() => undefined);
-      this.setHealth("class_d_notifier", "degraded", (err as Error).message.slice(0, 60));
+      this.setHealth("class_d_notifier", "degraded", clipRedacted((err as Error).message, 60));
     }
     try { request.onClassDNotification?.({ notified, error: notifyError }); } catch { /* en observatør kan aldri bryte kjeden */ }
     return result.ok ? { ...result, notified } : result;
@@ -1553,7 +1553,7 @@ export class ToolGateway {
         tool_id: request.tool_id,
         action: request.action,
         reason,
-        error: err instanceof Error ? err.message : String(err)
+        error: redactForLog(err instanceof Error ? err.message : String(err), 300)
       }));
     });
     return { ok: false, reason };

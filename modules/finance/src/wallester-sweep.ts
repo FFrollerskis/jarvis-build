@@ -1,6 +1,6 @@
 import type pg from "pg";
 import type { SweepFailureCollector } from "@jarvis/contracts";
-import { listBusinessTenantIds } from "@jarvis/core";
+import { listBusinessTenantIds, redactForLog } from "@jarvis/core";
 import type { CardService } from "./card-service.ts";
 
 export interface WallesterSweepResult {
@@ -53,7 +53,7 @@ export async function runWallesterSweepForAllTenants(pool: pg.Pool, cards: CardS
           // kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
           console.error(JSON.stringify({
             msg: "wallester_sweep_card_sync_failed", tenant_id: tenantId, card_id: card.card_id,
-            error: err instanceof Error ? err.message : String(err)
+            error: redactForLog(err instanceof Error ? err.message : String(err), 300)
           }));
           failures?.record(tenantId, err, `card:${card.card_id}`);
         }
@@ -62,7 +62,7 @@ export async function runWallesterSweepForAllTenants(pool: pg.Pool, cards: CardS
       // Credential-/listefeil - fortsett til de lokale stegene. Isolasjonen er UENDRET (D-227).
       console.error(JSON.stringify({
         msg: "wallester_sweep_card_list_failed", tenant_id: tenantId,
-        error: err instanceof Error ? err.message : String(err)
+        error: redactForLog(err instanceof Error ? err.message : String(err), 300)
       }));
       failures?.record(tenantId, err, "card_list");
     }
@@ -73,7 +73,7 @@ export async function runWallesterSweepForAllTenants(pool: pg.Pool, cards: CardS
       // Én tenants sveipfeil velter aldri de andre - isolasjonen er UENDRET (D-227).
       console.error(JSON.stringify({
         msg: "wallester_sweep_reconciliation_failed", tenant_id: tenantId,
-        error: err instanceof Error ? err.message : String(err)
+        error: redactForLog(err instanceof Error ? err.message : String(err), 300)
       }));
       failures?.record(tenantId, err, "reconciliation");
     }

@@ -1,6 +1,6 @@
 import type pg from "pg";
 import type { SweepFailureCollector } from "@jarvis/contracts";
-import { listBusinessTenantIds } from "@jarvis/core";
+import { listBusinessTenantIds, redactForLog } from "@jarvis/core";
 import type { FinanceReconciliationService, ReconciliationReport } from "./reconciliation.ts";
 
 /**
@@ -29,7 +29,7 @@ export async function runFinanceReconciliationForAllTenants(
     } catch (err) {
       // Én tenant sin feil skal aldri velte sveipet for andre tenants - isolasjonen er uendret, kun stillheten var feilen (D-227).
       console.error(JSON.stringify({
-        msg: "finance_reconcile_sweep_tenant_failed", tenant_id: tenantId, error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)
+        msg: "finance_reconcile_sweep_tenant_failed", tenant_id: tenantId, error: redactForLog(err instanceof Error ? err.message : String(err), 200)
       }));
       failures?.record(tenantId, err);
     }
