@@ -45,7 +45,10 @@ export interface WebhookDeps {
   readonly clock: Clock;
   readonly business?: Pick<BusinessService, "recordActivity">;
   readonly warn?: (event: Record<string, unknown>) => void;
-  /** K3: høyeste antall hendelser som behandles per signert forespørsel (standard `MAX_EVENTS_PER_REQUEST` = Metas dokumenterte batch-størrelse). Overskrides den, svarer tjenesten 503 så leverandøren prøver på nytt. Kun testene setter den lavere. */
+  /**
+   * K3: høyeste antall NYE hendelser (som faktisk skrives) som behandles per signert forespørsel (standard `MAX_EVENTS_PER_REQUEST` = Metas dokumenterte batch-størrelse). Kjente duplikater og hendelser som ikke lagres (ignorert) teller ikke (FIX-2).
+   * Gjenstår det nye hendelser etter taket, svarer tjenesten 503 så leverandøren prøver på nytt, og hver retry tar neste porsjon. Kun testene setter den lavere.
+   */
   readonly maxEventsPerRequest?: number;
 }
 
@@ -187,17 +190,22 @@ export class CommsWebhookService {
     const summary = emptySummary();
     summary.ignored += outcome.ignored;
     const ingestId = `ingest-${randomUUID()}`;
-    // K3 (JARVIS-112 d): stopp-/start-ord behandles FØRST (de er rettighetsbærende; de beholder sin innbyrdes rekkefølge så en STOP og en START i samme batch aldri bytter plass), deretter resten. Taket gjelder KUN antall hendelser
-    // som behandles; overskrides det, svarer vi med en FEILSTATUS (leverandøren prøver på nytt, dedupe gjør gjentak trygt) - aldri 200 med stille droppede hendelser. Logg: kun årsakskode og antall.
+    // K3 (JARVIS-112 d): stopp-/start-ord behandles FØRST (de er rettighetsbærende; de beholder sin innbyrdes rekkefølge så en STOP og en START i samme batch aldri bytter plass), deretter resten. Taket gjelder KUN antall NYE hendelser som
+    // skrives; overskrides det, svarer vi med en FEILSTATUS (leverandøren prøver på nytt, dedupe gjør gjentak trygt) - aldri 200 med stille droppede hendelser. Logg: kun årsakskode og antall.
+    // FIX-2: kjente duplikater (dedupe-raden finnes, og effekten ble skrevet i SAMME transaksjon, B-H2) slås opp i ÉN spørring og hoppes over uten arbeid, og hendelser som ikke lagres (ignorert) teller heller ikke mot taket. Før telte taket
+    // ALLE hendelser, så en retry brukte taket på duplikatene og de siste hendelsene (en STOP som nr. 1001) ble aldri behandlet. Nå tar hver retry neste porsjon, og 503 betyr alltid at det gjenstår nye hendelser.
     const keywordEvents = outcome.events.filter((e) => optKeywordOf(e) !== null);
     const ordered = [...keywordEvents, ...outcome.events.filter((e) => optKeywordOf(e) === null)];
     const cap = this.deps.maxEventsPerRequest ?? MAX_EVENTS_PER_REQUEST;
-    const batch = ordered.slice(0, cap);
-    for (const event of batch) {
+    const known = await this.deps.store.knownEventKeys(config.webhook_tenant_id, config.webhook_memory_space, provider, ordered.map((e) => e.event_key));
+    let deferred = 0;
+    for (let i = 0; i < ordered.length; i++) {
+      const event = ordered[i] as NormalizedInbound;
+      if (known.has(event.event_key)) { summary.received++; summary.duplicates++; continue; }
+      if (summary.inserted >= cap) { deferred = ordered.slice(i).filter((e) => !known.has(e.event_key)).length; break; }
       summary.received++;
       await this.processEvent(event, ingestId, summary);
     }
-    const deferred = ordered.length - batch.length;
     if (deferred > 0) {
       this.deps.warn?.({ msg: "comms_webhook_batch_over_cap", provider, events: ordered.length, cap, deferred });
       return { status: 503, body: { error: "batch_over_cap", events: { ...summary, deferred } } };

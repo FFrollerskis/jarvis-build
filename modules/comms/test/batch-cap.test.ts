@@ -123,13 +123,13 @@ describe("K3: stopp-/start-ord behandles FØRST, og over taket svarer tjenesten 
     expect(over.body).toMatchObject({ events: { received: 30, deferred: 1 } });
   });
 
-  it("det ekte taket (1000): 1001 hendelser der STOP står SIST -> STOP registreres (prioritert først), svaret er 503 og nøyaktig én hendelse er utsatt", async () => {
+  it("det ekte taket (1000) teller kun hendelser som SKRIVES (FIX-2): 1001 hendelser der 1000 ignoreres (ikke-autorisert konto) og STOP står SIST -> STOP registreres (prioritert først), svaret er 200 - ingenting er utsatt", async () => {
     const stopper = waNum();
-    // til en ikke-autorisert konto: hendelsene ignoreres raskt (kun STOP lagres), så testen måler taket - ikke databasen
+    // til en ikke-autorisert konto: hendelsene ignoreres raskt (kun STOP lagres), så testen måler taket - ikke databasen. Ignorerte hendelser skrives ikke og teller ikke mot taket (se `batch-progress` for det ekte taket med 1000 skrevne).
     const noise = Array.from({ length: 1000 }, (_, i) => waMessage("4790000001", "hei", `wamid.real.${i}`));
     const res = await webhooks.handle("meta", metaReq(waBatch([...noise, waMessage(stopper, "STOPP")], "999999999999")));
-    expect(res.status).toBe(503);
-    expect(res.body).toMatchObject({ error: "batch_over_cap", events: { received: 1000, deferred: 1, opt_outs: 1 } });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ received: true, events: { received: 1001, inserted: 1, ignored: 1000, opt_outs: 1 } });
     expect(await optedWa(stopper)).toBe(true);
   }, 120_000);
 

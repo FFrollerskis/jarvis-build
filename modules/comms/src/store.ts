@@ -712,6 +712,22 @@ export class CommsStore {
     });
   }
 
+  /**
+   * FIX-2: hvilke av disse hendelsesnøklene er allerede sett (dedupe-raden finnes)? En dedupe-rad og avmeldingen/gjenopptaket den hører til skrives i ÉN transaksjon (B-H2), så en kjent nøkkel er FERDIG behandlet og kan hoppes over uten arbeid.
+   * Kun en lesing (RLS: tenant og rom); selve dedupe-garantien er fortsatt `ON CONFLICT DO NOTHING` i `recordInbound`, så en samtidig levering av samme hendelse gir uansett nøyaktig én behandling.
+   */
+  async knownEventKeys(tenantId: string, space: MemorySpace, provider: InboundEventInput["provider"], keys: readonly string[]): Promise<ReadonlySet<string>> {
+    const known = new Set<string>();
+    if (keys.length === 0) return known;
+    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+      for (let i = 0; i < keys.length; i += 1000) {
+        const res = await client.query(`SELECT event_key FROM comms_inbound_events WHERE tenant_id = $1 AND provider = $2 AND event_key = ANY($3::text[])`, [tenantId, provider, keys.slice(i, i + 1000)]);
+        for (const row of res.rows as Array<{ event_key: string }>) known.add(row.event_key);
+      }
+      return known;
+    });
+  }
+
   /** Mottakerens siste VERIFISERTE innkommende melding til kontoen (server-tid, aldri leverandørens påstand). */
   async lastInboundAt(tenantId: string, space: MemorySpace, channel: CommsChannel, accountRef: string, senderHash: string): Promise<string | null> {
     return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
