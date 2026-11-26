@@ -377,7 +377,7 @@ describe("logghygiene: feilkoder i logg og helse er korte koder - aldri fritekst
     expect(errorCode(new Error("tts_stall_timeout"))).toBe("tts_stall_timeout");
     expect(errorCode(new Error("a:b:c:d"))).toBe("a:b");
     expect(errorCode(new Error("local_whisper_spawn_failed:spawn /opt/whisper/whisper-cli ENOENT"))).toBe("error"); // sti (og mellomrom) etter første kolon
-    expect(errorCode(new Error("Noe gikk galt med sti /home/tobias/.config"))).toBe("error");
+    expect(errorCode(new Error("Noe gikk galt med sti /home/bruker/.config"))).toBe("error");
     expect(errorCode("rå streng med mellomrom")).toBe("error");
     expect(errorCode(new Error("x".repeat(500)))).toHaveLength(60);
   });
