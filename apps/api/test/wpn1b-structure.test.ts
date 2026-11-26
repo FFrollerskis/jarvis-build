@@ -269,8 +269,8 @@ describe("G: ÉN lokalitetsregel (fiks-runde 1, FIX-7/A80): ingen ny leverandør
    * tar en LOKALITETSbeslutning (bruk i så fall `financeLockServedLocally`/`servedByCloud`, aldri en egen liste) før du legger filen inn her.
    */
   const ALLOWED: Readonly<Record<string, number>> = {
-    "apps/api/src/chat-candidates.ts": 1, "apps/api/src/control-center/ai.ts": 3, "apps/api/src/conversation.ts": 1, "apps/api/src/evolution-source.ts": 4, "apps/api/src/golden-suite.ts": 1, "apps/api/src/main.ts": 2,
-    "apps/api/src/run-rate.ts": 5, "apps/api/src/self-model-readers.ts": 1, "apps/api/src/vision-runtime.ts": 1, "apps/api/src/worker-main.ts": 1, "modules/executive/src/ai-mesh/report.ts": 1, "modules/memory/src/embedding.ts": 2,
+    "apps/api/src/chat-candidates.ts": 1, "apps/api/src/control-center/ai.ts": 3, "apps/api/src/conversation.ts": 1, "apps/api/src/evolution-source.ts": 4, "apps/api/src/golden-suite.ts": 1, "apps/api/src/local-model-endpoints.ts": 3, "apps/api/src/main.ts": 2,
+    "apps/api/src/run-rate.ts": 1, "apps/api/src/self-model-readers.ts": 1, "apps/api/src/vision-runtime.ts": 1, "apps/api/src/worker-main.ts": 1, "modules/executive/src/ai-mesh/report.ts": 1, "modules/memory/src/embedding.ts": 2,
     "modules/model-gateway/src/capability-registry.ts": 5, "modules/model-gateway/src/council.ts": 3, "modules/model-gateway/src/mesh-smoke.ts": 3, "modules/model-gateway/src/model-gateway.ts": 1,
     "modules/model-gateway/src/override-parser.ts": 1, "modules/situations/src/assist.ts": 3, "modules/vision/src/classifier.ts": 1,
     "packages/provider-adapters/src/local-llm.ts": 1, "packages/provider-adapters/src/ollama.ts": 1, "packages/provider-adapters/src/scripted.ts": 1
@@ -293,8 +293,8 @@ describe("G: ÉN lokalitetsregel (fiks-runde 1, FIX-7/A80): ingen ny leverandør
    * Grense: en regel som bruker KUN en stamme uten et helt leverandørnavn (`/^gemma/`) fanges ikke her (kodegjennomgang).
    */
   const ALLOWED_BARE: Readonly<Record<string, number>> = {
-    "apps/api/src/chat-candidates.ts": 1, "apps/api/src/control-center/ai.ts": 3, "apps/api/src/conversation.ts": 1, "apps/api/src/evolution-source.ts": 4, "apps/api/src/golden-suite.ts": 1, "apps/api/src/main.ts": 2,
-    "apps/api/src/run-rate.ts": 5, "apps/api/src/self-model-readers.ts": 1, "apps/api/src/vision-runtime.ts": 1, "apps/api/src/worker-main.ts": 1, "modules/executive/src/ai-mesh/report.ts": 1, "modules/memory/src/embedding.ts": 3,
+    "apps/api/src/chat-candidates.ts": 1, "apps/api/src/control-center/ai.ts": 3, "apps/api/src/conversation.ts": 1, "apps/api/src/evolution-source.ts": 4, "apps/api/src/golden-suite.ts": 1, "apps/api/src/local-model-endpoints.ts": 3, "apps/api/src/main.ts": 2,
+    "apps/api/src/run-rate.ts": 1, "apps/api/src/self-model-readers.ts": 1, "apps/api/src/vision-runtime.ts": 1, "apps/api/src/worker-main.ts": 1, "modules/executive/src/ai-mesh/report.ts": 1, "modules/memory/src/embedding.ts": 3,
     "modules/model-gateway/src/capability-registry.ts": 6, "modules/model-gateway/src/council.ts": 3, "modules/model-gateway/src/mesh-smoke.ts": 3, "modules/model-gateway/src/model-gateway.ts": 1,
     "modules/model-gateway/src/override-parser.ts": 1, "modules/model-gateway/src/pricing.ts": 5, "modules/situations/src/assist.ts": 3, "modules/tasks/src/coding.ts": 1, "modules/vision/src/classifier.ts": 1,
     "packages/provider-adapters/src/index.ts": 2, "packages/provider-adapters/src/local-llm.ts": 1, "packages/provider-adapters/src/ollama.ts": 1, "packages/provider-adapters/src/scripted.ts": 3

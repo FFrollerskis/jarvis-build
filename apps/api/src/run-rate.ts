@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
 import { financeWithheldMarker, isKnownNonFinanceConnectorId, withholdFinanceFromCurrentModel, type ToolDefinition, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
+import { servedByCloudModel } from "./cloud-tool-screen.ts";
 
 /**
  * D-421 (UA0-RUNRATE): run-rate - hva Jarvis faktisk koster (modell per leverandør/formål/dag, prognose for måneden) og hva connectorene koster i
@@ -12,7 +13,9 @@ import { financeWithheldMarker, isKnownNonFinanceConnectorId, withholdFinanceFro
  */
 type Pool = Pick<pg.Pool, "query"> & Partial<Pick<pg.Pool, "connect">>;
 
-const LOCAL_PROVIDERS = new Set(["gemma_local", "local_llm", "ollama", "scripted", "local_vision"]);
+// WP-G4b/N1b-integrasjon (L3): visningens «lokal» følger SAMME per-kall-regel som låsen (`servedByCloudModel` leser lokaliteten per kall fra modellprofilene): en identitet oppstartsvakten (K4) har demotert til sky vises som sky og
+// teller i `cloud_share_30d`. `local_vision` er vision-leverandøren og står ikke i modellprofilene, så den beholdes som lokal her (ingen egen lokalitetsliste for modellene).
+const isLocalForDisplay = (provider: string): boolean => provider === "local_vision" || !servedByCloudModel({ provider });
 export const MAINTENANCE_KINDS = ["incident", "credential_rotation", "api_change", "manual_fix", "upgrade", "outage", "other"] as const;
 
 export interface RunRateReport {
@@ -93,7 +96,7 @@ export class RunRateService {
     const d30 = totals?.d30 ?? 0;
     const providers = byProvider.map((r) => {
       const provider = r.provider ?? "ukjent";
-      return { provider, model: r.model, local: LOCAL_PROVIDERS.has(provider), calls: r.calls, failed_calls: r.failed, ore: nOre(r.ore), tokens_in: Number(r.tin), tokens_out: Number(r.tout) };
+      return { provider, model: r.model, local: isLocalForDisplay(provider), calls: r.calls, failed_calls: r.failed, ore: nOre(r.ore), tokens_in: Number(r.tin), tokens_out: Number(r.tout) };
     });
     const cloudOre = providers.filter((p) => !p.local).reduce((a, p) => a + p.ore, 0);
     const days7 = totals?.days_with_data_7 ?? 0;
