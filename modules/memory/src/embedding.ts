@@ -104,7 +104,7 @@ export class OllamaEmbedding implements EmbeddingProvider {
   constructor(
     baseUrl: string,
     readonly model: string = DEFAULT_OLLAMA_EMBEDDING_MODEL,
-    options: { dim?: number; timeoutMs?: number; minSimilarity?: number } = {}
+    options: { dim?: number; timeoutMs?: number; minSimilarity?: number; noRedirect?: boolean } = {}
   ) {
     const base = model.replace(/:.*$/, "");
     const dim = options.dim ?? KNOWN_EMBEDDING_DIMS[base];
@@ -113,8 +113,11 @@ export class OllamaEmbedding implements EmbeddingProvider {
     this.embedUrl = `${normalizeEmbeddingBaseUrl(baseUrl)}/api/embed`;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS;
     this.minSimilarity = options.minSimilarity ?? 0.35;
+    // WP-G4b fiks-runde 1 (FIX-5, review B L1): `noRedirect: true` følger aldri en omdirigering (en 307/308 ville sendt minneinnholdet videre til `Location`); av som standard = ingen `redirect`-nøkkel (som før).
+    this.noRedirect = options.noRedirect === true;
   }
   private readonly timeoutMs: number;
+  private readonly noRedirect: boolean;
 
   async embed(text: string): Promise<number[]> {
     const [v] = await this.embedBatch([text]);
@@ -131,6 +134,7 @@ export class OllamaEmbedding implements EmbeddingProvider {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: AbortSignal.timeout(this.timeoutMs),
+        ...(this.noRedirect ? { redirect: "error" as const } : {}),
         body: JSON.stringify({ model: this.model, input, truncate: true })
       });
     } catch (err) {
@@ -213,7 +217,7 @@ export function embeddingEndpointFromEnv(env: EmbeddingEnv = process.env as Embe
  * - ellers `LocalHashEmbedding` (fallback uten semantikk - logges som advarsel av kalleren).
  * Resultatet er ALLTID lokalt; faktoryen kan ikke returnere en sky-provider.
  */
-export function createEmbeddingProviderFromEnv(env: EmbeddingEnv = process.env as EmbeddingEnv): EmbeddingProvider {
+export function createEmbeddingProviderFromEnv(env: EmbeddingEnv = process.env as EmbeddingEnv, options: { noRedirect?: boolean } = {}): EmbeddingProvider {
   const provider = (env.JARVIS_EMBEDDING_PROVIDER ?? "").trim().toLowerCase();
   const model = (env.JARVIS_EMBEDDING_MODEL ?? "").trim();
   const wantsOllama = provider === "ollama" || (provider === "" && model !== "");
@@ -228,5 +232,5 @@ export function createEmbeddingProviderFromEnv(env: EmbeddingEnv = process.env a
   const dimRaw = (env.JARVIS_EMBEDDING_DIM ?? "").trim();
   const dim = dimRaw === "" ? undefined : Number.parseInt(dimRaw, 10);
   if (dimRaw !== "" && (!Number.isInteger(dim) || (dim as number) <= 0)) throw new Error("memory_embedding_dim_invalid");
-  return new OllamaEmbedding(url, model || DEFAULT_OLLAMA_EMBEDDING_MODEL, dim ? { dim } : {});
+  return new OllamaEmbedding(url, model || DEFAULT_OLLAMA_EMBEDDING_MODEL, { ...(dim ? { dim } : {}), ...(options.noRedirect === true ? { noRedirect: true } : {}) });
 }

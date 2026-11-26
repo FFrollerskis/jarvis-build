@@ -40,6 +40,15 @@ export function parseLocalModelEndpointGuard(env: Readonly<Record<string, string
 }
 
 /**
+ * WP-G4b fiks-runde 1 (FIX-5, review B L1): med vakten PÅ følger lokale modellkall (`local_llm`, `gemma_local`, `ollama` og minnets Ollama-embedding) ALDRI en omdirigering (`redirect: "error"`): en 307/308 fra den lokale URL-en ville
+ * ellers sendt forespørselskroppen (modellinnhold, inkl. helse/økonomi) videre til `Location`. Komposisjonsrotene (api og worker) gir denne verdien som konstruktøropsjonen `noRedirect`; AV (standard) = ingen `redirect`-nøkkel = main-atferd.
+ * Kun den eksakte flaggverdien `on` slår på (samme parser som vakten).
+ */
+export function localModelNoRedirect(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return parseLocalModelEndpointGuard(env).enabled;
+}
+
+/**
  * De tre identitetene som er «lokale» KUN ved konfigurasjon, og miljøvariabelen som setter URL-en (samme variabler som adapterne leser: `LocalOpenAiCompatibleAdapter` (`local_llm`, og `gemma_local` via `main.ts`/`worker-main.ts`)
  * og `OllamaAdapter`). `local_vision` har sin egen, strengere vakt (kaster ved oppstart) og er ikke med her.
  */
@@ -60,15 +69,19 @@ export class MemoryEmbeddingNotLocalError extends Error {
   }
 }
 
-/** Det vakten IKKE dekker (ærlig oppstartslogg; oppdateres når et hull lukkes). */
-export const LOCAL_MODEL_GUARD_NOT_COVERED: readonly string[] = Object.freeze(["redirects", "dns_after_startup"]);
+/**
+ * Det vakten IKKE dekker (ærlig oppstartslogg; oppdateres når et hull lukkes). `dns_rebinding_after_startup`: navneoppløsningen kontrolleres kun ved oppstart (ingen pinning per kall, ingen re-sjekk): et navn som løste til en lokal adresse
+ * og SENERE svarer med en offentlig fanges ikke (eierens DNS er en del av tillitsgrunnlaget). `memory_embedding_unresolved_name`: minnets embedding-URL med et navn som ikke kan løses ved oppstart beholdes (kan ikke demoteres; en avslått PC skal
+ * ikke velte API-et). Omdirigeringer (FIX-5) og minnets embedding-URL (FIX-1) er dekket; `run-rate.ts` har en frosset visningskopi av lokalitetsregelen og `decideRoute` i selvendringsmodulen er frosset (ikke sikkerhetsavgjørelser).
+ */
+export const LOCAL_MODEL_GUARD_NOT_COVERED: readonly string[] = Object.freeze(["dns_rebinding_after_startup", "memory_embedding_unresolved_name"]);
 
 export type LocalModelEndpointStatus = "not_configured" | "local" | "unresolved" | "demoted";
 
 export interface LocalModelEndpointVerdict {
   identity: string;
   status: LocalModelEndpointStatus;
-  /** Årsakskode (`local_url_malformed|scheme|credentials|not_local|resolves_nonlocal|check_failed`) når `demoted`, ellers `null`. Aldri URL eller vert. */
+  /** Årsakskode (`local_url_malformed|scheme|credentials|not_local|resolves_nonlocal|unresolved_fqdn|check_failed`) når `demoted`, ellers `null`. Aldri URL eller vert. */
   code: string | null;
 }
 
@@ -86,12 +99,17 @@ const defaultLog = (line: Record<string, unknown>, level: "info" | "warn"): void
   else console.log(JSON.stringify(line));
 };
 
-/** ÉN sjekk for alle identiteter (syntaks, så navneoppløsning ved oppstart): `demoteCode` satt = ikke bevist lokal; ellers `status` `local` eller `unresolved` (navnet kunne ikke løses akkurat nå). Kaster aldri: en uventet feil er «ikke bevist lokal». */
-async function checkEndpoint(raw: string, lookup: LocalEndpointDnsLookup, timeoutMs: number, options: LocalEndpointOptions): Promise<{ demoteCode: string | null; status: "local" | "unresolved" }> {
+/**
+ * ÉN sjekk for alle identiteter (syntaks, så navneoppløsning ved oppstart): `demoteCode` satt = ikke bevist lokal; ellers `status` `local` eller `unresolved` (navnet kunne ikke løses akkurat nå). Kaster aldri: en uventet feil er «ikke bevist lokal».
+ * `demoteUnresolvedFqdn` (FIX-6, review B L2): et navn som ikke kan løses og HAR PUNKTUM (FQDN) er ikke bevist lokalt (resolveren kan være nede ved oppstart og senere svare med en offentlig adresse) og gir `local_url_unresolved_fqdn`. Et enkelt-label-navn
+ * (docker-tjeneste som ikke er oppe ennå) kan aldri være offentlig og beholdes. Minnets embedding kan ikke demoteres til sky og stopper ikke oppstarten for et uløst navn (en avslått PC skal ikke velte API-et): `false` der.
+ */
+async function checkEndpoint(raw: string, lookup: LocalEndpointDnsLookup, timeoutMs: number, options: LocalEndpointOptions, demoteUnresolvedFqdn: boolean): Promise<{ demoteCode: string | null; status: "local" | "unresolved" }> {
   try {
     assertLocalEndpoint(raw, options);
     const resolution = await resolveEndpointLocality(raw, { lookup, timeoutMs }, options);
     if (resolution === "nonlocal") return { demoteCode: "local_url_resolves_nonlocal", status: "local" };
+    if (resolution === "unresolved" && demoteUnresolvedFqdn && new URL(raw).hostname.includes(".")) return { demoteCode: "local_url_unresolved_fqdn", status: "local" };
     return { demoteCode: null, status: resolution === "unresolved" ? "unresolved" : "local" };
   } catch (err) {
     return { demoteCode: err instanceof LocalEndpointError ? err.code : "local_url_check_failed", status: "local" };
@@ -117,7 +135,7 @@ export async function enforceLocalModelEndpoints(env: Readonly<Record<string, st
       verdicts.push({ identity: provider, status: "not_configured", code: null });
       continue;
     }
-    const check = await checkEndpoint(raw, deps.lookup, timeoutMs, options);
+    const check = await checkEndpoint(raw, deps.lookup, timeoutMs, options, true);
     if (check.demoteCode !== null) {
       demoteLocalProfileToCloud(provider, profiles);
       verdicts.push({ identity: provider, status: "demoted", code: check.demoteCode });
@@ -130,7 +148,7 @@ export async function enforceLocalModelEndpoints(env: Readonly<Record<string, st
   // FIX-1: minnets embedding-leverandør (null = lokal hash/ingen Ollama-URL: ingen nettverk, ingenting å sjekke). Samme sjekk; ikke-lokal = stopp (ingen sky-profil å demotere til).
   const embeddingUrl = embeddingEndpointFromEnv(env as EmbeddingEnv);
   if (embeddingUrl !== null) {
-    const check = await checkEndpoint(embeddingUrl, deps.lookup, timeoutMs, options);
+    const check = await checkEndpoint(embeddingUrl, deps.lookup, timeoutMs, options, false);
     if (check.demoteCode !== null) {
       log({ msg: "local_model_endpoint_rejected", identity: MEMORY_EMBEDDING_IDENTITY, code: check.demoteCode }, "warn");
       throw new MemoryEmbeddingNotLocalError(check.demoteCode);

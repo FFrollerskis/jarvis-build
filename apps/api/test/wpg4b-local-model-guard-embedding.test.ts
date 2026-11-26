@@ -131,7 +131,10 @@ describe("ingen lekkasje: aldri URL, vert eller hemmelighet i feil eller logg", 
     const guard = out.lines.find((l) => l.line["msg"] === "local_model_endpoint_guard")!.line;
     expect((guard["identities"] as Array<{ identity: string }>).map((i) => i.identity)).toEqual(["local_llm", "gemma_local", "ollama", "memory_embedding"]);
     expect(Array.isArray(guard["not_covered"])).toBe(true);
-    expect(guard["not_covered"]).not.toContain("memory_embedding"); // dekket na
+    // dekket na: minnets embedding-URL (FIX-1) og omdirigeringer (FIX-5); gjenstaaende hull staar i loggen (FIX-6: DNS etter oppstart, uloest embedding-navn)
+    expect(guard["not_covered"]).toEqual(["dns_rebinding_after_startup", "memory_embedding_unresolved_name"]);
+    expect(guard["not_covered"]).not.toContain("memory_embedding");
+    expect(guard["not_covered"]).not.toContain("redirects");
   });
 });
 
@@ -145,11 +148,11 @@ describe("struktur: samme vakt (ingen kopi) og kalt FOER embedding-leverandoren 
     expect(src.match(/resolveEndpointLocality\(/g)?.length).toBe(1);
   });
 
-  it("api og worker kaller vakten FOER `createEmbeddingProviderFromEnv()`", () => {
+  it("api og worker kaller vakten FOER `createEmbeddingProviderFromEnv(...)`", () => {
     for (const file of ["src/main.ts", "src/worker-main.ts"]) {
       const src = read(file);
       const guard = src.indexOf("await enforceLocalModelEndpoints(");
-      const firstEmbedding = src.indexOf("createEmbeddingProviderFromEnv()");
+      const firstEmbedding = src.search(/createEmbeddingProviderFromEnv\(/);
       expect(guard, file).toBeGreaterThan(0);
       expect(firstEmbedding, file).toBeGreaterThan(guard);
     }

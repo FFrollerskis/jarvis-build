@@ -297,7 +297,8 @@ describe("D: struktur - api OG worker kaller vakten FØR gatewayen, flaggene les
       expect(call, file).toBeGreaterThan(-1);
       expect(gateway, file).toBeGreaterThan(call);
       expect(code.match(/enforceLocalModelEndpoints\(/g)?.length, file).toBe(1);
-      expect(code, file).toMatch(/import \{ enforceLocalModelEndpoints \} from "\.\/local-model-endpoints\.ts";/);
+      // FIX-5: importen har også `localModelNoRedirect` (omdirigeringsvakten bruker samme flaggparser); ingen annen import fra filen
+      expect(code, file).toMatch(/import \{ enforceLocalModelEndpoints, localModelNoRedirect \} from "\.\/local-model-endpoints\.ts";/);
     }
   });
 

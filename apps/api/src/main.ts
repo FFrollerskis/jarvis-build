@@ -112,7 +112,7 @@ import {
   situationsToolDefinitions
 } from "@jarvis/situations";
 import { createSituationSignalsWiring } from "./situation-signals-wiring.ts";
-import { enforceLocalModelEndpoints } from "./local-model-endpoints.ts";
+import { enforceLocalModelEndpoints, localModelNoRedirect } from "./local-model-endpoints.ts";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, parseFollowUpPushPolicy, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
@@ -338,6 +338,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-G4b K4 (D-484, JARVIS-115 d): «lokal» modell er en etikett i registeret; med `JARVIS_LOCAL_MODEL_URL_GUARD=on` valideres URL-en til `gemma_local`/`local_llm`/`ollama` ved oppstart (G3-vakten, DNS inkludert), og en ugyldig/offentlig
   // URL gjør identiteten IKKE-lokal på SELVE profilen (alle lokalitetsavgjørelser ser det: ruter, gateway-låser, finanslåsen). Flagg AV = ingenting skjer. Kjøres FØR gatewayen bygges (samme i worker-main.ts).
   await enforceLocalModelEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
+  // WP-G4b fiks-runde 1 (FIX-5): med vakten PÅ følger lokale modellkall (local_llm/gemma_local/ollama og minnets embedding) aldri en omdirigering; AV = ingen `redirect`-nøkkel (main-atferd).
+  const noRedirect = localModelNoRedirect(process.env);
   const visionEndpoints = await verifyVisionEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
   const visionAdapter = visionAdapterFromEnv(process.env);
   const gateway = new ModelGateway({
@@ -360,7 +362,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       new AnthropicAdapter(),
       new GeminiAdapter(),
       new GemmaHostedAdapter(),
-      new LocalOpenAiCompatibleAdapter(),
+      new LocalOpenAiCompatibleAdapter(undefined, undefined, undefined, undefined, undefined, { noRedirect }),
       // D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): SAMME
       // `LocalOpenAiCompatibleAdapter`-klasse som `local_llm` over, registrert
       // EN GANG TIL under en distinkt provider-identitet (`gemma_local`) for
@@ -375,11 +377,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         // egen `envOrDefault()`-fiksede default), `||` retter opp samme sted.
         process.env["JARVIS_GEMMA_LOCAL_MODEL"] || "gemma-local",
         undefined,
-        "gemma_local"
+        "gemma_local",
+        undefined,
+        { noRedirect }
       ),
       new KimiAdapter(),
       new HermesAdapter(),
-      new OllamaAdapter(),
+      new OllamaAdapter(undefined, undefined, undefined, { noRedirect }),
       ...(visionAdapter !== null ? [visionAdapter] : [])
       // D-106 HOST-FIX (produksjonsherding, Defekt E): `ScriptedAdapter` er ALDRI
       // registrert her lenger - live host-kjøring viste at den, som en ordinær
@@ -706,7 +710,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // D-386 (Minne v2): ÉN faktory for embedding-provideren - alltid LOKAL (`assertLocalEmbedding` i writer/retriever
   // stopper en sky-provider ved oppstart). `ollama` (bge-m3 o.l.) gir ekte semantisk gjenfinning; `local-hash` er
   // kun fallback uten semantikk og logges som advarsel så det aldri går ubemerket i drift.
-  const memoryEmbedding = createEmbeddingProviderFromEnv();
+  const memoryEmbedding = createEmbeddingProviderFromEnv(process.env, { noRedirect });
   console.log(JSON.stringify({
     msg: memoryEmbedding.model === "local-hash-v1" ? "memory_embedding_fallback_hash_no_semantics" : "memory_embedding_provider",
     model: memoryEmbedding.model, dim: memoryEmbedding.dim, locality: memoryEmbedding.locality
