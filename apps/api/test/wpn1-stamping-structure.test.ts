@@ -31,8 +31,11 @@ describe("A: stemplingen av servingModel", () => {
   });
 
   it("settet av filer som overhodet nevner `servingModel` er kjent (gateway/mesh-bridge, executive, governance og jobbtransporten leser/videreformidler); en ny fil må vurderes mot utførelseslåsen", () => {
+    // WP-N1b (K1): `model-scope.ts` er vurdert (vaktens egen instruks) - den nevner `servingModel` kun som feltnavn i den modell-stemplede konteksten som `ToolGateway.execute()` setter (ENESTE setter, låst av
+    // `wpn1b-structure.test.ts`); den STEMPLER ingenting og leser ingenting fra parametere.
     expect(Object.keys(countBy(/\bservingModel\b/g))).toEqual([
-      "apps/api/src/chat-jobs.ts", "modules/executive/src/service.ts", "modules/executive/src/transport.ts", "modules/governance/src/transport.ts", "modules/tool-gateway/src/gateway.ts", "modules/tool-gateway/src/mesh-bridge.ts"
+      "apps/api/src/chat-jobs.ts", "modules/executive/src/service.ts", "modules/executive/src/transport.ts", "modules/governance/src/transport.ts", "modules/tool-gateway/src/gateway.ts", "modules/tool-gateway/src/mesh-bridge.ts",
+      "modules/tool-gateway/src/model-scope.ts"
     ]);
     expect(countBy(/\bservingModel\b/g)["modules/tool-gateway/src/mesh-bridge.ts"]).toBe(1); // kun stemplet, ingen annen bruk
   });

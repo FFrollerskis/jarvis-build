@@ -42,6 +42,56 @@ export type OpenLoopType =
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 
 /**
+ * WP-N1b (JARVIS-116 a, K2): hvilke løkketyper er FINANSAVLEDEDE - `reason`/`next_action` bærer beløp i NOK, leverandørnavn, formål, bank-/kortreferanser og id-er til `finance_*`-radene, og løkken er derfor like
+ * begrenset (SECRET_RESTRICTED, D-378) som selve finansdataene den er avledet av. `Record` over ALLE `OpenLoopType`: en NY løkketype kompilerer ikke før noen har tatt stilling til den. Samme klassifisering som
+ * `situations`-broen (`domainForLoopType`: domenet `spend`) og Finans-senteret (`FINANCE_LOOP_TYPES`) - en test pinner at de er enige.
+ * `marketing_spend_anomaly` er MED (strengeste regel): teksten bærer kampanjens utgift i NOK, `spend`-domenet i broen og Finans-senteret teller den som økonomi. Eieren kan slippe den ved å sette `false` her (én linje).
+ */
+export const FINANCE_DERIVED_LOOP_TYPE: Readonly<Record<OpenLoopType, boolean>> = {
+  overdue_followup: false,
+  stalled_opportunity: false,
+  support_ticket_needs_reply: false,
+  support_ticket_overdue: false,
+  support_ticket_unassigned: false,
+  support_ticket_waiting_internal: false,
+  contract_renewal_due: false,
+  contract_termination_deadline: false,
+  contract_obligation_due: false,
+  contract_review_required: false,
+  marketing_spend_anomaly: true,
+  payment_intent_anomaly: true,
+  payment_intent_reconciliation_mismatch: true,
+  finance_spend_unexpected: true,
+  finance_spend_amount_deviation: true,
+  finance_recurring_charge_missing: true,
+  finance_recurring_charge_duplicate: true,
+  finance_spend_correction_conflict: true,
+  bank_transaction_unmatched: true,
+  bank_consent_attention: true,
+  card_anomaly_attention: true,
+  finance_procurement_missing: true,
+  product_item_needs_triage: false,
+  product_item_high_priority_stalled: false,
+  operations_task_overdue: false,
+  operations_task_escalation_needed: false,
+  customer_churn_risk: false
+};
+
+/** Løkketypene som er finansavledede (til tester og rapportering). */
+export const FINANCE_DERIVED_LOOP_TYPES: readonly OpenLoopType[] = (Object.keys(FINANCE_DERIVED_LOOP_TYPE) as OpenLoopType[]).filter((t) => FINANCE_DERIVED_LOOP_TYPE[t]);
+
+/**
+ * Løkketypene som KJENT IKKE er finansavledede - HVITLISTEN SQL-filtrene bruker (`loop_type = ANY(...)`, aldri `NOT (... = ANY(finanslisten))`): en type som ikke står her (ukjent, ny, `NULL`) utelates, i tråd med
+ * fail-closed-regelen i `isFinanceDerivedLoopType`. En ny løkketype i databasen uten en klassifisering her blir da holdt tilbake fra skymodellen i stedet for å slippe gjennom.
+ */
+export const NON_FINANCE_LOOP_TYPES: readonly OpenLoopType[] = (Object.keys(FINANCE_DERIVED_LOOP_TYPE) as OpenLoopType[]).filter((t) => !FINANCE_DERIVED_LOOP_TYPE[t]);
+
+/** Er løkketypen finansavledet? FAIL-CLOSED: en type koden ikke kjenner (eller ikke en streng) regnes som finansavledet. */
+export function isFinanceDerivedLoopType(loopType: unknown): boolean {
+  return typeof loopType !== "string" || !Object.hasOwn(FINANCE_DERIVED_LOOP_TYPE, loopType) || FINANCE_DERIVED_LOOP_TYPE[loopType as OpenLoopType];
+}
+
+/**
  * D-396 (JARVIS-045): deterministiske loops hadde `confidence = NULL` - konsumenter (brief/attention) kunne ikke skille «hard fakta» fra
  * heuristikk. Hard-fakta-regler (frist passert, ticket uten svar, forfalt forpliktelse, bankavvik) = 0.9; terskel-/stillstandsheuristikker
  * (dager uten aktivitet, utgiftsavvik mot glidende snitt) = 0.7. Verdiene er KALIBRERINGSFORSLAG - eier kan justere (NEEDS_TOBIAS: kalibrering mot faktiske data).

@@ -4,6 +4,7 @@ import type { MemoryWriter } from "@jarvis/memory";
 import { authorizeDockerTarget, type DockerMutationAction } from "./docker-target-policy.ts";
 import { authorizeGceTarget, type GceMutationAction } from "./gce-target-policy.ts";
 import type { ToolDefinition, ToolTransport } from "./gateway.ts";
+import { withheldFromCloudTransport } from "./finance-withheld.ts";
 import {
   financeConnectorIdsForCredentialRef, financeCredentialRefForProvider,
   SUBMIT_PAYMENT_INTENT_RECOVERY, SUBMIT_STRIPE_REFUND_RECOVERY, SUBMIT_VIPPS_CAPTURE_RECOVERY, SUBMIT_VIPPS_REFUND_RECOVERY,
@@ -3817,7 +3818,8 @@ export function firstWaveTools(
       input_schema: empty, capability_class: "A", scopes: ["telnyx:read"],
       reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TELNYX_API_KEY",
-      output_trust: "untrusted", transport: transport("telnyx")
+      // WP-N1b fiks-runde 1 (FIX-6): kontoens SALDO er finansavledet metadata - holdes tilbake fra sky/ukjent modell VED UTFØRELSE (leverandøren kalles ikke); eierens livetest og lokal modell får saldoen som før
+      output_trust: "untrusted", transport: withheldFromCloudTransport(transport("telnyx"))
     },
     /**
      * D-322. Runway sitt REST-API v1 (`api.dev.runwayml.com`) - BEKREFTET via
