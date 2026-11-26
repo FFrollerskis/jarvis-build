@@ -40,7 +40,7 @@ export function parseLocalModelEndpointGuard(env: Readonly<Record<string, string
 }
 
 /**
- * WP-G4b fiks-runde 1 (FIX-5, review B L1): med vakten PÅ følger lokale modellkall (`local_llm`, `gemma_local`, `ollama` og minnets Ollama-embedding) ALDRI en omdirigering (`redirect: "error"`): en 307/308 fra den lokale URL-en ville
+ * WP-G4b fiks-runde 1 (FIX-5, review B L1): med vakten PÅ følger lokale modellkall (de tre chat-identitetene i `LOCAL_MODEL_ENDPOINTS` og minnets Ollama-embedding) ALDRI en omdirigering (`redirect: "error"`): en 307/308 fra den lokale URL-en ville
  * ellers sendt forespørselskroppen (modellinnhold, inkl. helse/økonomi) videre til `Location`. Komposisjonsrotene (api og worker) gir denne verdien som konstruktøropsjonen `noRedirect`; AV (standard) = ingen `redirect`-nøkkel = main-atferd.
  * Kun den eksakte flaggverdien `on` slår på (samme parser som vakten).
  */
