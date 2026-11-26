@@ -95,6 +95,20 @@ describe("FIX-2: hver retry tar neste porsjon (konvergerer)", () => {
     } finally { spy.mockRestore(); }
   }, 120_000);
 
+  it("«utsatt» teller kun NYE hendelser: kjente duplikater som står ETTER taket regnes ikke som utsatte (503 betyr alltid at det gjenstår nye hendelser)", async () => {
+    const svc = service({ maxEventsPerRequest: 5 });
+    const all = Array.from({ length: 12 }, (_, i) => waMessage(waNum(), "hei", `wamid.post${mid}x${i}`));
+    // to hendelser midt i halen er kjent fra før (levert alene): de står etter taket i den fulle kroppen
+    expect((await svc.handle("meta", metaReq(waBatch([all[8]!, all[9]!])))).status).toBe(200);
+    const first = await svc.handle("meta", metaReq(waBatch(all)));
+    expect(first.status).toBe(503);
+    expect(first.body, "e8 og e9 er kjent men står etter taket: de er verken telt som duplikater eller som utsatte").toMatchObject({ error: "batch_over_cap", events: { inserted: 5, deferred: 5, duplicates: 0 } });
+    // alt som gjenstår er kjent: ingen utsatt, ingen 503 (200)
+    const second = await svc.handle("meta", metaReq(waBatch(all)));
+    expect(second.status).toBe(200);
+    expect(second.body).toMatchObject({ events: { inserted: 5, duplicates: 7 } });
+  }, 120_000);
+
   it("duplikater teller IKKE mot taket: 10 sett fra før + 10 nye ved tak 10 gir 200 (alle 10 nye behandles)", async () => {
     const svc = service({ maxEventsPerRequest: 10 });
     const all = Array.from({ length: 20 }, (_, i) => waMessage(waNum(), "hei", `wamid.dup${mid}x${i}`));

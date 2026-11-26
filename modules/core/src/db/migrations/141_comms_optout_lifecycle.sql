@@ -25,6 +25,9 @@
 --    ÆRLIG AVGRENSNING (som 101): triggeren stopper utilsiktet/feilaktig sletting og kodefeil, IKKE en app-rolle med FRI SQL (den kan selv sette erasure-GUC-en i en transaksjon) og ikke tabelleieren/superbrukeren
 --    (kan `DISABLE TRIGGER`). Valget er bevisst smalest mulig: en SECURITY DEFINER-funksjon ville krevd DELETE-rettigheter og en ny definer-rolle for et vern som uansett ikke er kryptografisk, og ville endret
 --    erasure-planen (delt kode). Journalen (`comms_outbound_log`) får samme vern i 142.
+--    FIX-5 (fiks-runde 1, bekreftet av to uavhengige gjennomganger): DELVIS. Testet som app-rolle (`db-privileges`): TRUNCATE, `session_replication_role`, DISABLE/DROP TRIGGER og `setval` gir 42501, og UPDATE av kvitteringer og kjernekolonner avvises; men
+--    erasure-GUC-en kan settes av en app-forbindelse med fri SQL, og da kan den slette en eierregistrert avmelding. En SECURITY DEFINER-funksjon alene hjelper ikke (enhver app-forbindelse kan kalle den); skjerpingen er en EGEN erasure-rolle (egen
+--    DB-innlogging brukt kun av erasure-utføreren) som eneste har DELETE på avmeldingene. Ikke bygget (Q); runbook og DPIA §10.7 beskriver vernet som et vern mot kodefeil.
 
 CREATE SEQUENCE comms_event_seq AS bigint START WITH 1 INCREMENT BY 1 CACHE 1;
 GRANT USAGE, SELECT ON SEQUENCE comms_event_seq TO jarvis_app;
