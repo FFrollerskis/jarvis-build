@@ -113,10 +113,10 @@ describe("F2-A3: ÉN lokalitetsregel - executive-tjenestens `servedLocally` er `
     expect(code(read("apps/api/src/worker-main.ts"))).not.toContain("servedLocally");
   });
 
-  it("kun fire produksjonsfiler i apps/api/src bruker `servedByCloudModel` i kode (definisjonen, prediktatet, samtalemotoren og ruten for kostnadsnotatet) - en ny bruker må vurderes mot låsen, ikke kopieres inn", () => {
+  it("kun fem produksjonsfiler i apps/api/src bruker `servedByCloudModel` i kode (definisjonen, prediktatet, samtalemotoren, ruten for kostnadsnotatet og kostnadsvisningen `run-rate.ts`: kun visningens «lokal»-merke, ingen tilgangsbeslutning, WP-G4b L3) - en ny bruker må vurderes mot låsen, ikke kopieres inn", () => {
     const dir = join(ROOT, "apps/api/src");
     const users = sourceFiles(dir).filter((f) => code(readFileSync(f, "utf8")).includes("servedByCloudModel")).map((f) => f.slice(dir.length + 1)).sort();
-    expect(users).toEqual(["cloud-tool-screen.ts", "conversation.ts", "restricted-context-guard.ts", "tool-turn-route.ts"]);
+    expect(users).toEqual(["cloud-tool-screen.ts", "conversation.ts", "restricted-context-guard.ts", "run-rate.ts", "tool-turn-route.ts"]);
   });
 });
 
