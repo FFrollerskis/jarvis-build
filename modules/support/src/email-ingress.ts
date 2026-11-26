@@ -215,6 +215,9 @@ export class SupportEmailService {
       error = sanitizeError(err);
     }
     const ingestResult = await this.support.ingestMessage(tenantId, memorySpace, {
+      // WP-P3 K3 (JARVIS-104): svaret registreres på DENNE ticketen (id-oppslag), aldri via (kilde, instans, tråd) - et manuelt ticket har ingen av dem og fikk før et nytt skygge-ticket.
+      // Hendelsens dedupe-nøkkel (kildeinstans `?? accountEmail`, `source_message_id`) er uendret.
+      ticket_id: ticket.ticket_id,
       channel: ticket.channel, source_type: ticket.source_type,
       source_instance_id: ticket.source_instance_id ?? this.accountEmail,
       source_thread_id: ticket.source_thread_id ?? ticket.ticket_id,
