@@ -3,7 +3,7 @@ import type pg from "pg";
 import type { BusinessService } from "@jarvis/business";
 import {
   COMMS_PEPPER_REF, CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MeetingService, ReplySweep, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
-  commsAnyEnabled, commsToolDefinitions, createContentHasher, guardLegacyNotifyTransport, parseCommsConfig, retentionTenants, startRetentionSweep, type CommsConfig
+  assessPepper, commsAnyEnabled, commsToolDefinitions, createContentHasher, guardLegacyNotifyTransport, parseCommsConfig, retentionTenants, startRetentionSweep, type CommsConfig
 } from "@jarvis/comms";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import { AccessTokenCache, googleAccessToken, microsoftRefreshExchange, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
@@ -100,7 +100,9 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
     // K1: en tydelig oppstartsvarsel (kun koden og et ja/nei, aldri verdien) når utgående er på men pepperen mangler - utsendelse feiler lukket helt til eieren har lagt den inn (runbook §6, NAS-trinn).
     if (config.outbound) {
       void secrets.get(COMMS_PEPPER_REF).then((value) => {
-        if (createContentHasher(value) === null) input.warn?.({ msg: "comms_content_pepper_missing", effect: "outbound_fails_closed" });
+        // FIX-7: kun en fast årsakskode (aldri verdien): `missing` beholder den gamle meldingen; en svak/ugyldig verdi får en egen melding med årsaken.
+        const verdict = assessPepper(value);
+        if (!verdict.ok) input.warn?.(verdict.code === "missing" ? { msg: "comms_content_pepper_missing", effect: "outbound_fails_closed" } : { msg: "comms_content_pepper_invalid", reason: verdict.code, effect: "outbound_fails_closed" });
       }).catch(() => input.warn?.({ msg: "comms_content_pepper_check_failed" }));
     }
     startRetentionSweep({

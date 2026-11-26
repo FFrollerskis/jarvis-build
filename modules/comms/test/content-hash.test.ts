@@ -3,9 +3,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { JsonValue } from "@jarvis/contracts";
 import {
-  PEPPER_MIN_LENGTH, KEY_UNAVAILABLE, createContentHasher, legacyRequestFingerprint, parseSendParams, previewCommsSend, recipientHash, requestFingerprint, scopedIdempotencyKey, sha256Hex
+  PEPPER_MIN_DISTINCT_CHARS, PEPPER_MIN_LENGTH, KEY_UNAVAILABLE, assessPepper, createContentHasher, legacyRequestFingerprint, parseSendParams, previewCommsSend, recipientHash, requestFingerprint, scopedIdempotencyKey, sha256Hex
 } from "../src/index.ts";
-import { OWNER, TENANT_A, TEST_PEPPER } from "./support/harness.ts";
+import { OWNER, TENANT_A, TENANT_B, TEST_PEPPER } from "./support/harness.ts";
 import { authorizeAll, startChain, type Chain } from "./support/chain.ts";
 
 /**
@@ -20,8 +20,8 @@ const TEXT = "Hei!";
 const sendP = (recipient: string, text = TEXT): Record<string, JsonValue> => ({ channel: "sms", account_ref: SMS, recipient, purpose: "transactional", text, ...BASIS });
 const finalText = (text: string): string => `${text}\n\n${chain.config.ai_disclosure_text}`;
 const sends = (): number => chain.twilio.calls.filter((c) => c.op === "send").length;
-/** Uavhengig gjenskaping av oppskriften (ikke koden under test): nøkkel per formål = HMAC(pepper, "jarvis-comms-pepper-v1|<formål>"), hash = HMAC(formålsnøkkel, data). */
-const recipe = (key: string, purpose: string, data: string): string => createHmac("sha256", createHmac("sha256", key).update(`jarvis-comms-pepper-v1|${purpose}`, "utf8").digest()).update(data, "utf8").digest("hex");
+/** Uavhengig gjenskaping av oppskriften (ikke koden under test): nøkkel per (formål, tenant) = HMAC(pepper, JSON(["jarvis-comms-pepper-v2", formål, tenant])), hash = HMAC(nøkkelen, data). */
+const recipe = (key: string, purpose: string, tenant: string, data: string): string => createHmac("sha256", createHmac("sha256", key).update(JSON.stringify(["jarvis-comms-pepper-v2", purpose, tenant]), "utf8").digest()).update(data, "utf8").digest("hex");
 const journalRow = async (requestId: string) => (await chain.db.admin.query("SELECT content_sha256, content_hash_version, before_state, status, content_length FROM comms_outbound_log WHERE tenant_id = $1 AND request_id = $2 ORDER BY created_at DESC LIMIT 1", [TENANT_A, requestId])).rows[0] as
   { content_sha256: string | null; content_hash_version: number; before_state: { v?: number; request_fingerprint?: string } | null; status: string; content_length: number } | undefined;
 
@@ -31,39 +31,95 @@ beforeAll(async () => {
 }, 240_000);
 afterAll(async () => { await chain?.stop(); }, 120_000);
 
-describe("createContentHasher: HMAC med formålsskilte nøkler; ingen pepper eller en for kort pepper gir INGEN hasher (fail-closed)", () => {
-  it("manglende, ikke-streng og for kort pepper (< 32 tegn) gir null; nøyaktig minstelengde godtas; pepperen trimmes", () => {
-    for (const bad of [null, undefined, "", "   ", "x".repeat(PEPPER_MIN_LENGTH - 1), 42 as unknown as string, `  ${"x".repeat(PEPPER_MIN_LENGTH - 1)}  `]) expect(createContentHasher(bad), String(bad)).toBeNull();
+describe("assessPepper/createContentHasher (FIX-7): svake, ugyldige og manglende peppere gir INGEN hasher (fail-closed, med en tydelig kode som aldri er verdien)", () => {
+  const strong = TEST_PEPPER;
+  const verdict = (value: unknown): string => { const a = assessPepper(value); return a.ok ? "ok" : a.code; };
+
+  it("kodene: manglende, ikke-tekst, mellomrom/linjeskift rundt, for kort, for få ulike tegn og gjentatt mønster", () => {
     expect(PEPPER_MIN_LENGTH).toBe(32);
-    expect(createContentHasher("p".repeat(32))).not.toBeNull();
-    expect(createContentHasher(`  ${"p".repeat(32)}\n`)!.hmac("content", "a")).toBe(createContentHasher("p".repeat(32))!.hmac("content", "a"));
+    expect(PEPPER_MIN_DISTINCT_CHARS).toBe(10);
+    expect(verdict(null)).toBe("missing");
+    expect(verdict(undefined)).toBe("missing");
+    expect(verdict("")).toBe("missing");
+    expect(verdict(42)).toBe("not_a_string");
+    expect(verdict({ toString: () => strong })).toBe("not_a_string");
+    for (const padded of [` ${strong}`, `${strong} `, `${strong}\n`, `\t${strong}`, `  ${strong}\r\n`, "   "]) expect(verdict(padded), JSON.stringify(padded)).toBe("surrounding_whitespace");
+    expect(verdict("x".repeat(PEPPER_MIN_LENGTH - 1))).toBe("too_short");
+    expect(verdict("abcdefghijklmnopqrstuvwxyz01234")).toBe("too_short"); // 31 tegn, mange ulike
+    expect(verdict("a".repeat(32))).toBe("too_few_distinct_characters");
+    expect(verdict("0".repeat(32))).toBe("too_few_distinct_characters");
+    expect(verdict("abababababababababababababababab")).toBe("too_few_distinct_characters");
+    expect(verdict("abcdefghi".repeat(4))).toBe("too_few_distinct_characters"); // 9 ulike
+    expect(verdict("0123456789".repeat(4))).toBe("repeating_pattern"); // 10 ulike, men en gjentatt blokk
+    expect(verdict("kQ7vL2xN9pR4tZ8mW3cB6hJ1fD5gS0yA".repeat(2))).toBe("repeating_pattern");
   });
 
-  it("hashen er en ekte HMAC-SHA256 (uavhengig gjenskapt oppskrift), formålsskilt, pepper-avhengig, deterministisk - og IKKE den usaltede SHA-256 (ordbok-gjettbarhet)", () => {
+  it("grensene: 10 ulike tegn og nøyaktig minstelengde godtas, 9 ulike avvises; en ekte tilfeldig verdi (base64 og hex) godtas", () => {
+    expect(verdict("0123456789abcdefghijklmnopqrstuv")).toBe("ok"); // 32 tegn, 32 ulike
+    expect(verdict("0123456789".repeat(3) + "ab")).toBe("ok"); // 10 + 2 ulike = 12, ikke en ren gjentakelse
+    expect(verdict("0123456789".repeat(3) + "01")).toBe("repeating_pattern");
+    expect(verdict("012345678".repeat(3) + "012345")).toBe("too_few_distinct_characters"); // 9 ulike
+    expect(verdict(createHash("sha256").update("a").digest("hex"))).toBe("ok"); // 64 hex
+    expect(verdict(createHash("sha256").update("b").digest("base64") + createHash("sha256").update("c").digest("base64"))).toBe("ok");
+    expect(verdict(strong)).toBe("ok");
+  });
+
+  it("createContentHasher gir null for ALT som assessPepper avviser (inkl. pepper med mellomrom rundt: ikke lenger trimmet stille), og en hasher ellers", () => {
+    for (const bad of [null, undefined, "", "   ", "x".repeat(PEPPER_MIN_LENGTH - 1), 42 as unknown as string, `  ${strong}  `, `${strong}\n`, "p".repeat(32), "0".repeat(32), "0123456789".repeat(4)]) {
+      expect(createContentHasher(bad), JSON.stringify(bad)).toBeNull();
+    }
+    expect(createContentHasher(strong)).not.toBeNull();
+    expect(createContentHasher(`${strong}-rotated`)).not.toBeNull();
+  });
+
+  it("verdien lekker aldri: koden er en av de faste, og hasheren bærer ikke pepperen", () => {
+    const codes = new Set(["missing", "not_a_string", "surrounding_whitespace", "too_short", "too_few_distinct_characters", "repeating_pattern"]);
+    for (const bad of ["a".repeat(40), ` ${strong}`, "kort-verdi-123"]) {
+      const a = assessPepper(bad);
+      expect(a.ok).toBe(false);
+      if (!a.ok) { expect(codes.has(a.code)).toBe(true); expect(JSON.stringify(a)).not.toContain(bad.trim()); }
+    }
+    expect(JSON.stringify(createContentHasher(strong))).not.toContain(strong);
+  });
+});
+
+describe("createContentHasher: HMAC med nøkler per formål OG tenant", () => {
+  it("hashen er en ekte HMAC-SHA256 (uavhengig gjenskapt oppskrift), formålsskilt, tenant-skilt, pepper-avhengig, deterministisk - og IKKE den usaltede SHA-256 (ordbok-gjettbarhet)", () => {
     const hasher = createContentHasher(TEST_PEPPER)!;
     expect(hasher.version).toBe(2);
     for (const data of ["Hei!", "", "ja", "x".repeat(10_000), "æøå ✓"]) {
-      expect(hasher.hmac("content", data)).toBe(recipe(TEST_PEPPER, "content", data));
-      expect(hasher.hmac("content", data)).toMatch(/^[0-9a-f]{64}$/);
-      expect(hasher.hmac("content", data), "ikke den usaltede SHA-256").not.toBe(createHash("sha256").update(data, "utf8").digest("hex"));
-      expect(hasher.hmac("content", data)).toBe(hasher.hmac("content", data));
+      expect(hasher.hmac("content", TENANT_A, data)).toBe(recipe(TEST_PEPPER, "content", TENANT_A, data));
+      expect(hasher.hmac("request", TENANT_B, data)).toBe(recipe(TEST_PEPPER, "request", TENANT_B, data));
+      expect(hasher.hmac("content", TENANT_A, data)).toMatch(/^[0-9a-f]{64}$/);
+      expect(hasher.hmac("content", TENANT_A, data), "ikke den usaltede SHA-256").not.toBe(createHash("sha256").update(data, "utf8").digest("hex"));
+      expect(hasher.hmac("content", TENANT_A, data)).toBe(hasher.hmac("content", TENANT_A, data));
     }
-    expect(hasher.hmac("content", "Hei!"), "samme data, ulikt formål gir ulik hash (en hash for ett formål kan ikke gjenbrukes for et annet)").not.toBe(hasher.hmac("request", "Hei!"));
-    expect(createContentHasher(`${TEST_PEPPER}-annen`)!.hmac("content", "Hei!"), "ulik pepper gir ulik hash").not.toBe(hasher.hmac("content", "Hei!"));
+    expect(hasher.hmac("content", TENANT_A, "Hei!"), "samme data, ulikt formål gir ulik hash (en hash for ett formål kan ikke gjenbrukes for et annet)").not.toBe(hasher.hmac("request", TENANT_A, "Hei!"));
+    expect(hasher.hmac("content", TENANT_A, "Hei!"), "samme data og formål, ULIK tenant gir ulik hash (FIX-7)").not.toBe(hasher.hmac("content", TENANT_B, "Hei!"));
+    expect(createContentHasher(`${TEST_PEPPER}-annen`)!.hmac("content", TENANT_A, "Hei!"), "ulik pepper gir ulik hash").not.toBe(hasher.hmac("content", TENANT_A, "Hei!"));
     expect(JSON.stringify(hasher), "hasheren bærer ikke pepperen").not.toContain(TEST_PEPPER);
     expect(Object.keys(hasher).sort()).toEqual(["hmac", "version"]);
+  });
+
+  it("en tom eller ikke-tekst tenant gir en FEIL (aldri en hash uten tenant-kontekst), og to tenant-id-er som ville blitt like uten entydig koding forblir ulike", () => {
+    const hasher = createContentHasher(TEST_PEPPER)!;
+    expect(() => hasher.hmac("content", "", "Hei!")).toThrow("comms_hash_scope_invalid");
+    expect(() => hasher.hmac("content", undefined as unknown as string, "Hei!")).toThrow("comms_hash_scope_invalid");
+    expect(hasher.hmac("content", "a|b", "x")).not.toBe(hasher.hmac("content|a", "b", "x"));
+    expect(hasher.hmac("content", 'a","b', "x")).not.toBe(hasher.hmac("content", "a", "x"));
   });
 
   it("forespørselens fingeravtrykk (v2) er en HMAC (uavhengig av request_id) og skiller seg fra det gamle usaltede (v1)", () => {
     const hasher = createContentHasher(TEST_PEPPER)!;
     const parsed = parseSendParams({ request_id: "req-ch-00001", channel: "sms", account_ref: SMS, recipient: "+4790000001", purpose: "transactional", text: "Hei", ...BASIS });
     if (!parsed.ok) throw new Error(parsed.code);
-    const v2 = requestFingerprint(parsed.value.request, hasher);
+    const v2 = requestFingerprint(parsed.value.request, hasher, TENANT_A);
     const v1 = legacyRequestFingerprint(parsed.value.request);
     expect(v2).toMatch(/^[0-9a-f]{64}$/);
     expect(v1).toBe(sha256Hex(JSON.stringify(["comms-request-v1", ...legacyParts(parsed.value.request)])));
     expect(v2).not.toBe(v1);
-    expect(v2).toBe(requestFingerprint(parsed.value.request, hasher));
+    expect(v2).toBe(requestFingerprint(parsed.value.request, hasher, TENANT_A));
+    expect(v2, "samme forespørsel i en annen tenant gir et annet avtrykk").not.toBe(requestFingerprint(parsed.value.request, hasher, TENANT_B));
   });
 });
 
@@ -81,7 +137,7 @@ describe("journalen: nye rader har HMAC-hash (versjon 2); den usaltede hashen fi
     const r = await chain.act("send", sendP(n), key);
     expect(r.ok, JSON.stringify(r)).toBe(true);
     const row = (await journalRow(scopedIdempotencyKey(TENANT_A, "send", key)))!;
-    const expected = recipe(TEST_PEPPER, "content", finalText(TEXT));
+    const expected = recipe(TEST_PEPPER, "content", TENANT_A, finalText(TEXT));
     expect(row).toMatchObject({ content_sha256: expected, content_hash_version: 2, status: "sent" });
     expect(row.before_state).toMatchObject({ v: 2 });
     expect(row.before_state!.request_fingerprint).toMatch(/^[0-9a-f]{64}$/);
@@ -105,7 +161,7 @@ describe("journalen: nye rader har HMAC-hash (versjon 2); den usaltede hashen fi
     const r = await chain.act("send", sendP(n, "Takk!"), key);
     expect(r.ok === false && r.status === "denied" ? r.denial_codes : []).toContain("recipient_opted_out");
     const row = (await journalRow(scopedIdempotencyKey(TENANT_A, "send", key)))!;
-    expect(row).toMatchObject({ status: "denied", content_sha256: recipe(TEST_PEPPER, "content", finalText("Takk!")), content_hash_version: 2 });
+    expect(row).toMatchObject({ status: "denied", content_sha256: recipe(TEST_PEPPER, "content", TENANT_A, finalText("Takk!")), content_hash_version: 2 });
   });
 
   it("to like meldinger gir samme hash (kjent, og uten pepperen ikke gjettbar), begge i versjon 2", async () => {
@@ -117,7 +173,7 @@ describe("journalen: nye rader har HMAC-hash (versjon 2); den usaltede hashen fi
     const a = (await journalRow(scopedIdempotencyKey(TENANT_A, "send", ka)))!;
     const b = (await journalRow(scopedIdempotencyKey(TENANT_A, "send", kb)))!;
     expect(a.content_sha256).toBe(b.content_sha256);
-    expect(a.content_sha256).toBe(recipe(TEST_PEPPER, "content", finalText("Samme tekst")));
+    expect(a.content_sha256).toBe(recipe(TEST_PEPPER, "content", TENANT_A, finalText("Samme tekst")));
     expect([a.content_hash_version, b.content_hash_version]).toEqual([2, 2]);
     expect(a.before_state!.request_fingerprint, "fingeravtrykket skiller mottakerne").not.toBe(b.before_state!.request_fingerprint);
   });
@@ -218,7 +274,7 @@ describe("overgang: rader skrevet FØR HMAC (versjon 1, usaltet) gjenkjennes for
     const key2 = chain.key("rot2");
     expect((await chain.act("send", sendP(chain.phone()), key2)).ok).toBe(true);
     const newHash = (await journalRow(scopedIdempotencyKey(TENANT_A, "send", key2)))!.content_sha256;
-    expect(newHash).toBe(recipe(`${TEST_PEPPER}-rotated`, "content", finalText(TEXT)));
+    expect(newHash).toBe(recipe(`${TEST_PEPPER}-rotated`, "content", TENANT_A, finalText(TEXT)));
     expect(newHash).not.toBe(oldHash);
     pepper = TEST_PEPPER;
   });

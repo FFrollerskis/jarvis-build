@@ -173,8 +173,8 @@ function fingerprintParts(request: OutboundRequest): unknown[] {
 }
 
 /** K1: fingeravtrykket er nå en HMAC (v2) med server-side pepper - mottaker + tekst gir en ordbok-gjettbar usaltet hash, og fingeravtrykket ligger i journalen like lenge som innholdshashen. Versjonen står i journalens `before_state.v`. */
-export function requestFingerprint(request: OutboundRequest, hasher: ContentHasher): string {
-  return hasher.hmac("request", JSON.stringify(["comms-request-v2", ...fingerprintParts(request)]));
+export function requestFingerprint(request: OutboundRequest, hasher: ContentHasher, tenantId: string): string {
+  return hasher.hmac("request", tenantId, JSON.stringify(["comms-request-v2", ...fingerprintParts(request)]));
 }
 
 /** v1 (usaltet SHA-256): bevart KUN for å GJENKJENNE rader skrevet før WP-G1c (`before_state.v` = 1 eller manglende), så en gjenspilling av en gammel forespørsel fortsatt avgjøres riktig. Skriver aldri nye avtrykk. */
@@ -259,8 +259,8 @@ export class OutboundFunnel {
     };
     return {
       parsed, decision, account, provider, recipient_hash: hash, recipient_hint: hint, state, target_log_id: targetRow?.log_id ?? null,
-      content_sha256: hasher === null || decided.content_canonical === null ? null : hasher.hmac("content", decided.content_canonical),
-      request_fingerprint: hasher === null ? null : requestFingerprint(req, hasher)
+      content_sha256: hasher === null || decided.content_canonical === null ? null : hasher.hmac("content", ctx.tenantId, decided.content_canonical),
+      request_fingerprint: hasher === null ? null : requestFingerprint(req, hasher, ctx.tenantId)
     };
   }
 
@@ -337,7 +337,7 @@ export class OutboundFunnel {
   async replayState(ctx: FunnelContext, parsed: ParsedOutbound): Promise<ReplayState> {
     const prior = await this.deps.store.findAttempt(ctx.tenantId, ctx.space, parsed.request_id);
     if (prior === null) return "none";
-    const match = this.fingerprintMatches(prior, parsed.request, await this.hasher());
+    const match = this.fingerprintMatches(prior, parsed.request, await this.hasher(), ctx.tenantId);
     return match === "unknown" ? "unavailable" : match ? "replay" : "collision";
   }
 
@@ -345,9 +345,9 @@ export class OutboundFunnel {
    * Stemmer det lagrede fingeravtrykket med forespørselen? `true` også når raden ikke har noe avtrykk (eldre rad). v2 (HMAC) trenger pepperen: uten den kan vi ikke avgjøre det (`unknown`, fail-closed). v1 (eller uten versjon) sammenlignes med det
    * gamle, usaltede avtrykket - en gammel rad skal fortsatt gjenkjennes etter overgangen.
    */
-  private fingerprintMatches(prior: { request_fingerprint: string | null; fingerprint_version: number | null }, req: OutboundRequest, hasher: ContentHasher | null): boolean | "unknown" {
+  private fingerprintMatches(prior: { request_fingerprint: string | null; fingerprint_version: number | null }, req: OutboundRequest, hasher: ContentHasher | null, tenantId: string): boolean | "unknown" {
     if (prior.request_fingerprint === null) return true;
-    if (prior.fingerprint_version === 2) return hasher === null ? "unknown" : prior.request_fingerprint === requestFingerprint(req, hasher);
+    if (prior.fingerprint_version === 2) return hasher === null ? "unknown" : prior.request_fingerprint === requestFingerprint(req, hasher, tenantId);
     return prior.request_fingerprint === legacyRequestFingerprint(req);
   }
 
@@ -371,8 +371,8 @@ export class OutboundFunnel {
    * Svaret på en GJENSPILLING (samme forespørsels-id som et ikke-avslått forsøk). Ingen leverandørkall skjer på denne veien: sendt = dedup, feilet = brent id, ellers ukjent/under utførelse. Brukt av BÅDE den tidlige sjekken i `execute`
    * og `beginAttempt`s racevern. Er id-en brukt til en ANNEN forespørsel (A-M5) er det en feil, aldri «dedup».
    */
-  private replayResult(prior: Extract<BeginResult, { kind: "replay" }>, req: OutboundRequest, hasher: ContentHasher | null): ExecResult {
-    const match = this.fingerprintMatches(prior, req, hasher);
+  private replayResult(prior: Extract<BeginResult, { kind: "replay" }>, req: OutboundRequest, hasher: ContentHasher | null, tenantId: string): ExecResult {
+    const match = this.fingerprintMatches(prior, req, hasher, tenantId);
     // WP-G1c (g4): Jarvis' egne avslag kastes som `PolicyDeniedError` (samme melding som før): de teller ikke mot connector-helse.
     if (match === "unknown") throw new PolicyDeniedError(`comms_policy_denied:${KEY_UNAVAILABLE}`);
     if (!match) throw new PolicyDeniedError("idempotency_key_collision");
@@ -388,7 +388,7 @@ export class OutboundFunnel {
     const { store, adapters, config } = this.deps;
     // En GJENSPILLING avgjøres FØR policyen: policyen ville ellers vurdert den mot en tilstand det første forsøket selv har endret (ratetelleren teller forsøket selv) og skrevet en misvisende avslagsrad for en ellers idempotent gjenspilling.
     const prior = await store.findAttempt(ctx.tenantId, ctx.space, parsed.request_id);
-    if (prior !== null) return this.replayResult(prior, parsed.request, await this.hasher());
+    if (prior !== null) return this.replayResult(prior, parsed.request, await this.hasher(), ctx.tenantId);
     const ev = await this.evaluate(ctx, parsed);
     if (!ev.decision.allowed) {
       await this.recordDenial(ctx, ev);
@@ -406,7 +406,7 @@ export class OutboundFunnel {
       await this.recordDenial(ctx, this.withCapDenial(ev, begin.scope, begin.code));
       throw new PolicyDeniedError(`comms_policy_denied:${begin.code}`);
     }
-    if (begin.kind === "replay") return this.replayResult(begin, req, await this.hasher()); // racevern: et samtidig forsøk med samme id rakk å skrive raden mellom den tidlige sjekken og her
+    if (begin.kind === "replay") return this.replayResult(begin, req, await this.hasher(), ctx.tenantId); // racevern: et samtidig forsøk med samme id rakk å skrive raden mellom den tidlige sjekken og her
     const target = { account_ref: req.account_ref, recipient: req.recipient };
     // A-N3: leverandørens id, satt så snart leverandøren HAR akseptert (utenfor `try`, så et ukjent utfall ETTER aksept kan lagre den for avstemming).
     let providerMessageId: string | undefined;
