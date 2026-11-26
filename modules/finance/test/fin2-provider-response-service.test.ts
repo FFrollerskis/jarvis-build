@@ -91,17 +91,17 @@ describe("K7: ugyldig 2xx ved innsending = ukjent utfall, aldri en lagret «unde
     expect(row.anomaly_flags).toContain("SUBMIT_OUTCOME_UNKNOWN");
   });
 
-  it("Vipps: svar uten beløp gir ukjent utfall; ingen provider_ref lagres", async () => {
+  it("Vipps: svar uten `reference` (eller med en annen) gir ukjent utfall; ingen provider_ref lagres. (Fiks-runde 1, FIX-2: manglende state/beløp er IKKE lenger ukjent utfall - se fin2-vipps-ack-and-locks.test.ts)", async () => {
     const svc = new FinanceService(
       appPool, undefined, undefined, undefined, undefined, undefined,
       { getCredentials: async () => ({ clientId: "c", clientSecret: "s-fixture", subscriptionKey: "k", merchantSerialNumber: "1", environment: "test" as const }) },
       (c) => new VippsTransport(c.clientId, c.clientSecret, c.subscriptionKey, c.merchantSerialNumber, c.environment)
     );
     const intent = await newIntent(svc, "vipps");
-    stubFetch({ reference: intent.payment_intent_id, state: "CREATED" }); // amount mangler
+    stubFetch({ state: "CREATED", amount: { currency: "NOK", value: 10_000 } }); // reference mangler
     const err = await svc.submitPaymentIntent(TENANT, "business", intent.payment_intent_id, { getCredentials: async () => null }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ProviderOutcomeUnknownError);
-    expect((err as Error).message).toBe("outcome_unknown:provider_response_invalid:amount_missing");
+    expect((err as Error).message).toBe("outcome_unknown:provider_response_invalid:reference_missing");
     const row = await intentRow(intent.payment_intent_id);
     expect(row.state).toBe("draft");
     expect(row.provider_ref).toBeNull();

@@ -12,7 +12,7 @@ import { assertValidPaymentIntentTransition, canTransitionPaymentIntent, isTermi
 import { FikenTransport, type FikenGeneralJournalEntryInput, type FikenJournalEntry } from "./fiken-transport.ts";
 import { StripeTransport, type StripeBalanceObject, type StripePaymentIntentObject, type StripeRefundObject } from "./stripe-transport.ts";
 import { verifyStripeWebhookSignature, parseStripeEventEnvelope } from "./stripe-webhook.ts";
-import { VippsTransport, type VippsPaymentObject, type VippsPaymentWriter } from "./vipps-transport.ts";
+import { VippsTransport, type VippsCreatedPayment, type VippsPaymentWriter } from "./vipps-transport.ts";
 import { verifyVippsWebhookSignature, parseVippsEventEnvelope, type VippsWebhookRequestHeaders } from "./vipps-webhook.ts";
 import { NeonomicsTransport, NeonomicsPaymentAuthorizationRequiredError, type NeonomicsGateway, type NeonomicsPaymentObject } from "./neonomics-transport.ts";
 import { verifyNeonomicsWebhookApiKey, parseNeonomicsEventEnvelope } from "./neonomics-webhook.ts";
@@ -693,24 +693,26 @@ export class FinanceService {
         return this.submitPlan(true, () => transport.createPayment({
           amountOre, currency: current.currency, reference: paymentIntentId,
           paymentDescription: current.purpose.slice(0, 100), returnUrl: VIPPS_PLACEHOLDER_RETURN_URL, idempotencyKey
-        }), async (client: pg.PoolClient, vippsPayment: VippsPaymentObject) => {
+        }), async (client: pg.PoolClient, vippsPayment: VippsCreatedPayment) => {
+        // WP-FIN2 fiks-runde 1 (FIX-2): dokumentert opprett-svar er `{ reference, redirectUrl }` (`unverified`) - `state`/`amount` er `null` når Vipps ikke sendte dem. Da lagres NULL (kolonnene er
+        // nullable; aldri Jarvis' egne verdier utgitt som leverandørens) og `provider_status_updated_at` står NULL (ingen observasjon å beskytte mot eldre hendelser); første webhook/oppfrisking fyller dem.
         const { rows } = await client.query(
           `UPDATE payment_intents
-             SET state = 'provider_acknowledged', provider_ref = $3, provider_status = $4,
+             SET state = 'provider_acknowledged', provider_ref = $3, provider_status = $4::text,
                  provider_reported_amount_ore = $5, provider_reported_currency = $6,
-                 provider_status_updated_at = now(), submitted_at = now(), updated_at = now()
+                 provider_status_updated_at = CASE WHEN $4::text IS NULL THEN NULL ELSE now() END, submitted_at = now(), updated_at = now()
            WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
-          [tenantId, paymentIntentId, vippsPayment.reference, vippsPayment.state, vippsPayment.amount.value, vippsPayment.amount.currency.toUpperCase()]
+          [tenantId, paymentIntentId, vippsPayment.reference, vippsPayment.state, vippsPayment.amount?.value ?? null, vippsPayment.amount?.currency.toUpperCase() ?? null]
         );
         const updated = rows[0] as PaymentIntent;
         await insertEvent(client, tenantId, memorySpace, {
           payment_intent_id: paymentIntentId, event_type: "submitted",
-          summary: `Sendt til Vipps - betaling ${vippsPayment.reference} (state=${vippsPayment.state})`,
+          summary: `Sendt til Vipps - betaling ${vippsPayment.reference} (state=${vippsPayment.state ?? "ikke oppgitt"})`,
           actor_person_id: actorPersonId ?? null, metadata: { provider_ref: vippsPayment.reference, provider_status: vippsPayment.state }
         });
         await insertEvent(client, tenantId, memorySpace, {
           payment_intent_id: paymentIntentId, event_type: "provider_acknowledged",
-          summary: "Vipps bekreftet opprettelsen - VENTER på brukerbekreftelse i Vipps-appen (state=CREATED)",
+          summary: `Vipps bekreftet opprettelsen - VENTER på brukerbekreftelse i Vipps-appen (state=${vippsPayment.state ?? "ikke oppgitt ennå; hentes av første webhook/oppfrisking"})`,
           actor_person_id: actorPersonId ?? null, metadata: {}
         });
         return updated;
@@ -1701,7 +1703,7 @@ export class FinanceService {
         const locked = lockedRows[0] as StripeRefund | undefined;
         // En samtidig innsending (samme Idempotency-Key) har allerede lagret utfallet, eller raden er avsluttet på annen måte -> aldri skriv på nytt.
         if (locked && (isAckOrDone(locked.state) || locked.provider_ref || (locked.state !== "submitted" && locked.state !== "draft"))) return locked;
-        const targetState: StripeRefundState = STRIPE_REFUND_STATUS_TO_STATE[stripeRefund.status] ?? "provider_acknowledged";
+        const targetState: StripeRefundState = STRIPE_REFUND_STATUS_TO_STATE[stripeRefund.status ?? ""] ?? "provider_acknowledged"; // FIX-2: `status` kan være null (nullbarhet `unverified`)
         const timestampColumn = targetState === "settled" ? "settled_at" : targetState === "failed" ? "failed_at" : targetState === "cancelled" ? "cancelled_at" : null;
         const { rows } = await client.query(
           `UPDATE stripe_refunds SET state = $3, provider_ref = $4${timestampColumn ? `, ${timestampColumn} = now()` : ""}, failure_reason = NULL,
@@ -1997,14 +1999,19 @@ export class FinanceService {
 
   /**
    * WP-FIN2 (D-486, K5b): leverandøren (webhook/oppfrisking) eller et gjennomført cancel-kall sier «avsluttet», men intensjonen har oppgjorte/uavklarte captures. Intensjonen avsluttes ikke;
-   * `PROVIDER_STATE_CONFLICT` settes og en `anomaly_flagged`-hendelse skrives KUN første gang (gjentatte webhooks/oppfriskinger støyer ikke). Hendelsen bærer kun kode, aldri beløp.
+   * `PROVIDER_STATE_CONFLICT` settes og en `anomaly_flagged`-hendelse skrives KUN første gang pr. årsak (`metadata.reason`; gjentatte webhooks/oppfriskinger støyer ikke). Hendelsen bærer kun kode, aldri beløp.
    */
   private async flagCancelConflict(
     client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, intent: PaymentIntent, funds: "settled_captures" | "capture_outcome_unresolved", cause: string, actorPersonId: string | null
   ): Promise<void> {
-    const alreadyFlagged = (intent.anomaly_flags ?? []).includes("PROVIDER_STATE_CONFLICT");
     await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", intent.payment_intent_id, ["PROVIDER_STATE_CONFLICT"]);
-    if (alreadyFlagged) return;
+    // Fiks-runde 1 (FIX-7): «første gang» avgjøres av HENDELSEN (årsaken), ikke av flagget. Flagget `PROVIDER_STATE_CONFLICT` kan stå fra en ANNEN årsak (f.eks. `terminal_state_conflict` i
+    // `applyVippsPaymentOutcome`), og da ble `anomaly_flagged`-hendelsen med `captures`-metadata aldri skrevet. Som `recordSucceededAfterLocalFailed`: en hendelse pr. (intensjon, årsak).
+    const { rows: written } = await client.query(
+      `SELECT 1 FROM payment_intent_events WHERE tenant_id = $1 AND payment_intent_id = $2 AND event_type = 'anomaly_flagged' AND metadata->>'reason' = $3 LIMIT 1`,
+      [tenantId, intent.payment_intent_id, cause]
+    );
+    if (written.length > 0) return;
     await insertEvent(client, tenantId, memorySpace, {
       payment_intent_id: intent.payment_intent_id, event_type: "anomaly_flagged",
       summary: `Vipps meldte at betalingen er avsluttet, men intensjonen har ${funds === "settled_captures" ? "oppgjorte" : "uavklarte"} captures - intensjonen beholdes (PROVIDER_STATE_CONFLICT)`,
@@ -2060,7 +2067,8 @@ export class FinanceService {
     if (targetState === "cancelled" && !isTerminalPaymentIntentState(current.state)) {
       // WP-FIN2 (D-486, K5b): ALDRI `cancelled` med oppgjorte/uavklarte captures - da er intensjonen terminal mens penger er tatt, og `createVippsRefund` (krever `settled`)
       // kan aldri betale dem tilbake. Fail-closed på samme måte som konflikten under: FLAGG (én hendelse første gang), la intensjonen stå, ALDRI overskriv.
-      // Intensjonsraden er låst av kalleren (`FOR UPDATE`), så captures kan ikke endre seg mellom sjekken og skrivingen.
+      // Intensjonsraden er låst av kalleren (`FOR UPDATE`), så captures kan ikke endre seg mellom sjekken og skrivingen: en capture-reservasjon (`submitVippsCapture.prepare`) tar intensjonen i `FOR SHARE`
+      // (fiks-runde 1, FIX-9) og en oppgjørsskriving (`apply`) tar den i `FOR UPDATE`; begge konflikter med kallerens lås.
       const funds = await this.capturedFundsStatus(client, tenantId, current.payment_intent_id);
       if (funds !== "none") {
         await this.flagCancelConflict(client, tenantId, memorySpace, current, funds, `provider_reported_${outcome.vippsState.slice(0, 20)}`, actorPersonId);
@@ -2329,6 +2337,14 @@ export class FinanceService {
     >(tenantId, memorySpace, {
       subjectId: captureId,
       prepare: async (client) => {
+        // Fiks-runde 1 (FIX-9): en capture-RESERVASJON kunne skje uten intensjonslås, så en samtidig `cancelVippsPayment` kunne passere `capturedFundsStatus` (ingen captures ennå), commite, og
+        // capturen reservere og gjennomføres mot en betaling som var avbrutt (stress 60 runder: 10-18 endte `cancelled` med oppgjort capture; flagget `PROVIDER_STATE_CONFLICT`, aldri stille). Nå tas
+        // intensjonen i `FOR SHARE` FØR capture-låsen (samme rekkefølge som `apply`: intensjon -> capture, så ingen deadlock), og holdes til reservasjonen er committet: `cancelVippsPayment`/
+        // webhook/`apply` (`FOR UPDATE`) venter, og ser capturen som `submitted` (blokkert) - eller `prepare` ser at intensjonen allerede er avbrutt (`provider_status` != AUTHORIZED, ingen reservasjon).
+        // Flere samtidige reservasjoner av ulike captures deler `FOR SHARE` og blokkerer ikke hverandre.
+        const { rows: parentRows } = await client.query(`SELECT payment_intent_id FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2`, [tenantId, captureId]);
+        const parentIntentId = (parentRows[0] as { payment_intent_id: string } | undefined)?.payment_intent_id;
+        if (parentIntentId !== undefined) await client.query(`SELECT 1 FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2 FOR SHARE`, [tenantId, parentIntentId]);
         const { rows: captureRows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2 FOR UPDATE`, [tenantId, captureId]);
         const current = captureRows[0] as VippsCapture | undefined;
         if (!current) throw new CaptureNotFoundError(captureId);
@@ -2460,7 +2476,11 @@ export class FinanceService {
   async cancelVippsPayment(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
     // WP-FIN2 (D-486, K1a): credential-oppslaget (kan være et nettverkskall mot Infisical) skjer FØR transaksjonen med `FOR UPDATE`-låsen - tidligere sto det inne i `prepare`, under radlåsen
     // (funnet av kildevakten `fin2-no-provider-io-in-tx.test.ts`). Manglende credential kastes fortsatt på samme sted som før (etter tilstands-/capture-/nødbryter-sjekkene).
-    const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+    // Fiks-runde 1 (FIX-4): oppslaget var UBETINGET, så et credential-avbrudd (`infisical_down`) feilet også rent lokale baner som `main` lot lykkes (lokal avbrytelse av en aldri innsendt intensjon,
+    // no-op på en terminal intensjon). Som `prefetchCredentialsFor`: les intensjonen først (kort lesetransaksjon uten lås) og hent credentials KUN når intensjonen finnes hos Vipps (`provider_ref`)
+    // og ikke er terminal. Endrer intensjonen seg mellom lesingen og låsen (innsendt/avsluttet av en samtidig kall), gjelder dagens fail-lukkede regler i `prepare` (manglende credential kastes der).
+    const preview = await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, false));
+    const credentials = preview.provider_ref !== null && !isTerminalPaymentIntentState(preview.state) ? await this.vippsCredentialsProvider.getCredentials(tenantId) : null;
     return this.providerCallOutsideLock<{ providerRef: string; transport: VippsPaymentWriter }, unknown, PaymentIntent>(tenantId, memorySpace, {
       prepare: async (client) => {
         const current = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
