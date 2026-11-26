@@ -54,7 +54,7 @@ Core → tekststream → Voice Gateway: streaming TTS → WebRTC → høyttaler
   `replay_final` gir ett Core-kall) og **begrenset** (LRU + TTL). Den ligger i prosessminnet: **den overlever ikke en omstart og
   deles ikke mellom gateway-prosesser** (`PARTIAL` - varig deling krever en Core-rute og migrasjon, egen WP). Spillekø og siste tur
   checkpointes **ikke**. Dobbeltutførelse hindres derfor fullt ut kun innen samme gateway-prosess; ut over det kun delvis av
-  ToolGateway-ledgerens idempotensnøkkel (10 minutters tidsvindu). Se [runbooks/WPV2_VOICE_ROBUSTNESS.md](runbooks/WPV2_VOICE_ROBUSTNESS.md) §5.
+  ToolGateway-ledgerens idempotensnøkkel (10 minutters tidsvindu). Etter en Core-feil beholdes claimen (ukjent utfall - aldri retry), unntatt når feilen BEVISER at forespørselen aldri nådde Core (ubevist sti, nektet tilkobling/DNS: da kan samme id sendes på nytt). Se [runbooks/WPV2_VOICE_ROBUSTNESS.md](runbooks/WPV2_VOICE_ROBUSTNESS.md) §5.
 - Avbrutt TTS logges som «ikke levert» slik at Jarvis vet hva Tobias faktisk hørte.
 
 ## 5. Rask bane i tale
@@ -94,8 +94,8 @@ består uansett utfall.
 | Skyleverandør STT/TTS nede eller henger | Hvert leverandørkall har en frist. **Failover sky → lokal** via adapter (kun TTS før første ramme, kun når lokal er tilgjengelig og rutingporten slipper den gjennom; aldri lokal → sky automatisk) - degradert men fungerende. Uten lokal reserve: `stt_error`/`tts_error` for den turen/chunken, neste prøver på nytt. Se runbook §3-§4 |
 | Voice Gateway nede | Satellitt faller tilbake til Home Assistant Assist for grunnkommandoer |
 | Nett nede på stedet | Lokale hurtigkommandoer og sikkerhetsautomasjoner virker fortsatt (HA, deterministisk) |
-| Core nede eller henger | Gateway svarer med `core_error` (nede) eller `core_timeout` (total turfrist 120 s) og avbryter forespørselen; kritiske hjem-funksjoner uberørt. **Køing av turer er ikke bygget** (`NOT_BUILT`) - den tidligere teksten «køer ikke-kritiske turer» stemte ikke med koden |
-| Ugyldig ramme, for stor melding, flom, for mange tilkoblinger, langsom eller halvåpen klient | Definert lukking per tilkobling (1007/1002/1009/1008/1013/1000, se runbook §2), aldri et prosesskrasj; andre økter er upåvirket |
+| Core nede eller henger | Gateway svarer med `core_error` (nede) eller `core_timeout` (total turfrist 120 s) og avbryter forespørselen; en nektet tilkobling beviser at ingenting nådde Core, så samme `replay_final`-id kan sendes på nytt; kritiske hjem-funksjoner uberørt. **Køing av turer er ikke bygget** (`NOT_BUILT`) - den tidligere teksten «køer ikke-kritiske turer» stemte ikke med koden |
+| Ugyldig ramme, for stor melding, flom (ping/pong, lyd, meldinger), for mange tilkoblinger, langsom eller halvåpen klient | Definert lukking per tilkobling (1007/1002/1009/1008/1013/1000/1006, se runbook §2). **Målt** (ekte prosess): serverens minne forblir flatt og andre økter er målbart uberørt. **Ikke begrenset:** TCP/HTTP FØR WebSocket-oppgraderingen og containerens totale minne (ingen compose-grense) - se runbook §2. Er det fullt, kastes den eldste ikke-beviste tilkoblingen ut så en bevist enhet alltid kommer inn |
 | Lokal Piper/Whisper-binær mangler eller kan ikke kjøres | `available()` er `false` -> `/health` 503 (`NOT_CONFIGURED`); en spawn-feil midt i en samtale gir `tts_error`/`stt_error`, ikke krasj |
 
 ## 9. Hva Voice Gateway IKKE er
