@@ -11,8 +11,9 @@ import {
 import { domainForLoopType } from "@jarvis/situations";
 import {
   CONNECTOR_REGISTRY, FINANCE_DERIVED_SITUATION_DOMAINS, FINANCE_WITHHELD_NOTE_NO, financeWithheldMarker, isFinanceConnectorId, isFinanceCredentialRef, isFinanceDerivedSituationDomain,
-  isFinanceToolId, listConnectorStatus, type ConnectorStatus
+  isFinanceToolId, isKnownNonFinanceConnectorId, isKnownNonFinanceCredentialRef, listConnectorStatus, type ConnectorStatus
 } from "@jarvis/tool-gateway";
+import { UNKNOWN_FINANCE_LOOKING_IDS, UNKNOWN_FINANCE_LOOKING_REFS } from "./support/n1b-unknown-ids.ts";
 
 /**
  * WP-N1b (K2/K4): enhetstester (uten DB) for byggeklossene som holder finansAVLEDET innhold tilbake - merket, gjenkjenningen og de rene formingsfunksjonene - og pinner klassifiseringene mot de EKSISTERENDE kildene
@@ -84,6 +85,66 @@ describe("gjenkjenning av finanskoblinger og -legitimasjon (fra connector-regist
     for (const d of ["spend", "SPEND", " spend ", "Spend\n"]) expect(isFinanceDerivedSituationDomain(d), d).toBe(true);
     for (const d of ["pipeline", "support", "deadlines", "product", "operations", "retention", "infra", "home", "health"]) expect(isFinanceDerivedSituationDomain(d), d).toBe(false);
     for (const d of [undefined, null, 1, {}]) expect(isFinanceDerivedSituationDomain(d as never)).toBe(true);
+  });
+});
+
+describe("FIX-A: TILLATELSESLISTE for fritekst-id-er (ukjent = finansavledet): kun KJENTE ikke-finanskoblinger slipper til en sky-/ukjent modell", () => {
+  const nonFinance = CONNECTOR_REGISTRY.filter((c) => c.category !== "finance");
+  const finance = CONNECTOR_REGISTRY.filter((c) => c.category === "finance");
+
+  it("hver ikke-finanskobling i registeret (id og live-test-verktøy-id) og hver av credential-refene deres (også valgfrie) er KJENT", () => {
+    expect(nonFinance.length).toBeGreaterThan(40);
+    for (const c of nonFinance) {
+      expect(isKnownNonFinanceConnectorId(c.id), `id ${c.id}`).toBe(true);
+      if (c.live_test) expect(isKnownNonFinanceConnectorId(c.live_test.tool_id), `tool ${c.live_test.tool_id}`).toBe(true);
+      for (const ref of [...c.credential_refs, ...(c.optional_credential_refs ?? [])]) expect(isKnownNonFinanceCredentialRef(ref), `ref ${ref} (${c.id})`).toBe(true);
+    }
+  });
+
+  it("ingen finanskobling (id, verktøy-id, ref), ingenting i finans-navnerommene og ingenting som treffer ordstammene er kjent", () => {
+    for (const c of finance) {
+      expect(isKnownNonFinanceConnectorId(c.id), c.id).toBe(false);
+      if (c.live_test) expect(isKnownNonFinanceConnectorId(c.live_test.tool_id), c.live_test.tool_id).toBe(false);
+      for (const ref of [...c.credential_refs, ...(c.optional_credential_refs ?? [])]) expect(isKnownNonFinanceCredentialRef(ref), ref).toBe(false);
+    }
+    for (const id of ["finance", "finance_spend", "finance_stripe", "stripe-test", "bank_x", "payment-gw", "FINANCE_X"]) expect(isKnownNonFinanceConnectorId(id), id).toBe(false);
+    for (const ref of ["STRIPE_WEBHOOK_SECRET", "JARVIS_VIPPS_CLIENT_SECRET", "x_fiken_y"]) expect(isKnownNonFinanceCredentialRef(ref), ref).toBe(false);
+  });
+
+  it("de 16 ukjente fritekst-id-ene og 10 ukjente credential-refene (uten ordstamme) er IKKE kjente - og stamme-svartelisten alene fanger dem ikke (det var hullet)", () => {
+    for (const id of UNKNOWN_FINANCE_LOOKING_IDS) {
+      expect(isFinanceConnectorId(id), `svartelisten fanger ikke ${id} (hullet)`).toBe(false);
+      expect(isKnownNonFinanceConnectorId(id), id).toBe(false);
+    }
+    for (const ref of UNKNOWN_FINANCE_LOOKING_REFS) {
+      expect(isFinanceCredentialRef(ref), `svartelisten fanger ikke ${ref} (hullet)`).toBe(false);
+      expect(isKnownNonFinanceCredentialRef(ref), ref).toBe(false);
+    }
+    expect(UNKNOWN_FINANCE_LOOKING_IDS.length).toBe(16);
+    expect(UNKNOWN_FINANCE_LOOKING_REFS.length).toBe(10);
+  });
+
+  it("FAIL-CLOSED: ikke-strenger, tom/blank streng, ukjente navn uten finanspreg og avvikende skrivemåte av en kjent id (STORE bokstaver, mellomrom) er IKKE kjent (eksakt treff)", () => {
+    for (const bad of [undefined, null, 7, {}, [], true]) {
+      expect(isKnownNonFinanceConnectorId(bad as never)).toBe(false);
+      expect(isKnownNonFinanceCredentialRef(bad as never)).toBe(false);
+    }
+    for (const id of ["", "  ", "some_future_connector", "ollama", "GitHub", " github", "github ", "github\n", "model:anthropic", "constructor", "__proto__", "toString"]) expect(isKnownNonFinanceConnectorId(id), JSON.stringify(id)).toBe(false);
+    for (const ref of ["", "  ", "JARVIS_SOME_FUTURE_TOKEN", "jarvis_github_token", " JARVIS_GITHUB_TOKEN", "constructor"]) expect(isKnownNonFinanceCredentialRef(ref), JSON.stringify(ref)).toBe(false);
+  });
+
+  it("`shapeOwnerControlForCloud`: av frosne koblinger og tilbakekalte credentials beholdes KUN de kjente ikke-finans-ene (alle 16 ukjente id-er og alle 10 ukjente refer er ute); alle begrunnelser `null`", () => {
+    const at = { actor_person_id: "p", changed_at: "2026-11-21T08:00:00.000Z" };
+    const state = {
+      kill_switch: { active: false, reason: "FRITEKST-KILL", ...at },
+      frozen_connectors: [...["github", "slack", "stripe", ...UNKNOWN_FINANCE_LOOKING_IDS, "some_future_connector"].map((connector_id) => ({ connector_id, reason: `FRITEKST-${connector_id}`, ...at }))],
+      revoked_credentials: [...["JARVIS_GITHUB_TOKEN", "JARVIS_VIPPS_CLIENT_SECRET", ...UNKNOWN_FINANCE_LOOKING_REFS, "JARVIS_SOME_FUTURE_TOKEN"].map((credential_ref) => ({ credential_ref, reason: `FRITEKST-${credential_ref}`, ...at }))]
+    };
+    const shaped = shapeOwnerControlForCloud(state);
+    expect(shaped.frozen_connectors.map((f) => f.connector_id)).toEqual(["github", "slack"]);
+    expect(shaped.revoked_credentials.map((r) => r.credential_ref)).toEqual(["JARVIS_GITHUB_TOKEN"]);
+    expect(JSON.stringify(shaped)).not.toContain("FRITEKST");
+    for (const unknown of [...UNKNOWN_FINANCE_LOOKING_IDS, ...UNKNOWN_FINANCE_LOOKING_REFS]) expect(JSON.stringify(shaped), unknown).not.toContain(unknown);
   });
 });
 

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 import {
-  BLANK_MODEL, CLOUD, FIN, KEEP, LOCAL, LOOP_IDS, OWNER, TENANT, UNKNOWN_MODEL, buildWorld, fakeDef, run, seedConversationGraph, seedOpenLoops,
+  BLANK_MODEL, CLOUD, FIN, KEEP, LOCAL, LOOP_IDS, OWNER, TENANT, UNKNOWN_FROZEN_SEED, UNKNOWN_MODEL, UNKNOWN_REVOKED_SEED, buildWorld, fakeDef, run, seedConversationGraph, seedExtraFinanceMaintenance, seedOpenLoops,
   type ModelArg, type World
 } from "./support/n1b-finance-world.ts";
 import { CENTER_ROWS, ROWS } from "./support/n1b-rows.ts";
@@ -40,8 +40,9 @@ beforeAll(async () => {
   onC = buildWorld({ pool: db.appPool, guard: true, realCenters: true, centerFlags: CENTER_FLAGS, centerTools: [...CENTER_TOOLS] });
   offC = buildWorld({ pool: db.appPool, guard: false, realCenters: true, centerFlags: CENTER_FLAGS, centerTools: [...CENTER_TOOLS] });
   // frosne koblinger og tilbakekalte credentials (eier-kontroll, varig tilstand): to i finansdomenet, én vanlig av hver - Sikkerhet-senteret leser dem
-  for (const c of ["stripe", "finance_vipps", "github"]) await (onC.ownerControls as NonNullable<World["ownerControls"]>).freezeConnectorDurable(c, `begrunnelse-${c}`, OWNER);
-  for (const r of ["JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_GITHUB_TOKEN"]) await (onC.ownerControls as NonNullable<World["ownerControls"]>).revokeCredentialDurable(r, `begrunnelse-${r}`, OWNER);
+  // fiks-runde 2 (FIX-A): pluss ukjente fritekst-id-er uten ordstamme (frosne koblinger) og ukjente credential-referanser (tilbakekalt): ukjent = finansavledet, så sky/ukjent ser kun `github`/`JARVIS_GITHUB_TOKEN`
+  for (const c of ["stripe", "finance_vipps", "github", ...UNKNOWN_FROZEN_SEED]) await (onC.ownerControls as NonNullable<World["ownerControls"]>).freezeConnectorDurable(c, `begrunnelse-${c}`, OWNER);
+  for (const r of ["JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_GITHUB_TOKEN", ...UNKNOWN_REVOKED_SEED]) await (onC.ownerControls as NonNullable<World["ownerControls"]>).revokeCredentialDurable(r, `begrunnelse-${r}`, OWNER);
 }, 240_000);
 
 afterAll(async () => { await db?.stop(); }, 120_000);
@@ -60,6 +61,8 @@ beforeAll(async () => {
   for (const [connector, reason, minutes] of [["stripe", "N1B-VEDLIKEHOLD-STRIPE", 30], ["neonomics", "N1B-VEDLIKEHOLD-NEONOMICS", 20], ["github", "N1B-VEDLIKEHOLD-GITHUB", 10]] as const) {
     await db.adminPool.query("INSERT INTO connector_maintenance_log (tenant_id, connector_id, event_kind, minutes, reason, recorded_by) VALUES ($1, $2, 'manual_fix', $3, $4, 'test')", [TENANT, connector, minutes, reason]);
   }
+  // fiks-runde 2 (FIX-C e + FIX-A): navnerom/stamme (`finance_stripe`, `bank_x`) og et ukjent id-par uten stamme (`bankid`, `sparebank1`), eldre enn basisradene
+  await seedExtraFinanceMaintenance(db.adminPool, TENANT);
 });
 
 describe("K2-tabellen: hver rad - sky/ukjent/blank = tilbakeholdt, lokal og eier = full, flagg AV = som main", () => {

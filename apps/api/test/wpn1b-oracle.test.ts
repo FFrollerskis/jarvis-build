@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 import {
-  BLANK_MODEL, CLOUD, IDENTITY_ID, KEEP, LOCAL, LOOP_IDS, OWNER, TENANT, UNKNOWN_MODEL, buildWorld, identity, run, seedConversationGraph, seedOpenLoops,
+  BLANK_MODEL, CLOUD, IDENTITY_ID, KEEP, LOCAL, LOOP_IDS, OWNER, TENANT, UNKNOWN_FINANCE_LOOKING_IDS, UNKNOWN_FROZEN_SEED, UNKNOWN_MODEL, UNKNOWN_REVOKED_SEED, buildWorld, identity, run, seedConversationGraph,
+  seedExtraFinanceMaintenance, seedOpenLoops,
   type ModelArg, type World
 } from "./support/n1b-finance-world.ts";
 import { ROWS, type Row } from "./support/n1b-rows.ts";
@@ -56,8 +57,9 @@ beforeAll(async () => {
   aCenters = buildWorld({ pool: db.appPool, guard: true, realCenters: true, centerFlags: CENTER_FLAGS, centerTools: [...CENTER_TOOLS] });
   bCenters = buildWorld({ pool: db.appPool, guard: true, financeData: false, tenantId: TENANT_B, ownerId: OWNER_B, realCenters: true, centerFlags: CENTER_FLAGS, centerTools: [...CENTER_TOOLS] });
   // tenant A: frosne koblinger/credentials (finans og vanlig) og tilkoblingshelse; tenant B: kun de vanlige (minnebasert kontroll i verdenen)
-  for (const c of ["stripe", "finance_vipps", "github"]) await (aCenters.ownerControls as NonNullable<World["ownerControls"]>).freezeConnectorDurable(c, `begrunnelse-${c}`, OWNER);
-  for (const r of ["JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_GITHUB_TOKEN"]) await (aCenters.ownerControls as NonNullable<World["ownerControls"]>).revokeCredentialDurable(r, `begrunnelse-${r}`, OWNER);
+  // fiks-runde 2 (FIX-A): pluss ukjente fritekst-id-er uten ordstamme og ukjente credential-referanser (ukjent = finansavledet: sky/ukjent skal fortsatt kun se `github`/`JARVIS_GITHUB_TOKEN`)
+  for (const c of ["stripe", "finance_vipps", "github", ...UNKNOWN_FROZEN_SEED]) await (aCenters.ownerControls as NonNullable<World["ownerControls"]>).freezeConnectorDurable(c, `begrunnelse-${c}`, OWNER);
+  for (const r of ["JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_GITHUB_TOKEN", ...UNKNOWN_REVOKED_SEED]) await (aCenters.ownerControls as NonNullable<World["ownerControls"]>).revokeCredentialDurable(r, `begrunnelse-${r}`, OWNER);
   for (const w of [aBase, aCenters, bBase, bCenters]) (w.gateway.health as Map<string, unknown>).set("github", { state: "healthy", at: "2026-11-25T09:00:00.000Z" });
   for (const w of [aBase, aCenters]) (w.gateway.health as Map<string, unknown>).set("finance_stripe", { state: "auth_failed", at: "2026-11-25T09:00:00.000Z", detail: "N1B-HEALTH-DETAIL" });
   await db.adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore, provider, model, purpose, success) VALUES ($1, 'model_call', 77123, 'anthropic', 'claude', 'CHAT', true)", [TENANT]);
@@ -66,6 +68,8 @@ beforeAll(async () => {
   for (const [tenant, connector, reason, minutes] of [[TENANT, "stripe", "N1B-VEDLIKEHOLD-STRIPE", 30], [TENANT, "neonomics", "N1B-VEDLIKEHOLD-NEONOMICS", 20], [TENANT, "github", "N1B-VEDLIKEHOLD-GITHUB", 10], [TENANT_B, "github", "N1B-VEDLIKEHOLD-GITHUB", 10]] as const) {
     await db.adminPool.query("INSERT INTO connector_maintenance_log (tenant_id, connector_id, event_kind, minutes, reason, recorded_by) VALUES ($1, $2, 'manual_fix', $3, $4, 'test')", [tenant, connector, minutes, reason]);
   }
+  // fiks-runde 2 (FIX-C e + FIX-A): navnerom/stamme (`finance_stripe`, `bank_x`) og et ukjent id-par uten stamme (`bankid`, `sparebank1`) i tenant A (ikke i B): skysvaret skal være likt
+  await seedExtraFinanceMaintenance(db.adminPool, TENANT);
 }, 300_000);
 
 afterAll(async () => { await db?.stop(); }, 120_000);
@@ -159,6 +163,58 @@ describe("vedlikeholdsloggen (FIX-5): finansrader stjeler ikke plassene i `recen
       expect(full.by_connector.map((c) => c.connector_id)).toContain("neonomics");
     }
   });
+
+  it("`reason` er `null` på HVER rad i `recent` for sky/ukjent/blank (fritekst-begrunnelsen holdes tilbake), mens lokal modell og eier får den eksakte teksten (kontroll)", async () => {
+    await insert("github", 3, 0, "FRITEKST-BEGRUNNELSE-GH"); // nyeste rad: i `recent` for ALLE (også eier, LIMIT 5)
+    for (const [label, m] of MODELS_CLOUD) {
+      const cloud = (await ask(m)) as unknown as { recent: Array<{ connector_id: string; reason: unknown }> };
+      expect(cloud.recent.length, label).toBeGreaterThan(0);
+      for (const row of cloud.recent) expect(row.reason, `${label}: ${row.connector_id}`).toBeNull();
+      expect(JSON.stringify(cloud), label).not.toContain("FRITEKST-BEGRUNNELSE-GH");
+    }
+    const owner = (await ask(undefined)) as unknown as { recent: Array<{ reason: unknown }> };
+    expect(owner.recent.map((r) => r.reason)).toContain("FRITEKST-BEGRUNNELSE-GH");
+  });
+});
+
+describe("vedlikeholdsloggen (FIX-A, «ukjent = finansavledet»): en id som ikke er en KJENT ikke-finanskobling holdes tilbake for sky, uansett om navnet ligner en finansleverandør", () => {
+  const T4 = "tenant-n1b-maint-unknown";
+  const O4 = "person-n1b-maint-unknown";
+  const id4 = { ...identity, tenant_id: T4, person_id: O4 };
+  let w4: World;
+  const ask4 = async (m: ModelArg): Promise<{ minutes_30d: number; by_connector: Array<{ connector_id: string; minutes: number }>; recent: Array<{ connector_id: string }>; finance_withheld?: true }> =>
+    (await run(w4.gateway, "run_rate", "list_connector_maintenance", {}, m, id4)).data as never;
+
+  beforeAll(async () => {
+    await seedTenants(db.adminPool, [{ tenant_id: T4, person_id: O4 }]);
+    w4 = buildWorld({ pool: db.appPool, guard: true, tenantId: T4, ownerId: O4 });
+    // to KJENTE ikke-finanskoblinger (registeret), alle 16 ukjente fritekst-id-er som ligner finans, og tre ukjente uten finanspreg (ukjent = finansavledet også da: strengeste regel)
+    const rows: Array<[string, number, number]> = [["github", 10, 3], ["slack", 5, 4]];
+    UNKNOWN_FINANCE_LOOKING_IDS.forEach((c, i) => rows.push([c, 100 + i, 1]));
+    for (const c of ["some_future_connector", "ollama", "GitHub"]) rows.push([c, 7, 2]);
+    for (const [c, minutes, ago] of rows) {
+      await db.adminPool.query("INSERT INTO connector_maintenance_log (tenant_id, connector_id, event_kind, minutes, reason, recorded_by, occurred_at) VALUES ($1, $2, 'manual_fix', $3, 'fritekst', 'test', now() - make_interval(hours => $4::int))", [T4, c, minutes, ago]);
+    }
+  }, 120_000);
+
+  for (const [label, model] of MODELS_CLOUD) {
+    it(`${label}: kun de kjente ikke-finanskoblingene (github, slack) i `+"`by_connector`/`recent`"+`, summen på dem alene, og ingen av de ukjente id-ene (ingen sum, ingen plass, ingen navn)`, async () => {
+      const r = await ask4(model);
+      expect(r.by_connector.map((c) => c.connector_id).sort(), label).toEqual(["github", "slack"]);
+      expect(r.recent.map((x) => x.connector_id).sort(), label).toEqual(["github", "slack"]);
+      expect(r.minutes_30d, label).toBe(15);
+      const text = JSON.stringify(r);
+      for (const unknown of [...UNKNOWN_FINANCE_LOOKING_IDS, "some_future_connector", "ollama", "GitHub"]) expect(text, `${label}: lekket ${unknown}`).not.toContain(`"${unknown}"`);
+      expect(r.finance_withheld, label).toBe(true);
+    });
+  }
+
+  it("lokal modell og eier: alle ukjente id-er er med (kontroll: sammenligningen er ikke tom)", async () => {
+    for (const m of [LOCAL, undefined]) {
+      const ids = (await ask4(m)).by_connector.map((c) => c.connector_id);
+      for (const unknown of UNKNOWN_FINANCE_LOOKING_IDS) expect(ids, String(unknown)).toContain(unknown);
+    }
+  });
 });
 
 describe("Sikkerhet-senteret (FIX-1): frosne finanskoblinger, tilbakekalte finans-credentials og pausen i `spend`-domenet er ikke med i listene OG ikke i tellingene for sky", () => {
@@ -178,15 +234,18 @@ describe("Sikkerhet-senteret (FIX-1): frosne finanskoblinger, tilbakekalte finan
       expect(byId(xs, "stopped_credentials").facts).toMatchObject({ revoked: 1, frozen: 1 });
       expect(byId(xs, "paused_domains").facts["paused"]).toBe(1);
       expect(JSON.stringify(xs)).not.toMatch(/stripe|finance_vipps|JARVIS_VIPPS_CLIENT_SECRET|spend/);
+      // FIX-A: ingen av de ukjente fritekst-id-ene/-referansene (uten ordstamme) er i listene eller tellingene
+      for (const unknown of [...UNKNOWN_FROZEN_SEED, ...UNKNOWN_REVOKED_SEED]) expect(JSON.stringify(xs), `lekket: ${unknown}`).not.toContain(unknown);
     });
   }
-  it("lokal modell og eier: ALT (3 frosne, 2 tilbakekalte, 2 pauser) - kontroll", async () => {
+  it("lokal modell og eier: ALT (3 + 4 ukjente frosne, 2 + 3 ukjente tilbakekalte, 2 pauser) - kontroll", async () => {
     for (const m of [LOCAL, undefined]) {
       const xs = items(await run(aCenters.gateway, "executive", "get_control_center", { center: "security" }, m));
-      expect(byId(xs, "frozen_now").facts["frozen"]).toBe(3);
-      expect(byId(xs, "revoked_now").facts["revoked"]).toBe(2);
+      expect(byId(xs, "frozen_now").facts["frozen"]).toBe(3 + UNKNOWN_FROZEN_SEED.length);
+      expect(byId(xs, "revoked_now").facts["revoked"]).toBe(2 + UNKNOWN_REVOKED_SEED.length);
       expect(byId(xs, "paused_domains").facts["paused"]).toBe(2);
       expect(byId(xs, "frozen_now").detail_no).toContain("stripe");
+      for (const unknown of [...UNKNOWN_FROZEN_SEED, ...UNKNOWN_REVOKED_SEED]) expect(JSON.stringify(xs), `mangler (lokal/eier skal se alt): ${unknown}`).toContain(unknown);
     }
   });
 });

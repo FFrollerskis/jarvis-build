@@ -15,6 +15,9 @@ import { z } from "zod";
 import { createControlCenterRegistry, registerControlCenters } from "../../src/control-center/register.ts";
 import { FINANCE_EXECUTION_LOCK, financeLockServedLocally } from "../../src/restricted-context-guard.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "../../src/run-rate.ts";
+import { R22_EXTRA_FINANCE_IDS, UNKNOWN_FROZEN_SEED, UNKNOWN_REVOKED_SEED } from "./n1b-unknown-ids.ts";
+
+export { R22_EXTRA_FINANCE_IDS, UNKNOWN_FINANCE_LOOKING_IDS, UNKNOWN_FINANCE_LOOKING_REFS, UNKNOWN_FROZEN_SEED, UNKNOWN_REVOKED_SEED } from "./n1b-unknown-ids.ts";
 
 /**
  * WP-N1b (K2/K4c): ÉN felles testverden for kartleggingen av avledet finansmetadata utenfor `finance*`-låsen. Ekte Postgres (app-rolle, RLS), ekte `ToolGateway` + `PolicyGateway`, ekte `BusinessTransport`/`OpenLoopService`,
@@ -42,6 +45,18 @@ export const FIN = {
 export const KEEP = { followup: "N1B-KUNDE-BETA", ticket: "N1B-SAK-7", github: "N1B-GITHUB-FRYS", reasonOk: "N1B-GITHUB-BEGRUNNELSE", infra: "N1B-INFRA-GITHUB" } as const;
 
 export const LOOP_IDS = { fin1: "loop-fin-1", fin2: "loop-fin-2", fin3: "loop-fin-3", fin4: "loop-fin-4", ok1: "loop-ok-1", ok2: "loop-ok-2" } as const;
+
+/**
+ * Sår de ekstra finans-vedlikeholdsradene (`R22_EXTRA_FINANCE_IDS`) for en tenant. ELDRE enn de tre basisradene (`recent` har fem plasser: lokal modell og eier skal fortsatt se basisradene der); admin-pool omgår RLS - kun testdata.
+ */
+export async function seedExtraFinanceMaintenance(admin: pg.Pool, tenant: string): Promise<void> {
+  for (const [i, id] of R22_EXTRA_FINANCE_IDS.entries()) {
+    await admin.query(
+      "INSERT INTO connector_maintenance_log (tenant_id, connector_id, event_kind, minutes, reason, recorded_by, occurred_at) VALUES ($1, $2, 'manual_fix', $3, $4, 'test', now() - make_interval(days => 2, hours => $5::int))",
+      [tenant, id, 5 + i, `N1B-VEDLIKEHOLD-EKSTRA-${i}`, i]
+    );
+  }
+}
 
 /** Sår finans- og ikke-finans-løkker (åpne) i `business_open_loops` (admin-pool omgår RLS - kun til testdata). */
 export async function seedOpenLoops(admin: pg.Pool): Promise<void> {
@@ -115,11 +130,14 @@ export const OWNER_CONTROL_STATE = {
   frozen_connectors: [
     { connector_id: "github", reason: KEEP.reasonOk, actor_person_id: OWNER, changed_at: "2026-11-21T08:10:00.000Z" },
     { connector_id: "stripe", reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T08:20:00.000Z" },
-    { connector_id: "finance_vipps", reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T08:30:00.000Z" }
+    { connector_id: "finance_vipps", reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T08:30:00.000Z" },
+    // fiks-runde 2 (FIX-A): ukjente fritekst-id-er uten ordstamme (se `UNKNOWN_FINANCE_LOOKING_IDS`)
+    ...UNKNOWN_FROZEN_SEED.map((connector_id) => ({ connector_id, reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T08:40:00.000Z" }))
   ],
   revoked_credentials: [
     { credential_ref: "JARVIS_GITHUB_TOKEN", reason: KEEP.reasonOk, actor_person_id: OWNER, changed_at: "2026-11-21T09:00:00.000Z" },
-    { credential_ref: "JARVIS_VIPPS_CLIENT_SECRET", reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T09:10:00.000Z" }
+    { credential_ref: "JARVIS_VIPPS_CLIENT_SECRET", reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T09:10:00.000Z" },
+    ...UNKNOWN_REVOKED_SEED.map((credential_ref) => ({ credential_ref, reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T09:20:00.000Z" }))
   ]
 };
 
