@@ -62,6 +62,7 @@ import { toOreInteger } from "./ore.ts";
 import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
 import { ProviderResponseInvalidError, expectArray, expectCurrency, expectId, expectMinorUnits, expectRecord, expectStatus, optionalId, optionalStatus, optionalText, readJsonBody, type ResponseContext } from "./provider-response.ts";
 
+import { clipRedacted } from "@jarvis/core";
 export class StripeApiError extends Error {
   constructor(
     message: string,
@@ -81,7 +82,7 @@ function classifyStripeErrorBody(rawBody: string): { summary: string; errorType:
   try {
     const parsed = JSON.parse(rawBody) as { error?: { type?: string; message?: string } };
     const errorType = typeof parsed.error?.type === "string" ? parsed.error.type : null;
-    const message = typeof parsed.error?.message === "string" ? parsed.error.message.slice(0, 200) : trimmed;
+    const message = typeof parsed.error?.message === "string" ? clipRedacted(parsed.error.message, 200) : trimmed;
     return { summary: message.length > 0 ? message : "no_body", errorType };
   } catch {
     return { summary: trimmed.length > 0 ? trimmed : "no_body", errorType: null };

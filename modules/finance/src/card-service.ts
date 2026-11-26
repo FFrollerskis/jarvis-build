@@ -23,7 +23,7 @@ import { AmbiguousProviderResponseError, FinanceKillSwitchActiveError, InvalidWe
 import { SUBMIT_INFLIGHT_LEASE_MS, classifyProviderFailure, type ProviderFailureClass } from "./submit-guard.ts";
 import { malformedWebhookKey, rejectionCode } from "./webhook-guard.ts";
 
-import { redactForLog } from "@jarvis/core";
+import { clipRedacted, redactForLog } from "@jarvis/core";
 /**
  * UA-6 Slice 6 (D-112): kanonisk programmerbar kort-domenetjeneste
  * (Wallester-adapteret). Egen klasse ved siden av FinanceService/
@@ -569,7 +569,7 @@ export class CardService {
       if (err instanceof WallesterApiError && !err.retryable) {
         await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
           await client.query(`UPDATE card_spend_policies SET sync_state = 'rejected', updated_at = now() WHERE tenant_id = $1 AND card_id = $2`, [tenantId, cardId]);
-          await this.logCardEvent(client, tenantId, memorySpace, cardId, "limits_rejected", { error: err.message.slice(0, 200) }, actorPersonId);
+          await this.logCardEvent(client, tenantId, memorySpace, cardId, "limits_rejected", { error: clipRedacted(err.message, 200) }, actorPersonId);
           // UA-6 closeout (D-115): en avvist grenseendring ble tidligere
           // KUN logget til card_events - card_anomaly_attention-open-loop-
           // regelen leser `provider_cards.anomaly_flags` (ren SQL, ALDRI
@@ -1093,7 +1093,7 @@ export class CardService {
       } catch (err) {
         await client.query("ROLLBACK TO SAVEPOINT webhook_apply");
         await client.query(`UPDATE wallester_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE dedupe_key = $1`, [
-          envelope.dedupeKey, (err as Error).message.slice(0, 500)
+          envelope.dedupeKey, clipRedacted((err as Error).message, 500)
         ]);
         return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
       }

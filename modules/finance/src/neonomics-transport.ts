@@ -58,6 +58,7 @@ const TOKEN_REFRESH_SKEW_MS = 60_000;
 import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
 import { expectAccessToken, expectArray, expectCurrency, expectDecimalMinorUnits, expectId, expectRecord, expectStatus, optionalCurrency, readJsonBody, type ResponseContext } from "./provider-response.ts";
 
+import { clipRedacted } from "@jarvis/core";
 export type NeonomicsEnvironment = "sandbox" | "production";
 
 export function neonomicsApiBaseUrl(environment: NeonomicsEnvironment): string {
@@ -99,11 +100,11 @@ function classifyErrorBody(rawBody: string): { message: string; errorCode: numbe
     const parsed = JSON.parse(rawBody) as { errorCode?: number | string; message?: string };
     const code = parsed.errorCode !== undefined ? Number(parsed.errorCode) : null;
     return {
-      message: typeof parsed.message === "string" ? parsed.message.slice(0, 200) : rawBody.slice(0, 200).trim() || "no_body",
+      message: typeof parsed.message === "string" ? clipRedacted(parsed.message, 200) : clipRedacted(rawBody, 200).trim() || "no_body",
       errorCode: Number.isFinite(code) ? (code as number) : null
     };
   } catch {
-    return { message: rawBody.slice(0, 200).trim() || "no_body", errorCode: null };
+    return { message: clipRedacted(rawBody, 200).trim() || "no_body", errorCode: null };
   }
 }
 

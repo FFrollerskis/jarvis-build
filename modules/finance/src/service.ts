@@ -27,7 +27,7 @@ import {
   NEONOMICS_STATUS_TO_JARVIS_STATE
 } from "./banking-types.ts";
 import type { BankAccount, BankConsent } from "./banking-types.ts";
-import { redactForLog } from "@jarvis/core";
+import { clipRedacted, redactForLog } from "@jarvis/core";
 import {
   createVendor, getVendor, listVendors, bindVendorProvider, revokeVendorProviderBinding, listVendorBindings, assertValidVendorBinding,
   VendorNotFoundError,
@@ -953,7 +953,7 @@ export class FinanceService {
       await client.query(
         `UPDATE ${table} SET state = 'draft', submitted_at = NULL, first_submit_attempt_at = NULL, failure_reason = $3, updated_at = now()
          WHERE tenant_id = $1 AND ${idColumn} = $2 AND state = 'submitted'${refGuard}`,
-        [tenantId, id, reason.slice(0, 200)]
+        [tenantId, id, clipRedacted(reason, 200)]
       );
       return;
     }
@@ -1577,7 +1577,7 @@ export class FinanceService {
         return { status: "processed" as const, eventId: envelope.id };
       } catch (err) {
         await client.query("ROLLBACK TO SAVEPOINT webhook_apply");
-        await client.query(`UPDATE stripe_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE stripe_event_id = $1`, [envelope.id, (err as Error).message.slice(0, 500)]);
+        await client.query(`UPDATE stripe_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE stripe_event_id = $1`, [envelope.id, clipRedacted((err as Error).message, 500)]);
         return { status: "failed_retryable" as const, eventId: envelope.id };
       }
     });
@@ -2256,7 +2256,7 @@ export class FinanceService {
         return { status: "processed" as const, eventId: envelope.dedupeKey };
       } catch (err) {
         await client.query("ROLLBACK TO SAVEPOINT webhook_apply");
-        await client.query(`UPDATE vipps_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, (err as Error).message.slice(0, 500)]);
+        await client.query(`UPDATE vipps_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, clipRedacted((err as Error).message, 500)]);
         return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
       }
     });
@@ -3020,7 +3020,7 @@ export class FinanceService {
         return { status: "processed" as const, eventId: envelope.dedupeKey };
       } catch (err) {
         await client.query("ROLLBACK TO SAVEPOINT webhook_apply");
-        await client.query(`UPDATE neonomics_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, (err as Error).message.slice(0, 500)]);
+        await client.query(`UPDATE neonomics_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, clipRedacted((err as Error).message, 500)]);
         return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
       }
     });

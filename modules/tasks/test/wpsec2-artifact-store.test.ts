@@ -15,7 +15,7 @@ describe("ArtifactStore.save", () => {
   it("token over kuttgrensen og skjulte/delte hemmeligheter redigeres før lagring", async () => {
     const { pool, contents } = fakePool();
     const store = new ArtifactStore(pool);
-    await store.save("t1", "task-1", "log", "test.log", `${"x".repeat(99_990)}${token}`);
+    await store.save("t1", "task-1", "log", "test.log", `${"x".repeat(99_989)} ${token}`);
     await store.save("t1", "task-1", "log", "hidden.log", `a ${token.slice(0, 8)}${String.fromCodePoint(0x200b)}${token.slice(8)} b`);
     await store.save("t1", "task-1", "log", "json.log", '{"password":"enkeltord"}');
     expect(contents[0]).not.toContain("ghp_");

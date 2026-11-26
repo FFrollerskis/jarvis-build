@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 /**
  * WP-SEC2 K7e: STRUKTURVAKT for lagringssteder. Hver `INSERT INTO <tabell>`/`UPDATE <tabell> SET` i produktkoden (apps/modules/packages `src`) er klassifisert i `fixtures/secret-sink-baseline.json`:
  *  - `verified`: hand-kontrollert fritekst-sink - filen skriver til tabellen OG skanner teksten (beviset `evidence` finnes i filen);
+ *  - `safe`: vurdert som kun id/enum/tall/hash/vektor (ingen fritekst);
  *  - `file_level`: filen kaller skanneren et sted (ikke bevist per kolonne);
  *  - `unreviewed`: ikke vurdert enkeltvis (DEFERRED/PARTIAL; se runbooken).
  * En NY (fil, tabell)-skriving som ikke står i baseline feller testen: skann teksten (og legg raden under `verified`), eller klassifiser den bevisst under `unreviewed` med en begrunnelse i runbooken. `audit_events` har kun ÉN skriver.
@@ -13,6 +14,7 @@ import { describe, expect, it } from "vitest";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const baseline = JSON.parse(readFileSync(join(ROOT, "modules/core/test/fixtures/secret-sink-baseline.json"), "utf8")) as {
   verified: Array<{ table: string; file: string; evidence: string }>;
+  safe: Array<{ file: string; tables: string[]; why: string }>;
   file_level: Array<{ file: string; tables: string[] }>;
   unreviewed: Array<{ file: string; tables: string[] }>;
 };
@@ -65,7 +67,7 @@ describe("K7e: ingen ny lagringssted-skriving uten klassifisering", () => {
     (known.get(file) as Set<string>).add(table);
   };
   for (const v of baseline.verified) add(v.file, v.table);
-  for (const e of [...baseline.file_level, ...baseline.unreviewed]) for (const t of e.tables) add(e.file, t);
+  for (const e of [...baseline.safe, ...baseline.file_level, ...baseline.unreviewed]) for (const t of e.tables) add(e.file, t);
 
   it("hver INSERT/UPDATE (fil, tabell) i produktkoden er klassifisert i baseline (en ny, uklassifisert skriving feller testen)", () => {
     const unclassified: string[] = [];
@@ -75,7 +77,7 @@ describe("K7e: ingen ny lagringssted-skriving uten klassifisering", () => {
   });
 
   it("hver `verified`-sink skriver fortsatt til tabellen og har fortsatt skannebeviset sitt i filen (fjernes skanningen, feller testen)", () => {
-    expect(baseline.verified.length).toBeGreaterThanOrEqual(10);
+    expect(baseline.verified.length).toBeGreaterThanOrEqual(15);
     for (const v of baseline.verified) {
       const text = readFileSync(join(ROOT, v.file), "utf8");
       expect(found.get(v.file)?.has(v.table), `${v.file} skriver ikke lenger til ${v.table}`).toBe(true);
