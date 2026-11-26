@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_PROFILES, type ModelProfile } from "@jarvis/model-gateway";
 import { MemoryEmbeddingNotLocalError, enforceLocalModelEndpoints } from "../src/local-model-endpoints.ts";
@@ -156,5 +157,100 @@ describe("struktur: samme vakt (ingen kopi) og kalt FOER embedding-leverandoren 
       expect(guard, file).toBeGreaterThan(0);
       expect(firstEmbedding, file).toBeGreaterThan(guard);
     }
+  });
+});
+
+/**
+ * FIX-A (delta-review, testhull; mutantene D41/D58): en ikke-lokal embedding-URL STOPPER oppstarten fordi `enforceLocalModelEndpoints` KASTER - men ingen test pinnet at kastet faktisk når helt fram. En senere «gjør oppstart robust»-endring
+ * (`.catch(() => undefined)`, en tom `catch`, et ikke-`await`et kall) ville latt oppstarten fortsette, og minneteksten (helse/økonomi) ville gått til en offentlig URL uten at noe feilet. Strukturen leses som AST (ikke regex), slik at
+ * omformatering ikke gir falsk grønt/rødt, og pinner at:
+ *  1. kallet er `await`et DIREKTE (ingen `.catch`/`.then`/`void`/`Promise.allSettled` rundt) og står som egen setning;
+ *  2. kastet svelges ikke: api = setningen står rett i kroppen til `async function buildDeps()` (ingen `try`/`if` rundt) og `buildDeps().catch(...)` avslutter prosessen med `process.exit(<≠0>)`;
+ *     worker = setningen står alene i en `try` på toppnivå hvis `catch` kun kaller `failStartup(<feilen>)`, og `failStartup` returnerer `never` og avslutter med `process.exit(<≠0>)`;
+ *  3. kallet står FØR hver `createEmbeddingProviderFromEnv(...)` (ingenting rekker å bygge en embedding-leverandør, og dermed sende noe, før vakten har sagt ja).
+ */
+describe("struktur (AST): oppstart STOPPER når embedding-vakten kaster - kastet svelges aldri", () => {
+  const parse = (rel: string): ts.SourceFile => ts.createSourceFile(rel, readFileSync(fileURLToPath(new URL(`../${rel}`, import.meta.url)), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const collect = <T extends ts.Node>(root: ts.Node, pred: (n: ts.Node) => n is T): T[] => {
+    const out: T[] = [];
+    const visit = (n: ts.Node): void => { if (pred(n)) out.push(n); ts.forEachChild(n, visit); };
+    visit(root);
+    return out;
+  };
+  const callsTo = (root: ts.Node, name: string): ts.CallExpression[] =>
+    collect(root, (n): n is ts.CallExpression => ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === name);
+  /** `process.exit(<tall ≠ 0>);` som egen setning. */
+  const isProcessExitNonZero = (s: ts.Node): boolean => {
+    if (!ts.isExpressionStatement(s) || !ts.isCallExpression(s.expression)) return false;
+    const callee = s.expression.expression;
+    const arg = s.expression.arguments[0];
+    return ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === "process" && callee.name.text === "exit"
+      && s.expression.arguments.length === 1 && arg !== undefined && ts.isNumericLiteral(arg) && Number(arg.text) !== 0;
+  };
+  /** Setningen kallet er `await`et direkte i (`await f(...);` eller `const x = await f(...);`); `null` hvis kallet er pakket inn i noe annet (`.catch`, `.then`, `void`, parentes, `Promise.allSettled`, ...). */
+  const awaitedStatement = (call: ts.CallExpression): ts.Node | null => {
+    const aw = call.parent;
+    if (!ts.isAwaitExpression(aw)) return null;
+    const p = aw.parent;
+    if (ts.isExpressionStatement(p)) return p;
+    if (ts.isVariableDeclaration(p) && ts.isVariableDeclarationList(p.parent) && ts.isVariableStatement(p.parent.parent)) return p.parent.parent;
+    return null;
+  };
+  const guardCall = (sf: ts.SourceFile): ts.CallExpression => {
+    const calls = callsTo(sf, "enforceLocalModelEndpoints");
+    expect(calls, "nøyaktig ett kall til `enforceLocalModelEndpoints`").toHaveLength(1);
+    return calls[0]!;
+  };
+  const expectBeforeEmbeddingProviders = (sf: ts.SourceFile, call: ts.CallExpression, file: string): void => {
+    const providers = callsTo(sf, "createEmbeddingProviderFromEnv");
+    expect(providers.length, `${file}: minst ett kall til createEmbeddingProviderFromEnv`).toBeGreaterThanOrEqual(1);
+    for (const p of providers) expect(p.getStart(sf), `${file}: vakten står FØR createEmbeddingProviderFromEnv`).toBeGreaterThan(call.getStart(sf));
+  };
+
+  it("api (main.ts): kallet er en direkte, `await`et setning i `async function buildDeps()`, og `buildDeps().catch(...)` avslutter prosessen med kode ≠ 0", () => {
+    const sf = parse("src/main.ts");
+    const call = guardCall(sf);
+    const stmt = awaitedStatement(call);
+    expect(stmt, "kallet er `await`et direkte (ikke `.catch(...)`, `.then(...)`, `void`, `Promise.allSettled`)").not.toBeNull();
+    const block = stmt!.parent;
+    const fn = ts.isBlock(block) ? block.parent : undefined;
+    expect(fn !== undefined && ts.isFunctionDeclaration(fn) && fn.name?.text === "buildDeps" && (fn.modifiers ?? []).some((m) => m.kind === ts.SyntaxKind.AsyncKeyword),
+      "setningen står rett i kroppen til `async function buildDeps()` (ingen try/if/løkke rundt som kan svelge kastet)").toBe(true);
+    // kastet forplanter seg ut av buildDeps til toppnivåbehandleren, som skal avslutte prosessen
+    const handled = collect(sf, (n): n is ts.CallExpression => ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === "catch"
+      && ts.isCallExpression(n.expression.expression) && ts.isIdentifier(n.expression.expression.expression) && n.expression.expression.expression.text === "buildDeps");
+    expect(handled, "nøyaktig ett `buildDeps().catch(...)`").toHaveLength(1);
+    const handler = handled[0]!.arguments[0];
+    expect(handler !== undefined && (ts.isArrowFunction(handler) || ts.isFunctionExpression(handler)) && ts.isBlock(handler.body) && handler.body.statements.some(isProcessExitNonZero),
+      "behandleren kaller `process.exit(<≠0>)` som egen setning").toBe(true);
+    expectBeforeEmbeddingProviders(sf, call, "src/main.ts");
+  });
+
+  it("worker (worker-main.ts): kallet står alene i en `try` på toppnivå hvis eneste `catch`-setning er `failStartup(<feilen>)`; `failStartup` returnerer `never` og avslutter med kode ≠ 0", () => {
+    const sf = parse("src/worker-main.ts");
+    const call = guardCall(sf);
+    const stmt = awaitedStatement(call);
+    expect(stmt, "kallet er `await`et direkte (ikke `.catch(...)`, `.then(...)`, `void`, `Promise.allSettled`)").not.toBeNull();
+    const tryBlock = stmt!.parent;
+    if (!ts.isBlock(tryBlock)) throw new Error("kallet må stå i en blokk");
+    const tryStmt = tryBlock.parent;
+    if (!ts.isTryStatement(tryStmt) || tryStmt.tryBlock !== tryBlock) throw new Error("kallet må stå i try-blokken til en try-setning");
+    expect(ts.isSourceFile(tryStmt.parent), "try-setningen står på toppnivå (ikke inne i en betingelse/funksjon)").toBe(true);
+    expect(tryStmt.finallyBlock, "ingen finally").toBeUndefined();
+    expect(tryBlock.statements, "try-blokken inneholder kun vakten").toHaveLength(1);
+    const clause = tryStmt.catchClause;
+    if (clause === undefined) throw new Error("try-setningen mangler catch");
+    const binder = clause.variableDeclaration?.name;
+    if (binder === undefined || !ts.isIdentifier(binder)) throw new Error("catch må binde feilen");
+    expect(clause.block.statements, "catch gjør KUN `failStartup(feilen)` (ingen tom catch, ingen logging uten stopp)").toHaveLength(1);
+    const only = clause.block.statements[0]!;
+    const onlyCall = ts.isExpressionStatement(only) && ts.isCallExpression(only.expression) ? only.expression : undefined;
+    const arg = onlyCall?.arguments[0];
+    expect(onlyCall !== undefined && ts.isIdentifier(onlyCall.expression) && onlyCall.expression.text === "failStartup" && onlyCall.arguments.length === 1 && arg !== undefined && ts.isIdentifier(arg) && arg.text === binder.text,
+      "catch kaller `failStartup(<den fangede feilen>)`").toBe(true);
+    const fail = sf.statements.find((s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === "failStartup");
+    expect(fail?.type?.kind, "`failStartup(...)`: never").toBe(ts.SyntaxKind.NeverKeyword);
+    expect(fail?.body?.statements.some(isProcessExitNonZero), "`failStartup` avslutter prosessen med `process.exit(<≠0>)` som egen setning").toBe(true);
+    expectBeforeEmbeddingProviders(sf, call, "src/worker-main.ts");
   });
 });
