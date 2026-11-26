@@ -16,7 +16,7 @@ import { classifyFetchFailure } from "./core-errors.ts";
 import { deadlineSignal } from "./deadline.ts";
 import { VoiceHealth } from "./health.ts";
 import { UtteranceJournal } from "./journal.ts";
-import { ConnectionTracker, TokenBucket, peerKey, resolveLimits, type VoiceLimits } from "./limits.ts";
+import { ClosedPeerBudget, ConnectionTracker, TokenBucket, peerKey, resolveLimits, type VoiceLimits } from "./limits.ts";
 import {
   VoiceSession,
   type CoreClient,
@@ -461,6 +461,14 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
     const peer = peerKey(req);
     let socketClosed = false;
     let closing = false;
+    /**
+     * FIX-1 (runde 2, F10): rammer fra en klient vi ikke lenger betjener (close-rammen er sendt, eller tilkoblingen er avvist). `ws` parser dem til klienten svarer
+     * på close (opptil 5 s); en flom av tekst-/binær-/ping-/pong-rammer holdt event-loopen oppe for ALLE økter. Et lite budsjett tåles, så termineres tilkoblingen.
+     */
+    const closedPeer = new ClosedPeerBudget(limits, () => {
+      console.error(JSON.stringify({ msg: "voice_closed_peer_flood" }));
+      ws.terminate();
+    });
     let session: VoiceSession | null = null;
     /**
      * D-123: grant-en som ga denne sesjonen sin autoritet. `null` = klienten
@@ -537,6 +545,10 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
       }, limits.refusedCloseGraceMs);
       refusedGrace.unref();
       ws.once("close", () => clearTimeout(refusedGrace));
+      // FIX-1 (runde 2, F10): en avvist klient som ikke svarer på close og sender rammer i stedet, terminereres når budsjettet er brukt opp - ikke først ved svarfristen.
+      ws.on("message", () => closedPeer.frame());
+      ws.on("ping", () => closedPeer.frame());
+      ws.on("pong", () => closedPeer.frame());
       return;
     }
     const ticket = admission.ticket;
@@ -868,12 +880,15 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
     let pingOutstanding = false;
     const terminateFrameFlood = (frame: "ping" | "pong"): void => {
       closing = true; // en flom leverer mange rammer i samme tikk: handlerne under ignorerer alt etter den første (`closing`)
+      closedPeer.settle(); // ... og budsjettet for lukkede klienter terminerer/logger ikke en gang til
       console.error(JSON.stringify({ msg: "voice_control_frame_flood", frame }));
       session?.disconnect();
       ws.terminate();
     };
+    // FIX-1 (runde 2, F10): under `closing` ignoreres rammen, men den koster fra budsjettet (`closedPeer`) - ping, pong og meldinger (tekst/binær) likt.
     ws.on("ping", (data: Buffer) => {
       if (closing) {
+        closedPeer.frame();
         return;
       }
       if (!frameBucket.tryTake()) {
@@ -888,6 +903,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
     });
     ws.on("pong", () => {
       if (closing) {
+        closedPeer.frame();
         return;
       }
       if (pingOutstanding) {
@@ -915,10 +931,11 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
     pingTimer.unref();
 
     ws.on("message", (raw) => {
-      idleTimer.refresh();
       if (closing) {
+        closedPeer.frame(); // FIX-1 (runde 2, F10): før `idleTimer.refresh()` - en klient vi lukker forlenger ingenting
         return;
       }
+      idleTimer.refresh();
       let message: Record<string, unknown>;
       try {
         const parsed: unknown = JSON.parse(String(raw));

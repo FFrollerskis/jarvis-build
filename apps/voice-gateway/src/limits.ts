@@ -161,6 +161,39 @@ export class TokenBucket {
   }
 }
 
+/**
+ * FIX-1 (runde 2, F10): budsjett for rammer fra en klient vi IKKE lenger betjener - close-rammen er sendt (rate limit, utkasting, idle, backpressure ...) eller
+ * tilkoblingen er avvist (1013). `ws` leser og parser hver ramme klienten sender til den svarer på close (opptil 5 s), og handlerne ignorerte dem uten bøtte og uten
+ * terminering: en klient som ikke svarer på close og sender tekstrammer `{}` ga målt `/health` p50 138 ms (grunnlinje 2 ms) og en annen økts TTS-strøm på 35 mot
+ * 151 rammer per 3 s. Nå tåles høyst `pingPongBurst` rammer (+ `pingPongPerSecond`/s) av ALLE typer (tekst, binær, ping, pong); så kalles `onExceeded` (terminering)
+ * - nøyaktig ÉN gang. En klient som svarer på close sender ingen flom, og håndtrykket fullføres som før (`ws` slutter å parse så snart close-svaret er lest).
+ */
+export class ClosedPeerBudget {
+  private readonly bucket: TokenBucket;
+  private settled = false;
+  constructor(
+    limits: Pick<VoiceLimits, "pingPongPerSecond" | "pingPongBurst">,
+    private readonly onExceeded: () => void,
+    now?: () => number
+  ) {
+    this.bucket = new TokenBucket(limits.pingPongPerSecond, limits.pingPongBurst, now);
+  }
+
+  /** Én innkommende ramme (tekst, binær, ping eller pong) fra en klient vi ikke lenger betjener. */
+  frame(): void {
+    if (this.settled || this.bucket.tryTake()) {
+      return;
+    }
+    this.settled = true;
+    this.onExceeded();
+  }
+
+  /** Tilkoblingen er allerede terminert av oss: rammer som ligger igjen i samme chunk ignoreres stille (ingen ny terminering, ingen ny logg). */
+  settle(): void {
+    this.settled = true;
+  }
+}
+
 function isLoopback(address: string | undefined): boolean {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
