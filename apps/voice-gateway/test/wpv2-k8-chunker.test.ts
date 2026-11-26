@@ -167,6 +167,19 @@ describe("lineær tid (skanningen er inkrementell)", () => {
     expect(t200 / Math.max(t50, 1)).toBeLessThan(10);
   }, 60_000);
 
+  it("skanningen er INKREMENTELL: 100 KB uten kutt (hard grense 1 MB) i 4-tegns deltaer skanner hver posisjon én gang, ikke på nytt per push", () => {
+    // Med en høy hard grense vokser bufferen uten å bli kuttet; en implementasjon som skanner fra `minChars` ved hver push bruker da O(n²)
+    // (her ca. 10^9 tegnsjekker) mot O(n) for scanPos-løsningen.
+    let best = Number.POSITIVE_INFINITY;
+    for (let run = 0; run < 3; run++) {
+      const chunker = new SentenceChunker(() => undefined, { maxChars: 2_000_000, hardMaxChars: 2_000_001 });
+      const start = performance.now();
+      for (let i = 0; i < 100_000; i += 4) chunker.push("aaaa");
+      best = Math.min(best, performance.now() - start);
+    }
+    expect(best).toBeLessThan(1_500);
+  }, 60_000);
+
   it("200 KB med mange punktum uten mellomrom (a.a.a.…) er også lineær - ubegrenset bakoverskanning er en kvadratisk felle", () => {
     const t200 = timeStreaming(200_000, ".a");
     expect(t200).toBeLessThan(3_000);

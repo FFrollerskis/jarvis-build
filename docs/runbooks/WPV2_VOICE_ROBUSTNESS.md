@@ -41,6 +41,8 @@ Alle tall er konstanter i `DEFAULT_VOICE_LIMITS`. En grense som brytes gir en de
 | `maxConcurrentWhisper` / `maxConcurrentPiper` | 2 / 4 | `voice_busy` (STT/TTS) etter køfrist `processQueueTimeoutMs` = 8 s | Whisper er CPU-tung (NAS); piper er lett, men en sesjon bruker to samtidig (gjeldende + forhåndshentet chunk, D-390). Egne semaforer så whisper ikke sulter ut piper. |
 | `replay_final` | id maks 128 tegn (`[A-Za-z0-9._:-]`), tekst maks 4 000 | `malformed_message` | En ytring på 30 s er ca. 600 tegn. |
 
+**Per-peer-grensen og NAT:** «peer» er TCP-adressen gatewayen ser. Når Docker-NAT eller en loopback-proxy uten `X-Forwarded-For` gjør at ALLE klienter ser ut som samme adresse (f.eks. docker-proxy/bridge-gateway), gjelder grensen på 4 dem samlet - da er 4 samtidige tilkoblinger taket, og den 5. får `voice_busy`. Sjekk i §8 punkt 4 hvilken adresse klientene faktisk får hos deg; grensene er konstanter i `limits.ts` (ingen miljøflagg, med vilje) og kan heves i koden hvis det viser seg for stramt.
+
 **Ikke endret:** `/health` (503 når STT/TTS er `NOT_CONFIGURED`/`UNAVAILABLE`), `/status`-formatet (kun utvidet), `authorizeVoiceSession` (10 s frist fantes).
 
 ## 3. Frister (K4)
