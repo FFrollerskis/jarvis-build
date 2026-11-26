@@ -5,6 +5,7 @@ import type pg from "pg";
 import { CapabilityRegistry, DEFAULT_PROFILES, MemoryTraceSink, ModelGateway, demoteLocalProfileToCloud, resetProfileLocalityToDefaults, type CompleteInput, type ModelProfile } from "@jarvis/model-gateway";
 import type { ModelProviderAdapter, ModelRequest, ModelResult } from "@jarvis/provider-adapters";
 import { ModelSignalAssist, type AssistInput } from "@jarvis/situations";
+// @ts-expect-error - ren .mjs uten typer (genererer compose-blokkene)
 import { SERVICE_ENV } from "../../../infra/local/service-env.mjs";
 import { cloudToolTurnsAllowed } from "../src/chat-jobs.ts";
 import { servedByCloudModel } from "../src/cloud-tool-screen.ts";
