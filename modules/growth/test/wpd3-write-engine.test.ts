@@ -1498,6 +1498,25 @@ describe("E7: review N6 - avkortede leverandørlister feiler LUKKET også for GB
         }
       });
 
+      const badFirstPage: Array<[string, VReply]> = [
+        ["[] (toppnivå-liste)", { json: [] }],
+        ["null", { json: null }],
+        ["et tall", { json: 5 }],
+        ["en streng", { json: "ingen innlegg" }]
+      ];
+      it.each(badFirstPage)("side 1 som svarer 200 med %s (ikke et objekt) er KUTTET (ingen innlegg vist), create_local_post nektes og INGEN skriving sendes; `{}` på side 1 er fortsatt en komplett, tom liste", async (_name, reply) => {
+        const w = await contVendor(() => ({ json: { localPosts: [] } }), () => reply);
+        try {
+          const state = await w.list();
+          expect(state["truncated"]).toBe(true);
+          expect(state["posts"]).toEqual([]);
+          await expect(call7(w.t, "create_local_post", { ...base, summary: "Helt nytt innlegg" })).rejects.toThrow("growth_precondition_failed:local_post_list_truncated");
+          expect(writes(w.v)).toHaveLength(0);
+        } finally {
+          await w.v.stop();
+        }
+      });
+
       it("side 3 (etter et nytt token) med uforståelig form er også KUTTET - sidene som ble lest beholdes", async () => {
         const w = await contVendor((n) => (n === 2 ? { json: { localPosts: [post(2)], nextPageToken: "t3" } } : { json: [] }));
         try {
