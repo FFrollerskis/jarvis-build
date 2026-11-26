@@ -13,9 +13,10 @@ import { BLANK_MODEL, CLOUD, LOCAL, OWNER, TENANT, UNKNOWN_MODEL, buildWorld, ru
 let db: H0Db;
 let on: World;
 let off: World;
-const calls: Array<{ action: string }> = [];
+/** Spionen registrerer ALLE fem argumentene transporten får (fiks-runde 2, FIX-C b: innpakningen skal ikke endre noe av det for eier/lokal). */
+const calls: Array<{ action: string; parameters: unknown; credential: unknown; context: { identity?: { tenant_id?: string; person_id?: string }; servingModel?: unknown } | undefined; signal: unknown; argc: number }> = [];
 const BALANCE = { balance: "N1B-SALDO-1234.56", credit_limit: "N1B-KREDITT-500.00", available_credit: "N1B-TILGJENGELIG-1734.56", currency: "USD", record_type: "balance" };
-const spy: ToolTransport = { async invoke(action) { calls.push({ action }); return { data: BALANCE as never }; } };
+const spy: ToolTransport = { async invoke(...args: unknown[]) { const [action, parameters, credential, context, signal] = args as [string, unknown, unknown, never, unknown]; calls.push({ action, parameters, credential, context, signal, argc: args.length }); return { data: BALANCE as never }; } } as ToolTransport;
 
 beforeAll(async () => {
   db = await startH0Db("n1bprov");
@@ -43,13 +44,21 @@ describe("A: telnyx.get_account_info (kontosaldo) - tilbakeholdt VED UTFØRELSE 
     });
   }
   for (const [label, model] of MODELS_FULL) {
-    it(`${label}: saldoen som før (leverandøren kalles), uten merke`, async () => {
+    it(`${label}: saldoen som før (leverandøren kalles), uten merke - og transporten får ALLE fem argumentene (handling, parametre, credential, kontekst, avbruddssignal) som uten innpakningen`, async () => {
       const before = calls.length;
       const r = await run(on.gateway, "telnyx", "get_account_info", {}, model);
       expect(r.ok, JSON.stringify(r)).toBe(true);
       expect(calls.length).toBe(before + 1);
       expect(text(r)).toContain("N1B-SALDO-1234.56");
       expect(text(r)).not.toContain("finance_withheld");
+      const seen = calls[calls.length - 1] as (typeof calls)[number];
+      expect(seen.argc, "antall argumenter til transporten").toBe(5);
+      expect(seen.action).toBe("get_account_info");
+      expect(seen.parameters, "parametrene").toEqual({});
+      expect(seen.credential, "credential (fra SecretProvider, ikke endret av innpakningen)").toBe("secret");
+      expect(seen.signal, "avbruddssignalet (tidsavbrudd/avbrudd virker for eier/lokal)").toBeInstanceOf(AbortSignal);
+      expect(seen.context?.identity, "kontekstens identitet").toMatchObject({ tenant_id: TENANT, person_id: OWNER });
+      expect(seen.context?.servingModel, "kontekstens modell").toEqual(model === undefined ? undefined : model);
     });
   }
   it("FLAGG AV (ingen lås, ingen sentral kontekst): en skymodell får saldoen som på main - ingen innpakning som endrer svaret", async () => {

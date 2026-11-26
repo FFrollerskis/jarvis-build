@@ -10,9 +10,10 @@ import {
 } from "@jarvis/executive";
 import { domainForLoopType } from "@jarvis/situations";
 import {
-  CONNECTOR_REGISTRY, FINANCE_DERIVED_SITUATION_DOMAINS, FINANCE_WITHHELD_NOTE_NO, financeWithheldMarker, isFinanceConnectorId, isFinanceCredentialRef, isFinanceDerivedSituationDomain,
-  isFinanceToolId, isKnownNonFinanceConnectorId, isKnownNonFinanceCredentialRef, listConnectorStatus, type ConnectorStatus
+  CLOUD_WITHHELD_ATTENTION_DOMAINS, CONNECTOR_REGISTRY, FINANCE_DERIVED_SITUATION_DOMAINS, FINANCE_WITHHELD_NOTE_NO, financeWithheldMarker, isCloudWithheldAttentionDomain, isFinanceConnectorId, isFinanceCredentialRef,
+  isFinanceDerivedSituationDomain, isFinanceToolId, isKnownNonFinanceConnectorId, isKnownNonFinanceCredentialRef, listConnectorStatus, withheldFromCloudTransport, type ConnectorStatus, type ToolTransport
 } from "@jarvis/tool-gateway";
+import { runWithModelScope } from "../../../modules/tool-gateway/src/model-scope.ts";
 import { UNKNOWN_FINANCE_LOOKING_IDS, UNKNOWN_FINANCE_LOOKING_REFS } from "./support/n1b-unknown-ids.ts";
 
 /**
@@ -85,6 +86,59 @@ describe("gjenkjenning av finanskoblinger og -legitimasjon (fra connector-regist
     for (const d of ["spend", "SPEND", " spend ", "Spend\n"]) expect(isFinanceDerivedSituationDomain(d), d).toBe(true);
     for (const d of ["pipeline", "support", "deadlines", "product", "operations", "retention", "infra", "home", "health"]) expect(isFinanceDerivedSituationDomain(d), d).toBe(false);
     for (const d of [undefined, null, 1, {}]) expect(isFinanceDerivedSituationDomain(d as never)).toBe(true);
+  });
+
+  it("FIX-C a - køens tilbakehold (`isCloudWithheldAttentionDomain`: `spend` + `infra`): domenet normaliseres (store/små bokstaver, mellomrom), andre domener slipper gjennom, og ikke-strenger er tilbakeholdt (fail-closed; `situations.domain` er fritekst)", () => {
+    expect([...CLOUD_WITHHELD_ATTENTION_DOMAINS].sort()).toEqual(["infra", "spend"]);
+    for (const d of ["spend", "SPEND", " spend ", "Spend\n", "infra", "INFRA", " Infra ", "infra\t"]) expect(isCloudWithheldAttentionDomain(d), JSON.stringify(d)).toBe(true);
+    for (const d of ["pipeline", "support", "deadlines", "product", "operations", "retention", "home", "health", "growth"]) expect(isCloudWithheldAttentionDomain(d), d).toBe(false);
+    for (const d of [undefined, null, 1, {}, [], true]) expect(isCloudWithheldAttentionDomain(d as never), String(d)).toBe(true);
+  });
+});
+
+describe("FIX-C b - `withheldFromCloudTransport` (telnyx.get_account_info): ALLE fem argumenter går uendret til den ekte transporten for eier/lokal/vakt AV, og transporten kalles aldri for sky/ukjent", () => {
+  const parameters = { sentinel: "p" } as never;
+  const credential = "cred-sentinel";
+  const context = { identity: { person_id: "p", tenant_id: "t" }, servingModel: { provider: "x", model: "y" } } as never;
+  const signal = new AbortController().signal;
+  const reply = { data: { balance: "N1B-SALDO" }, external_id: "ext-1" } as never;
+  const inspect = (): { inner: ToolTransport; seen: unknown[][] } => {
+    const seen: unknown[][] = [];
+    return { seen, inner: { async invoke(...args: unknown[]) { seen.push(args); return reply; } } as ToolTransport };
+  };
+  const fiveSame = (args: unknown[] | undefined): void => {
+    expect(args, "den ekte transporten ble ikke kalt").toBeDefined();
+    expect(args).toHaveLength(5);
+    expect((args as unknown[])[0]).toBe("get_account_info");
+    expect((args as unknown[])[1], "parametrene").toBe(parameters);
+    expect((args as unknown[])[2], "credential").toBe(credential);
+    expect((args as unknown[])[3], "kontekst").toBe(context);
+    expect((args as unknown[])[4], "avbruddssignal").toBe(signal);
+  };
+
+  it("ingen modell i løkka (eier/vakt AV): fem like argumenter (samme referanser) og svaret fra leverandøren uendret", async () => {
+    const { inner, seen } = inspect();
+    const out = await withheldFromCloudTransport(inner).invoke("get_account_info", parameters, credential, context, signal);
+    expect(seen).toHaveLength(1);
+    fiveSame(seen[0]);
+    expect(out).toBe(reply);
+  });
+
+  it("LOKAL modell i skopet: fem like argumenter og svaret uendret", async () => {
+    const { inner, seen } = inspect();
+    const out = await runWithModelScope({ servingModel: { provider: "gemma_local", model: "m" }, cloud: false }, () => withheldFromCloudTransport(inner).invoke("get_account_info", parameters, credential, context, signal));
+    expect(seen).toHaveLength(1);
+    fiveSame(seen[0]);
+    expect(out).toBe(reply);
+  });
+
+  it("SKY-/ukjent modell i skopet: kun det nøytrale merket, og den ekte transporten får INGEN kall (ingen forespørsel ut)", async () => {
+    for (const servingModel of [{ provider: "anthropic", model: "m" }, { provider: "ukjent-leverandor", model: "x" }, { provider: "", model: "x" }]) {
+      const { inner, seen } = inspect();
+      const out = await runWithModelScope({ servingModel, cloud: true }, () => withheldFromCloudTransport(inner).invoke("get_account_info", parameters, credential, context, signal));
+      expect(seen, JSON.stringify(servingModel)).toHaveLength(0);
+      expect(out).toEqual({ data: { ...financeWithheldMarker() } });
+    }
   });
 });
 

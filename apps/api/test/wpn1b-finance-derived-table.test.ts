@@ -141,19 +141,24 @@ describe("K2: kontrollsentrene Autoritet, Integrasjoner og AI (EKTE byggere via 
     const ALL = ["agent", "ai", "authority", "integration", "memory", "operations", "privacy", "security"];
     for (const [label, model] of MODELS_WITHHELD) {
       const r = await run(onC.gateway, "executive", "get_control_center", {}, model);
-      const d = r.data as { centers: Array<{ center: string }>; withheld?: string[] };
+      const d = r.data as { centers: Array<{ center: string }>; withheld?: string[]; finance_withheld?: boolean; note_no?: string };
       expect(d.centers.map((c) => c.center).sort(), label).toEqual(["agent", "memory", "operations", "privacy", "security"]);
       expect([...(d.withheld ?? [])].sort(), label).toEqual(["ai", "authority", "integration"]);
+      // FIX-C c (runbook R23: «+ merke»): oversikten bærer det nøytrale merket for sky/ukjent (alltid, også når de byggede sentrene ikke hadde noe å holde tilbake)
+      expect(d.finance_withheld, `${label}: oversikten mangler merket`).toBe(true);
+      expect(typeof d.note_no, `${label}: merknaden`).toBe("string");
       for (const m of ["Stripe", "Finans-nødbryter", "77123", "stripe", "finance_vipps", "JARVIS_VIPPS_CLIENT_SECRET"]) expect(text(r), `${label}: ${m}`).not.toContain(m);
     }
     for (const [label, model] of MODELS_FULL) {
-      const d = (await run(onC.gateway, "executive", "get_control_center", {}, model)).data as { centers: Array<{ center: string }>; withheld?: string[] };
+      const d = (await run(onC.gateway, "executive", "get_control_center", {}, model)).data as { centers: Array<{ center: string }>; withheld?: string[]; finance_withheld?: boolean };
       expect(d.centers.map((c) => c.center).sort(), label).toEqual(ALL);
       expect(d.withheld, label).toBeUndefined();
+      expect(d.finance_withheld, `${label}: lokal modell/eier skal ikke ha merket`).toBeUndefined();
     }
-    const off = (await run(offC.gateway, "executive", "get_control_center", {}, CLOUD)).data as { centers: unknown[]; withheld?: string[] };
+    const off = (await run(offC.gateway, "executive", "get_control_center", {}, CLOUD)).data as { centers: unknown[]; withheld?: string[]; finance_withheld?: boolean };
     expect(off.centers.length).toBe(ALL.length);
     expect(off.withheld).toBeUndefined();
+    expect(off.finance_withheld, "vakten AV: ingen merke (som på main)").toBeUndefined();
   });
 });
 
