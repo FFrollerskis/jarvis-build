@@ -610,3 +610,41 @@ describe("G: ulagrede/uautoriserte tilstander etter angrepet", () => {
     expect(i.rows[0].n).toBe(0);
   });
 });
+
+describe("H3: WP-S1 (JARVIS-111) - /infra/status viser modusen for kanalbinding og blokkerte flagg KUN for den suverene eieren", () => {
+  const OWNER_GATE = ownerPredicate({ owner_person_id: "person-cp-a", owner_tenants: [TENANT_A] });
+  const STATUS = {
+    mode: "observe", enforced: false, invalid_value: null,
+    blocked: [{ flag: "JARVIS_PERSONAL_CAR", group: "personal", reason: "stepup_binding_not_enforced" }]
+  } as const;
+  beforeEach(() => { apiDeps.ownerGate = OWNER_GATE; apiDeps.stepUpBinding = STATUS; });
+  afterEach(() => { delete apiDeps.ownerGate; delete apiDeps.stepUpBinding; });
+  const statusAs = async (subject: typeof SUBJECT_A | typeof SUBJECT_M, device: string) => post("/infra/status", { grant_token: await mintGrant(baseUrl, subject, keys[device]!) });
+
+  it("eieren ser `stepup_binding` med modus, ugyldig verdi og blokkerte flaggnavn (kun navn og årsak, aldri verdier)", async () => {
+    const r = await statusAs(SUBJECT_A, "cp-dev-a");
+    expect(r.status).toBe(200);
+    expect(r.body["stepup_binding"]).toEqual(STATUS);
+  });
+
+  it("en annen grant-innehaver i eierens tenant ser IKKE nøkkelen, og resten av svaret er IDENTISK med eierens (bortsett fra det eier-skopede)", async () => {
+    const asOwner = await statusAs(SUBJECT_A, "cp-dev-a");
+    const asMember = await statusAs(SUBJECT_M, "cp-dev-m");
+    expect(asMember.status).toBe(200);
+    expect("stepup_binding" in asMember.body).toBe(false);
+    const strip = (b: Record<string, unknown>): Record<string, unknown> => { const c = { ...b }; delete c["stepup_binding"]; delete c["frozen_connectors"]; delete c["frozen_connectors_readable"]; return c; };
+    expect(strip(asMember.body)).toEqual(strip(asOwner.body));
+  });
+
+  it("uten `stepUpBinding` i deps (som main) finnes nøkkelen ikke, selv for eieren; FAIL-CLOSED uten eier-port (eller når den kaster) finnes den heller ikke", async () => {
+    delete apiDeps.stepUpBinding;
+    expect("stepup_binding" in (await statusAs(SUBJECT_A, "cp-dev-a")).body).toBe(false);
+    apiDeps.stepUpBinding = STATUS;
+    delete apiDeps.ownerGate;
+    expect("stepup_binding" in (await statusAs(SUBJECT_A, "cp-dev-a")).body).toBe(false);
+    apiDeps.ownerGate = () => { throw new Error("gate exploded"); };
+    const throwing = await statusAs(SUBJECT_A, "cp-dev-a");
+    expect(throwing.status).toBe(200);
+    expect("stepup_binding" in throwing.body).toBe(false);
+  });
+});

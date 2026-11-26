@@ -16,7 +16,7 @@
  *
  * Kill-switch-handlinger er unntatt: de er sikkerhetsbrytere som alltid må kunne brukes (også mens varsler/leverandør er nede).
  */
-import type { IdentityContext, JsonValue } from "@jarvis/contracts";
+import { OWNER_STEP_UP_CHANNELS, type IdentityContext, type JsonValue } from "@jarvis/contracts";
 import type { ToolDefinition, ToolResult } from "./gateway.ts";
 
 export interface ClassDNotification {
@@ -48,8 +48,10 @@ export interface ClassDPipelineOptions {
 /**
  * WP-F1 (D-462): kanaler der eieren selv sitter foran en innrullert enhet. ALDRI tale, Telegram, meldingsplattformer, klokke eller system.
  * Felles kilde for API-rutenes step-up (`apps/api/src/step-up.ts` delegerer hit) og for gatewayens egen håndhevelse (`ToolDefinition.step_up_required`).
+ * WP-S1 (JARVIS-111): mengden BOR nå i `@jarvis/contracts` (`device-kind.ts`), fordi autorisasjonskjernen (`@jarvis/core`) trenger den for å binde kanal til enhetstype uten å importere gatewayen. Samme mengde, samme navn,
+ * SAMME objekt (re-eksport, ingen kopi): kanal -> step-up er policy her, enhetstype -> kanal er autorisasjon i kjernen, og de to komponerer.
  */
-export const OWNER_STEP_UP_CHANNELS: ReadonlySet<string> = new Set(["web", "desktop", "api", "mobile"]);
+export { OWNER_STEP_UP_CHANNELS };
 
 /**
  * Step-up for eierens kontroll- og pengehandlinger: kun en enhetssignert økt (`auth_strength === "signed"`) fra en eier-kanal. `undefined` = oppfylt, ellers årsakskode.
