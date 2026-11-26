@@ -6,7 +6,7 @@ import { isFinancialNamespace } from "./tool-manifest.ts";
 /**
  * WP-N1b (JARVIS-116 a, Q-76 pkt 7, Q-64 pkt 2; K2): FELLES byggeklosser for «hold tilbake finansAVLEDET innhold ved UTFØRELSE». Utførelseslåsen (N1, K6) dekker `finance`/`finance_*`-verktøyene; denne modulen er det de ØVRIGE
  * stiene en modell kan kalle (forretnings-OS, executive-statusverktøyene, kontrollsentrene, kost-/verdirapportene) bruker når en sky-/ukjent modell betjener kallet (sentral lesning: `withholdFinanceFromCurrentModel()`, `model-scope.ts`):
- *  - ÉTT nøytralt, innholdsfritt merke (`financeWithheldMarker`): `finance_withheld: true` + en kort norsk merknad UTEN sifre, id-er, tellinger eller leverandørnavn (låst av `wpn1b-finance-withheld-note.test.ts`).
+ *  - ÉTT nøytralt, innholdsfritt merke (`financeWithheldMarker`): `finance_withheld: true` + en kort norsk merknad UTEN sifre, id-er, tellinger eller leverandørnavn (låst av `wpn1b-finance-withheld.test.ts`).
  *    Merket settes ALLTID for en sky-/ukjent modell (uavhengig av om det finnes noe finansavledet å holde tilbake), så merket selv aldri røper om finansdata finnes.
  *  - gjenkjenning av finanskoblinger og -legitimasjon (`isFinanceConnectorId`, `isFinanceCredentialRef`) utledet av SAMME connector-register som resten av systemet (`category: "finance"`) + finans-navnerommene
  *    (`isFinancialNamespace`), FAIL-CLOSED på ordstammene (en referanse som nevner en finansleverandør regnes som finansavledet selv om registeret ikke kjenner den). Svartelisten alene er IKKE nok for fritekst-id-er som eieren skriver

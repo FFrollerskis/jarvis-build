@@ -6,18 +6,18 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * FØR: kun det øverste verktøykallet bar `ToolInvocationContext.servingModel`. Et nøstet kall (en transport som selv kaller `gateway.execute()`, f.eks. executive-tjenestens `finance.get_kill_switch`) så ingen modell, så
  * utførelseslåsen for `finance*` ble omgått, og hvert nøstet finansoppslag måtte holdes tilbake per tjeneste (kun `executive` var dekket, F-B1).
  *
- * NÅ: `ToolGateway.execute()` setter skopet ÉN gang (`runWithModelScope`, det ENESTE setter-stedet i produksjonskoden, låst av `wpn1b-model-scope-structure.test.ts`) når (1) begrenset-vakten er på (gatewayen har
+ * NÅ: `ToolGateway.execute()` setter skopet ÉN gang (`runWithModelScope`, det ENESTE setter-stedet i produksjonskoden, låst av `wpn1b-structure.test.ts` (A)) når (1) begrenset-vakten er på (gatewayen har
  * `financeExecutionLock`) og (2) kallet er modellstyrt (`servingModel` stemplet av adapteren i `MeshToolExecutor`, aldri fra parametere). Nøstede `execute()`-kall arver skopet, så utførelseslåsen og alle sentrale lesere
  * (`withholdFinanceFromCurrentModel`, `currentServingModel`) ser SAMME modell uansett nesting-dybde.
  *
- * REGLER (alle låst av tester):
+ * REGLER (alle låst av tester: atferden i `wpn1b-model-scope.test.ts`, strukturen i `wpn1b-structure.test.ts`):
  *  - SKOPET BÆRER ET FERDIG LOKALITETSVEDTAK (`cloud`), beregnet av gatewayen med den ENE lokalitetsregelen (`financeLockServedLocally` via `FinanceExecutionLock.servedLocally`, fail-closed: ukjent/blank/kast/ikke-`true` = sky). Lesere
  *    trenger aldri en egen kopi av regelen (F2-A3: ingen fjerde kopi).
  *  - INGEN MODELL = INGET SKOP (eierens egne HTTP-ruter, `/control`, eier-godkjent bekreftelse): leserne gir `undefined`/`false`, så eieren får alt som før.
  *  - ET SKYSKOP KAN ALDRI LØSNES: et nøstet kall inne i et sky-/ukjent-betjent kall får alltid den ytre modellen, selv om det selv oppgir en lokal (gatewayen håndhever det). Et lokalt skop kan strammes inn av et nøstet kall som oppgir sky.
  *  - VAKT AV (`financeExecutionLock` utelatt = begrenset-vakten er AV): ingen skop settes noe sted, lesere gir `undefined`/`false`, og `execute()` er identisk med main.
  *  - DELT ARBEID: skopet følger den ASYNKRONE kjeden til kallet som satte det. Delt arbeid som lages av ÉN kaller og deles av flere (single-flight, cache, `Promise` i et felt) kjører derfor i den FØRSTE kallerens skop - slikt
- *    arbeid MÅ ikke lese skopet (bruk et eksplisitt valg som er del av nøkkelen, slik `ControlCenterRegistry.buildOne` gjør med `restrictFinance`). Lesere i delt arbeid er forbudt (kildevakt: `wpn1b-model-scope-structure.test.ts`).
+ *    arbeid MÅ ikke lese skopet (bruk et eksplisitt valg som er del av nøkkelen, slik `ControlCenterRegistry.buildOne` gjør med `restrictFinance`). Lesere i delt arbeid er forbudt (kildevakt: `wpn1b-structure.test.ts` (A)).
  */
 
 /** Modellen som betjener kallet: stemplet av adapteren (`MeshToolExecutor`), aldri fra parametere eller modellens egne argumenter. */
