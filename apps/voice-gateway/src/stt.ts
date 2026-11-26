@@ -7,7 +7,7 @@ import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
 import { WebSocket as WsClient } from "ws";
 import { maybeDumpAudioForDebug } from "./debug-audio-dump.ts";
 import { deadlineSignal } from "./deadline.ts";
-import { killProcessGroup, probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
+import { AVAILABILITY_CACHE_MS, AvailabilityCache, killProcessGroup, probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
 import { DEFAULT_VOICE_LIMITS, ProcessSlots } from "./limits.ts";
 import type { SpeechCallContext } from "./speech-context.ts";
 
@@ -681,8 +681,15 @@ export class LocalWhisperStt implements SttAdapter {
     /** WP-V2 (K2): samtidige whisper-prosesser (delt semafor). */
     private readonly slots: ProcessSlots = DEFAULT_WHISPER_SLOTS,
     /** WP-V2 (K4): maks varighet (ms) for én whisper-prosess. */
-    private readonly timeoutMs: number = DEFAULT_WHISPER_TIMEOUT_MS
-  ) {}
+    private readonly timeoutMs: number = DEFAULT_WHISPER_TIMEOUT_MS,
+    /** FIX-7: klokke for tilgjengelighets-cachen (tester). */
+    now: () => number = Date.now
+  ) {
+    this.availability = new AvailabilityCache(() => probeLocalBinary(this.binPath, this.modelPath), AVAILABILITY_CACHE_MS, now);
+  }
+
+  /** FIX-7: `available()` går hit (5 s cache) i stedet for synkron stat/access ved hvert kall. */
+  private readonly availability: AvailabilityCache;
 
   /** Argumentene som sendes til whisper-cli (observerbart for tester). */
   cliArgs(tmpOutBase: string): string[] {
@@ -700,7 +707,7 @@ export class LocalWhisperStt implements SttAdapter {
   }
 
   unavailableReason(): LocalBinaryProblem | undefined {
-    return probeLocalBinary(this.binPath, this.modelPath);
+    return this.availability.get();
   }
 
   status(): Record<string, unknown> {

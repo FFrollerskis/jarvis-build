@@ -51,6 +51,33 @@ export function probeLocalBinary(binPath: string | undefined, modelPath: string 
   return undefined;
 }
 
+/** FIX-7 (F7): hvor lenge et tilgjengelighetssvar gjenbrukes (ms). Kort nok til at en rettet konfigurasjon synes raskt, lang nok til at `/health` og hver TTS-chunk ikke går til disk. */
+export const AVAILABILITY_CACHE_MS = 5_000;
+
+/**
+ * FIX-7 (F7): `probeLocalBinary` gjør SYNKRON `statSync`/`accessSync`, og `available()` kalles fra `/health` og for HVER TTS-chunk (`usableReserve`). Mot en hengende
+ * nettmontering (NAS) kan ett slikt kall fryse hele event-loopen og dermed alle økter. Svaret (også «ikke tilgjengelig») gjenbrukes i `ttlMs`. Klokken er
+ * injiserbar; en klokke som går bakover gir ny sjekk (aldri et evig cachet svar).
+ */
+export class AvailabilityCache {
+  private cached: LocalBinaryProblem | undefined;
+  private checkedAt = Number.NEGATIVE_INFINITY;
+  constructor(
+    private readonly probe: () => LocalBinaryProblem | undefined,
+    private readonly ttlMs: number = AVAILABILITY_CACHE_MS,
+    private readonly now: () => number = Date.now
+  ) {}
+
+  get(): LocalBinaryProblem | undefined {
+    const t = this.now();
+    if (t - this.checkedAt >= this.ttlMs || t < this.checkedAt) {
+      this.cached = this.probe();
+      this.checkedAt = t;
+    }
+    return this.cached;
+  }
+}
+
 /**
  * Dreper HELE prosessgruppen `proc` leder (krever `detached: true` ved spawn), ALDRI kun selve PID-en: en wrapper-script/binær kan
  * ha barneprosesser som arver stdout-pipen - å drepe bare toppen lar pipen stå åpen (Node ser aldri `close`) og et kall henger til

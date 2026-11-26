@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
 import { deadlineSignal } from "./deadline.ts";
-import { killProcessGroup, probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
+import { AVAILABILITY_CACHE_MS, AvailabilityCache, killProcessGroup, probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
 import { DEFAULT_VOICE_LIMITS, ProcessSlots, VoiceBusyError } from "./limits.ts";
 import type { SpeechCallContext } from "./speech-context.ts";
 
@@ -476,6 +476,8 @@ export class LocalPiperTts implements TtsAdapter {
   readonly sampleRate: number;
   readonly sampleRateSource: PiperSampleRateSource;
   private readonly sampleRateMismatch: PiperSampleRate["mismatch"];
+  /** FIX-7: `available()` går hit (5 s cache) i stedet for synkron stat/access ved hvert kall (hver TTS-chunk via `usableReserve`, og `/health`). */
+  private readonly availability: AvailabilityCache;
   constructor(
     private readonly binPath: string | undefined = process.env["JARVIS_PIPER_BIN"],
     private readonly modelPath: string | undefined = process.env["JARVIS_PIPER_MODEL"],
@@ -484,8 +486,11 @@ export class LocalPiperTts implements TtsAdapter {
     /** WP-V2 (K2): samtidige piper-prosesser (delt). */
     private readonly slots: ProcessSlots = DEFAULT_PIPER_SLOTS,
     /** WP-V2 (K4): maks varighet per chunk (ms). */
-    private readonly chunkTimeoutMs: number = DEFAULT_PIPER_CHUNK_TIMEOUT_MS
+    private readonly chunkTimeoutMs: number = DEFAULT_PIPER_CHUNK_TIMEOUT_MS,
+    /** FIX-7: klokke for tilgjengelighets-cachen (tester). */
+    now: () => number = Date.now
   ) {
+    this.availability = new AvailabilityCache(() => probeLocalBinary(this.binPath, this.modelPath), AVAILABILITY_CACHE_MS, now);
     if (typeof sampleRate === "number" && Number.isFinite(sampleRate) && sampleRate > 0) {
       this.sampleRate = sampleRate;
       this.sampleRateSource = "constructor";
@@ -510,7 +515,7 @@ export class LocalPiperTts implements TtsAdapter {
   }
 
   unavailableReason(): LocalBinaryProblem | undefined {
-    return probeLocalBinary(this.binPath, this.modelPath);
+    return this.availability.get();
   }
 
   status(): Record<string, unknown> {
