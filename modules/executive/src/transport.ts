@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { JsonValue } from "@jarvis/contracts";
-import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { financeWithheldMarker, withholdFinanceFromCurrentModel, type ToolDefinition, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 import type { ExecutiveService } from "./service.ts";
 import { summarizeCapabilityStatusNo, summarizeConnectorStatusNo, summarizeSelfDiagnosisNo } from "./status-summary.ts";
-import { CLOUD_WITHHELD_CENTERS, CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, CONTROL_CENTER_TITLES_NO, EXTENSION_CONTROL_CENTER_IDS, controlCenterForReadAction, isCloudWithheldCenter, withheldCenterData, type ControlCenterId } from "./control-center/index.ts";
+import { shapeCapabilityStatusForCloud, shapeConnectorsForCloud, shapeSloReportForCloud } from "./finance-withheld.ts";
+import { CLOUD_WITHHELD_CENTERS, CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, CONTROL_CENTER_TITLES_NO, EXTENSION_CONTROL_CENTER_IDS, GUARDED_CLOUD_WITHHELD_CENTERS, controlCenterForReadAction, isCloudWithheldCenter, isGuardedCloudWithheldCenter, withheldCenterData, type ControlCenterId } from "./control-center/index.ts";
 import { EVOLUTION_DECISIONS, isEvolutionDecision, summarizeEvolutionDecisionNo } from "./evolution/index.ts";
 
 /**
@@ -41,8 +42,10 @@ export class ExecutiveTransport implements ToolTransport {
    * i løkka) får hele rapporten. Håndhevingen skjer HER, ved utførelse, uavhengig av hvilke verktøy utvalget valgte for turen.
    */
   private async centerResponse(identity: Parameters<ExecutiveService["getControlCenterReport"]>[0], center: string, servingModel: ToolInvocationContext["servingModel"]): Promise<{ data: JsonValue }> {
-    const cloud = this.service.isCloudServed(servingModel);
-    if (isCloudWithheldCenter(center) && cloud && this.service.hasControlCenter(center)) {
+    // WP-N1b (K2): med begrenset-vakten på (sentral lesning) holdes i tillegg Autoritet, Integrasjoner og AI tilbake HELT fra sky/ukjent (`GUARDED_CLOUD_WITHHELD_CENTERS`); den sentrale avgjørelsen kan bare STRAMME inn (`cloud` er sky om en av dem sier det).
+    const guarded = withholdFinanceFromCurrentModel();
+    const cloud = this.service.isCloudServed(servingModel) || guarded;
+    if ((isCloudWithheldCenter(center) || (guarded && isGuardedCloudWithheldCenter(center))) && cloud && this.service.hasControlCenter(center)) {
       return { data: withheldCenterData(center as ControlCenterId, CONTROL_CENTER_TITLES_NO[center as ControlCenterId]) as unknown as JsonValue };
     }
     // M2 (H2): for en SKYmodell bygges de øvrige sentrene uten finansavledet tilstand (`restrictFinance`, f.eks. finans-nødbryteren i Sikkerhet og finansjobbene i Drift); lokal modell og siden får alt.
@@ -51,7 +54,8 @@ export class ExecutiveTransport implements ToolTransport {
       return { data: { found: false, center, summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." } as unknown as JsonValue };
     }
     // `summary_no` og `explanation_no` først: chat-executoren kutter lange svar bakfra, og det er disse modellen skal relayere.
-    return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report } as unknown as JsonValue };
+    // WP-N1b (FIX-1): med vakten PÅ og en sky-/ukjent modell bærer et senter bygget uten finansavledet tilstand (`restrictFinance`) alltid det nøytrale merket (også når ingenting ble fjernet) - skyen kan ikke utlede om noe fantes.
+    return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report, ...(cloud && guarded ? financeWithheldMarker() : {}) } as unknown as JsonValue };
   }
 
   /** Gjennomgang av PR #324 (M3/L4): eier + signert økt-porten for `get_infra_status` - fail-closed også uten register. */
@@ -75,14 +79,22 @@ export class ExecutiveTransport implements ToolTransport {
       throw new Error("executive_missing_invocation_context");
     }
     switch (action) {
+      // WP-N1b (JARVIS-116 a, K2): situasjoner i det finansavledede `spend`-domenet bærer løkkens begrunnelse (beløp, leverandør, AI-kost) og holdes tilbake fra en sky-/ukjent modell ved utførelse (sentral lesning;
+      // lokal modell og eierens ruter får alt, flagg AV er uendret). Svaret til en slik modell har ALLTID det nøytrale merket, så en tom kø aldri leses som «ingen økonomivarsler».
       case "get_attention_queue": {
         const filter = parameters["domain"] !== undefined ? { domain: String(parameters["domain"]) } : {};
+        if (withholdFinanceFromCurrentModel()) {
+          const items = await this.service.getAttentionQueue(identity, filter, { withholdFinance: true });
+          return { data: { items, ...financeWithheldMarker() } as unknown as JsonValue };
+        }
         const items = await this.service.getAttentionQueue(identity, filter);
         return { data: items as unknown as JsonValue };
       }
       case "get_attention_item": {
-        const item = await this.service.getAttentionItem(identity, requireString(parameters, "situation_id"));
+        const situationId = requireString(parameters, "situation_id");
+        const item = withholdFinanceFromCurrentModel() ? await this.service.getAttentionItem(identity, situationId, { withholdFinance: true }) : await this.service.getAttentionItem(identity, situationId);
         if (!item) throw new Error("attention_item_not_found");
+        if ("finance_withheld" in item) return { data: item as unknown as JsonValue }; // KUN merket: ingen `external_id`, ingen felt
         return { external_id: item.situation_id, data: item as unknown as JsonValue };
       }
       case "get_pause_state": {
@@ -117,21 +129,34 @@ export class ExecutiveTransport implements ToolTransport {
       }
       case "get_capability_status": {
         const status = await this.service.getCapabilityStatus(context?.servingModel);
+        // WP-N1b (K2): finansverktøy og finanstilkoblingenes helse (navn, tilstand, feildetaljer) er finansavledet metadata: ut for sky/ukjent, og oppsummeringen bygges på det som er igjen
+        if (withholdFinanceFromCurrentModel()) {
+          const shaped = shapeCapabilityStatusForCloud(status);
+          return { data: { ...shaped, summary_no: summarizeCapabilityStatusNo(shaped) } as unknown as JsonValue };
+        }
         return { data: { ...status, summary_no: summarizeCapabilityStatusNo(status) } as unknown as JsonValue };
       }
       case "get_self_diagnosis": {
+        // WP-N1b (K2, strengeste regel): observasjonenes fritekst (tilkoblinger, daglige jobber, verktøyfeil, kostnadsdrift) kan navngi finansleverandører, -jobber og -verktøy og bære AI-kost i øre, og kan ikke renses
+        // strukturelt (fritekst fra lesere i apps/api) - hele selvdiagnosen holdes derfor tilbake fra sky/ukjent. Eieren/lokal modell får den; hurtigbanen («hva er galt med deg») svarer uten modell og låser turen.
+        if (withholdFinanceFromCurrentModel()) return { data: { ...financeWithheldMarker() } as unknown as JsonValue };
         const diagnosis = await this.service.getSelfDiagnosis();
         return { data: { ...diagnosis, summary_no: summarizeSelfDiagnosisNo(diagnosis) } as unknown as JsonValue };
       }
       case "get_slo_report": {
         const report = await this.service.getSloReport();
-        return { data: report as unknown as JsonValue };
+        // WP-N1b (K2): kostnadsdriften («Kostnad per kall økte fra 3 til 6.7 øre») er AI-kost i øre: ut for sky/ukjent, rapporten komponeres på nytt fra resten (tjenestemålene har ingen kostnad)
+        return { data: (withholdFinanceFromCurrentModel() ? shapeSloReportForCloud(report) : report) as unknown as JsonValue };
       }
       case "get_evolution_report": {
+        // WP-N1b (K2, strengeste regel): rapporten inneholder kostnadsporten (EV-16: månedsforbruk og grenser i øre) og Evolusjon-senteret holdes allerede tilbake HELT fra skyen - hele rapporten holdes tilbake her
+        if (withholdFinanceFromCurrentModel()) return { data: { ...financeWithheldMarker() } as unknown as JsonValue };
         const report = await this.service.getEvolutionReport();
         return { data: report as unknown as JsonValue };
       }
       case "get_ai_mesh_status": {
+        // WP-N1b (K2, strengeste regel): kostnad per leverandør siste 7 døgn (`usage_7d.cost_ore`) er AI-kost i øre (Q-64 pkt 1) - hele rapporten holdes tilbake fra sky/ukjent
+        if (withholdFinanceFromCurrentModel()) return { data: { ...financeWithheldMarker() } as unknown as JsonValue };
         const report = await this.service.getAiMeshStatus();
         return { data: report as unknown as JsonValue };
       }
@@ -140,9 +165,13 @@ export class ExecutiveTransport implements ToolTransport {
         // IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
         const center = parameters["center"];
         if (center === undefined) {
-          const overview = await this.service.getControlCenterOverview(identity, this.service.isCloudServed(context?.servingModel) ? { withhold: CLOUD_WITHHELD_CENTERS, restrictFinance: true } : {});
+          // WP-N1b (K2): med vakten på og en sky-/ukjent modell holdes også de vakt-styrte sentrene tilbake (oversikten sier rett ut at de er holdt tilbake, uten tall)
+          const guarded = withholdFinanceFromCurrentModel();
+          const overview = await this.service.getControlCenterOverview(identity, this.service.isCloudServed(context?.servingModel) || guarded
+            ? { withhold: guarded ? [...CLOUD_WITHHELD_CENTERS, ...GUARDED_CLOUD_WITHHELD_CENTERS] : CLOUD_WITHHELD_CENTERS, restrictFinance: true }
+            : {});
           const { summary_no, ...rest } = overview;
-          return { data: { summary_no, ...rest } as unknown as JsonValue }; // `summary_no` først (se under)
+          return { data: { summary_no, ...rest, ...(guarded ? financeWithheldMarker() : {}) } as unknown as JsonValue }; // `summary_no` først (se under)
         }
         return this.centerResponse(identity, String(center), context?.servingModel);
       }
@@ -188,17 +217,27 @@ export class ExecutiveTransport implements ToolTransport {
         return { external_id: `${result.change_id}:${result.proposal_digest.slice(0, 12)}`, data: { summary_no: summarizeEvolutionDecisionNo(result), ...result } as unknown as JsonValue };
       }
       case "get_value_report": {
-        // WP-C4: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
+        // WP-N1b (K2, strengeste regel til Q-64 pkt 1 er besvart): verdimålingene inkluderer modellkost i øre (`tasks.cost_ore`, `cost.model_total_ore`), og Verdi-senteret holdes allerede tilbake HELT fra skyen (H2/M2) -
+        // samme regel her: hele rapporten holdes tilbake fra sky/ukjent (lokal modell og eierens ruter får den). Tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
+        if (withholdFinanceFromCurrentModel()) return { data: { ...financeWithheldMarker() } as unknown as JsonValue };
         const report = await this.service.getValueReport(identity.tenant_id);
         return { data: report as unknown as JsonValue };
       }
       case "get_infra_status": {
+        // WP-N1b fiks-runde 1 (FIX-2, strengeste regel): hendelsestitlene (`providerProducer`: «Tilkobling svikter: <tilkobling>», `schedulerProducer`: «Bakgrunnsjobben <jobb> ga opp»), repo/gren og produsentenes feiltekster kan navngi
+        // finanskoblinger og finansjobber og kan ikke renses strukturelt - hele driftsbildet holdes tilbake fra sky/ukjent VED UTFØRELSE, FØR kilden leses (lokal modell og eier får det; Drift-senteret viser kun tall).
+        if (withholdFinanceFromCurrentModel()) return { data: { ...financeWithheldMarker() } as unknown as JsonValue };
         // WP-E1: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
         const report = await this.service.getInfraStatus(identity.tenant_id);
         return { data: report as unknown as JsonValue };
       }
       case "get_connector_status": {
         const status = await this.service.getConnectorStatus();
+        // WP-N1b (K2): finanskoblingene (navn, konfigurert, credential-refs, helse) er finansavledet metadata: ut for sky/ukjent, og oppsummeringen bygges på det som er igjen
+        if (withholdFinanceFromCurrentModel()) {
+          const connectors = shapeConnectorsForCloud(status.connectors);
+          return { data: { ...status, connectors, summary_no: summarizeConnectorStatusNo(connectors), ...financeWithheldMarker() } as unknown as JsonValue };
+        }
         return { data: { ...status, summary_no: summarizeConnectorStatusNo(status.connectors) } as unknown as JsonValue };
       }
       case "activate_kill_switch": {

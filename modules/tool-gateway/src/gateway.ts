@@ -4,8 +4,10 @@ import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLev
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
 import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal, toolCallAbortEnabled } from "./call-signal.ts";
+import { currentModelScope, runWithModelScope } from "./model-scope.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, ownerStepUpDenial, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isIndeterminateTransportError, transportErrorKind } from "./transport-errors.ts";
+import { isPolicyDenied } from "./policy-denied.ts";
 import { isFinancialNamespace } from "./tool-manifest.ts";
 import type { AutonomyBindability } from "./autonomy-bindable.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
@@ -617,6 +619,35 @@ export interface ToolGatewayOptions {
   financeExecutionLock?: FinanceExecutionLock;
 }
 
+/**
+ * Forespørselen til `ToolGateway.execute()`. Trukket ut av metodesignaturen (WP-N1b) uten endring av felt eller semantikk, så den tynne `execute()` (som setter den modell-stemplede konteksten) og `executeCall` (den uendrede
+ * kroppen) deler ÉN type.
+ */
+export interface ToolExecuteRequest {
+  identity: IdentityContext;
+  tool_id: string;
+  action: string;
+  parameters: Record<string, JsonValue>;
+  idempotency_key?: string;
+  approval?: unknown;
+  /** Delegert jobb: verktøyet MÅ stå i kontraktens allowed_tools. */
+  jobContract?: JobContract;
+  /** D-317: se `ToolInvocationContext.servingModel` sitt filhode. WP-N1b: med begrenset-vakten på arves den av nøstede kall (`model-scope.ts`). */
+  servingModel?: { provider: string; model: string };
+  /** D-449: se `ToolInvocationContext.contentOrigin` sitt filhode (kun trusted kode setter den). */
+  contentOrigin?: "owner_direct";
+  /** WP-N1 (F-A2): se `ToolInvocationContext.restrictedOrigin` (kun trusted kode setter den). */
+  restrictedOrigin?: true;
+  /** D-394 (JARVIS-054): korrelasjons-ID-er som følger HVER audit-rad for dette kallet. */
+  task_id?: string;
+  trace_id?: string;
+  /**
+   * WP-G2 (fiks-runde A-L7): kalles etter at klasse D-varslingen er FORSØKT, med `notified` og en kort, sanert feilkode. Resultatformen er uendret (også for MISMATCH/UKJENT, der varslingsstatus ellers ikke fantes
+   * på resultatet), så eksisterende kallere og tester påvirkes ikke. Kun trusted kode setter den; en feil i observatøren bryter aldri kjeden.
+   */
+  onClassDNotification?: (status: { notified: boolean; error: string | null }) => void;
+}
+
 /** Parameterfelt som er identitet/scope - utledes av den autentiserte identiteten, aldri av en modell- eller klientverdi. */
 const IDENTITY_PARAMETER_FIELDS = ["tenant_id", "person_id", "actor_person_id", "owner_person_id"] as const;
 
@@ -752,30 +783,32 @@ export class ToolGateway {
     return [...this.tools.values()];
   }
 
-  async execute(request: {
-    identity: IdentityContext;
-    tool_id: string;
-    action: string;
-    parameters: Record<string, JsonValue>;
-    idempotency_key?: string;
-    approval?: unknown;
-    /** Delegert jobb: verktøyet MÅ stå i kontraktens allowed_tools. */
-    jobContract?: JobContract;
-    /** D-317: se `ToolInvocationContext.servingModel` sitt filhode. */
-    servingModel?: { provider: string; model: string };
-    /** D-449: se `ToolInvocationContext.contentOrigin` sitt filhode (kun trusted kode setter den). */
-    contentOrigin?: "owner_direct";
-    /** WP-N1 (F-A2): se `ToolInvocationContext.restrictedOrigin` (kun trusted kode setter den). */
-    restrictedOrigin?: true;
-    /** D-394 (JARVIS-054): korrelasjons-ID-er som følger HVER audit-rad for dette kallet. */
-    task_id?: string;
-    trace_id?: string;
-    /**
-     * WP-G2 (fiks-runde A-L7): kalles etter at klasse D-varslingen er FORSØKT, med `notified` og en kort, sanert feilkode. Resultatformen er uendret (også for MISMATCH/UKJENT, der varslingsstatus ellers ikke fantes
-     * på resultatet), så eksisterende kallere og tester påvirkes ikke. Kun trusted kode setter den; en feil i observatøren bryter aldri kjeden.
-     */
-    onClassDNotification?: (status: { notified: boolean; error: string | null }) => void;
-  }): Promise<ToolResult> {
+  /**
+   * WP-N1b (JARVIS-116 b, K1): inngangen til ALLE verktøykall. Tynn omslag rundt `executeCall` (den uendrede kroppen) som setter den MODELL-STEMPLEDE KONTEKSTEN (`model-scope.ts`) ÉN gang når et modellstyrt kall starter,
+   * slik at NØSTEDE `execute()`-kall (en transport som selv kaller gatewayen) arver modellen og utførelseslåsen for `finance*` ser den sentralt - uten at hver tjeneste må holde tilbake selv.
+   *  - VAKT AV (`financeExecutionLock` utelatt = begrenset-vakten er AV): går rett til `executeCall` med uendret forespørsel - ingen skop, ingen arvet modell, identisk med main.
+   *  - INGEN MODELL (eierens HTTP-ruter, `/control`, eier-godkjent bekreftelse; hverken eksplisitt eller arvet): ingen skop - eieren får alt som før.
+   *  - ET SKYSKOP KAN ALDRI LØSNES: er det ytre kallet betjent av sky/ukjent, gjelder DEN modellen for alle nøstede kall, selv om et nøstet kall oppgir en lokal. Et lokalt skop kan strammes inn (nøstet kall oppgir sky).
+   *  - Lokalitetsvedtaket (`cloud`) tas HER, ÉN gang, med den ene regelen (`servedByCloud` -> `FinanceExecutionLock.servedLocally`, i drift `financeLockServedLocally`; fail-closed) og ligger i skopet for alle lesere.
+   */
+  execute(request: ToolExecuteRequest): Promise<ToolResult> {
+    // Hele omslaget står i `try`: en feil (også en løsrevet `execute` uten `this`) er en AVVISNING som før N1b (`execute` var `async`), aldri et synkront kast. Vakt AV returnerer fortsatt kroppens eget løfte uendret (ingen `await`, ingen ekstra tick).
+    try {
+      const lock = this.options?.financeExecutionLock;
+      if (lock === undefined) return this.executeCall(request);
+      const ambient = currentModelScope();
+      // `!== undefined` (ikke `??`): en `null`/uleselig verdi er IKKE «ingen modell» - den regnes som sky av `servedByCloud` (fail-lukket), akkurat som finanslåsen i `executeCall` alltid har gjort. Kun fraværet av en modell gir arv/full tilgang.
+      const model = ambient?.cloud === true ? ambient.servingModel : (request.servingModel !== undefined ? request.servingModel : ambient?.servingModel);
+      if (model === undefined) return this.executeCall(request);
+      const cloud = ambient?.cloud === true || this.servedByCloud(model, lock);
+      const effective: ToolExecuteRequest = model === request.servingModel ? request : { ...request, servingModel: model };
+      return runWithModelScope({ servingModel: model, cloud }, () => this.executeCall(effective));
+    } catch (err) {
+      return Promise.reject(err); // som før: en feil i kallet er en avvisning, aldri et synkront kast
+    }
+  }
+
+  private async executeCall(request: ToolExecuteRequest): Promise<ToolResult> {
     const definition = this.get(request.tool_id, request.action);
     const corr = { ...(request.task_id !== undefined ? { task_id: request.task_id } : {}), ...(request.trace_id !== undefined ? { trace_id: request.trace_id } : {}) };
     // WP-K (D-471, JARVIS-054): ID-en til Policy Gateway-avgjørelsen som førte til dette kallet står i HVER revisjonsrad herfra (`payload.policy_decision_id`), og avslag
@@ -1022,7 +1055,7 @@ export class ToolGateway {
     const needsEvidence = (definition.capability_class === "C" || definition.capability_class === "D") && definition.preflight_action;
     if (needsEvidence) {
       try {
-        const pre = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
+        const pre = await invokePreflight(definition, request.parameters, credential, invocationContext);
         beforeState = pre.data ?? null;
         // Q-34: preflight-KALLET lyktes (kastet ikke), men for et revidert
         // klasse D-verktøy betyr et null/undefined resultat FAKTISK "mål
@@ -1180,9 +1213,12 @@ export class ToolGateway {
       const transportUnknown = !isOutcomeUnknownMessage(raw) && mayDuplicateOnRetry(definition) && isIndeterminateTransportError(err);
       const message = transportUnknown ? `${OUTCOME_UNKNOWN_PREFIX}:transport_${transportErrorKind(err)}` : raw;
       failure = { message, timedOut: isOutcomeUnknownMessage(message) };
-      this.setHealth(request.tool_id,
-        /401|403|auth/.test(raw) ? "auth_failed" : /429|rate/.test(raw) ? "rate_limited" : "unavailable",
-        raw.slice(0, 60));
+      // WP-G1c (JARVIS-112 g4): et typet policy-avslag (`PolicyDeniedError`) er Jarvis' egen beslutning, ikke en leverandørfeil: connector-helsen røres ikke. ALT annet er klassifisert som før.
+      if (!isPolicyDenied(err)) {
+        this.setHealth(request.tool_id,
+          /401|403|auth/.test(raw) ? "auth_failed" : /429|rate/.test(raw) ? "rate_limited" : "unavailable",
+          raw.slice(0, 60));
+      }
     }
 
     let afterState: JsonValue | null = null;
@@ -1337,7 +1373,7 @@ export class ToolGateway {
     definition: ToolDefinition, request: { parameters: Record<string, JsonValue> }, credential: string, invocationContext: ToolInvocationContext
   ): Promise<{ reason: string | null; beforeState: JsonValue | null }> {
     try {
-      const pre = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
+      const pre = await invokePreflight(definition, request.parameters, credential, invocationContext);
       const state = pre.data ?? null;
       if (state === null) return { reason: "preflight_target_not_found", beforeState: null };
       if (definition.preflight_target_check && !definition.preflight_target_check(state, request.parameters)) return { reason: "preflight_target_not_found", beforeState: null };
@@ -1557,4 +1593,17 @@ async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, ms: numb
   } finally {
     clearTimeout(timer!);
   }
+}
+
+/**
+ * WP-FIN2 (D-486, K3): preflight (og re-arm-lesingen) leser tilstanden FØR noe reserveres eller utføres og hadde INGEN frist - en hengende lesing holdt kallet for alltid. Nå samme `timeout_ms` og
+ * kallsignal som selve utførelsen. Tidsavbrudd gir det EKSISTERENDE utfallet av en kastet preflight (klasse D: avslag `preflight_failed:tool_timeout` før noe reserveres; klasse C: som en kastet preflight;
+ * re-arm: avslag og frigitt reservasjon) - aldri en ny utfallstype. `JARVIS_TOOL_CALL_ABORT=off` = som før (ingen frist, intet signal).
+ */
+function invokePreflight(
+  definition: ToolDefinition, parameters: Record<string, JsonValue>, credential: string, invocationContext: ToolInvocationContext
+): Promise<{ external_id?: string; data?: JsonValue }> {
+  const action = definition.preflight_action!;
+  if (!toolCallAbortEnabled()) return definition.transport.invoke(action, parameters, credential, invocationContext);
+  return withTimeout((signal) => invokeWithCallSignal(definition.transport, action, parameters, credential, invocationContext, signal), definition.timeout_ms);
 }

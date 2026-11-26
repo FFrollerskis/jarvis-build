@@ -143,7 +143,14 @@ export class SlackAdapter implements ChannelAdapter {
       if (mutation && res.status < 400) throw new Error("outcome_unknown:comms_slack_unreadable_response");
       throw new ProviderRejectedError("slack", `http_${res.status}`);
     }
-    if (res.json["ok"] !== true) return rejectFrom("slack", res, ["error"]);
+    if (res.json["ok"] !== true) {
+      // WP-G1c (JARVIS-112 g3): Slack dokumenterer `fatal_error` og `internal_error` som feil der «noe av operasjonen kan ha lyktes før feilen oppsto» (UVERIFISERT mot Slacks egen referanse i denne økten: docs.slack.dev var ikke nåbar, kun
+      // søkeutdrag og funnet L4 i reviewer A). For en MUTASJON er utfallet derfor UKJENT, aldri et sikkert avslag: journalen får `outcome_unknown` (teller i takene, ingen automatisk retry, eieren avstemmer), ikke `failed` som tillater en ny
+      // sending med ny nøkkel og dermed en mulig dobbel melding. Lesinger er uberørt (en lesing har ingen effekt å være usikker på). Kun koden `comms_slack_<kode>` forlater adapteren, aldri leverandørens tekst.
+      const code = res.json["error"];
+      if (mutation && (code === "fatal_error" || code === "internal_error")) throw new Error(`outcome_unknown:comms_slack_${code}`);
+      return rejectFrom("slack", res, ["error"]);
+    }
     return res.json;
   }
 

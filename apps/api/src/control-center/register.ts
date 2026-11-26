@@ -119,6 +119,11 @@ export interface ControlCenterWiring {
   processStartedAt?: () => Date;
   /** WP-H2 Security Center: golden-suite-kjøreren. Brukes KUN med `JARVIS_CONTROL_GOLDEN_SUITE=on`. */
   goldenSuite?: GoldenSuiteControl;
+  /**
+   * WP-N1b fiks-runde 1 (FIX-1): `true` KUN med begrenset-vakten PÅ (satt fra `main.ts`). Sikkerhet-senteret bygget for en skymodell holder da finanskoblinger/-credentials og `spend`-pausen ute av listene og tellingene.
+   * Utelatt (vakten AV) = nøyaktig H2-oppførselen (main) - nøkkelen settes ikke engang.
+   */
+  financeGuard?: true;
 }
 
 /** Lat oppslag av klassen til en registrert executive-handling: `undefined` når verktøyet ikke (ennå/lenger) er registrert i gatewayen - aldri en gjettet klasse. Kaster aldri. */
@@ -191,6 +196,7 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
   if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.security) && wiring.toolGateway && wiring.ownerControls && wiring.killSwitch) {
     registry.register(createSecurityCenter({
       pool: wiring.pool, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls, killSwitch: wiring.killSwitch,
+      ...(wiring.financeGuard === true ? { financeGuard: true } : {}),
       ...(flagOn(wiring.env, CONTROL_FEATURE_FLAGS.goldenSuite) && wiring.goldenSuite ? { goldenSuite: wiring.goldenSuite } : {})
     }));
   }

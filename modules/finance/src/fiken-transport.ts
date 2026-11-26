@@ -48,6 +48,7 @@
  *     Fiken selv deduplikerer.
  */
 
+import { detachFromCallSignal, raceCallSignal, throwIfAborted } from "@jarvis/tool-gateway";
 import { FIKEN_OAUTH_TOKEN_ENDPOINT, buildRefreshTokenExchangeBody, fikenBasicAuthHeader } from "./fiken-oauth.ts";
 
 const FIKEN_API_BASE = "https://api.fiken.no/api/v2";
@@ -55,7 +56,8 @@ const RETRYABLE_HTTP_STATUS: ReadonlySet<number> = new Set([429, 500, 502, 503, 
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
 
-import { financeSignal, isRetrySafe } from "./http.ts";
+import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
+import { expectAccessToken, expectArray, expectId, expectRecord, optionalText, readJsonBody, type ResponseContext, expectNumericId } from "./provider-response.ts";
 
 export class FikenApiError extends Error {
   constructor(
@@ -66,10 +68,6 @@ export class FikenApiError extends Error {
     super(message);
     this.name = "FikenApiError";
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Tolerant, avkortet (200 tegn) sanering av Fiken sin feilrespons - ALDRI rå kropp/headere logget (samme presedens som `classifyGoogleAdsErrorBody`). */
@@ -109,8 +107,7 @@ async function exchangeFikenAccessToken(refreshToken: string): Promise<{ token: 
   const clientId = process.env["JARVIS_FIKEN_CLIENT_ID"];
   const clientSecret = process.env["JARVIS_FIKEN_CLIENT_SECRET"];
   if (!clientId || !clientSecret) throw new Error("fiken_oauth_client_not_configured");
-  const response = await fetch(FIKEN_OAUTH_TOKEN_ENDPOINT, {
-        signal: financeSignal(),
+  const response = await financeFetch(FIKEN_OAUTH_TOKEN_ENDPOINT, {
     method: "POST",
     headers: { authorization: fikenBasicAuthHeader(clientId, clientSecret), "content-type": "application/x-www-form-urlencoded" },
     body: buildRefreshTokenExchangeBody(refreshToken)
@@ -119,9 +116,12 @@ async function exchangeFikenAccessToken(refreshToken: string): Promise<{ token: 
     const rawBody = await response.text().catch(() => "");
     throw new FikenApiError(`fiken_auth_failed_${response.status}:${classifyFikenErrorBody(rawBody)}`, response.status, false);
   }
-  const body = (await response.json()) as { access_token: string; expires_in?: number | string };
-  const ttl = Number(body.expires_in);
-  return { token: body.access_token, ttlSeconds: Number.isFinite(ttl) && ttl > 0 ? ttl : FIKEN_TOKEN_DEFAULT_TTL_S };
+  // WP-FIN2 (K7): ugyldig token-svar er en typet feil (aldri `Bearer undefined`, aldri en cachet «undefined»). Token-utvekslingen er ingen pengemutasjon.
+  const ctx: ResponseContext = { operation: "fiken.access_token", mutation: false };
+  const body = expectRecord(await readJsonBody(response, ctx), ctx);
+  const token = expectAccessToken(body, "access_token", ctx);
+  const ttl = Number(body["expires_in"]);
+  return { token, ttlSeconds: Number.isFinite(ttl) && ttl > 0 ? ttl : FIKEN_TOKEN_DEFAULT_TTL_S };
 }
 
 export async function fikenAccessToken(refreshToken: string): Promise<string> {
@@ -129,9 +129,12 @@ export async function fikenAccessToken(refreshToken: string): Promise<string> {
   if (!process.env["JARVIS_FIKEN_CLIENT_ID"] || !process.env["JARVIS_FIKEN_CLIENT_SECRET"]) throw new Error("fiken_oauth_client_not_configured");
   const cached = fikenTokenCache.get(refreshToken);
   if (cached && cached.expiresAtMs - FIKEN_TOKEN_MARGIN_MS > Date.now()) return cached.token;
+  // WP-FIN2 (D-486, K2d): token-utvekslingen er DELT arbeid (parallelle kall venter på samme løfte). Den startes FRAKOBLET fra det enkelte kallets signal (egen 20 s-frist), så første kallers
+  // gateway-tidsavbrudd ikke dreper utvekslingen for de andre; hver kaller venter med `raceCallSignal` og slippes fri av SITT EGET tidsavbrudd uten å avbryte utvekslingen.
   const pending = fikenTokenInflight.get(refreshToken);
-  if (pending) return pending;
-  const run = (async () => {
+  if (pending) return raceCallSignal(pending);
+  throwIfAborted(); // et allerede avbrutt kall skal ikke starte en ny (frakoblet) utveksling
+  const run = detachFromCallSignal(() => (async () => {
     try {
       const { token, ttlSeconds } = await exchangeFikenAccessToken(refreshToken);
       fikenTokenCache.set(refreshToken, { token, expiresAtMs: Date.now() + ttlSeconds * 1000 });
@@ -139,9 +142,9 @@ export async function fikenAccessToken(refreshToken: string): Promise<string> {
     } finally {
       fikenTokenInflight.delete(refreshToken);
     }
-  })();
+  })());
   fikenTokenInflight.set(refreshToken, run);
-  return run;
+  return raceCallSignal(run);
 }
 
 export interface FikenContact {
@@ -194,12 +197,11 @@ export class FikenTransport {
     return fikenAccessToken(this.refreshToken);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, onSuccess?: (response: Response) => Promise<T>): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, onSuccess?: (response: Response) => Promise<T>, operation?: string): Promise<T> {
     const token = await this.accessToken();
     let lastError: FikenApiError | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const response = await fetch(`${FIKEN_API_BASE}${path}`, {
-        signal: financeSignal(),
+      const response = await financeFetch(`${FIKEN_API_BASE}${path}`, {
         method,
         headers: {
           authorization: `Bearer ${token}`,
@@ -211,32 +213,52 @@ export class FikenTransport {
       if (response.ok) {
         if (onSuccess) return onSuccess(response);
         if (response.status === 204) return undefined as T;
-        return (await response.json()) as T;
+        // WP-FIN2 (K7): en uparserbar 2xx-kropp er et ugyldig svar (typet feil for lesing), aldri en rå `SyntaxError`.
+        return (await readJsonBody(response, { operation: operation ?? `fiken.${method.toLowerCase()}_request`, mutation: method.toUpperCase() !== "GET" })) as T;
       }
       const rawBody = await response.text().catch(() => "");
       const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, false);
       lastError = new FikenApiError(`fiken_api_failed_${response.status}:${classifyFikenErrorBody(rawBody)}`, response.status, retryable);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
-      await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+      await financeBackoff(BASE_BACKOFF_MS * 2 ** (attempt - 1));
     }
     throw lastError ?? new FikenApiError("fiken_api_failed_unknown", 0, false);
   }
 
   /** Billig helsesjekk-/reachability-probe (Fiken sin egen dokumenterte "hent companySlug"-inngang) - INGEN mutasjon. */
   async listCompanies(): Promise<Array<{ slug: string; name: string }>> {
-    return this.request("GET", "/companies");
+    // WP-FIN2 (K7): svaret må være en liste av selskaper med trygg `slug` (brukes til å adressere alle øvrige kall). Navnet er kun visning (fraværende = tomt).
+    const ctx: ResponseContext = { operation: "fiken.list_companies", mutation: false };
+    return expectArray(await this.request<unknown>("GET", "/companies", undefined, undefined, ctx.operation), ctx).map((item) => {
+      const company = expectRecord(item, ctx, "company");
+      return { slug: expectId(company, "slug", ctx), name: optionalText(company, "name", ctx) ?? "" };
+    });
+  }
+
+  /**
+   * WP-FIN2 fiks-runde 1 (FIX-6): de tre Fiken-LESERNE var `as T` uten noen feltsjekk (K7 dekket dem ikke). Nå: svaret MÅ være en liste av objekter der id-feltet (`contactId`/`bankAccountId`/
+   * `journalEntryId`: positivt heltall) er til stede og gyldig - en HTML-200, et objekt eller en liste med ugyldige elementer er en typet feil (`provider_response_invalid:<operasjon>:<kode>`),
+   * aldri en stille tom liste. Elementene returneres UENDRET (alle felt bevares, f.eks. bilagslinjene `fiken-posting-reader.ts` summerer); bare id-feltet valideres. Fikens svarform er `unverified` (D-41).
+   */
+  private async readList<T>(path: string, operation: string, idField: string): Promise<T[]> {
+    const ctx: ResponseContext = { operation, mutation: false };
+    return expectArray(await this.request<unknown>("GET", path, undefined, undefined, operation), ctx).map((item) => {
+      const record = expectRecord(item, ctx, "item");
+      expectNumericId(record, idField, ctx);
+      return record as T;
+    });
   }
 
   async listContacts(): Promise<FikenContact[]> {
-    return this.request("GET", `/companies/${this.companySlug}/contacts`);
+    return this.readList<FikenContact>(`/companies/${this.companySlug}/contacts`, "fiken.list_contacts", "contactId");
   }
 
   async listBankAccounts(): Promise<FikenBankAccount[]> {
-    return this.request("GET", `/companies/${this.companySlug}/bankAccounts`);
+    return this.readList<FikenBankAccount>(`/companies/${this.companySlug}/bankAccounts`, "fiken.list_bank_accounts", "bankAccountId");
   }
 
   async listJournalEntries(): Promise<FikenJournalEntry[]> {
-    return this.request("GET", `/companies/${this.companySlug}/journalEntries`);
+    return this.readList<FikenJournalEntry>(`/companies/${this.companySlug}/journalEntries`, "fiken.list_journal_entries", "journalEntryId");
   }
 
   /**

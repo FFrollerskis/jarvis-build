@@ -1,5 +1,5 @@
 import type { JsonValue } from "@jarvis/contracts";
-import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { financeWithheldMarker, withholdFinanceFromCurrentModel, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 import type { ConversationGraphService } from "./service.ts";
 import type { ConversationChannel } from "./types.ts";
 
@@ -135,17 +135,23 @@ export class ConversationGraphTransport implements ToolTransport {
       // utelukkende fra serveren, samme "no parameter = no spoof surface"-
       // prinsipp som tenant/space.
       case "read_cross_channel_commitment_view": {
+        // WP-N1b (K2): en sky-/ukjent modell får ikke finansavledede åpne løkker (beløp/leverandør i `reason`/`next_action`): utelatt i SPØRRINGEN + nøytralt merke. Eier/lokal modell: uendret.
+        const withhold = withholdFinanceFromCurrentModel();
         const view = await this.service.crossChannelCommitmentView(
-          tenantId, memorySpace, requireString(parameters, "identity_id")
+          tenantId, memorySpace, requireString(parameters, "identity_id"), undefined, withhold ? { excludeFinanceDerived: true } : undefined
         );
         return {
           ...(view.effective_identity_id !== null ? { external_id: view.effective_identity_id } : {}),
-          data: view as unknown as JsonValue
+          data: (withhold ? { ...view, ...financeWithheldMarker() } : view) as unknown as JsonValue
         };
       }
       case "read_cross_channel_attention": {
-        const rows = await this.service.crossChannelAttention(tenantId, memorySpace);
-        return { data: rows as unknown as JsonValue };
+        // WP-N1b (K2): som over. Matriseformen (liste) beholdes for eier/lokal modell; en begrenset modell får `{ entries, ...merke }`.
+        const withhold = withholdFinanceFromCurrentModel();
+        const rows = await this.service.crossChannelAttention(
+          tenantId, memorySpace, undefined, withhold ? { excludeFinanceDerived: true } : undefined
+        );
+        return { data: (withhold ? { entries: rows, ...financeWithheldMarker() } : rows) as unknown as JsonValue };
       }
       default:
         throw new Error(`conversation_graph_action_not_implemented:${action}`);

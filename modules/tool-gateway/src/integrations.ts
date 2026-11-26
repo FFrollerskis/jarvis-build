@@ -4,6 +4,7 @@ import type { MemoryWriter } from "@jarvis/memory";
 import { authorizeDockerTarget, type DockerMutationAction } from "./docker-target-policy.ts";
 import { authorizeGceTarget, type GceMutationAction } from "./gce-target-policy.ts";
 import type { ToolDefinition, ToolTransport } from "./gateway.ts";
+import { withheldFromCloudTransport } from "./finance-withheld.ts";
 import {
   financeConnectorIdsForCredentialRef, financeCredentialRefForProvider,
   SUBMIT_PAYMENT_INTENT_RECOVERY, SUBMIT_STRIPE_REFUND_RECOVERY, SUBMIT_VIPPS_CAPTURE_RECOVERY, SUBMIT_VIPPS_REFUND_RECOVERY,
@@ -2619,10 +2620,12 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("finance_wallester")
     },
     {
-      tool_id: "finance_wallester", action: "submit_card", description: "Send kortutkastet til Wallester (oppretter det REELLE kortet - spend-muliggjørende, kill-switch-gated; idempotent retry kan aldri duplisere)",
+      tool_id: "finance_wallester", action: "submit_card", description: "Send kortutkastet til Wallester (oppretter det REELLE kortet - spend-muliggjørende, kill-switch-gated; Jarvis reserverer innsendingen FØR kallet, og en retry etter ukjent utfall blokkeres til eieren har avstemt hos Wallester)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
+      // WP-FIN2 (D-486, K8): `idempotent_external: false` - Wallesters deduplisering på `external_reference` er `unverified` (transporten sender ingen Idempotency-Key). «Retry duplikerer ikke» er
+      // Jarvis' EGEN garanti (reservasjon i `CardService.submitCard` + flagget `CARD_SUBMIT_OUTCOME_UNKNOWN`), ikke leverandørens - gatewayen skal derfor behandle uavklarte transportfeil som ukjent utfall.
       capability_class: "C", scopes: ["finance.write", "finance.cards"], reversible: false, rollback_procedure: "freeze_card + close_card (kortet kan fryses/lukkes, men utstedelsen har skjedd)",
-      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
       output_trust: "internal", transport: transport("finance_wallester")
     },
     {
@@ -3823,7 +3826,8 @@ export function firstWaveTools(
       input_schema: empty, capability_class: "A", scopes: ["telnyx:read"],
       reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TELNYX_API_KEY",
-      output_trust: "untrusted", transport: transport("telnyx")
+      // WP-N1b fiks-runde 1 (FIX-6): kontoens SALDO er finansavledet metadata - holdes tilbake fra sky/ukjent modell VED UTFØRELSE (leverandøren kalles ikke); eierens livetest og lokal modell får saldoen som før
+      output_trust: "untrusted", transport: withheldFromCloudTransport(transport("telnyx"))
     },
     /**
      * D-322. Runway sitt REST-API v1 (`api.dev.runwayml.com`) - BEKREFTET via

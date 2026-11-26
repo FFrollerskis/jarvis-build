@@ -823,7 +823,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     evolutionReadiness, ev0Status: () => getLastEv0BootStatus(), evolutionTenantId: owner.tenant_id,
     valueReport: (tenantId) => lateExecutive().getValueReport(tenantId), infraStatus: (tenantId) => lateExecutive().getInfraStatus(tenantId),
     ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
-    ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
+    ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {}),
+    // WP-N1b fiks-runde 1 (FIX-1): Sikkerhet-senteret holder finanskoblinger/-credentials ute for en skymodell KUN med begrenset-vakten på (flagg AV: nøkkelen settes ikke = H2-oppførselen som på main).
+    ...(restrictedContextGuard.enabled ? { financeGuard: true as const } : {})
   });
   // WP-D3 (UA-4 Growth, D-459): skrivehandlinger mot annonse-/analyseplattformene + eksperimentregisteret. ALT er AV som standard: uten `JARVIS_GROWTH_WRITE_PLATFORMS` registreres INGEN skriveverktøy, og uten
   // `JARVIS_GROWTH_EXPERIMENTS=on` ingen eksperimentverktøy - verktøylister, utvalg og rate-grenser er da identiske med main, og `deps.growthWrites` (rutene) finnes ikke (404). Skriving krever dessuten
@@ -880,18 +882,19 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // GmailTransport/GithubTransport over) - ingen resolver-closure nødvendig
     // her, i motsetning til Telegram sin `chat_id` (Slack sender `channel`
     // som et vanlig model-/trusted-lag-parameter, ALDRI en fast bot-config).
-    slack: new SlackTransport(),
+    // WP-G1c (D-481, JARVIS-112 g5): de fem eldre `*.notify`-transportene får en STOP-vakt når comms er på (avmeldt mottaker = policy-avslag før noe sendes); med alle `JARVIS_COMMS_*` AV er `guardLegacyNotifyTransport` identiteten (samme objekt som før).
+    slack: commsRuntime.guardLegacyNotifyTransport("slack", new SlackTransport()),
     // D-294: samme mønster som Slack over - Discord sender `channel_id` som
     // et vanlig handlingsparameter per kall, ingen resolver-closure nødvendig.
-    discord: new DiscordTransport(),
+    discord: commsRuntime.guardLegacyNotifyTransport("discord", new DiscordTransport()),
     // D-295: Twilio krever TO faste konfigurasjonsverdier utover selve
     // credential-en (`AccountSid`/`From`-nummer) - SAMME resolver-mot-
     // readSecretProvider-mønster som Telegram sin `chat_id` (D-247) over,
     // slått opp PÅ NYTT ved hvert kall, ikke frosset ved oppstart.
-    twilio: new TwilioTransport(
+    twilio: commsRuntime.guardLegacyNotifyTransport("twilio", new TwilioTransport(
       () => readSecretProvider.get("JARVIS_TWILIO_ACCOUNT_SID"),
       () => readSecretProvider.get("JARVIS_TWILIO_FROM_NUMBER")
-    ),
+    )),
     // D-296: ren tom-konstruktør, samme mønster som Slack/Discord over -
     // Brave Search sender `query` som et vanlig handlingsparameter per kall,
     // ingen resolver-closure nødvendig (ingen ekstra fast kontokonfigurasjon
@@ -974,7 +977,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     }),
     // D-314: `phone_number_id` er Jarvis sin egen avsenderidentitet - SAMME
     // resolver-mot-readSecretProvider-mønster som Telegram sin chat_id.
-    whatsapp: new WhatsAppTransport(() => readSecretProvider.get("JARVIS_WHATSAPP_PHONE_NUMBER_ID")),
+    whatsapp: commsRuntime.guardLegacyNotifyTransport("whatsapp", new WhatsAppTransport(() => readSecretProvider.get("JARVIS_WHATSAPP_PHONE_NUMBER_ID"))),
     // D-315: SAMME resolver-mot-readSecretProvider-mønster som n8n - Make
     // sin API-base-URL er zone-spesifikk (brukerens kontosone).
     make: new MakeTransport(() => readSecretProvider.get("JARVIS_MAKE_API_BASE_URL")),
@@ -983,7 +986,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     openai_images: new OpenAIImagesTransport(),
     // D-321: `from`-nummeret er Jarvis sin egen avsenderidentitet - SAMME
     // resolver-mot-readSecretProvider-mønster som Twilio (D-295).
-    telnyx: new TelnyxTransport(() => readSecretProvider.get("JARVIS_TELNYX_FROM_NUMBER")),
+    telnyx: commsRuntime.guardLegacyNotifyTransport("telnyx", new TelnyxTransport(() => readSecretProvider.get("JARVIS_TELNYX_FROM_NUMBER"))),
     // D-322: tom konstruktør - fast Runway-vertsnavn, kun Bearer-token +
     // en fast X-Runway-Version-header (satt inni transporten selv).
     runway: new RunwayTransport(),
