@@ -23,6 +23,11 @@ Vent på Tobias sin eksplisitte godkjenning av fase 1 før du skriver applikasjo
    [DEPLOYMENT_STRATEGY](docs/DEPLOYMENT_STRATEGY.md)
 3. [docs/input/01_Jarvis_Masterplan_v2.1.md](docs/input/01_Jarvis_Masterplan_v2.1.md) – kildedokument (masterplan v2.1)
 
+De seks masterplanene HF1-HF6 ligger i [docs/input/](docs/input/README.md) (PDF-originaler i `docs/input/pdf/`;
+HF6 §24 = programkonstitusjon). De er mottatt som input 2026-11-26, ikke adoptert: adopsjon som governing plansett
+og eventuell erstatning av ADR-001-regler krever eierens NAVNGITTE D-beslutning (Q-86), ellers gjelder ADR-001 §2.1
+uendret.
+
 Beslutningslogg: [docs/DECISIONS_AND_ASSUMPTIONS.md](docs/DECISIONS_AND_ASSUMPTIONS.md) (D-xx = beslutninger, K-xx = kritikkfunn, A-xx = antakelser).
 Åpne spørsmål: [docs/OPEN_QUESTIONS.md](docs/OPEN_QUESTIONS.md) (Q-xx). Nye beslutninger logges alltid der med ID.
 
@@ -103,7 +108,17 @@ er knyttet til issue #68 og repo-eieren `tsworkflow` i det gamle, frosne repoet 
 eieren har valgt ny protokoll, Q-77). Frem til da gjelder: Tobias merger selv i GitHub-grensesnittet
 (to-forelder merge-commit); Claude åpner og vedlikeholder PR-er, løser konflikter med fremover-merge og merger
 ikke. D-192-veien (Tobias gir i en interaktiv chat-økt eksplisitt stående fullmakt) er uendret tilgjengelig,
-men er ikke gitt for det nye repoet.
+**og er NÅ GITT for `FFrollerskis/jarvis-build` (D-497, 2026-11-26, Tobias direkte i chat): «ikke gitt for det
+nye repoet» og «Claude ... merger ikke» over er dermed overtatt for RUTINEMESSIGE PR-er.** Vilkår og grenser er
+uforandret fra D-192-tillegget under og D-497: uavhengig review = MERGE og alle funn fikset eller dokumentert
+`DEFERRED`/`PARTIAL`; kjede-/integrasjonsverifisering grønn på EKSAKT HEAD (typecheck, lint, `check:containment`,
+gitleaks, relevante tester og FULL suite for bølge-/kjedetopper; kun de fem kjente sandkassefeilene tillatt);
+ingen åpne review-tråder eller sikkerhetsfunn; eksakt HEAD-/base-guard rett før merge; kun to-forelder-merge
+(`merge_method=merge`); aldri force/squash/rebase, aldri push direkte til `main`, aldri slette grener eller tagger;
+ingen selv-godkjenning som eneste kontroll. `HARD_EXTERNAL_BLOCKER` (credential som ikke finnes trygt,
+betaling/kjøp/kontrakt, fysisk handling, juridisk aksept, NAS-kjøringer) stopper og varsler Tobias UANSETT, og
+fullmakten er ikke en navngiving av regler som erstattes (ADR-001 §2.1). Tobias kan nedlegge veto eller snevre
+inn når som helst. Full tekst: D-497 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Merge-autoritet (delegert til ChatGPT-arkitekten, D-120, se GitHub issue #68 "Jarvis Architect ↔
 Claude Control Queue" i det gamle repoet for full protokoll):** Claude kan merge en PR NÅR en `ARCHITECT_TASK`-melding i
