@@ -163,6 +163,10 @@ describe("B: tjenesten mot ekte Postgres og ekte ToolGateway", () => {
     expect(telegram.messages).toEqual([]);
     expect((await svc().deliver(TENANT_A, "home", gateway, identity(TENANT_A, "home"), at("2026-11-20T06:00:00.000Z") + MORNING_SUMMARY_CATCH_UP_MS - 60_000)).status).toBe("sent");
     expect(telegram.messages).toEqual([MORNING_SUMMARY_MESSAGE]);
+    // grensen er INKLUSIV: akkurat 12 t etter slutten er fortsatt innenfor vinduet (her `already_sent`, ikke `outside_window`), 1 ms senere er det utenfor
+    expect((await svc().deliver(TENANT_A, "home", gateway, identity(TENANT_A, "home"), at("2026-11-20T06:00:00.000Z") + MORNING_SUMMARY_CATCH_UP_MS)).status).toBe("already_sent");
+    expect((await svc().deliver(TENANT_A, "home", gateway, identity(TENANT_A, "home"), at("2026-11-20T06:00:00.000Z") + MORNING_SUMMARY_CATCH_UP_MS + 1)).status).toBe("outside_window");
+    expect(telegram.messages).toEqual([MORNING_SUMMARY_MESSAGE]);
   });
 
   it("en feilet sending (transport avviser) gir `failed` og prøves igjen under SAMME nøkkel; deretter nøyaktig én melding", async () => {

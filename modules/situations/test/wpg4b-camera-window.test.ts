@@ -212,6 +212,23 @@ describe("B: bussen mot ekte Postgres - glidende vindu med injisert klokke", () 
     expect(await keys()).toHaveLength(1);
   });
 
+  it("tunet vindu: ligger flere episoder i rekkevidde (vinduet ble gjort bredere mellom hendelsene), hører hendelsen til den NYESTE (siste varslede), aldri den eldste", async () => {
+    await subscribe();
+    const tunedBus = (thresholds: Record<string, number>, nowMs: number): SituationSignalBus =>
+      new SituationSignalBus({
+        pool: db.appPool, engine: db.engine, domainPauses: db.domainPauses, subscriptions: (t, s) => db.registry.listEnabled(t, s), now: () => nowMs,
+        tuning: { thresholds: async () => new Map(Object.entries(thresholds)) }
+      });
+    // vindu 10 min (standard): a (T0) og b (T0+15) blir to episoder. Så tunes vinduet til 30 min, og c (T0+20) er innenfor BEGGE ankrene (20 og 5 min): den hører til den siste (T0+15).
+    await tunedBus({}, T0 + 16 * MIN).publishBatch(TENANT_A, "home", [obs("a", T0), obs("b", T0 + 15 * MIN)]);
+    expect((await keys()).map(anchorOf)).toEqual([T0, T0 + 15 * MIN]);
+    const out = await tunedBus({ "vision:motion_detected": 30 }, T0 + 21 * MIN).publishBatch(TENANT_A, "home", [obs("c", T0 + 20 * MIN)]);
+    expect(out).toMatchObject({ evaluated: 1, created: 0 }); // en duplikat: ingen tredje episode
+    const logged = (await db.adminPool.query(`SELECT detection_key FROM situation_signal_log WHERE tenant_id = $1 AND source_ref LIKE '%:c'`, [TENANT_A])).rows as Array<{ detection_key: string }>;
+    expect(logged.map((r) => anchorOf(r.detection_key))).toEqual([T0 + 15 * MIN]);
+    expect((await keys()).map(anchorOf)).toEqual([T0, T0 + 15 * MIN]);
+  });
+
   it("idempotens: å lese de samme observasjonene på nytt (neste tikk) gir ingen nye episoder og ingen nye loggrader; en duplikat bumper episodens situasjon", async () => {
     await subscribe();
     const batch = [obs("a", T0), obs("b", T0 + 3 * MIN), obs("c", T0 + 12 * MIN)];

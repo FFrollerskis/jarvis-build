@@ -127,10 +127,15 @@ describe("B: enforceLocalModelEndpoints", () => {
     }
   });
 
-  it("FAIL-LUKKET: en uventet feil i selve sjekken demoterer (aldri en stille «lokal»)", async () => {
-    const out = await run(gemma("http://gpu-boks:11434"), { lookup: (() => { throw new TypeError("uventet"); }) as never });
-    // lookup som kaster synkront fanges av oppløsningen og gir `unresolved`; en feil UTENFOR (her: profil-listen er ugyldig) skal heller ikke slippe gjennom
-    expect(["unresolved", "demoted"]).toContain(out.verdicts?.find((v) => v.identity === "gemma_local")?.status);
+  it("FAIL-LUKKET: en uventet feil i selve sjekken (ikke en `LocalEndpointError`) demoterer med `local_url_check_failed` - aldri en stille «lokal»", async () => {
+    // en navneoppløsning som svarer med en ugyldig adresse får selve vurderingen (`isLocalAddress`) til å kaste en TypeError utenfor lookup-feilhåndteringen: «ikke bevist lokal» = demotert (mutantfunn: den gamle testen godtok både `unresolved` og `demoted`)
+    const out = await run(gemma("http://gpu-boks:11434"), { lookup: async () => [{ address: undefined as unknown as string }] });
+    expect(out.verdicts?.find((v) => v.identity === "gemma_local")).toEqual({ identity: "gemma_local", status: "demoted", code: "local_url_check_failed" });
+    expect(localityOf(out.profiles, "gemma_local")).toBe("cloud");
+    expect(out.lines.some((l) => l.line["msg"] === "local_model_endpoint_demoted" && l.line["code"] === "local_url_check_failed" && l.level === "warn")).toBe(true);
+    // en lookup som kaster synkront er derimot «kan ikke løses nå» (beholdes, logges): ikke samme gren
+    const thrown = await run(gemma("http://gpu-boks:11434"), { lookup: (() => { throw new TypeError("uventet"); }) as never });
+    expect(thrown.verdicts?.find((v) => v.identity === "gemma_local")).toEqual({ identity: "gemma_local", status: "unresolved", code: null });
   });
 
   it("LOGGEN har kun identitetsnavn, statuskoder og tall - aldri URL, vert, port, brukernavn eller hemmelighet", async () => {
@@ -153,6 +158,19 @@ describe("B: enforceLocalModelEndpoints", () => {
     expect(visionIsLocalAddress).toBe(isLocalAddress);
     expect(isLocalAddress("100.64.0.1")).toBe(false);
     expect(isLocalAddress("100.64.0.1", { allowTailscale: true })).toBe(true);
+  });
+
+  it("grensene i adresserommet (begge sider av hver grense): RFC 1918, loopback, CGNAT kun med tailnet-flagget, IPv6 ULA/loopback og IPv4-mappet IPv6", () => {
+    const local = ["127.0.0.1", "127.255.255.255", "10.0.0.0", "10.255.255.255", "172.16.0.0", "172.31.255.255", "192.168.0.0", "192.168.255.255", "::1", "fc00::1", "fd12:3456::1", "::ffff:10.0.0.1", "[::1]"];
+    const nonLocal = ["126.255.255.255", "128.0.0.1", "9.255.255.255", "11.0.0.0", "172.15.255.255", "172.32.0.0", "192.167.255.255", "192.169.0.0", "169.254.169.254", "0.0.0.0", "8.8.8.8", "::", "fe80::1", "fb00::1", "fe00::1", "2001:db8::1", "::ffff:172.32.0.1", "::ffff:8.8.8.8", "ikke-en-adresse", ""];
+    for (const a of local) expect(isLocalAddress(a), a).toBe(true);
+    for (const a of nonLocal) expect(isLocalAddress(a), a).toBe(false);
+    // tailnet (CGNAT 100.64.0.0/10) kun med eierens flagg, og aldri utenfor blokken
+    for (const a of ["100.64.0.0", "100.100.1.1", "100.127.255.255"]) {
+      expect(isLocalAddress(a), a).toBe(false);
+      expect(isLocalAddress(a, { allowTailscale: true }), a).toBe(true);
+    }
+    for (const a of ["100.63.255.255", "100.128.0.0", "99.64.0.1", "101.64.0.1"]) expect(isLocalAddress(a, { allowTailscale: true }), a).toBe(false);
   });
 });
 
