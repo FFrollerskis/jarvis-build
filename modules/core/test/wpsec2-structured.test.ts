@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { STRUCTURED_MAX_DEPTH, STRUCTURED_MAX_NODES, scanStructuredForSecrets } from "../src/services/secret-scan-structured.ts";
 import { classifyKey } from "../src/services/secret-scan-keys.ts";
-import { body, tok } from "./support/secret-fixtures.ts";
+import { body, pemBegin, tok } from "./support/secret-fixtures.ts";
 
 /**
  * WP-SEC2 (K2b, K3, K6): strukturert skanning. `scanStructuredForSecrets(value)` skanner hver streng, limer søsken-strenger i samme objekt/liste sammen (delte tokens), redigerer verdier under hemmelige NØKKELNAVN (med en
@@ -43,12 +43,12 @@ describe("K2b: søsken-strenger skannes sammen", () => {
   });
 
   it("en privat nøkkel uten avslutning i EN streng sluker ikke søsknene (hver streng skannes for seg)", () => {
-    const r = scanStructuredForSecrets(["før", `-----BEGIN PRIVATE KEY-----\n${body(64)}`, "andre søsken som skal stå igjen"]);
+    const r = scanStructuredForSecrets(["før", `${pemBegin()}\n${body(64)}`, "andre søsken som skal stå igjen"]);
     expect(r.value).toEqual(["før", MARK("private_key"), "andre søsken som skal stå igjen"]);
   });
 
   it("en privat nøkkel delt over to strenger (BEGIN i én, END i neste) fanges", () => {
-    const r = scanStructuredForSecrets([`-----BEGIN PRIVATE KEY-----\n${body(64)}`, `${body(64, 1)}\n-----END PRIVATE KEY-----`]);
+    const r = scanStructuredForSecrets([`${pemBegin()}\n${body(64)}`, `${body(64, 1)}\n-----END PRIVATE KEY-----`]);
     expect(JSON.stringify(r.value)).not.toContain(body(64));
     expect(r.findings).toEqual([{ kind: "private_key", count: 1 }]);
   });

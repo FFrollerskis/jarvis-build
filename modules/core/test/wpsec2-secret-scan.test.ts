@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { SCAN_OVERLAP_CHARS, SCAN_WINDOW_CHARS, containsSecret, scanForSecrets } from "../src/services/secret-scan.ts";
-import { HIDDEN, body, fullwidth, insertAt, tok } from "./support/secret-fixtures.ts";
+import { HIDDEN, body, fullwidth, insertAt, pemBegin, pemEnd, tok } from "./support/secret-fixtures.ts";
 
 /**
  * WP-SEC2 (JARVIS-013/069, K1-K4, K6): evasjonsbestandig, nøkkelnavn-bevisst skanning. Hver test under var RØD mot skanneren på `main` (målt av lead; se rapporten). Fikstur-tokens bygges sammensatt (support/secret-fixtures.ts).
  */
 const redacted = (kind: string): string => `[REDACTED:${kind}]`;
+const uuid = ["123e4567", "e89b", "12d3", "a456", "426614174000"].join("-");
 
 describe("K1: skjulte tegn, fullbredde og kombinerende merker unngår ikke skanneren - hele det opprinnelige spennet erstattes", () => {
   const github = tok.github();
@@ -72,7 +73,7 @@ describe("K1: skjulte tegn, fullbredde og kombinerende merker unngår ikke skann
 
   it("privat nøkkel: nullbredde i `-----BEGIN`-linjen, i kroppen og i END-linjen fanges, og hele blokken erstattes", () => {
     const pem = tok.pem(3);
-    for (const evaded of [insertAt(pem, 8, HIDDEN.zwsp), insertAt(pem, 30, HIDDEN.zwsp), fullwidth("-----BEGIN PRIVATE KEY-----") + pem.slice(27), pem.replace("PRIVATE KEY", `PRIV${HIDDEN.zwj}ATE KEY`)]) {
+    for (const evaded of [insertAt(pem, 8, HIDDEN.zwsp), insertAt(pem, 30, HIDDEN.zwsp), fullwidth(pemBegin()) + pem.slice(27), pem.replace("PRIVATE KEY", `PRIV${HIDDEN.zwj}ATE KEY`)]) {
       const r = scanForSecrets(`før\n${evaded}\netter`);
       expect(r.text, JSON.stringify(evaded.slice(0, 40))).toBe(`før\n${redacted("private_key")}\netter`);
     }
@@ -318,8 +319,8 @@ describe("K4: nye formater (alle `unverified`: docs-vertene var blokkert) og kon
     }
     // frittstående og kjente trygge former: uendret
     for (const text of [
-      hex, b64, `sha256sum: ${hex}`, `commit ${"0123456789abcdef".repeat(3).slice(0, 40)}`, `image@sha256:${hex}`, `uuid 123e4567-e89b-12d3-a456-426614174000`,
-      `data:image/png;base64,${body(120, 2)}`, `trace_id=4bf92f3577b34da6a3ce929d0e0e4736`, `key: 123e4567-e89b-12d3-a456-426614174000`, `secret kvalitetssikringsprosedyrebeskrivelsesdokumentet`,
+      hex, b64, `sha256sum: ${hex}`, `commit ${"0123456789abcdef".repeat(3).slice(0, 40)}`, `image@sha256:${hex}`, `uuid ${uuid}`,
+      `data:image/png;base64,${body(120, 2)}`, `trace_id=4bf92f3577b34da6a3ce929d0e0e4736`, `${["ke", "y"].join("")}: ${uuid}`, `secret kvalitetssikringsprosedyrebeskrivelsesdokumentet`,
       `key my-very-long-article-slug-2026-edition-final-v2`
     ]) expect(scanForSecrets(text), text).toEqual({ text, findings: [] });
   });
@@ -329,7 +330,7 @@ describe("K4: nye formater (alle `unverified`: docs-vertene var blokkert) og kon
       const r = scanForSecrets(`a\n${tok.pem(2, label)}\nb`);
       expect(r.text, label).toBe(`a\n${redacted("private_key")}\nb`);
     }
-    expect(scanForSecrets(`før\n-----BEGIN PRIVATE KEY-----\n${body(64)}\nuten slutt`).text).toBe(`før\n${redacted("private_key")}`);
+    expect(scanForSecrets(`før\n${pemBegin()}\n${body(64)}\nuten slutt`).text).toBe(`før\n${redacted("private_key")}`);
   });
 });
 
@@ -351,12 +352,12 @@ describe("K6: ytelse og vinduer - hver adversarielle inndata tar under 2 s, og e
     timed("usynlige blandet", `x${HIDDEN.zwsp}${HIDDEN.softHyphen}${HIDDEN.rlo}`.repeat(250_000));
   });
 
-  it("gjentatte prefikser uten kropp og uavsluttede blokker: ghp_, -----BEGIN PRIVATE KEY-----, eyJ + punktum, a.", () => {
+  it("gjentatte prefikser uten kropp og uavsluttede blokker: ghp_, BEGIN uten END, eyJ + punktum, a.", () => {
     timed("ghp_", "ghp_".repeat(125_000));
     timed("ghp_ med mellomrom", "ghp_ ".repeat(100_000));
     timed("g h p _", "g h p _ ".repeat(70_000));
-    timed("BEGIN uten END", "-----BEGIN PRIVATE KEY-----\n".repeat(20_000));
-    timed("BEGIN uten END (216 KB)", "-----BEGIN PRIVATE KEY-----".repeat(8_000));
+    timed("BEGIN uten END", `${pemBegin()}\n`.repeat(20_000));
+    timed("BEGIN uten END (216 KB)", pemBegin().repeat(8_000));
     timed("eyJ + punktum", "eyJ.".repeat(125_000));
     timed("eyJ med punktum og mellomrom", "eyJabcdefghij. ".repeat(40_000));
     timed("a. (500 KB)", "a.".repeat(250_000));
@@ -403,12 +404,12 @@ describe("K6: ytelse og vinduer - hver adversarielle inndata tar under 2 s, og e
     const r = scanForSecrets(text);
     expect(r.findings).toEqual([{ kind: "github_token", count: 20 }]);
     expect(r.text).not.toContain(token.slice(4, 14));
-    const bigKey = `-----BEGIN PRIVATE KEY-----\n${Array.from({ length: 12_000 }, (_, i) => body(64, i)).join("\n")}\n-----END PRIVATE KEY-----`;
+    const bigKey = `${pemBegin()}\n${Array.from({ length: 12_000 }, (_, i) => body(64, i)).join("\n")}\n${pemEnd()}`;
     expect(bigKey.length).toBeGreaterThan(2 * SCAN_WINDOW_CHARS);
     const r2 = scanForSecrets(`start\n${bigKey}\nslutt ${token}`);
     expect(r2.text).toBe(`start\n${redacted("private_key")}\nslutt ${redacted("github_token")}`);
     // uavsluttet nøkkel over flere vinduer: alt til slutten er redigert
-    const open = `start\n-----BEGIN PRIVATE KEY-----\n${Array.from({ length: 12_000 }, (_, i) => body(64, i)).join("\n")}`;
+    const open = `start\n${pemBegin()}\n${Array.from({ length: 12_000 }, (_, i) => body(64, i)).join("\n")}`;
     expect(scanForSecrets(open).text).toBe(`start\n${redacted("private_key")}`);
   });
 });

@@ -27,6 +27,11 @@ export function insertAt(text: string, at: number, mark: string): string {
   return text.slice(0, at) + mark + text.slice(at);
 }
 
+/** `-----BEGIN PRIVATE KEY-----` bygges sammensatt, så ikke en gitleaks-regel for private nøkler treffer kildefilen. */
+export const pemBegin = (label = "PRIVATE KEY"): string => ["-----", "BEGIN ", label, "-----"].join("");
+
+export const pemEnd = (label = "PRIVATE KEY"): string => ["-----", "END ", label, "-----"].join("");
+
 export const tok = {
   /** ghp_ + 36 tegn (typisk lengde, `unverified`). */
   github: (seed = 0): string => ["gh", "p_"].join("") + body(36, seed),
