@@ -212,6 +212,27 @@ export const FILTER_SCHEMAS = {
 /** Minimert fakta-mengde (kun skalarer; strenger er korte og lukkede). Dette er ALT som lagres om selve signalet i loggen. */
 export type SignalFacts = Record<string, string | number | boolean>;
 
+/**
+ * WP-G4b K3 (D-484, Q-75 pkt 10, JARVIS-115 b): GLIDENDE dedupe-vindu for kamerahendelser. Broen er ren (ingen I/O) og kan derfor ikke selv se hva som allerede er varslet; den beskriver i stedet vinduet, og inntaksbussen finner
+ * episoden hendelsen hører til (`SituationSignalBus.episodeKey`). `detection_key` fra broen er forslaget «ny episode som starter nå»: `<key_prefix><anker-ms med 13 siffer>`.
+ */
+export interface EpisodeWindow {
+  /** Nøkkelprefikset for (kamera, hendelsestype): `vision:<type>:<kilde>:`. */
+  key_prefix: string;
+  /** Hendelsestidspunktet (epoch-ms) = ankeret hvis hendelsen starter en ny episode. */
+  anchor_ms: number;
+  /** Vinduet (ms): en hendelse mindre enn dette etter episodens anker er en duplikat (strengt `<`; akkurat på grensen starter en ny episode). */
+  window_ms: number;
+}
+
+/** Antall siffer i ankeret (epoch-ms) i en episodenøkkel: fast bredde slik at tekstsortering = tidssortering og eldre bøttenøkler (kort suffiks) aldri tolkes som anker. */
+export const EPISODE_ANCHOR_DIGITS = 13;
+
+/** Episodenøkkelen for et anker: `<prefiks><anker-ms med fast bredde>`. */
+export function episodeKeyFor(keyPrefix: string, anchorMs: number): string {
+  return `${keyPrefix}${String(Math.max(0, Math.trunc(anchorMs))).padStart(EPISODE_ANCHOR_DIGITS, "0")}`;
+}
+
 export interface BridgeResult {
   rule_key: string;
   source: SignalSource;
@@ -223,6 +244,8 @@ export interface BridgeResult {
   facts: SignalFacts;
   urgent: boolean;
   occurred_at: string;
+  /** K3: kun kamerareglene med glidende vindu (ikke haste-regler). Bussen løser den faktiske episodenøkkelen; uten feltet er `candidate.detection_key` endelig. */
+  episode?: EpisodeWindow;
 }
 
 export interface BridgeContext {
