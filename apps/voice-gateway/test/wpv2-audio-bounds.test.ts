@@ -155,6 +155,7 @@ describe("FIX-3: byte-tak per tur (sesjon)", () => {
     expect(streams.length).toBeGreaterThanOrEqual(2); // den tvungne slutten nullstiller VAD, så neste tale starter en NY tur
     for (const s of streams) expect(s.bytes).toBeLessThanOrEqual(cap);
     expect(streams[0]?.bytes).toBe(cap); // første tur fikk nøyaktig taket (ikke mindre: ingen legitim lyd kastes før taket)
+    expect(streams[1]?.bytes).toBe(cap); // og en NY tur starter med nullstilt teller (ikke arvet fra forrige)
     expect(streams[0]?.ended).toBe(true); // avsluttet (transkribert), ikke bare kastet
     expect(events.errors).toContain("turn_audio_limit");
     session.disconnect();
@@ -174,6 +175,22 @@ describe("FIX-3: byte-tak per tur (sesjon)", () => {
     expect(streams[0]?.bytes).toBeLessThan(200 * 640);
     expect(events.errors).toEqual([]);
     session.disconnect();
+  });
+});
+
+describe("FIX-3: gatewayens limits flyter inn i sesjonen", () => {
+  it("limits.maxTurnBytes (gateway) begrenser turen til en tilkoblet klient: strømmen får aldri mer enn taket, og klienten får turn_audio_limit", async () => {
+    const { stt, streams } = countingStt();
+    gateway = await startGateway({ stt, limits: { maxTurnBytes: 6_400 } }); // 10 rammer à 640 byte
+    const client = await new TestClient(gateway.url).connect();
+    await client.startUnproven();
+    for (let i = 0; i < 60; i++) client.send({ type: "audio", data: speechFrame() }); // 38 400 byte: langt under byte-bøtta
+    await client.waitFor((m) => m.type === "error" && m["error"] === "turn_audio_limit");
+    await sleep(100);
+    expect(streams.length).toBeGreaterThanOrEqual(1);
+    for (const stream of streams) expect(stream.bytes).toBeLessThanOrEqual(6_400);
+    expect(client.closeEvent).toBeNull(); // taket avslutter turen, ikke tilkoblingen
+    client.close();
   });
 });
 
@@ -200,6 +217,36 @@ describe("FIX-3: tak på turkjeden og TTS-køen", () => {
     session.replayFinal("u3", "tekst-u3");
     await sleep(100);
     expect(core.chatCalls.map((c) => c.message)).toEqual(["tekst-u1", "tekst-u2", "tekst-u3"]);
+    session.disconnect();
+  });
+
+  it("VAD-avsluttede turer (ikke bare replay) teller mot samme tak: en tur over maxPendingTurns forkastes med voice_busy", async () => {
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const ended: number[] = [];
+    const stt: SttAdapter = {
+      name: "gated-stt", processor: LOCAL, available: () => true,
+      startStream(): SttStream {
+        const index = ended.length;
+        return { pushAudio: () => undefined, end: async () => { await gate; ended.push(index); return ""; }, onPartial: () => undefined };
+      }
+    };
+    const { session, events } = newSession({ maxPendingTurns: 1, sttEndTimeoutMs: 20_000 }, { stt });
+    const silence = Buffer.alloc(640);
+    let t = 10_000;
+    const utterance = (): void => {
+      for (let i = 0; i < 20; i++) session.pushAudio(SPEECH, (t += 20));
+      for (let i = 0; i < 50; i++) session.pushAudio(silence, (t += 20)); // > hangover: end_of_turn
+    };
+    utterance(); // tur 1: stt.end() henger (porten) = ett ventende steg
+    expect(events.errors).toEqual([]);
+    utterance(); // tur 2: kjeden er full
+    expect(events.errors).toEqual(["voice_busy"]);
+    open();
+    await sleep(50);
+    expect(ended).toEqual([0]); // kun den første turen ble noen gang transkribert; den forkastede strømmen ble aldri avsluttet/kjørt
     session.disconnect();
   });
 
