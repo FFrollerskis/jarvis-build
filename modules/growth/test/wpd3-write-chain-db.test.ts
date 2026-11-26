@@ -1347,3 +1347,169 @@ describe("V3: re-review N4 - mutanter som overlevde (kommando-kampanje og nøkke
     expect(gMut()).toHaveLength(1);
   });
 });
+
+describe("V4: WP-P3 K2 (JARVIS-107) - replay-sikkerhet: ledger-leddet, helingen av kommandoen og N2d (replay av `outcome_unknown` uten bevis i ledgeren)", () => {
+  type ExecDeps = Parameters<typeof executeGrowthWrite>[0];
+  /** Gateway-spion: teller `execute`-kall og delegerer til den ekte gatewayen (beviser at en vakt stopper FØR gatewayen, ikke bare at leverandøren ikke ble truffet). */
+  function spied(): { deps: ExecDeps; calls: () => number } {
+    let calls = 0;
+    const gw = { get: gateway.get.bind(gateway), execute: async (req: Parameters<typeof gateway.execute>[0]) => { calls += 1; return gateway.execute(req); } };
+    return { deps: { ...exec, gateway: gw as never }, calls: () => calls };
+  }
+  const journalRow = async (id: string) => (await adminPool.query(`SELECT status, failure_code FROM growth_write_journal WHERE write_id = $1`, [id])).rows[0] as { status: string; failure_code: string | null };
+  const ledgerRow = async (key: string) => (await adminPool.query(`SELECT status FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [A, key])).rows[0] as { status: string } | undefined;
+  const setLedger = (key: string, status: string) => adminPool.query(`UPDATE tool_executions SET status = $3 WHERE tenant_id = $1 AND idempotency_key = $2`, [A, key, status]);
+  const dropLedger = (key: string) => adminPool.query(`DELETE FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [A, key]);
+  const insertLedger = (key: string, status: string) => adminPool.query(
+    `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status, postcondition_reason) VALUES ($1,$2,'growth_googleads','set_campaign_budget',$3,$4)`,
+    [A, key, status, status === "unverified" ? "postcondition_unverified:tool_timeout_outcome_unknown" : null]
+  );
+  const BUDGET = { campaign_id: "101", amount_ore: 40_000 };
+  const inputFor = (key: string, commandId?: string) => ({ idempotency_key: key, provider: "google_ads", action: "set_campaign_budget", ...(commandId !== undefined ? { command_id: commandId } : {}), parameters: { customer_id: CID, ...BUDGET } });
+
+  /** Journalraden står `requested` uten ledger-rad (krasj FØR gatewayen); testene setter selv inn ledger-raden som admin (= krasj ETTER gatewayen). */
+  async function requestedRow(key: string) {
+    const input = inputFor(key);
+    const crashing = { get: gateway.get.bind(gateway), execute: async () => { throw new Error("simulated_crash_before_gateway"); } };
+    await expect(executeGrowthWrite({ ...exec, gateway: crashing as never }, owner, input)).rejects.toThrow("simulated_crash_before_gateway");
+    const row = await journal.findByKey(A, "business", key);
+    expect(row?.status).toBe("requested");
+    return { input, row: row! };
+  }
+
+  /** Første forsøk gir UKJENT utfall UTEN at leverandøren endret noe (503 på mutasjonen): journal `outcome_unknown`, ledger `unverified`, kommandoen `execution_unknown`. */
+  async function unknownNotApplied(commandId?: string) {
+    if (commandId !== undefined) await seedCommand(commandId, 50_000, 40_000);
+    const key = uniq("p3-unk");
+    const input = inputFor(key, commandId);
+    gads.mutateStatus = 503;
+    const first = await executeGrowthWrite(exec, owner, input);
+    gads.mutateStatus = undefined;
+    expect(first.outcome).toBe("UNKNOWN");
+    expect(first.write.status).toBe("outcome_unknown");
+    expect(first.command_status).toBe(commandId !== undefined ? "execution_unknown" : null);
+    expect(await ledgerRow(key)).toEqual({ status: "unverified" });
+    expect(gMut()).toHaveLength(1); // selve 503-forsøket
+    expect(gads.budgets.get("11")?.micros).toBe(500_000_000); // leverandøren er UENDRET: en ny utførelse ville vært en ekte mutasjon
+    return { key, input, first };
+  }
+  /** Kommandoen settes tilbake til en tilstand som en krasj/manuell handling kan ha etterlatt (admin-UPDATE; databasevakten tillater overgangen fra `execution_unknown`). */
+  const setCommand = (id: string, status: "pending_execution" | "cancelled" | "superseded") =>
+    adminPool.query(`UPDATE marketing_campaign_execution_commands SET status = $2, execution_write_id = NULL, executed_at = NULL WHERE command_id = $1`, [id, status]);
+
+  it("(a1) journal `requested` + ledger-rad `reserved`|`unverified`|`succeeded` + port-avvisning FØR ledger-oppslaget (varsler ikke klar): UNKNOWN, raden står `requested`, ingen leverandørmutasjon; kontroll: ledger `failed` gir terminal FAILED som før", async () => {
+    for (const status of ["reserved", "unverified", "succeeded"]) {
+      const { input, row } = await requestedRow(uniq(`p3-a1-${status}`));
+      await insertLedger(input.idempotency_key, status);
+      state.notifierReady = false;
+      const res = await executeGrowthWrite(exec, owner, input);
+      expect(res, status).toMatchObject({ outcome: "UNKNOWN", reason: "class_d_notifier_not_ready", replayed: true });
+      expect(res.write.write_id, status).toBe(row.write_id);
+      expect(await journalRow(row.write_id), status).toEqual({ status: "requested", failure_code: null });
+      expect(await ledgerRow(input.idempotency_key), status).toEqual({ status });
+      expect(gMut(), status).toHaveLength(0);
+      state.notifierReady = true;
+    }
+    // kontroll: en `failed` ledger-rad beviser at leverandøren IKKE utførte - en port-avvisning låser raden som terminal FAILED (uendret atferd)
+    const { input, row } = await requestedRow(uniq("p3-a1-failed"));
+    await insertLedger(input.idempotency_key, "failed");
+    state.notifierReady = false;
+    const res = await executeGrowthWrite(exec, owner, input);
+    expect(res).toMatchObject({ outcome: "FAILED", reason: "class_d_notifier_not_ready" });
+    expect(await journalRow(row.write_id)).toEqual({ status: "failed", failure_code: "class_d_notifier_not_ready" });
+    expect(gMut()).toHaveLength(0);
+  });
+
+  it("(a1, andre rekkefølge) uten port-avvisning svarer gatewayen SELV ukjent utfall ved en `reserved` ledger-rad (execution_in_flight_or_outcome_unknown) - uten leverandørmutasjon; `unverified` gir UKJENT og `succeeded` fullfører som `applied` uten ny mutasjon", async () => {
+    const reserved = await requestedRow(uniq("p3-a1o-reserved"));
+    await insertLedger(reserved.input.idempotency_key, "reserved");
+    const r = await executeGrowthWrite(exec, owner, reserved.input);
+    expect(r).toMatchObject({ outcome: "UNKNOWN", reason: "execution_in_flight_or_outcome_unknown", replayed: true });
+    expect((await journalRow(reserved.row.write_id)).status).toBe("outcome_unknown"); // gatewayen svarte ukjent utfall (ikke porten): raden blir `outcome_unknown`, aldri `failed`
+    const unverified = await requestedRow(uniq("p3-a1o-unverified"));
+    await insertLedger(unverified.input.idempotency_key, "unverified");
+    const u = await executeGrowthWrite(exec, owner, unverified.input);
+    expect(u.outcome).toBe("UNKNOWN");
+    expect((await journalRow(unverified.row.write_id)).status).toBe("outcome_unknown");
+    const succeeded = await requestedRow(uniq("p3-a1o-succeeded"));
+    await insertLedger(succeeded.input.idempotency_key, "succeeded");
+    const s = await executeGrowthWrite(exec, owner, succeeded.input);
+    expect(s).toMatchObject({ outcome: "SUCCESS", replayed: true });
+    expect((await journalRow(succeeded.row.write_id)).status).toBe("applied");
+    expect(gMut()).toHaveLength(0); // ingen av replayene sendte noe til leverandøren
+  });
+
+  it("(a2) heling: journal `outcome_unknown` + kommandoen tilbakestilt til `pending_execution` (krasj mellom journalen og kommandoen) + port-avvisning: UNKNOWN OG kommandoen leges til `execution_unknown` med `execution_write_id`", async () => {
+    const id = uniq("cmd-p3-a2");
+    const { input, first } = await unknownNotApplied(id);
+    await setCommand(id, "pending_execution");
+    expect(await commandStatus(id)).toEqual({ status: "pending_execution", execution_write_id: null });
+    state.notifierReady = false;
+    const spy = spied();
+    const res = await executeGrowthWrite(spy.deps, owner, input);
+    expect(res).toMatchObject({ outcome: "UNKNOWN", reason: "class_d_notifier_not_ready", replayed: true, command_status: "execution_unknown" });
+    expect(res.write.write_id).toBe(first.write.write_id);
+    expect(await commandStatus(id)).toEqual({ status: "execution_unknown", execution_write_id: first.write.write_id });
+    expect((await journalRow(first.write.write_id)).status).toBe("outcome_unknown");
+    expect(gMut()).toHaveLength(1); // kun det opprinnelige 503-forsøket
+  });
+
+  describe("(b) N2d: en replay av en `outcome_unknown`-rad går til gatewayen KUN når ledgeren beviser at den ikke sender på nytt", () => {
+    type Case = { ledger: "absent" | "failed"; command: "none" | "pending_execution" | "cancelled" | "superseded" };
+    const cases: Case[] = (["absent", "failed"] as const).flatMap((ledger) => (["none", "pending_execution", "cancelled", "superseded"] as const).map((command) => ({ ledger, command })));
+    it.each(cases)("ledger $ledger x kommando $command: INGEN gateway.execute, 0 nye mutasjoner, UKJENT `growth_write_replay_ledger_unproven`, raden UENDRET `outcome_unknown`, kommandoen aldri `executed`", async ({ ledger, command }) => {
+      const commandId = command === "none" ? undefined : uniq(`cmd-p3-${command.slice(0, 4)}`);
+      const { key, input, first } = await unknownNotApplied(commandId);
+      if (ledger === "absent") await dropLedger(key); else await setLedger(key, "failed");
+      if (commandId !== undefined) await setCommand(commandId, command as "pending_execution" | "cancelled" | "superseded");
+      const spy = spied();
+      const res = await executeGrowthWrite(spy.deps, owner, input);
+      expect(gMut()).toHaveLength(1); // kun det opprinnelige 503-forsøket: en ny leverandørmutasjon her er selve N2d-feilen
+      expect(gads.budgets.get("11")?.micros).toBe(500_000_000);
+      expect(spy.calls()).toBe(0);
+      expect(res).toMatchObject({ outcome: "UNKNOWN", reason: "growth_write_replay_ledger_unproven", replayed: true });
+      expect(res.write.write_id).toBe(first.write.write_id);
+      expect(await journalRow(first.write.write_id)).toEqual({ status: "outcome_unknown", failure_code: first.write.failure_code });
+      expect(await ledgerRow(key)).toEqual(ledger === "absent" ? undefined : { status: "failed" }); // vakten rører ikke ledgeren
+      if (commandId === undefined) {
+        expect(res.command_status).toBeNull();
+      } else if (command === "pending_execution") {
+        expect(res.command_status).toBe("execution_unknown"); // helingen (som ved port-avvisning): kommandoen er verken «venter» eller «utført»
+        expect(await commandStatus(commandId)).toEqual({ status: "execution_unknown", execution_write_id: first.write.write_id });
+      } else {
+        expect(res.command_status).toBeNull(); // en avbrutt/erstattet kommando forblir det - aldri `executed`
+        expect(await commandStatus(commandId)).toEqual({ status: command, execution_write_id: null });
+      }
+    });
+
+    it("kontroller: med bevis i ledgeren (`reserved`/`unverified`/`succeeded`) går replayen fortsatt til gatewayen, som svarer fra ledgeren uten ny mutasjon (uendret atferd)", async () => {
+      for (const status of ["reserved", "unverified", "succeeded"]) {
+        const { key, input, first } = await unknownNotApplied();
+        if (status !== "unverified") await setLedger(key, status);
+        const spy = spied();
+        const res = await executeGrowthWrite(spy.deps, owner, input);
+        expect(spy.calls(), status).toBe(1);
+        expect(gMut(), status).toHaveLength(1);
+        expect(res.write.write_id, status).toBe(first.write.write_id);
+        if (status === "succeeded") expect(res, status).toMatchObject({ outcome: "SUCCESS", replayed: true });
+        else expect(res, status).toMatchObject({ outcome: "UNKNOWN", replayed: true });
+        expect(res.reason, status).not.toBe("growth_write_replay_ledger_unproven");
+        gads.reset(); gads.seed();
+      }
+    });
+
+    it("vakten gjelder KUN en eksisterende `outcome_unknown`-rad: en `requested` rad uten ledger-rad (krasj før gatewayen) utføres fortsatt av en replay, og en NY forespørsel utføres", async () => {
+      const { input } = await requestedRow(uniq("p3-b-requested"));
+      expect(await ledgerRow(input.idempotency_key)).toBeUndefined();
+      const spy = spied();
+      const res = await executeGrowthWrite(spy.deps, owner, input);
+      expect(spy.calls()).toBe(1);
+      expect(res).toMatchObject({ outcome: "SUCCESS", replayed: true });
+      expect(gMut()).toHaveLength(1);
+      gads.reset(); gads.seed();
+      const fresh = await executeGrowthWrite(spy.deps, owner, inputFor(uniq("p3-b-fresh")));
+      expect(fresh).toMatchObject({ outcome: "SUCCESS", replayed: false });
+      expect(gMut()).toHaveLength(1);
+    });
+  });
+});
