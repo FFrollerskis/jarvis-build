@@ -91,6 +91,8 @@ export class HttpCoreClient implements CoreClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(evidence),
+      // FIX-3 (runde 2, F12): ALDRI følg redirect - en 307/308 ville sendt enhetsbeviset videre til en annen vert. En redirect er en feil (fail-closed).
+      redirect: "error",
       // En hengende autoritet skal ikke kunne holde en talesesjon i limbo -
       // og køen av lydrammer som venter på vedtaket er ikke ubegrenset.
       signal: AbortSignal.timeout(this.timeouts.authorizeTimeoutMs ?? DEFAULT_AUTHORIZE_TIMEOUT_MS)
@@ -107,10 +109,13 @@ export class HttpCoreClient implements CoreClient {
     const deadline = deadlineSignal(this.timeouts.turnTimeoutMs ?? DEFAULT_CORE_TURN_TIMEOUT_MS);
     try {
       // FIX-5: en feil fra tilkoblings-/DNS-fasen BEVISER at forespørselen aldri nådde Core (`CoreRequestNotSentError`); alt annet gis uendret videre.
+      // FIX-3 (runde 2, F12): `redirect: "error"` - en redirect (307/308 bevarer metode og kropp) ble før fulgt: en død redirect-vert ga ECONNREFUSED/ENOTFOUND = «ikke sendt»
+      // selv om Core-leddet HADDE mottatt turen (dobbel-ACT), og `grant_token` i kroppen ble sendt videre til en annen vert. Nå er en redirect en feil UTEN syscall = UKJENT utfall.
       const response = await fetch(`${this.baseUrl}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body,
+        redirect: "error",
         signal: deadline.signal
       }).catch((err: unknown) => {
         throw classifyFetchFailure(err);
@@ -165,6 +170,7 @@ export class HttpCoreClient implements CoreClient {
       method: "POST",
       headers: { "content-type": "application/json", accept: "text/event-stream" },
       body,
+      redirect: "error", // FIX-3 (runde 2, F12): se `chat()`
       signal
     }).catch((err: unknown) => {
       throw classifyFetchFailure(err); // FIX-5: se `chat()`

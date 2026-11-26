@@ -10,6 +10,10 @@
  * DNS-feil `cause {code: ENOTFOUND, syscall: getaddrinfo}`; en socket serveren dreper ETTER mottatt forespørsel gir `UND_ERR_SOCKET` UTEN syscall
  * (ukjent utfall). Alt uten dette beviset - lese-/skrive-/reset-feil, timeout, avbrudd, HTTP-feil, tilkoblings-timeout uten syscall - er UKJENT: claimen
  * beholdes og forespørselen prøves aldri på nytt (dobbel-ACT er verre enn en tapt kommando som klienten ser og kan gjenta med ny id).
+ *
+ * FIX-3 (runde 2, F12): en REDIRECT fra Core er også UKJENT. `HttpCoreClient` bruker `redirect: "error"` (aldri å følge): fulgte `fetch` en 307/308 til en vert som ga
+ * ECONNREFUSED/ENOTFOUND, ville `syscall` pekt på redirect-MÅLET og feilaktig bevist «ikke sendt», selv om det redirectende leddet hadde mottatt hele turen. Nå kaster
+ * `fetch` en feil UTEN `syscall` (`unexpected redirect`), som regnes som ukjent utfall.
  */
 
 /** Core nådde aldri forespørselen (ingenting ble skrevet til en socket). Meldingen er en kort kode (aldri innhold). */
