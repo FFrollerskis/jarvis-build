@@ -12,6 +12,8 @@ const base = (over: Partial<ChangeProposal> = {}): ChangeProposal => ({
   problem: { statement: "Chat-ttft p95 er over målet siste døgn.", baseline: { ttft_p95_ms: 41_000 } },
   evidence: [{ kind: "metric", ref: "slo:chat_ttft_p95", trust: "trusted", provenance: "cost_events" }],
   primary_source_verified: { verified: false },
+  kind: "personality",
+  personality_scope: "internal",
   proposed_change: { component: "personality", paths: ["config/charlie-personality.json"], summary: "Kortere standard svarlengde i chat for lavere ttft." },
   claimed_class: "E1",
   confidence_basis: ["eval_delta", "slo_metric"],

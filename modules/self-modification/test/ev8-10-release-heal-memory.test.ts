@@ -7,7 +7,7 @@ import {
 const okSignals = { incident_open: false, observability_ok: true, slo_breaches: 0, kill_switch_active: false };
 const rel = (over: Partial<ReleaseRequest> = {}): ReleaseRequest => ({
   change_class: "E1", kind: "personality", stage: "shadow", owner_approved: false, last_known_good_stored: true, signals: okSignals,
-  usage: { deploys_today: 0, auto_merges_today: 0 }, budget: { max_deploys_per_day: 3, max_auto_merges_per_day: 5 }, evals_passed: true, independent_review: true, ...over
+  usage: { deploys_today: 0, deploys_this_hour: 0, auto_merges_today: 0 }, budget: { max_deploys_per_day: 3, max_deploys_per_hour: 1, max_auto_merges_per_day: 5 }, evals_passed: true, independent_review: true, ...over
 });
 
 describe("EV-8 utrullingsport", () => {
@@ -26,8 +26,8 @@ describe("EV-8 utrullingsport", () => {
     }
   });
   it("budsjett, eval, review, LKG og eier-godkjenning håndheves; E3 aldri", () => {
-    expect(decideRelease(rel({ usage: { deploys_today: 3, auto_merges_today: 0 } })).reasons).toContain("deploy_budget_exhausted");
-    expect(decideRelease(rel({ usage: { deploys_today: 0, auto_merges_today: 5 } })).reasons).toContain("auto_merge_budget_exhausted");
+    expect(decideRelease(rel({ usage: { deploys_today: 3, deploys_this_hour: 0, auto_merges_today: 0 } })).reasons).toContain("deploy_budget_exhausted");
+    expect(decideRelease(rel({ usage: { deploys_today: 0, deploys_this_hour: 0, auto_merges_today: 5 } })).reasons).toContain("auto_merge_budget_exhausted");
     expect(decideRelease(rel({ evals_passed: false })).reasons).toContain("evals_not_passed");
     expect(decideRelease(rel({ independent_review: false })).reasons).toContain("independent_review_missing");
     expect(decideRelease(rel({ last_known_good_stored: false })).reasons).toContain("last_known_good_missing");

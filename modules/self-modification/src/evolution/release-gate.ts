@@ -1,4 +1,5 @@
 import type { BudgetCaps, EvChangeClass } from "../constitution.ts";
+import { minimumClassForKind, type ChangeKind } from "./change-kind.ts";
 import { classRank } from "./common.ts";
 
 /**
@@ -7,7 +8,6 @@ import { classRank } from "./common.ts";
  * utrulling får gå videre, må vente, eller må rulles tilbake - og kan aldri løsne eierens signerte budsjett.
  */
 export type ReleaseStage = "shadow" | "staging" | "canary" | "full";
-export type ChangeKind = "code" | "prompt" | "personality" | "routing" | "config";
 
 export interface SystemSignals {
   /** Er en hendelse åpen? `null` = UKJENT (kunne ikke telles). Ukjent utelukker ikke en freeze (M2, gjennomgang av PR #313): aldri en fabrikkert `false`. */
@@ -22,6 +22,8 @@ export interface SystemSignals {
 
 export interface DeployUsage {
   deploys_today: number;
+  /** WP-EV0 (HF2 kap. 15): deploys i inneværende hele UTC-time. */
+  deploys_this_hour: number;
   auto_merges_today: number;
 }
 
@@ -61,7 +63,7 @@ export interface ReleaseRequest {
   last_known_good_stored: boolean;
   signals: SystemSignals;
   usage: DeployUsage;
-  budget: Pick<BudgetCaps, "max_deploys_per_day" | "max_auto_merges_per_day">;
+  budget: Pick<BudgetCaps, "max_deploys_per_day" | "max_deploys_per_hour" | "max_auto_merges_per_day">;
   /** Har kandidaten bestått eval-porten (EV-4) og uavhengig review? */
   evals_passed: boolean;
   independent_review: boolean;
@@ -77,20 +79,31 @@ export interface ReleaseVerdict {
 
 const NEXT: Record<ReleaseStage, ReleaseStage | null> = { shadow: "staging", staging: "canary", canary: "full", full: null };
 
+/**
+ * Innenfor grensen? Kun et endelig, ikke-negativt tall under en endelig grense er «innenfor» - alt annet (NaN, negativt, manglende, uendelig) er IKKE det
+ * (fail-closed, WP-EV0): en forbruksmåling som ikke kunne leses skal aldri slippe en utrulling gjennom.
+ */
+function withinBudget(used: number, limit: number): boolean {
+  return Number.isFinite(used) && Number.isFinite(limit) && used >= 0 && used < limit;
+}
+
 export function decideRelease(r: ReleaseRequest): ReleaseVerdict {
   const reasons: string[] = [];
   if (r.change_class === "E3") reasons.push("e3_forbidden");
   const freeze = changeFreeze(r.signals);
   if (freeze.frozen) reasons.push(...freeze.reasons.map((x) => `freeze:${x}`));
-  if (r.usage.deploys_today >= r.budget.max_deploys_per_day) reasons.push("deploy_budget_exhausted");
-  if (r.change_class === "E1" && r.usage.auto_merges_today >= r.budget.max_auto_merges_per_day) reasons.push("auto_merge_budget_exhausted");
+  if (!withinBudget(r.usage.deploys_today, r.budget.max_deploys_per_day)) reasons.push("deploy_budget_exhausted");
+  if (!withinBudget(r.usage.deploys_this_hour, r.budget.max_deploys_per_hour)) reasons.push("deploy_hour_budget_exhausted");
+  if (r.change_class === "E1" && !withinBudget(r.usage.auto_merges_today, r.budget.max_auto_merges_per_day)) reasons.push("auto_merge_budget_exhausted");
   if (!r.evals_passed) reasons.push("evals_not_passed");
   if (r.change_class !== "E0" && !r.independent_review) reasons.push("independent_review_missing");
   if (classRank(r.change_class) >= classRank("E2") && !r.owner_approved) reasons.push("owner_approval_missing");
   if (!r.last_known_good_stored) reasons.push("last_known_good_missing");
   // Prompt-, personlighets- og ruting-endringer er minst E1 og MÅ gjennom canary før full utrulling.
   const needs_canary = r.kind === "prompt" || r.kind === "personality" || r.kind === "routing" || r.change_class !== "E0";
-  if (r.kind !== "code" && r.kind !== "config" && r.change_class === "E0") reasons.push("kind_requires_at_least_e1");
+  // Gulvet pr. type er SAMME tabell som forslagsvalideringen (`KIND_MINIMUM_CLASS`); en ukjent type har gulv E3 og blokkerer alltid.
+  const kindFloor = minimumClassForKind(r.kind);
+  if (classRank(r.change_class) < classRank(kindFloor)) reasons.push(`kind_requires_at_least_${kindFloor.toLowerCase()}`);
   const next = NEXT[r.stage];
   return { allowed: reasons.length === 0, next_stage: reasons.length === 0 ? next : null, needs_canary, reasons };
 }
