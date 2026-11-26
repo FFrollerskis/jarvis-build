@@ -1,0 +1,38 @@
+{
+  "generated_at": "2026-12-10T12:00:00.000Z",
+  "constitution": {
+    "version": 2,
+    "digest": "0123456789abcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "signed": false,
+    "verification_code": "constitution_unsigned"
+  },
+  "caps": {
+    "max_auto_merges_per_day": 5,
+    "max_deploys_per_day": 3,
+    "max_deploys_per_hour": 1,
+    "max_owner_proposals_per_day": 10,
+    "max_evolution_cost_ore_per_month": 10000,
+    "max_radar_cost_ore_per_month": 2000,
+    "max_eval_cost_ore_per_month": 3000,
+    "max_redteam_cost_ore_per_month": 1500,
+    "max_shadow_cost_ore_per_month": 1500,
+    "max_review_cost_ore_per_month": 2000,
+    "owner_time_budget_minutes_per_week": 240,
+    "max_owner_minutes_per_autonomous_change": 15
+  },
+  "usage": {
+    "month": "2026-12",
+    "days_elapsed": 10,
+    "days_in_month": 31,
+    "spend_ore": {
+      "radar": 450,
+      "eval": 1000,
+      "redteam": 0,
+      "shadow": 1500,
+      "review": null
+    },
+    "week_start": "2026-12-07",
+    "owner_minutes_week": 90,
+    "autonomous_changes_week": 6
+  }
+}
