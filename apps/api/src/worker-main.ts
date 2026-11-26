@@ -36,6 +36,7 @@ import {
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import { GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
+import { createClassCWiring } from "./class-c-wiring.ts";
 import { ClaudeBudgetAlerter, startClaudeBudgetAlerts } from "./claude-budget-surfaces.ts";
 import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute } from "./tool-turn-route.ts";
 import {
@@ -225,11 +226,15 @@ const baseToolSecretProvider = new FallbackSecretProvider(
 // privatnøkkelen leses fra vaulten (workeren beholder Infisical-maskinidentiteten) - aldri fra container-env.
 const githubAuth = createGitHubAuth({ secrets: baseToolSecretProvider, env: process.env });
 const toolSecretProvider = githubAuth.secretProvider(baseToolSecretProvider);
+// WP-AUTH2a (JARVIS-014): deterministisk klasse C-behandling, samme kobling som i main.ts (API/worker-parity). Modus AV (standard) sender ingen option = gatewayen er identisk med main.
+const classCWiring = createClassCWiring(process.env);
 // Del 3 (JARVIS-013/043): samme HÅRDE klasse D-pipeline som API-prosessen (API/worker-parity); varsleren bindes rett under.
 const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider, {
   classDPipeline: { enforce: true },
-  credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
+  credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) },
+  ...classCWiring.options
 });
+if (classCWiring.log) (classCWiring.invalid ? console.error : console.log)(JSON.stringify(classCWiring.log));
 // WP-K (D-471, JARVIS-056): samme hvelv-først-lesing av Google-klientens id/secret som apps/api/src/main.ts (API/worker-parity) - miljøet er en LOGGET-DEPRECATED fallback, og Drive-sjekken
 // (`driveTransportsIfConfigured()` under) måles hvelv-bevisst ÉN gang her, FØR `firstWaveTools()`.
 configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault: infisicalSecretProvider }));

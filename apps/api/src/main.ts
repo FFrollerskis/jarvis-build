@@ -154,6 +154,7 @@ import { createPushSendGuard, startFollowUpPush } from "./follow-up-push.ts";
 import { buildValueRuntimeFacts } from "./value-facts.ts";
 import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
+import { createClassCWiring } from "./class-c-wiring.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
 import { CONTROL_FEATURE_FLAGS, controlCentersWithTools, flagOn } from "./control-center/shared.ts";
@@ -449,6 +450,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // leverer dekoratøren installasjonstokenet under SAMME ref (`JARVIS_GITHUB_TOKEN`); privatnøkkelen leses fra vaulten ved hver signering.
   const githubAuth = createGitHubAuth({ secrets: baseSecretProvider, env: process.env });
   const readSecretProvider = githubAuth.secretProvider(baseSecretProvider);
+  // WP-AUTH2a (JARVIS-014): deterministisk klasse C-behandling. Modus AV (standard) sender ingen option = gatewayen er identisk med main; samme kobling som i worker-main.ts.
+  const classCWiring = createClassCWiring(process.env);
   // Del 3 (JARVIS-013/043): klasse D-pipelinen er HÅRD i produksjon (nøkkel + full kjede + out-of-band-varsler; varsleren bindes sent under).
   const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
     classDPipeline: { enforce: true },
@@ -456,8 +459,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) },
     // WP-N1 (K6): utførelseslås for finance/finance_* mot skymodeller. Lokalitet fra leverandørregisteret (SAMME `servedByCloudModel` som chattens verktøyskjerm og Finans-senteret); ukjent leverandør regnes som sky (fail-closed).
     // Prediktatet bor i `restricted-context-guard.ts` (F-A1/F-B2) og er testet mot de ekte profilene.
-    ...(restrictedContextGuard.enabled ? { financeExecutionLock: FINANCE_EXECUTION_LOCK } : {})
+    ...(restrictedContextGuard.enabled ? { financeExecutionLock: FINANCE_EXECUTION_LOCK } : {}),
+    ...classCWiring.options
   });
+  if (classCWiring.log) (classCWiring.invalid ? console.error : console.log)(JSON.stringify(classCWiring.log));
   // WP-K (D-471, JARVIS-056): Google-klientens id/secret leses hvelv-først (dashbord-lagret/Infisical) med miljøet som LOGGET-DEPRECATED fallback (dagens NAS-oppsett virker uendret);
   // Drive-registreringssjekken (`driveTransportsIfConfigured()` under) måles hvelv-bevisst ÉN gang her, FØR `firstWaveTools()`. API/worker-parity: samme to linjer i worker-main.ts.
   configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault: infisicalSecretProvider }));

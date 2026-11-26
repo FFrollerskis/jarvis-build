@@ -42,6 +42,8 @@ export const CORE_ENV = [
   "JARVIS_BRIEF_HOUR",
   "JARVIS_BROWSER_GATEWAY_BASE_URL",
   "JARVIS_BROWSER_GATEWAY_TOKEN_SECRET",
+  // WP-AUTH2a (JARVIS-014): modus for deterministisk klasse C-behandling i ToolGateway (`off` standard, `observe`, `enforce`; alt annet = off). api OG worker bruker samme gateway-kode og leser samme bryter. Ingen hemmeligheter.
+  "JARVIS_CLASS_C_PIPELINE",
   // WP-G2c (D-483, JARVIS-113 d): tidsavbrudd (ms) for å få en forbindelse fra den delte DB-poolen (`createPool`, 0 = ingen grense, standard 30000). Ikke-hemmelig; api, worker og migrate lager hver sin pool.
   "JARVIS_DB_CONNECT_TIMEOUT_MS",
   "JARVIS_DB_PASSWORD",
