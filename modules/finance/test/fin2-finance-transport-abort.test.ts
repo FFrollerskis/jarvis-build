@@ -179,16 +179,19 @@ describe("K2: allerede avbrutt kall sender ingenting; eget 20 s-tak består uten
 describe("K2d: delt token-utveksling (Fiken) dør ikke med første kallers frist", () => {
   it("to samtidige kall: A (frist 100 ms) slippes fri av sin egen frist; B (uten frist) får tokenet - ÉN utveksling, utvekslingen ble ikke avbrutt", async () => {
     handler = (req, res) => {
-      if (/oauth\/token/.test(req.url ?? "")) { setTimeout(() => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ access_token: "tok-shared", expires_in: 3600 })); }, 400); return; }
+      if (/oauth\/token/.test(req.url ?? "")) { setTimeout(() => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ access_token: "tok-shared", expires_in: 3600 })); }, 1_500); return; }
       res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify([{ slug: "firma-as", name: "Firma AS" }]));
     };
     const controller = new AbortController();
     const reason = new Error("tool_timeout");
-    const a = runWithCallSignal(controller.signal, () => new FikenTransport("refresh-shared", "firma").listCompanies()).catch((e: unknown) => e);
+    const t0 = Date.now();
+    const a = runWithCallSignal(controller.signal, () => new FikenTransport("refresh-shared", "firma").listCompanies()).then(() => ({ error: null as unknown, ms: Date.now() - t0 }), (e: unknown) => ({ error: e, ms: Date.now() - t0 }));
     await waitFor(() => seen.some((s) => /oauth\/token/.test(s.url)));
     const b = new FikenTransport("refresh-shared", "firma").listCompanies();
     setTimeout(() => controller.abort(reason), 100);
-    expect(await a).toBe(reason);
+    const aSettled = await a;
+    expect(aSettled.error).toBe(reason);
+    expect(aSettled.ms).toBeLessThan(1_000); // slippes fri av SITT EGET tidsavbrudd (raceCallSignal) - ikke først når den delte utvekslingen er ferdig (1,5 s)
     expect(await b).toEqual([{ slug: "firma-as", name: "Firma AS" }]);
     expect(seen.filter((s) => /oauth\/token/.test(s.url))).toHaveLength(1);
     expect(seen.filter((s) => /oauth\/token/.test(s.url))[0]!.aborted).toBe(false);

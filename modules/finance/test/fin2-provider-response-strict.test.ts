@@ -9,6 +9,7 @@ import {
   WallesterTransport,
   classifyProviderFailure,
   createRsaJwtSigner,
+  expectDecimalMinorUnits,
   resetFikenAccessTokenCache
 } from "../src/index.ts";
 
@@ -360,3 +361,22 @@ describe("K7: grenseverdier som SKAL være gyldige", () => {
     expect((err as Error).message).toMatch(/^outcome_unknown:provider_response_invalid:limits_body_missing$/);
   });
 });
+
+describe("expectDecimalMinorUnits: fortegn styres av kalleren (ingen dagens transport bruker allowNegative: false - grenen er låst her)", () => {
+  const ctx = { operation: "test.decimal", mutation: false } as const;
+  const parse = (v: string | number): number => Math.round(Number(v) * 100);
+  it("allowNegative: false avviser negative beløp med kode `amount_negative`; allowNegative: true slipper dem gjennom (kontosaldo/transaksjon er fortegnsbærende)", () => {
+    expect(() => expectDecimalMinorUnits({ amount: "-1.50" }, "amount", ctx, parse, { allowNegative: false })).toThrow(/amount_negative/);
+    expect(expectDecimalMinorUnits({ amount: "-1.50" }, "amount", ctx, parse, { allowNegative: true })).toBe(-150);
+    expect(expectDecimalMinorUnits({ amount: "1.50" }, "amount", ctx, parse, { allowNegative: false })).toBe(150);
+  });
+  it("manglende/tom/feil type/uleselig/for stort gir hver sin kode (aldri en stille 0)", () => {
+    const o = { allowNegative: true } as const;
+    expect(() => expectDecimalMinorUnits({}, "amount", ctx, parse, o)).toThrow(/amount_missing/);
+    expect(() => expectDecimalMinorUnits({ amount: "" }, "amount", ctx, parse, o)).toThrow(/amount_empty/);
+    expect(() => expectDecimalMinorUnits({ amount: true }, "amount", ctx, parse, o)).toThrow(/amount_wrong_type/);
+    expect(() => expectDecimalMinorUnits({ amount: "x" }, "amount", ctx, () => { throw new Error("bad"); }, o)).toThrow(/amount_unparseable/);
+    expect(() => expectDecimalMinorUnits({ amount: "1" }, "amount", ctx, () => Number.MAX_SAFE_INTEGER + 2, o)).toThrow(/amount_too_large/);
+  });
+});
+
