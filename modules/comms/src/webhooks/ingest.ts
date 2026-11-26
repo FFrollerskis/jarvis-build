@@ -7,7 +7,7 @@ import { optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel 
 import type { CommsConfig, CommsWebhookProvider } from "../config.ts";
 import { OPT_KEYWORD_CHANNELS, parseOptKeyword, type OptKeyword } from "../optout.ts";
 import type { Clock, CommsStore, OptEffect } from "../store.ts";
-import { MAX_EVENTS_PER_REQUEST, parseMetaBody, parseSlackBody, parseTelnyxBody, parseTwilioParams, type NormalizedInbound, type ParseOutcome } from "./parsers.ts";
+import { MAX_EVENTS_PER_REQUEST, PROCESSING_CAP_FACTOR, parseMetaBody, parseSlackBody, parseTelnyxBody, parseTwilioParams, type NormalizedInbound, type ParseOutcome } from "./parsers.ts";
 import { secretsEqual, verifyMetaSignature, verifySlackSignature, verifyTelnyxSignature, verifyTwilioSignature } from "./verify.ts";
 
 /**
@@ -50,6 +50,11 @@ export interface WebhookDeps {
    * Gjenstår det nye hendelser etter taket, svarer tjenesten 503 så leverandøren prøver på nytt, og hver retry tar neste porsjon. Kun testene setter den lavere.
    */
   readonly maxEventsPerRequest?: number;
+  /**
+   * FIX-3 (fiks-runde 2): høyeste antall hendelser som BEHANDLES (alt som ikke er et kjent duplikat: skrevet, ignorert eller duplikat i et kappløp) per signert forespørsel; standard `PROCESSING_CAP_FACTOR` x taket over (5000). Stopp-ord (STOP) er unntatt
+   * (de skrives alltid og er begrenset av skrivetaket). Over taket svarer tjenesten 503 `batch_over_cap` og resten utsettes. Kun testene setter den.
+   */
+  readonly maxProcessedPerRequest?: number;
 }
 
 export const WEBHOOK_SECRET_REFS = {
@@ -197,17 +202,25 @@ export class CommsWebhookService {
     const keywordEvents = outcome.events.filter((e) => optKeywordOf(e) !== null);
     const ordered = [...keywordEvents, ...outcome.events.filter((e) => optKeywordOf(e) === null)];
     const cap = this.deps.maxEventsPerRequest ?? MAX_EVENTS_PER_REQUEST;
+    // FIX-3 (fiks-runde 2): et EGET tak på hendelser som BEHANDLES (ikke kjente duplikater), ellers var arbeidet per forespørsel bare byte-begrenset (hver ignorerte hendelse koster minst ett kontooppslag). Stopp-ord (STOP) er unntatt: de skrives alltid
+    // (skrivetaket begrenser dem) og står først, så en STOP kan aldri sultes ut av ignorerbare hendelser foran seg. Utsatte hendelser (`continue`) kostet ingenting; resten av kroppen leses fortsatt så en STOP lenger bak nås. Merk: en ignorert hendelse lagres
+    // aldri og kan derfor aldri bli «kjent» - en kropp med flere ignorerbare hendelser enn taket gir 503 ved hver retry (Meta sender ikke så mange: dokumentert grense, runbook), men en STOP er registrert i første forsøk.
+    const processingCap = this.deps.maxProcessedPerRequest ?? cap * PROCESSING_CAP_FACTOR;
     const known = await this.deps.store.knownEventKeys(config.webhook_tenant_id, config.webhook_memory_space, provider, ordered.map((e) => e.event_key));
     let deferred = 0;
+    let processed = 0;
+    let capReason: "write_cap" | "processing_cap" | null = null;
     for (let i = 0; i < ordered.length; i++) {
       const event = ordered[i] as NormalizedInbound;
       if (known.has(event.event_key)) { summary.received++; summary.duplicates++; continue; }
-      if (summary.inserted >= cap) { deferred = ordered.slice(i).filter((e) => !known.has(e.event_key)).length; break; }
+      if (summary.inserted >= cap) { deferred += ordered.slice(i).filter((e) => !known.has(e.event_key)).length; capReason ??= "write_cap"; break; }
+      if (processed >= processingCap && optKeywordOf(event) !== "stop") { deferred++; capReason ??= "processing_cap"; continue; }
+      processed++;
       summary.received++;
       await this.processEvent(event, ingestId, summary);
     }
     if (deferred > 0) {
-      this.deps.warn?.({ msg: "comms_webhook_batch_over_cap", provider, events: ordered.length, cap, deferred });
+      this.deps.warn?.({ msg: "comms_webhook_batch_over_cap", provider, reason: capReason, events: ordered.length, cap, deferred });
       return { status: 503, body: { error: "batch_over_cap", events: { ...summary, deferred } } };
     }
     return { status: 200, body: { received: true, events: { ...summary } } };

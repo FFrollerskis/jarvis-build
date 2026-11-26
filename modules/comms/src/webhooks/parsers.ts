@@ -44,6 +44,11 @@ export interface ParseOutcome {
  * feilstatus (leverandøren prøver på nytt), aldri 200 med droppede hendelser. Byte-grensen før signaturen er per leverandør (`WEBHOOK_MAX_BYTES_BY_PROVIDER`: Meta 4 MiB, de andre 256 KB; FIX-1, se runbook §5).
  */
 export const MAX_EVENTS_PER_REQUEST = 1000;
+/**
+ * FIX-3 (fiks-runde 2): taket over teller kun hendelser som SKRIVES, så arbeidet per forespørsel var bare byte-begrenset (16 000 ignorerte hendelser, 2,7 MB, tok 6,9 s: ett kontooppslag per hendelse). `PROCESSING_CAP_FACTOR` x skrivetaket er det EGNE
+ * taket på hendelser som BEHANDLES (ikke kjente duplikater) per signert forespørsel: 5 x 1000 = 5000, ca. 2-3 s på utviklingsdatabasen (UVERIFISERT på NAS). Over det svarer tjenesten 503 `batch_over_cap`, som for skrivetaket. Stopp-ord (STOP) er unntatt.
+ */
+export const PROCESSING_CAP_FACTOR = 5;
 const SAFE_KEY = /^[A-Za-z0-9._:@=+/-]{1,300}$/;
 
 /**

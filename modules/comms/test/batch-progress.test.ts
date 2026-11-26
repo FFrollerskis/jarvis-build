@@ -26,7 +26,7 @@ const waBatch = (messages: object[], phoneNumberId = PHONE_ID): object => ({
 });
 const waNum = (): string => chain.phone().replace("+", "");
 const optedWa = (digits: string): Promise<boolean> => chain.store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "whatsapp", `+${digits}`));
-const service = (extra: { maxEventsPerRequest?: number } = {}) => new CommsWebhookService({
+const service = (extra: { maxEventsPerRequest?: number; maxProcessedPerRequest?: number } = {}) => new CommsWebhookService({
   store: chain.store, graph: chain.graph, config: chain.config, clock: chain.now, warn: (w) => warnings.push(w), ...extra,
   secrets: { get: async (ref) => (ref === WEBHOOK_SECRET_REFS.meta ? META_SECRET : null) }
 });
@@ -118,8 +118,8 @@ describe("FIX-2: hver retry tar neste porsjon (konvergerer)", () => {
     expect(res.body).toMatchObject({ events: { received: 20, inserted: 10, duplicates: 10 } });
   }, 120_000);
 
-  it("hendelser som ikke skrives (ignorert: ukjent konto) teller IKKE mot taket - de kan ikke sulte ut de som skal behandles", async () => {
-    const svc = service({ maxEventsPerRequest: 5 });
+  it("hendelser som ikke skrives (ignorert: ukjent konto) teller IKKE mot SKRIVETAKET - de kan ikke sulte ut de som skal behandles (de teller mot det egne behandlingstaket, satt høyt her; se `batch-processing-cap`)", async () => {
+    const svc = service({ maxEventsPerRequest: 5, maxProcessedPerRequest: 100 });
     const ignored = Array.from({ length: 30 }, (_, i) => waMessage("4790000001", "hei", `wamid.ign${mid}x${i}`));
     const real = Array.from({ length: 5 }, (_, i) => waMessage(waNum(), "hei", `wamid.real${mid}x${i}`));
     // de ignorerte står FØRST i kroppen (til en konto eieren ikke har autorisert), de 5 ekte sist
@@ -141,7 +141,7 @@ describe("FIX-2: hver retry tar neste porsjon (konvergerer)", () => {
     const res = await svc.handle("meta", metaReq(waBatch([...Array.from({ length: 6 }, () => waMessage(waNum(), "hemmelig-tekst-xyz")), waMessage(stopper, "STOPP")])));
     expect(res.status).toBe(503);
     const log = warnings.find((w) => w["msg"] === "comms_webhook_batch_over_cap");
-    expect(log).toEqual({ msg: "comms_webhook_batch_over_cap", provider: "meta", events: 7, cap: 3, deferred: 4 });
+    expect(log).toEqual({ msg: "comms_webhook_batch_over_cap", provider: "meta", reason: "write_cap", events: 7, cap: 3, deferred: 4 });
     expect(JSON.stringify(warnings)).not.toContain("hemmelig-tekst-xyz");
     expect(JSON.stringify(warnings)).not.toContain(stopper);
   });

@@ -110,7 +110,7 @@ describe("K3: stopp-/start-ord behandles FØRST, og over taket svarer tjenesten 
     expect(res.body).toMatchObject({ error: "batch_over_cap", events: { received: 50, deferred: 70, opt_outs: 1 } });
     expect(await optedWa(stopper), "STOP-en ble behandlet FØRST og er registrert").toBe(true);
     const log = warnings.find((w) => w["msg"] === "comms_webhook_batch_over_cap");
-    expect(log).toEqual({ msg: "comms_webhook_batch_over_cap", provider: "meta", events: 120, cap: 50, deferred: 70 });
+    expect(log).toEqual({ msg: "comms_webhook_batch_over_cap", provider: "meta", reason: "write_cap", events: 120, cap: 50, deferred: 70 });
     expect(JSON.stringify(warnings)).not.toContain("hei"); // ingen innhold i loggen
     expect(JSON.stringify(warnings)).not.toContain(stopper);
   });
