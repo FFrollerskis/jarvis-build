@@ -53,7 +53,8 @@ const POSTS_PAGE_SIZE = 20;
  * WP-P3 K6 (JARVIS-108, Q-68 pkt 5; PARTIAL): paginering av lokale innlegg. ALT i denne konstanten er UVERIFISERT mot Googles dokumentasjon (developers.google.com var utilgjengelig, ENOTFOUND, D-41) og samlet her så det kan
  * rettes mot primærkilden uten å lete: Google-konvensjonen `pageToken` (forespørsel) / `nextPageToken` (svar), og at et FRAVÆRENDE token betyr siste side (en full side uten token er da komplett). Tak: 10 sider = 200 innlegg.
  * FAIL-LUKKET (`truncated: true`, så `create_local_post` nektes): token igjen ved taket, samme token to ganger, et token som ikke er en ikke-tom streng på høyst `maxTokenChars` tegn (også `null`/tom/tall), over `maxPosts`
- * innlegg, eller en side som forsvinner (404) midt i listen. Feil (401/403/5xx/nett) midt i listen kastes. Live er NOT VERIFIED (BLOCKED_EXTERNAL: Googles godkjenning av API-tilgangen).
+ * innlegg, en side som forsvinner (404) midt i listen, eller (fiks-runde 1) en fortsettelsesside som ikke er et objekt med en `localPosts`-liste (`[]`, `{}`, tom kropp, `{error}`). Feil (401/403/5xx/nett) midt i listen kastes.
+ * Live er NOT VERIFIED (BLOCKED_EXTERNAL: Googles godkjenning av API-tilgangen).
  */
 const POSTS_PAGINATION_UNVERIFIED = { requestParam: "pageToken", responseField: "nextPageToken", maxPages: 10, maxPosts: 200, maxTokenChars: 2048 } as const;
 
@@ -217,6 +218,12 @@ export class GbpWriteTransport extends GoogleOAuthTransport {
             break;
           }
           const body = asObj(res.json);
+          // WP-P3 fiks-runde 1 (K6-rest): et token lovet flere innlegg, så en FORTSETTELSESSIDE må være et objekt med en `localPosts`-liste (en eksplisitt tom liste er lesbar). `[]`, `{error:...}`, `{}` og en tom kropp
+          // (`VendorHttp` gjør den til `{}`) beviser ikke at listen er komplett: ellers ble fraværet av `nextPageToken` lest som «siste side». Side 1 er uendret (`{}` = ingen innlegg).
+          if (page > 1 && !Array.isArray(body["localPosts"])) {
+            truncated = true;
+            break;
+          }
           rawPosts.push(...asArr(body["localPosts"]));
           const next = body[responseField];
           if (next === undefined) break; // fraværende token = siste side (UVERIFISERT)

@@ -1456,6 +1456,86 @@ describe("E7: review N6 - avkortede leverandørlister feiler LUKKET også for GB
       expect(writes(broken.v)).toHaveLength(0);
       await broken.v.stop();
     });
+
+    describe("WP-P3 fiks-runde 1 (K6-rest): en fortsettelsesside (etter et `nextPageToken`) må være et objekt med en `localPosts`-liste - ellers KUTTET", () => {
+      type VReply = Awaited<ReturnType<FakeVendor["handler"]>>;
+      /** Side 1 gir `first` (innlegg + token `t2`); hver fortsettelsesside n (2, 3, ...) svarer `continuation(n)`. POST oppretter innlegget (vises på side 1 etterpå, for readback). */
+      async function contVendor(continuation: (n: number) => VReply, first: (created: Array<Record<string, unknown>>) => VReply = (created) => ({ json: { localPosts: [post(1), ...created], nextPageToken: "t2" } })) {
+        const v = new FakeVendor(); await v.start();
+        const created: Array<Record<string, unknown>> = [];
+        v.handler = (r) => {
+          if (r.method === "GET" && r.path.endsWith("/localPosts")) {
+            const token = r.query.get("pageToken");
+            return token === null ? first(created) : continuation(Number(token.slice(1)));
+          }
+          if (r.method === "POST" && r.path.endsWith("/localPosts")) { created.push({ name: `${LOC}/localPosts/999`, summary: r.body["summary"], state: "LIVE", topicType: "STANDARD" }); return { json: { name: `${LOC}/localPosts/999` } }; }
+          return { status: 404, json: {} };
+        };
+        const t = new GbpWriteTransport({ ...killOpen, ...token, spec: specs.google_business_profile, baseUrl: v.baseUrl, v4BaseUrl: v.baseUrl, sleep: async () => undefined });
+        const list = async () => ((await call7(t, "list_local_posts", base)).data as Record<string, any>);
+        return { v, t, list };
+      }
+
+      const badPage: Array<[string, VReply]> = [
+        ["[] (toppnivå-liste)", { json: [] }],
+        ["tom kropp (HTTP 200 uten innhold)", { text: "" }],
+        ["{} (objekt uten localPosts)", { json: {} }],
+        ["{ error: ... } uten localPosts", { json: { error: { message: "nektet", code: 403 } } }],
+        ["{ localPosts: null }", { json: { localPosts: null } }],
+        ["{ localPosts: {} } (objekt i stedet for liste)", { json: { localPosts: {} } }],
+        ["{ localPosts: \"tekst\" }", { json: { localPosts: "tekst" } }]
+      ];
+      it.each(badPage)("side 2 (etter et token) svarer 200 med %s: KUTTET - side 1 beholdes, list_local_posts er truncated, create_local_post nektes og INGEN skriving sendes", async (_name, reply) => {
+        const w = await contVendor(() => reply);
+        try {
+          const state = await w.list();
+          expect(state["truncated"]).toBe(true);
+          expect(state["posts"]).toHaveLength(1);
+          await expect(call7(w.t, "create_local_post", { ...base, summary: "Helt nytt innlegg" })).rejects.toThrow("growth_precondition_failed:local_post_list_truncated");
+          expect(writes(w.v)).toHaveLength(0);
+        } finally {
+          await w.v.stop();
+        }
+      });
+
+      it("side 3 (etter et nytt token) med uforståelig form er også KUTTET - sidene som ble lest beholdes", async () => {
+        const w = await contVendor((n) => (n === 2 ? { json: { localPosts: [post(2)], nextPageToken: "t3" } } : { json: [] }));
+        try {
+          const state = await w.list();
+          expect(state["truncated"]).toBe(true);
+          expect(state["posts"]).toHaveLength(2);
+          await expect(call7(w.t, "create_local_post", { ...base, summary: "Helt nytt innlegg" })).rejects.toThrow("growth_precondition_failed:local_post_list_truncated");
+          expect(writes(w.v)).toHaveLength(0);
+        } finally {
+          await w.v.stop();
+        }
+      });
+
+      it("kontroller (ingen falsk positiv): en fortsettelsesside med en EKSPLISITT tom `localPosts`-liste er en lesbar, komplett slutt; side 1 uten innlegg (`{}`) er en komplett, tom liste - dedupe og opprettelse virker", async () => {
+        const w = await contVendor(() => ({ json: { localPosts: [] } }));
+        try {
+          const state = await w.list();
+          expect(state["truncated"]).toBe(false);
+          expect(state["posts"]).toHaveLength(1);
+          expect(await call7(w.t, "create_local_post", { ...base, summary: "Innlegg 1" })).toEqual({ data: { unchanged: true } });
+          expect(writes(w.v)).toHaveLength(0);
+          expect(await call7(w.t, "create_local_post", { ...base, summary: "Helt nytt innlegg" })).toMatchObject({ external_id: "999" });
+          expect(writes(w.v)).toHaveLength(1);
+        } finally {
+          await w.v.stop();
+        }
+        const empty = await contVendor(() => ({ json: { localPosts: [] } }), (created) => (created.length === 0 ? { json: {} } : { json: { localPosts: created } }));
+        try {
+          const state = await empty.list();
+          expect(state["truncated"]).toBe(false);
+          expect(state["posts"]).toEqual([]);
+          expect(await call7(empty.t, "create_local_post", { ...base, summary: "Første innlegg" })).toMatchObject({ external_id: "999" });
+          expect(writes(empty.v)).toHaveLength(1);
+        } finally {
+          await empty.v.stop();
+        }
+      });
+    });
   });
 
   it("GA4: en full side (200) ELLER `nextPageToken` = KUTTET -> create_key_event nektes, delete_key_event av en id som ikke står i den kuttede listen nektes (aldri falsk «uendret»), en id som FINNES fjernes", async () => {
