@@ -63,7 +63,7 @@ import {
 import { LlmExtractionAdapter, MemoryRetriever, MemoryWriter, createEmbeddingProviderFromEnv } from "@jarvis/memory";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
 import {
-  WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, costWarningCheck, databaseCheck, stuckTasksCheck,
+  WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, costWarningCheck, databaseCheck, stuckTasksAllTenantsCheck,
   parseWatchdogIntervalMs, parseCostHardLimitOre
 } from "@jarvis/watchdog";
 
@@ -598,7 +598,8 @@ toolGateway.setClassDNotifier(telegramClassDNotifier({
 const watchdogAlertSink = new WatchdogEmergencyAlertSink(telegramTransport, toolSecretProvider);
 const watchdog = new Watchdog(watchdogAlertSink, killSwitch);
 watchdog.register(databaseCheck(pool));
-watchdog.register(stuckTasksCheck(pool, owner.tenant_id));
+// WP-OPS2a K2 (JARVIS-041): workeren claimer på tvers av tenants, så fastlåste jobber telles i ALLE tenants (ikke bare eierens); meldingen er uendret så lenge det finnes én tenant.
+watchdog.register(stuckTasksAllTenantsCheck(pool));
 // D-187 (BLOCKER B2, arkitekt-order D187 mot PR #96): begge miljøvariablene
 // valideres FØR bruk - `parseCostHardLimitOre`/`parseWatchdogIntervalMs`
 // kaster ved enhver eksplisitt oppgitt, ugyldig verdi (fail-closed oppstart)

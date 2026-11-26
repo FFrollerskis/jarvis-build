@@ -64,7 +64,7 @@ export class AllTenantEnumerationError extends Error {
  * `listBusinessTenantIds` selv er BEVISST uendret og fortsatt kun for
  * eksisterende bedrifts-sveip.
  */
-export async function listAllTenantIds(pool: pg.Pool, limit = 200): Promise<string[]> {
+export async function listAllTenantIds(pool: pg.Pool, limit = 200, options: { quiet?: boolean } = {}): Promise<string[]> {
   let result;
   try {
     result = await pool.query<{ tenant_id: string }>("SELECT tenant_id FROM jarvis_list_all_tenant_ids($1)", [limit]);
@@ -72,7 +72,8 @@ export async function listAllTenantIds(pool: pg.Pool, limit = 200): Promise<stri
     throw new AllTenantEnumerationError(err);
   }
   const tenantIds = result.rows.map((row) => row.tenant_id);
-  console.log(JSON.stringify({ msg: "all_tenants_enumerated", count: tenantIds.length }));
+  // WP-OPS2a K2: `quiet` er kun for en kaller som kjører hvert minutt (vakthundens `stuck_tasks`); sveipene (daglig/ukentlig) logger som før.
+  if (options.quiet !== true) console.log(JSON.stringify({ msg: "all_tenants_enumerated", count: tenantIds.length }));
   return tenantIds;
 }
 

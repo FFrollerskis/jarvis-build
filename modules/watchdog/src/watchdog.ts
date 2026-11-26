@@ -1,6 +1,6 @@
 import type pg from "pg";
 import type { KillSwitch } from "@jarvis/policy";
-import { withTenantTransaction } from "@jarvis/core";
+import { listAllTenantIds, withTenantTransaction } from "@jarvis/core";
 
 export type Severity = "info" | "warning" | "critical";
 
@@ -278,6 +278,87 @@ export function stuckTasksCheck(pool: pg.Pool, tenantId: string): HealthCheck {
       return n === 0
         ? { ok: true, severity: "info", message: "" }
         : { ok: false, severity: "warning", message: `${n} jobber med utløpt lease` };
+    }
+  };
+}
+
+/** WP-OPS2a K2: maks antall tenants `stuckTasksAllTenantsCheck` vurderer per kjøring (samme øvre grense som sveipene). Flere enn dette meldes som delvis blindhet, aldri avkortet i det stille. */
+export const STUCK_TASKS_MAX_TENANTS = 200;
+/** WP-OPS2a K2: tidsbudsjett for selve telleløkken (under sjekk-fristen på 20 s): uleste tenants regnes som «ikke lest», så en treg database ikke lar kjøringer hope seg opp. */
+export const STUCK_TASKS_READ_BUDGET_MS = 15_000;
+
+export interface StuckTasksAllTenantsOptions {
+  /** Overstyrer `STUCK_TASKS_MAX_TENANTS` (tester). */
+  maxTenants?: number;
+  /** Overstyrer `STUCK_TASKS_READ_BUDGET_MS` (tester). */
+  budgetMs?: number;
+  /** Klokke i ms (tester). */
+  now?: () => number;
+}
+
+/**
+ * WP-OPS2a K2 (JARVIS-041-resten): `stuckTasksCheck(pool, tenantId)` teller kun ÉN tenant, men workeren claimer på tvers av tenants (`007_claim_function.sql`): en fastlåst jobb i en business-tenant var usynlig for vakthunden. Denne sjekken
+ * teller utløpt lease i HVER tenant (`listAllTenantIds` + `withTenantTransaction` per tenant, samme RLS-trygge mønster som `stuckTasksCheck` og sveipene) og beholder navn, runbook, nedkjøling og meldingsform.
+ *  - Meldingen er IDENTISK med den gamle når katalogen har nøyaktig én tenant (`N jobber med utløpt lease`); med flere tenants får den suffikset ` (i k tenants)` (k = tenants som har fastlåste jobber).
+ *  - Delvis blindhet er ALDRI «0 = frisk»: en opptellingsfeil, en tenant som ikke kan leses (eller ikke rekkes innen tidsbudsjettet), en tom katalog og flere enn `maxTenants` gir `ok:false` (warning). En feilende tenant stopper ikke de øvrige.
+ *  - Aldri tenant-id og aldri rå feiltekst i melding eller logg: kun antall og SQLSTATE-koder (feilteksten kan sitere tenant-id eller rader).
+ *  - Opptellingen er stille (`quiet`): sjekken kjører hvert minutt og skal ikke legge en ny loggrad per tikk.
+ */
+export function stuckTasksAllTenantsCheck(pool: pg.Pool, options: StuckTasksAllTenantsOptions = {}): HealthCheck {
+  const maxTenants = options.maxTenants ?? STUCK_TASKS_MAX_TENANTS;
+  const budgetMs = options.budgetMs ?? STUCK_TASKS_READ_BUDGET_MS;
+  const clock = options.now ?? (() => Date.now());
+  const warn = (message: string): { ok: false; severity: Severity; message: string } => ({ ok: false, severity: "warning", message });
+  return {
+    name: "stuck_tasks",
+    runbook: "docs/runbooks/TIER1_RUNBOOKS.md#worker",
+    async run() {
+      let found: string[];
+      try {
+        // ÉN ekstra rad over grensen avslører at katalogen er lengre enn det vi vurderer.
+        found = await listAllTenantIds(pool, maxTenants + 1, { quiet: true });
+      } catch (err) {
+        console.warn(JSON.stringify({ msg: "watchdog_stuck_tasks_enumeration_failed", error_name: (err as Error).name }));
+        return warn("tenant-oppregning feilet - jobber med utløpt lease er ikke vurdert");
+      }
+      if (found.length === 0) return warn("ingen tenants funnet - jobber med utløpt lease er ikke vurdert");
+      const truncated = found.length > maxTenants;
+      const tenants = truncated ? found.slice(0, maxTenants) : found;
+      const startedAt = clock();
+      let stuck = 0;
+      let stuckTenants = 0;
+      let unread = 0;
+      const sqlstates = new Set<string>();
+      for (const tenantId of tenants) {
+        if (clock() - startedAt > budgetMs) {
+          unread += 1;
+          sqlstates.add("budget");
+          continue;
+        }
+        try {
+          const n = await withTenantTransaction(pool, tenantId, async (client) => {
+            const result = await client.query(`SELECT count(*)::int AS n FROM tasks WHERE status = 'running' AND lease_expires_at < now()`);
+            return (result.rows[0] as { n: number }).n;
+          });
+          if (n > 0) {
+            stuck += n;
+            stuckTenants += 1;
+          }
+        } catch (err) {
+          unread += 1;
+          const code = (err as { code?: unknown }).code;
+          sqlstates.add(typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : "error");
+        }
+      }
+      if (unread > 0) console.warn(JSON.stringify({ msg: "watchdog_stuck_tasks_tenant_read_failed", unread, tenants: tenants.length, reasons: [...sqlstates].sort() }));
+      const parts: string[] = [];
+      if (stuck > 0) {
+        const suffix = tenants.length > 1 || truncated ? ` (i ${stuckTenants} ${stuckTenants === 1 ? "tenant" : "tenants"})` : "";
+        parts.push(`${stuck} jobber med utløpt lease${suffix}`);
+      }
+      if (unread > 0) parts.push(`${unread} av ${tenants.length} tenants kunne ikke leses`);
+      if (truncated) parts.push(`flere enn ${maxTenants} tenants (de øvrige er ikke vurdert)`);
+      return parts.length === 0 ? { ok: true, severity: "info", message: "" } : warn(parts.join("; "));
     }
   };
 }
