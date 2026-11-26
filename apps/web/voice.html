@@ -242,6 +242,46 @@
   const statRoute = document.getElementById("stat-route");
   const statTurns = document.getElementById("stat-turns");
 
+  // @wpv2-begin tech-log
+  // WP-V2 (K7, JARVIS-098): teknisk logg = RINGBUFFER (maks 200 linjer, hver maks 400 tegn). Før ble hele loggen (opptil 20 000 tegn) skrevet
+  // om i DOM-en for HVER servermelding - også `tts_frame` (base64-lyd, 10-50 meldinger/s) - så loggen fylles av lyd-støy og siden brukte CPU på å
+  // tegne den. Nå: `tts_frame` logges KUN som en sammenslått teller (aldri payload), og DOM-en oppdateres høyst ca. 4 ganger i sekundet.
+  const TECH_LOG_MAX_LINES = 200;
+  const TECH_LOG_MAX_LINE_CHARS = 400;
+  const TECH_LOG_RENDER_MS = 250;
+  const techLines = [];
+  let techLogTimer = null;
+  function techLogRender() {
+    techLogTimer = null;
+    // Nyeste linje øverst (som før).
+    techLogEl.textContent = techLines.map((entry) => entry.text).reverse().join("\n");
+  }
+  function techLogSchedule() {
+    if (techLogTimer === null) techLogTimer = setTimeout(techLogRender, TECH_LOG_RENDER_MS);
+  }
+  function techLogPush(entry) {
+    techLines.push(entry);
+    if (techLines.length > TECH_LOG_MAX_LINES) techLines.splice(0, techLines.length - TECH_LOG_MAX_LINES);
+    techLogSchedule();
+  }
+  function techLog(line) {
+    techLogPush({ kind: "line", text: new Date().toLocaleTimeString("nb-NO") + "  " + String(line).slice(0, TECH_LOG_MAX_LINE_CHARS) });
+  }
+  // TTS-rammer: ÉN linje per sammenhengende serie («tts_frame ×N»), oppdatert på stedet - aldri base64-payload.
+  function techLogTtsFrame(approxBytes) {
+    const last = techLines[techLines.length - 1];
+    if (last && last.kind === "tts") {
+      last.count += 1;
+      last.bytes += approxBytes;
+      last.text = last.at + "  tts_frame ×" + last.count + " (≈" + last.bytes + " byte)";
+      techLogSchedule();
+      return;
+    }
+    const at = new Date().toLocaleTimeString("nb-NO");
+    techLogPush({ kind: "tts", at, count: 1, bytes: approxBytes, text: at + "  tts_frame ×1 (≈" + approxBytes + " byte)" });
+  }
+  // @wpv2-end tech-log
+
   // Samme dev-identitet/enhetsautentisering som apps/web/dashboard.html - se
   // D-131-kommentarene der for hvorfor feltene under kun er PÅSTANDER som
   // følger med et ekte enhetsbevis. Samme localStorage-nøkler for enhetsnøkkel
@@ -357,9 +397,6 @@
   }
   renderVoiceSettings();
 
-  function techLog(line) {
-    techLogEl.textContent = new Date().toLocaleTimeString("nb-NO") + "  " + line + "\n" + techLogEl.textContent.slice(0, 20000);
-  }
 
   function base64FromBuffer(buffer) {
     const bytes = new Uint8Array(buffer);
@@ -521,16 +558,23 @@
     tellShell({ jarvis: "voice-metrics", ms: ms === null ? undefined : ms, routed: m.routed || "" });
   }
 
+  // @wpv2-begin handle-server-message
   function handleServerMessage(msg) {
-    techLog(JSON.stringify(msg).slice(0, 300));
+    if (msg.type === "tts_frame") {
+      // WP-V2 (K7): aldri base64-payload i loggen - kun en teller (ca. byte = base64-tegn * 3/4).
+      techLogTtsFrame(typeof msg.data === "string" ? Math.floor(msg.data.length * 3 / 4) : 0);
+    } else {
+      techLog(JSON.stringify(msg).slice(0, 300));
+    }
     switch (msg.type) {
       case "started": {
         const authority = msg.memory_space_authority;
+        ttsGateSpeaking(); // ny sesjon: avspilling er åpen
         // D-390: avspillingsraten følger TTS-adapteren (piper 22 050, OpenAI 24 000, ElevenLabs 16 000) - før ble alt spilt som 24 kHz.
         const rate = Number(msg.tts_sample_rate) || 24000;
         if (rate !== ttsSampleRate) {
           ttsSampleRate = rate;
-          if (playbackCtx) { void playbackCtx.close(); playbackCtx = null; }
+          closePlaybackCtx();
         }
         techLog("tts sample rate = " + ttsSampleRate + " Hz");
         applyVoiceCapabilities(msg.voice_capabilities);
@@ -545,6 +589,7 @@
         break;
       }
       case "state": {
+        if (msg.state === "speaking") ttsGateSpeaking(); // WP-V2: ny tale åpner avspillingen igjen etter et avbrudd
         setState(msg.state);
         break;
       }
@@ -563,9 +608,12 @@
         if (msg.activity) { statusEl.textContent = msg.activity; appendTurn("tool", msg.activity); }
         break;
       case "tts_frame":
+        // WP-V2 (K7): etter `tts_cancelled` forkastes rammer til serveren melder en ny `speaking`-tilstand.
+        if (!ttsGateOpen) { noteDroppedTtsFrame("etter tts_cancelled"); break; }
         playTtsFrame(msg.data);
         break;
       case "tts_cancelled":
+        ttsGateCancelled();
         stopPlayback();
         break;
       case "metrics":
@@ -597,6 +645,7 @@
         break;
     }
   }
+  // @wpv2-end handle-server-message
 
   // --- Nivåvisning: orb + stolper drives av RMS fra de samme PCM-rammene som sendes (ingen ekstra lydgraf). ---
   let micLevel = 0;
@@ -700,6 +749,42 @@
   // --- TTS-avspilling: PCM16 mono, samplerate fra `started`-meldingen (D-390; standard 24 kHz = OpenAI "pcm"). ---
 
   let ttsSampleRate = 24000;
+
+  // @wpv2-begin tts-guard
+  // WP-V2 (K7): avspillingsvern.
+  //  - Etter `tts_cancelled` (barge-in) spilles INGEN `tts_frame` før serveren melder en ny `speaking`-tilstand (en forsinket/gammel ramme skal
+  //    aldri høres etter avbruddet).
+  //  - En ramme med oddetall byte (PCM16 = 2 byte per sample) eller ugyldig base64 FORKASTES kontrollert (teller) - `new Int16Array(...)` ville ellers
+  //    kastet RangeError og tatt med seg hele meldingen i den generelle «ugyldig melding»-fella.
+  //  - `stopConversation()` lukker AudioContext (før ble kun kildene stoppet; hver «Start samtale» la igjen en åpen kontekst, og nettlesere
+  //    tillater bare noen få).
+  let ttsGateOpen = true;
+  let ttsFramesDropped = 0;
+  function ttsGateCancelled() { ttsGateOpen = false; }
+  function ttsGateSpeaking() { ttsGateOpen = true; }
+  function decodeTtsFrame(base64Data) {
+    if (typeof base64Data !== "string" || base64Data.length === 0) return null;
+    let binary;
+    try { binary = atob(base64Data); } catch { return null; }
+    if (binary.length === 0 || binary.length % 2 !== 0) return null;
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Int16Array(bytes.buffer);
+  }
+  function noteDroppedTtsFrame(reason) {
+    ttsFramesDropped += 1;
+    if (ttsFramesDropped === 1 || ttsFramesDropped % 50 === 0) techLog("tts_frame forkastet (" + reason + "), totalt " + ttsFramesDropped);
+  }
+  function closePlaybackCtx() {
+    if (playbackCtx) {
+      try { void playbackCtx.close(); } catch { /* allerede lukket */ }
+      playbackCtx = null;
+    }
+    nextPlaybackTime = 0;
+  }
+  // @wpv2-end tts-guard
+
+  // @wpv2-begin playback
   function ensurePlaybackCtx() {
     if (!playbackCtx) {
       playbackCtx = new AudioContext({ sampleRate: ttsSampleRate });
@@ -709,11 +794,9 @@
   }
 
   function playTtsFrame(base64Data) {
+    const pcm16 = decodeTtsFrame(base64Data);
+    if (pcm16 === null) { noteDroppedTtsFrame("ugyldig base64 eller oddetall bytes"); return; }
     const ctx = ensurePlaybackCtx();
-    const binary = atob(base64Data);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const pcm16 = new Int16Array(bytes.buffer);
     const float32 = new Float32Array(pcm16.length);
     let sum = 0;
     for (let i = 0; i < pcm16.length; i++) { float32[i] = pcm16[i] / 0x8000; sum += float32[i] * float32[i]; }
@@ -750,6 +833,7 @@
     if (playbackCtx) nextPlaybackTime = playbackCtx.currentTime;
     ttsLevel = 0;
   }
+  // @wpv2-end playback
 
   // --- Tilkobling ---
 
@@ -820,9 +904,12 @@
     }
   }
 
+  // @wpv2-begin stop-conversation
   function stopConversation() {
     stopMicCapture();
     stopPlayback();
+    closePlaybackCtx(); // WP-V2 (K7): lukk AudioContext (før lå den åpen etter hver samtale)
+    ttsGateSpeaking();
     if (ws) { try { ws.close(); } catch { /* allerede lukket */ } ws = null; }
     setConnected(false);
     statePill.className = "pill state-idle";
@@ -832,6 +919,7 @@
     vsEls.test.disabled = true;
     tellShell({ jarvis: "voice-state", state: "offline" });
   }
+  // @wpv2-end stop-conversation
 
   bigBtn.addEventListener("click", () => {
     if (ws) { stopConversation(); statusEl.textContent = "Frakoblet."; }
