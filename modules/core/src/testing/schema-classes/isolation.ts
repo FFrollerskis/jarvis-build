@@ -387,8 +387,12 @@ export async function checkTableIsolation(env: IsolationEnv, table: string, fact
     if (tenantCol === undefined || !tenantCol.runtime.update) {
       state.updateMove = "denied_by_grant";
     } else {
-      const move = await attempt(asRuntime(A, (c) => c.query(`UPDATE ${q(table)} SET tenant_id = $1 WHERE tenant_id = $2`, [B, A])));
-      if (move.ok) state.updateMove = fail(`LEKKASJE: ${move.value.rowCount ?? 0} A-rad(er) ble flyttet til tenant B (WITH CHECK mangler)`);
+      // UTEN WHERE (og uten RETURNING): da kreves ikke SELECT-rettighet, så Postgres sjekker KUN UPDATE-policyens WITH CHECK mot den nye raden. Med en WHERE som leser
+      // kolonner legger Postgres i tillegg SELECT/ALL-policyenes USING på den nye raden, som ville skjult et manglende eller for vidt WITH CHECK. RLS begrenser uansett
+      // oppdateringen til A-radene (alt annet er usynlig), og transaksjonen rulles tilbake.
+      const move = await attempt(asRuntime(A, (c) => c.query(`UPDATE ${q(table)} SET tenant_id = $1`, [B])));
+      if (move.ok && (move.value.rowCount ?? 0) === 0) state.updateMove = fail("kontroll: flyttingen traff ingen A-rad");
+      else if (move.ok) state.updateMove = fail(`LEKKASJE: ${move.value.rowCount ?? 0} A-rad(er) ble flyttet til tenant B (WITH CHECK mangler eller er for vid)`);
       else if (move.kind === "grant") state.updateMove = "denied_by_grant";
       else if (move.kind !== "rls") state.updateMove = fail(`flytting avvist av noe annet enn RLS: ${move.message}`);
     }
