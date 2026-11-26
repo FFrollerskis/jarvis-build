@@ -176,15 +176,17 @@ describe("B: bussen mot ekte Postgres - glidende vindu med injisert klokke", () 
     await subscribe();
     const legacy = `vision:motion_detected:camera.inngang:${Math.floor(T0 / (10 * MIN))}`;
     const collide = episodeKeyFor("vision:motion_detected:camera.inngang:x:", T0 + MIN); // `camera.inngang:x` er en annen kilde
-    for (const key of [legacy, collide]) {
+    // en nøkkel med FEIL bredde på suffikset (12 siffer) som likevel sorterer INNENFOR tidsområdet: kun regulært uttrykk (13 siffer) holder den unna
+    const shortAnchor = `vision:motion_detected:camera.inngang:${String(T0 + MIN).slice(0, 12)}`;
+    expect(shortAnchor > episodeKeyFor("vision:motion_detected:camera.inngang:", T0 - 8 * MIN) && shortAnchor < episodeKeyFor("vision:motion_detected:camera.inngang:", T0 + 2 * MIN)).toBe(true);
+    for (const key of [legacy, collide, shortAnchor]) {
       await db.engine.evaluateCandidate(TENANT_A, "home", { domain: "vision", detection_key: key, priority: "normal", reason: "Bevegelse registrert" }, T0);
     }
     const out = await publish([obs("a", T0 + 2 * MIN)]);
-    expect(out).toMatchObject({ evaluated: 1, created: 1 }); // ny episode: ingen av de to er et anker for `camera.inngang`
+    expect(out).toMatchObject({ evaluated: 1, created: 1 }); // ny episode: ingen av de tre er et anker for `camera.inngang`
     const all = await keys();
     expect(all).toContain(episodeKeyFor("vision:motion_detected:camera.inngang:", T0 + 2 * MIN));
-    expect(all).toContain(legacy);
-    expect(all).toContain(collide);
+    for (const key of [legacy, collide, shortAnchor]) expect(all).toContain(key);
   });
 
   it("rekkefølge: leseren leverer NYESTE først, men bussen behandler eldste først - ankeret er den eldste hendelsen, og alt innenfor vinduet er én episode", async () => {
