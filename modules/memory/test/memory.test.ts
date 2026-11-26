@@ -391,6 +391,23 @@ describe("Del 3: hemmeligheter kommer aldri inn i minnet (siste forsvar)", () =>
     const after = (await adminPool.query("SELECT count(*)::int AS n FROM memory_items")).rows[0].n as number;
     expect(after).toBe(before);
   });
+
+  it("WP-SEC2 K9: skjulte, delte og JSON-formede hemmeligheter gir heller ingen minneuttrekk (containsSecret ser dem nå), og propose avviser dem", async () => {
+    const id = identity("personal");
+    const before = (await adminPool.query("SELECT count(*)::int AS n FROM memory_items")).rows[0].n as number;
+    const token = ["gh", "p_"].join("") + "Zx3Qk9Lm2Vb7Nc4Rt8Wy1Hd5Fs6Jg0Pa8TnX";
+    const zwsp = String.fromCodePoint(0x200b);
+    for (const text of [
+      `Husk at tokenet er ${token.slice(0, 7)}${zwsp}${token.slice(7)} for alltid.`,
+      `Husk tokenet: ${token.slice(0, 20)}\n${token.slice(20)}`,
+      `Husk konfigen {"api_key":"${"enkel" + "nokkel99"}"} for alltid.`,
+      `Husk Authorization: Basic ${"dXNlcjpwYXNzd29yZA" + "=="} for alltid.`
+    ]) expect(await writer.ingestText(id, TRUSTED, text), text).toEqual([]);
+    await expect(writer.propose(id, { subject: "api.token", content: `bruk ${token.slice(0, 7)}${zwsp}${token.slice(7)}` })).rejects.toThrow("invalid_proposal_secret");
+    await expect(writer.propose(id, { subject: "konfig", content: `{"password":"${"enkel" + "ord9"}"}` })).rejects.toThrow("invalid_proposal_secret");
+    const after = (await adminPool.query("SELECT count(*)::int AS n FROM memory_items")).rows[0].n as number;
+    expect(after).toBe(before);
+  });
 });
 
 describe("D-373: motstrid og duplikater oppdages også når uttrekket velger ulike emnenavn", () => {

@@ -89,6 +89,54 @@ describe("hemmeligheter i samtalen", () => {
   });
 });
 
+/**
+ * WP-SEC2 K9 (JARVIS-013 ende-til-ende): en eier-melding med en SKJULT, DELT eller JSON-formet hemmelighet lagres ikke i `messages`, gir ingen minneuttrekk, når ikke modellkallet (spion) og gir eier-merknaden (kun typen).
+ * D-369 («vanlig eier-tekst er trusted minnekilde») er IKKE endret og ikke med her. Tokens bygges sammensatt (ingen ferdige nøkkelformer i kilden).
+ */
+describe("WP-SEC2 K9: skjulte, delte og JSON-formede hemmeligheter i en eier-melding", () => {
+  const gh = ["gh", "p_"].join("") + "Zx3Qk9Lm2Vb7Nc4Rt8Wy1Hd5Fs6Jg0Pa8TnX";
+  const zwsp = String.fromCodePoint(0x200b);
+  const apiKeyValue = "enkel" + "nokkel99xyz";
+  const basicValue = "dXNlcjpwYXNzd29yZDEyMw" + "==";
+  const pemHeader = ["-----", "BEGIN ", "PRIVATE KEY", "-----"].join("");
+  const pemBody = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC";
+  const cases: Array<{ label: string; text: string; leaks: string[]; kind: string }> = [
+    { label: "nullbredde midt i GitHub-tokenet", text: `Her er tokenet mitt ${gh.slice(0, 9)}${zwsp}${gh.slice(9)} bruk det`, leaks: [gh.slice(10, 30), gh.slice(0, 9)], kind: "github_token" },
+    { label: "GitHub-tokenet delt over to linjer", text: `Tokenet:\n${gh.slice(0, 20)}\n${gh.slice(20)}\ner mitt`, leaks: [gh.slice(6, 20), gh.slice(20)], kind: "github_token" },
+    { label: "fullbredde-token", text: `bruk ${[...gh].map((c) => (c === "_" ? String.fromCodePoint(0xff3f) : String.fromCodePoint(c.charCodeAt(0) + 0xfee0))).join("")} nå`, leaks: [gh.slice(10, 30)], kind: "github_token" },
+    { label: "JSON-form api_key", text: `Konfigen min er {"api_key":"${apiKeyValue}","region":"eu"} ok?`, leaks: [apiKeyValue], kind: "named_secret" },
+    { label: "Authorization: Basic", text: `Jeg sender Authorization: Basic ${basicValue} til API-et`, leaks: [basicValue.slice(0, 18)], kind: "authorization_header" },
+    { label: "Cookie-header", text: `Cookie: session=${gh.slice(4, 24)}; theme=dark`, leaks: [gh.slice(4, 24)], kind: "cookie_header" },
+    { label: "privat nøkkel med nullbredde i BEGIN-linjen", text: `${pemHeader.slice(0, 8)}${zwsp}${pemHeader.slice(8)}\n${pemBody}\n-----END PRIVATE KEY-----`, leaks: [pemBody], kind: "private_key" }
+  ];
+  for (const c of cases) {
+    it(`${c.label}: ikke lagret, ikke i modellkallet, ingen minneuttrekk, eier får merknad (kun typen)`, async () => {
+      const { engine, savedMessages, modelInputs, ingests } = setup();
+      const reply = await engine.handle(identity, c.text);
+      const stored = savedMessages.join("\n");
+      const sent = modelInputs.join("\n");
+      for (const leak of c.leaks) {
+        expect(stored, `lagret: ${leak}`).not.toContain(leak);
+        expect(sent, `modell: ${leak}`).not.toContain(leak);
+        expect(reply.reply, `svar: ${leak}`).not.toContain(leak);
+      }
+      expect(stored).toContain(`[REDACTED:${c.kind}]`);
+      expect(sent).toContain(`[REDACTED:${c.kind}]`);
+      expect(ingests).toEqual([]);
+      expect(reply.reply).toContain(c.kind);
+      expect(reply.reply).toContain("Koble til");
+    });
+  }
+
+  it("en melding uten hemmeligheter (også med blanke tegn, emoji og JSON) går som før: lagret uendret, minnet får teksten", async () => {
+    const { engine, savedMessages, ingests } = setup();
+    const text = `Pappa bor i Oslo 👨‍👩‍👧 og {"token_count":12,"status":"ok"}`;
+    await engine.handle(identity, text);
+    expect(savedMessages.join("\n")).toContain(text);
+    expect(ingests).toEqual([{ text, pasted: false }]);
+  });
+});
+
 describe("looksLikePastedContent", () => {
   it("lang tekst, e-post-headere og store kodeblokker er innlimt; korte setninger er ikke", () => {
     expect(looksLikePastedContent("x".repeat(1501))).toBe(true);
