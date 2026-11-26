@@ -144,15 +144,29 @@ describe("FIX-8 (F8): ordinaltall + månedsnavn («den 1. mai») er ikke en setn
     expect(run(chars("Fristen for innsending av skjemaet er satt til den 15. Mai i år. Takk."))[0]).toBe("Fristen for innsending av skjemaet er satt til den 15. Mai i år.");
   });
 
-  it("IKKE en dato: år/store tall (2024.), null, vanlig ord etter tallet, og tall som er del av et ord/kode kuttes som før", () => {
-    expect(run(chars("Selskapet ble stiftet i det herrens år 2024. Mai ble en travel måned for alle."))[0]).toBe("Selskapet ble stiftet i det herrens år 2024.");
-    expect(run(chars("Du har akkurat nå fått til sammen 32. Mai kommer snart."))[0]).toBe("Du har akkurat nå fått til sammen 32."); // 32 er ikke en dag
-    expect(run(chars("Det står null på tavla akkurat nå 0. Mai kommer snart."))[0]).toBe("Det står null på tavla akkurat nå 0.");
-    expect(run(chars("Han endte på en delt tredjeplass, altså 3. Deretter gikk vi hjem."))[0]).toBe("Han endte på en delt tredjeplass, altså 3."); // ikke månedsnavn
-    expect(run(chars("Produktet heter modell A1. Mai er den neste måneden for oss alle."))[0]).toBe("Produktet heter modell A1."); // tall midt i en kode (selv om ordet etter ER en måned)
-    expect(run(chars("Nasjonaldagen vår feires den 1.\nmai er nasjonaldagen vår, sa han til alle."))[0]).toBe("Nasjonaldagen vår feires den 1."); // linjeskift er en setningsslutt, ikke et mellomrom mellom dato og måned
-    expect(run(chars("Fristen for innsending av skjemaet er den 1.     mai i år. Takk."))[0]).toBe("Fristen for innsending av skjemaet er den 1."); // mer enn tre mellomrom er ingen dato
-    expect(run(chars("Vi tok med oss 12. Marsipan er godt, sa han. Takk."))[0]).toBe("Vi tok med oss 12."); // «marsipan» er ikke «mars»
+  it("IKKE en dato: år/store tall (2024.), null, vanlig ord etter tallet, og tall som er del av et ord/kode kuttes som før (tegn for tegn OG som hel tekst)", () => {
+    const cases: Array<[string, string]> = [
+      ["Selskapet ble stiftet i det herrens år 2024. Mai ble en travel måned for alle.", "Selskapet ble stiftet i det herrens år 2024."],
+      ["Du har akkurat nå fått til sammen 32. Mai kommer snart.", "Du har akkurat nå fått til sammen 32."], // 32 er ikke en dag
+      ["Det står null på tavla akkurat nå 0. Mai kommer snart.", "Det står null på tavla akkurat nå 0."],
+      ["Han endte på en delt tredjeplass, altså 3. Deretter gikk vi hjem.", "Han endte på en delt tredjeplass, altså 3."], // ikke månedsnavn
+      ["Produktet heter modell A1. Mai er den neste måneden for oss alle.", "Produktet heter modell A1."], // tall midt i en kode (selv om ordet etter ER en måned)
+      ["Nasjonaldagen vår feires den 1.\nmai er nasjonaldagen vår, sa han til alle.", "Nasjonaldagen vår feires den 1."], // linjeskift er en setningsslutt
+      ["Fristen for innsending av skjemaet er den 1.     mai i år. Takk.", "Fristen for innsending av skjemaet er den 1."], // mer enn tre mellomrom er ingen dato
+      ["Vi tok med oss 12. Marsipan er godt, sa han. Takk.", "Vi tok med oss 12."] // «marsipan» er ikke «mars»
+    ];
+    for (const [text, expected] of cases) {
+      for (const input of [chars(text), text, [text.slice(0, 40), text.slice(40)]]) {
+        expect(run(input)[0]).toBe(expected);
+      }
+    }
+  });
+
+  it("linjeskift rett etter dagstallet sendes UMIDDELBART (ingen hold): «den 1.\n» uten mer tekst", () => {
+    const out: string[] = [];
+    const chunker = new SentenceChunker((c) => out.push(c));
+    chunker.push("Nasjonaldagen vår feires den 1.\n");
+    expect(out).toEqual(["Nasjonaldagen vår feires den 1."]);
   });
 
   it("vanlig tall + punktum + mellomrom + ny setning (ikke måned) sendes uten ekstra forsinkelse når neste ord er sett", () => {
