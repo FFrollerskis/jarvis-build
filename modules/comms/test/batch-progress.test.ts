@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { CommsWebhookService, WEBHOOK_SECRET_REFS, optOutHash, type WebhookRequest } from "../src/index.ts";
-import { TENANT_A } from "./support/harness.ts";
+import { TENANT_A, TENANT_B } from "./support/harness.ts";
 import { authorizeAll, startChain, type Chain } from "./support/chain.ts";
 
 /**
@@ -144,5 +144,17 @@ describe("FIX-2: hver retry tar neste porsjon (konvergerer)", () => {
     expect(log).toEqual({ msg: "comms_webhook_batch_over_cap", provider: "meta", events: 7, cap: 3, deferred: 4 });
     expect(JSON.stringify(warnings)).not.toContain("hemmelig-tekst-xyz");
     expect(JSON.stringify(warnings)).not.toContain(stopper);
+  });
+});
+
+describe("FIX-2: «kjent hendelsesnøkkel» er per tenant OG per leverandør (dedupe-nøkkelen er (tenant, leverandør, nøkkel))", () => {
+  it("samme nøkkel hos en annen leverandør er en annen hendelse: ikke kjent (ellers ville en ekte hendelse hoppes over som duplikat og aldri skrives); og den kan skrives der", async () => {
+    const key = `shared-key-${++mid}-${Math.random().toString(36).slice(2, 10)}`;
+    const base = { channel: "sms" as const, account_ref: "+4791000000", event_key: key, kind: "message" as const, sender_hash: null, sender_hint: null, identity_id: null, thread_ref: null, content_excerpt: "hei", content_sha256: null, provider_ts: null, ingest_id: "ingest-known-0001" };
+    expect((await chain.store.recordInbound(TENANT_A, "business", { ...base, provider: "twilio" }, 30)).inserted).toBe(true);
+    expect([...(await chain.store.knownEventKeys(TENANT_A, "business", "twilio", [key, "ukjent-nokkel"]))], "kontroll: nøkkelen er kjent hos leverandøren den ble skrevet for").toEqual([key]);
+    expect((await chain.store.knownEventKeys(TENANT_A, "business", "meta", [key])).size, "samme nøkkel hos en annen leverandør: ikke kjent").toBe(0);
+    expect((await chain.store.knownEventKeys(TENANT_B, "business", "twilio", [key])).size, "samme nøkkel og leverandør i en annen tenant: ikke kjent").toBe(0);
+    expect((await chain.store.recordInbound(TENANT_A, "business", { ...base, provider: "meta", channel: "whatsapp", account_ref: PHONE_ID }, 30)).inserted, "den andre leverandørens hendelse med samme nøkkel skrives").toBe(true);
   });
 });

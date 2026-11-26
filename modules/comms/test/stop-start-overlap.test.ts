@@ -12,6 +12,9 @@ import { authorizeAll, startChain, type Chain } from "./support/chain.ts";
  *
  * Alle matrisene bruker en GAMMEL avmelding (en rad uten registreringstid, som fra før migrasjon 141: alltid løftbar av en START) som utgangspunkt, så en START alene VILLE løftet den (kontrollrunden), og kun den samtidige STOP-en beskytter.
  * Marginen 0 = ren sekvensmodell: orakelet (uavhengig gjenspilling i sekvensrekkefølge) skal stemme der, uforandret fra før marginen.
+ *
+ * Fiks-runde 2 (FIX-1): matrisene over beviser kun den NEGATIVE veien (en START løfter ikke innenfor marginen). Den POSITIVE veien (en START løfter en EKTE STOP, med registreringstid, som er eldre enn marginen) hadde ingen test: en mutant som aldri
+ * lot en START løfte en STOP skrevet av ny kode overlevde hele suiten. Nå dekket av «positiv vei» under (raden gjøres gammel med `session_replication_role = replica`), og av registreringstidens opphav (`clock_timestamp()`, ikke transaksjonsstart).
  */
 const BASE = "https://hooks.example.com";
 const TWILIO_TOKEN = "fake-twilio-auth-token";
@@ -19,6 +22,7 @@ const SEED = Number(process.env["G1C_SEED"] ?? 20261126);
 const ROUNDS = Number(process.env["G1C_ROUNDS"] ?? 60);
 const MATRIX_ROUNDS = Number(process.env["G1C_MATRIX_ROUNDS"] ?? 60);
 const GAPS_MS = [0, 1, 2, 3, 5, 8, 12] as const;
+const LOCK_SEED = 7340464; // samme frø som `CommsStore.lockRecipient` (pinnet av `optout-concurrency.test.ts`)
 
 function mulberry32(a: number): () => number {
   return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
@@ -73,6 +77,21 @@ async function seedLegacyStop(tenant: string, num: string): Promise<void> {
     [tenant, `optout-legacy-${++legacyN}-${Math.random().toString(36).slice(2, 8)}`, hashOf(tenant, num), recipientHint("sms", num)]
   );
 }
+
+/** Gjør registreringstiden til mottakerens AKTIVE avmelding «gammel» (`seconds` sekunder siden). Kun superbruker kan omgå triggeren som ellers hindrer at registreringstiden går bakover (`session_replication_role = replica`). */
+async function ageStop(tenant: string, num: string, seconds: number): Promise<void> {
+  const admin = await chain.db.admin.connect();
+  try {
+    await admin.query("BEGIN");
+    await admin.query("SET LOCAL session_replication_role = replica");
+    await admin.query(
+      "UPDATE comms_recipient_opt_outs SET stop_db_at = clock_timestamp() - ($3::int * interval '1 second') WHERE tenant_id = $1 AND recipient_hash = $2 AND status = 'active'", [tenant, hashOf(tenant, num), seconds]
+    );
+    await admin.query("COMMIT");
+  } finally { admin.release(); }
+}
+const optOutRows = async (tenant: string, num: string): Promise<Array<{ status: string; stop_db_at: Date | null; stop_seq: string | null }>> =>
+  (await chain.db.admin.query("SELECT status, stop_db_at, stop_seq FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 ORDER BY created_at, opt_out_id", [tenant, hashOf(tenant, num)])).rows as Array<{ status: string; stop_db_at: Date | null; stop_seq: string | null }>;
 
 beforeAll(async () => {
   chain = await startChain("g1c2o", { JARVIS_COMMS_WEBHOOKS: "twilio,meta", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: BASE });
@@ -160,14 +179,8 @@ describe("FIX-3: STOP vinner innenfor tie-marginen (millisekund-overlapp, samtid
   it("en senere STOP som absorberes i en GAMMEL rad flytter registreringstiden fram (siste STOP teller): en START rett etter løfter ingenting", async () => {
     const n = chain.phone();
     expect((await svc.handle("twilio", smsFrom(n, "STOP"))).status).toBe(200);
-    // raden gjøres «gammel» (registrert for 30 s siden) med replica-rolle (kun superbruker kan omgå triggeren som ellers hindrer at tiden går bakover)
-    const admin = await chain.db.admin.connect();
-    try {
-      await admin.query("BEGIN");
-      await admin.query("SET LOCAL session_replication_role = replica");
-      await admin.query("UPDATE comms_recipient_opt_outs SET stop_db_at = clock_timestamp() - interval '30 seconds' WHERE tenant_id = $1 AND recipient_hash = $2", [TENANT_A, hashOf(TENANT_A, n)]);
-      await admin.query("COMMIT");
-    } finally { admin.release(); }
+    // raden gjøres «gammel» (registrert for 30 s siden)
+    await ageStop(TENANT_A, n, 30);
     const old = ((await chain.db.admin.query("SELECT stop_db_at FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2", [TENANT_A, hashOf(TENANT_A, n)])).rows[0] as { stop_db_at: Date }).stop_db_at;
     expect(Date.now() - old.getTime(), "kontroll: raden er gjort 30 s gammel").toBeGreaterThan(25_000);
     expect((await svc.handle("twilio", smsFrom(n, "STOP"))).body, "andre STOP absorberes i samme rad").toMatchObject({ events: { opt_outs: 1 } });
@@ -176,6 +189,60 @@ describe("FIX-3: STOP vinner innenfor tie-marginen (millisekund-overlapp, samtid
     await svc.handle("twilio", smsFrom(n, "START"));
     expect(await opted(TENANT_A, n), "START innenfor marginen etter den siste STOP-en løfter ingenting").toBe(true);
   });
+
+  it("POSITIV vei (produksjonsmargin): en START LØFTER en ekte STOP (med registreringstid) som er eldre enn marginen, men ikke innenfor den; en NY STOP etter løftingen er igjen beskyttet mot en START rett etter", async () => {
+    const n = chain.phone();
+    expect((await svc.handle("twilio", smsFrom(n, "STOP"))).status).toBe(200);
+    const fresh = await optOutRows(TENANT_A, n);
+    expect(fresh, "én aktiv rad").toHaveLength(1);
+    expect(fresh[0]!.stop_db_at, "en ekte STOP har registreringstid og -sekvens (ikke en gammel rad uten, som alltid kan løftes)").not.toBeNull();
+    expect(fresh[0]!.stop_seq).not.toBeNull();
+    await svc.handle("twilio", smsFrom(n, "START"));
+    expect(await opted(TENANT_A, n), "kontroll: en START innenfor marginen løfter ikke").toBe(true);
+
+    await ageStop(TENANT_A, n, 30);
+    const aged = (await optOutRows(TENANT_A, n))[0]!.stop_db_at as Date;
+    expect(Date.now() - aged.getTime(), "kontroll: registreringstiden er nå 30 s gammel").toBeGreaterThan(25_000);
+    await svc.handle("twilio", smsFrom(n, "START"));
+    expect(await opted(TENANT_A, n), "en START mer enn marginen etter en EKTE STOP løfter (ellers kan en mottaker som melder seg på igjen aldri bli fri)").toBe(false);
+    expect((await optOutRows(TENANT_A, n)).map((r) => r.status)).toEqual(["lifted"]);
+
+    // en NY STOP etter løftingen får en ny rad med fersk registreringstid: en START rett etter løfter ikke igjen
+    expect((await svc.handle("twilio", smsFrom(n, "STOP"))).status).toBe(200);
+    expect(await opted(TENANT_A, n)).toBe(true);
+    await svc.handle("twilio", smsFrom(n, "START"));
+    expect(await opted(TENANT_A, n), "ny STOP + START rett etter: beskyttet").toBe(true);
+    expect((await optOutRows(TENANT_A, n)).map((r) => r.status).sort(), "den gamle raden er opphevet og den nye er aktiv (testklokken står stille, så radrekkefølgen er ikke meningsfull)").toEqual(["active", "lifted"]);
+  }, 60_000);
+
+  it("registreringstiden er tidspunktet STOP-en fikk låsen (`clock_timestamp()`), ikke transaksjonsstart (`now()`): en STOP som sto i lås-kø lenger enn marginen er likevel beskyttet mot en START rett etter", async () => {
+    // Marginen settes til 1 s (kun denne testen); STOP-en holdes i lås-køen i 2,5 s. Med `now()` ville registreringstiden vært 2,5 s FØR den faktiske registreringen, og en START rett etter ville løftet.
+    const store = new CommsStore(chain.db.app, chain.now, { startTieMarginMs: 1000 });
+    const n = chain.phone();
+    const hash = hashOf(TENANT_A, n);
+    const holder = await chain.db.admin.connect();
+    let stop: Promise<unknown> | undefined;
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, $2))", [`comms-optout|${TENANT_A}|${hash}`, LOCK_SEED]);
+      stop = store.recordOptOut(TENANT_A, "business", { channel: "sms", recipient_hash: hash, recipient_hint: recipientHint("sms", n), source: "inbound_stop_keyword", recorded_by: "system" });
+      let waiting = 0;
+      for (let i = 0; i < 400 && waiting === 0; i++) {
+        waiting = ((await chain.db.admin.query("SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")).rows[0] as { n: number }).n;
+        if (waiting === 0) await sleep(10);
+      }
+      expect(waiting, "STOP-en står i lås-køen (transaksjonen er startet, låsen ikke tatt)").toBeGreaterThan(0);
+      await sleep(2500);
+      await holder.query("COMMIT");
+    } finally { holder.release(); }
+    await stop;
+    expect(await store.liftByStartKeyword(TENANT_A, { channel: "sms", recipient_hash: hash }), "START rett etter registreringen: innenfor marginen regnet fra registreringen, ikke fra transaksjonsstart").toBe(0);
+    expect(await store.isOptedOut(TENANT_A, hash)).toBe(true);
+    // kontroll: om marginen er passert fra den FAKTISKE registreringen løfter START (bekrefter at målingen over ikke bare er en START som aldri løfter)
+    await sleep(1200);
+    expect(await store.liftByStartKeyword(TENANT_A, { channel: "sms", recipient_hash: hash })).toBe(1);
+    expect(await store.isOptedOut(TENANT_A, hash)).toBe(false);
+  }, 60_000);
 
   for (const order of ["start_first", "stop_first"] as const) {
     it(`matrise (${order}): gap ${GAPS_MS.join("/")} ms, ${MATRIX_ROUNDS} runder hver, ekte samtidige tilkoblinger: 0 frie mottakere`, async () => {
