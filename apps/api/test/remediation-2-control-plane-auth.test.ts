@@ -13,7 +13,7 @@ import {
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { DeploymentService, IncidentService } from "@jarvis/incidents";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
-import { InMemoryDeviceRegistry, InMemoryNonceStore, InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { InMemoryDeviceRegistry, InMemoryNonceStore, InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
@@ -34,6 +34,8 @@ let appPool: pg.Pool;
 let baseUrl: string;
 let server: ReturnType<typeof createApiServer>;
 let devices: DeviceService;
+/** WP-P3 K4: samme objekt som serveren leser per forespørsel (`deps.incidents`) - H2-testene setter/fjerner `controls` her. */
+let incidentsDeps: NonNullable<NonNullable<Parameters<typeof createApiServer>[0]>["incidents"]>;
 const TENANT_A = "tenant-cp-a";
 const TENANT_B = "tenant-cp-b";
 
@@ -120,12 +122,13 @@ beforeAll(async () => {
   const sessionService = new SessionService(appPool);
   devices = new DeviceService(appPool);
   const grantService = new SessionGrantService(appPool);
+  incidentsDeps = { service: incidentService, deployments: new DeploymentService(appPool), gateway, infraGate, pool: appPool };
   server = createApiServer({
     identity: identityService, sessions: sessionService, devices, grants: grantService,
     channelAuthority: new ChannelSessionAuthority({ pool: appPool, devices, sessions: sessionService, identity: identityService, grants: grantService }),
     policy, worker, tasks: taskService,
     conversation: new ConversationEngine({ messages: new MessageStore(appPool), context: new ContextBuilder(appPool), gateway: modelGateway, tasks: taskService, worker, trace: new MemoryTraceSink() }),
-    incidents: { service: incidentService, deployments: new DeploymentService(appPool), gateway, infraGate, pool: appPool },
+    incidents: incidentsDeps,
     rateLimits: { perIpPerMinute: 100_000, authPerIpPerMinute: 100_000, perDevicePerMinute: 100_000 }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -438,6 +441,83 @@ describe("H: delt infra-modus via /infra-rutene (D-438)", () => {
     expect(status.body["infra_mode_in_sync"]).toBe(false);
     expect(JSON.stringify(status.body)).not.toMatch(/secret-db-host/);
     reset();
+  });
+});
+
+describe("H2: WP-P3 K4 (JARVIS-094) - /infra/status viser frosne connectorer fra det VARIGE registeret (alle, sortert), ikke en hardkodet liste eller prosess-lokal tilstand", () => {
+  const OWNER_AUTH = { owner_person_id: "person-cp-a" };
+  /** «En annen prosess» (worker/annen API-instans): egen prosess-lokal tilstand, men SAMME varige register (`owner_control_state`). */
+  const otherProcess = () => new OwnerControls(new KillSwitch(), appPool, OWNER_AUTH);
+  const viewer = () => new OwnerControls(new KillSwitch(), appPool, OWNER_AUTH);
+  const cleanup = async () => {
+    delete incidentsDeps.controls;
+    const writer = otherProcess();
+    for (const row of await writer.listFrozenConnectorsDurable()) await writer.unfreezeConnectorDurable(row.connector_id, "person-cp-a");
+  };
+  const statusOf = async () => post("/infra/status", { grant_token: await mintGrant(baseUrl, SUBJECT_A, keys["cp-dev-a"]!) });
+
+  it("frys gce + github (+ en tredje) i en ANNEN prosess: ALLE listes (sortert) selv om denne prosessen aldri har frosset dem lokalt; readable=true og helse-omfanget er `api_process`", async () => {
+    await cleanup();
+    const writer = otherProcess();
+    await writer.freezeConnectorDurable("github", "test", "person-cp-a");
+    await writer.freezeConnectorDurable("gce", "test", "person-cp-a");
+    await writer.freezeConnectorDurable("cloudflare", "test", "person-cp-a");
+    const mine = viewer();
+    incidentsDeps.controls = mine;
+    try {
+      expect(mine.isFrozen("gce")).toBe(false); // prosess-lokalt er ingenting frosset her - kun det varige registeret vet
+      const status = await statusOf();
+      expect(status.status).toBe(200);
+      expect(status.body["frozen_connectors"]).toEqual(["cloudflare", "gce", "github"]);
+      expect(status.body["frozen_connectors_readable"]).toBe(true);
+      expect(status.body["connector_health_scope"]).toBe("api_process");
+    } finally { await cleanup(); }
+  });
+
+  it("opphevet frys forsvinner, og ingen frosne gir en tom liste med readable=true", async () => {
+    await cleanup();
+    const writer = otherProcess();
+    await writer.freezeConnectorDurable("gce", "test", "person-cp-a");
+    incidentsDeps.controls = viewer();
+    try {
+      expect((await statusOf()).body["frozen_connectors"]).toEqual(["gce"]);
+      await writer.unfreezeConnectorDurable("gce", "person-cp-a");
+      const after = await statusOf();
+      expect(after.body["frozen_connectors"]).toEqual([]);
+      expect(after.body["frozen_connectors_readable"]).toBe(true);
+    } finally { await cleanup(); }
+  });
+
+  it("svaret er sortert uansett hvilken rekkefølge kilden gir (stabil, sammenlignbar utskrift)", async () => {
+    await cleanup();
+    incidentsDeps.controls = { listFrozenConnectorsDurable: async () => [{ connector_id: "gce" }, { connector_id: "github" }, { connector_id: "cloudflare" }] } as unknown as OwnerControls;
+    try {
+      const status = await statusOf();
+      expect(status.body["frozen_connectors"]).toEqual(["cloudflare", "gce", "github"]);
+      expect(status.body["frozen_connectors_readable"]).toBe(true);
+    } finally { await cleanup(); }
+  });
+
+  it("lesefeil på det varige registeret: frozen_connectors_readable=false og [] - uten å lekke feilteksten (som infra_mode_shared_readable)", async () => {
+    await cleanup();
+    incidentsDeps.controls = { listFrozenConnectorsDurable: async () => { throw new Error("secret-db-host:5432 refused"); }, isFrozen: () => true } as unknown as OwnerControls;
+    try {
+      const status = await statusOf();
+      expect(status.status).toBe(200);
+      expect(status.body["frozen_connectors_readable"]).toBe(false);
+      expect(status.body["frozen_connectors"]).toEqual([]);
+      expect(JSON.stringify(status.body)).not.toMatch(/secret-db-host|refused/);
+      expect(status.body["connector_health_scope"]).toBe("api_process");
+    } finally { await cleanup(); }
+  });
+
+  it("uten `controls`: frozen_connectors_readable=false og [] (vi VET ikke, vi påstår ikke «ingen frosne»)", async () => {
+    await cleanup();
+    const status = await statusOf();
+    expect(status.status).toBe(200);
+    expect(status.body["frozen_connectors"]).toEqual([]);
+    expect(status.body["frozen_connectors_readable"]).toBe(false);
+    expect(status.body["connector_health_scope"]).toBe("api_process");
   });
 });
 

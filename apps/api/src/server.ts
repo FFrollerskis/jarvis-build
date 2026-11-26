@@ -2532,6 +2532,17 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       const authed = await authedRequest(req, res, deps, []);
       if (!authed) return;
       const infra = await infraGate.statusDurable();
+      // WP-P3 K4 (JARVIS-094): frosne connectorer leses fra det VARIGE registeret (alle, sortert) - ikke en hardkodet liste og ikke prosess-lokal tilstand. Lesefeil eller ingen `controls` => readable=false og tom liste; feilteksten lekker aldri.
+      let frozen: string[] = [];
+      let frozenReadable = false;
+      if (controls) {
+        try {
+          frozen = (await controls.listFrozenConnectorsDurable()).map((r) => r.connector_id).sort();
+          frozenReadable = true;
+        } catch {
+          frozen = [];
+        }
+      }
       return json(res, 200, {
         infra_mode: infra.state,
         infra_mode_local: infra.local,
@@ -2540,7 +2551,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         // false = en innstramming gjelder KUN denne prosessen (f.eks. en pause som ikke fikk lagret) eller den delte modusen kan ikke leses: workeren er da ikke nødvendigvis stanset.
         infra_mode_in_sync: infra.in_sync,
         connector_health: Object.fromEntries(gateway.health),
-        frozen_connectors: controls ? ["github"].filter((id) => controls.isFrozen(id)) : []
+        // gateway.health er PER PROSESS (denne API-prosessen): workerens helse sees ikke her (JARVIS-025-resten er DEFERRED).
+        connector_health_scope: "api_process",
+        frozen_connectors: frozen,
+        frozen_connectors_readable: frozenReadable
       });
     }
   }
