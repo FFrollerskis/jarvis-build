@@ -122,11 +122,20 @@ export function optionalText(record: Record<string, unknown>, field: string, ctx
   return value.length === 0 ? null : value.slice(0, max);
 }
 
+/** Kontrolltegn (C0 og DEL) uten kontrolltegn i et regulært uttrykk (`no-control-regex`). */
+function hasControlChar(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
 /** Adgangstoken fra en token-utveksling: ikke-tom streng uten mellomrom/kontrolltegn (aldri «undefined» som `Bearer`-verdi). Token-endepunkter er IKKE pengemutasjoner (typet feil, aldri ukjent utfall). */
 export function expectAccessToken(record: Record<string, unknown>, field: string, ctx: ResponseContext): string {
   const value = record[field];
   if (missing(value)) return invalid(ctx, `${field}_missing`);
   if (value === "") return invalid(ctx, `${field}_empty`);
   if (typeof value !== "string") return invalid(ctx, `${field}_wrong_type`);
-  return value.length <= 8_192 && /^[^\s\x00-\x1f\x7f]+$/.test(value) ? value : invalid(ctx, `${field}_invalid`);
+  return value.length <= 8_192 && /^\S+$/.test(value) && !hasControlChar(value) ? value : invalid(ctx, `${field}_invalid`);
 }
