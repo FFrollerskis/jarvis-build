@@ -101,6 +101,68 @@ describe("forkortelser kuttes ikke midt i", () => {
   });
 });
 
+describe("FIX-8 (F8): ordinaltall + månedsnavn («den 1. mai») er ikke en setningsslutt (norsk)", () => {
+  it("«den 1. mai», «17. mai», «31. desember»: én setning (hele, tegn for tegn og i større deler)", () => {
+    for (const [text, expected] of [
+      ["Nasjonaldagen vår feires den 1. mai hvert år. Neste setning følger.", "Nasjonaldagen vår feires den 1. mai hvert år."],
+      ["Folk samles i byen på 17. mai med flagg i hånden. Alle koser seg.", "Folk samles i byen på 17. mai med flagg i hånden."],
+      ["Årets siste dag er alltid den 31. desember. Så starter et nytt år.", "Årets siste dag er alltid den 31. desember."],
+      ["Flyet lander mandag 3. mars klokka 14:30 i Oslo. Takk for tålmodigheten.", "Flyet lander mandag 3. mars klokka 14:30 i Oslo."]
+    ] as const) {
+      for (const input of [text, chars(text), [text.slice(0, 30), text.slice(30)], [text.slice(0, 33), text.slice(33, 40), text.slice(40)]]) {
+        expect(run(input)[0]).toBe(expected);
+      }
+    }
+  });
+
+  it("holdes til månedsnavnet er sett: en tekst som slutter på «1. » eller «1. m» sender ingenting ennå (flush sender alt), og «1. mars»/«1. mai» holdes til ordet er ferdig", () => {
+    const out: string[] = [];
+    const chunker = new SentenceChunker((c) => out.push(c));
+    chunker.push("Nasjonaldagen vår feires den 1. ");
+    expect(out).toEqual([]); // ordet etter «1.» er ikke sett
+    chunker.push("m");
+    expect(out).toEqual([]); // «m» kan bli «mai»/«mars»
+    chunker.push("ai");
+    expect(out).toEqual([]); // «mai» kan ennå bli et lengre ord - ordet er ikke avsluttet
+    chunker.push(" hvert år. Neste.");
+    expect(out).toEqual(["Nasjonaldagen vår feires den 1. mai hvert år."]);
+    chunker.flush();
+    expect(out).toEqual(["Nasjonaldagen vår feires den 1. mai hvert år.", "Neste."]);
+
+    const flushed: string[] = [];
+    const early = new SentenceChunker((c) => flushed.push(c));
+    early.push("Nasjonaldagen vår feires den 1. ");
+    early.flush(); // slutt på generering: holdt tekst går aldri tapt
+    expect(flushed).toEqual(["Nasjonaldagen vår feires den 1."]);
+  });
+
+  it("alle tolv månedsnavn, og både små og store forbokstaver etter tall (Mai/mai)", () => {
+    for (const month of ["januar", "februar", "mars", "april", "mai", "juni", "juli", "august", "september", "oktober", "november", "desember"]) {
+      const text = `Fristen for innsending av skjemaet er satt til den 15. ${month} i år. Takk.`;
+      expect(run(chars(text))[0]).toBe(`Fristen for innsending av skjemaet er satt til den 15. ${month} i år.`);
+    }
+    expect(run(chars("Fristen for innsending av skjemaet er satt til den 15. Mai i år. Takk."))[0]).toBe("Fristen for innsending av skjemaet er satt til den 15. Mai i år.");
+  });
+
+  it("IKKE en dato: år/store tall (2024.), null, vanlig ord etter tallet, og tall som er del av et ord/kode kuttes som før", () => {
+    expect(run(chars("Selskapet ble stiftet i det herrens år 2024. Mai ble en travel måned for alle."))[0]).toBe("Selskapet ble stiftet i det herrens år 2024.");
+    expect(run(chars("Du har akkurat nå fått til sammen 32. Mai kommer snart."))[0]).toBe("Du har akkurat nå fått til sammen 32."); // 32 er ikke en dag
+    expect(run(chars("Det står null på tavla akkurat nå 0. Mai kommer snart."))[0]).toBe("Det står null på tavla akkurat nå 0.");
+    expect(run(chars("Han endte på en delt tredjeplass, altså 3. Deretter gikk vi hjem."))[0]).toBe("Han endte på en delt tredjeplass, altså 3."); // ikke månedsnavn
+    expect(run(chars("Produktet heter modell A1. Mai er den neste måneden for oss alle."))[0]).toBe("Produktet heter modell A1."); // tall midt i en kode (selv om ordet etter ER en måned)
+    expect(run(chars("Nasjonaldagen vår feires den 1.\nmai er nasjonaldagen vår, sa han til alle."))[0]).toBe("Nasjonaldagen vår feires den 1."); // linjeskift er en setningsslutt, ikke et mellomrom mellom dato og måned
+    expect(run(chars("Fristen for innsending av skjemaet er den 1.     mai i år. Takk."))[0]).toBe("Fristen for innsending av skjemaet er den 1."); // mer enn tre mellomrom er ingen dato
+    expect(run(chars("Vi tok med oss 12. Marsipan er godt, sa han. Takk."))[0]).toBe("Vi tok med oss 12."); // «marsipan» er ikke «mars»
+  });
+
+  it("vanlig tall + punktum + mellomrom + ny setning (ikke måned) sendes uten ekstra forsinkelse når neste ord er sett", () => {
+    const out: string[] = [];
+    const chunker = new SentenceChunker((c) => out.push(c));
+    chunker.push("Du har akkurat nå fått til sammen 3. Deretter");
+    expect(out).toEqual(["Du har akkurat nå fått til sammen 3."]); // «deretter» er ikke et månedsnavn: ingen hold
+  });
+});
+
 describe("hard maks chunk-lengde (OpenAI-TTS tar 4 096 tegn)", () => {
   it("tekst uten mellomrom og grenser: hver chunk <= hardMaxChars, og ingen tekst går tapt", () => {
     const text = "x".repeat(10_000);

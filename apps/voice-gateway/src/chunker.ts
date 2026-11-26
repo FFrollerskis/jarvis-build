@@ -41,6 +41,26 @@ const DOTTED_PREFIXES: ReadonlySet<string> = (() => {
   return prefixes;
 })();
 
+/**
+ * FIX-8 (F8): månedsnavn (bokmål/nynorsk, små bokstaver). «den 1. mai» er et ORDINALTALL + måned (norsk skriver dagen som «1.»), ikke slutten på en
+ * setning - før kuttet chunkeren etter «1.» og TTS leste «den første» som en egen setning med fall i tonen.
+ */
+const MONTH_NAMES: ReadonlySet<string> = new Set([
+  "januar", "februar", "mars", "april", "mai", "juni", "juli", "august", "september", "oktober", "november", "desember"
+]);
+/** Alle ikke-tomme forstavelser av månedsnavn («m», «ma», «mar», «mars», «mai»): et ord på slutten av bufferen som kan BLI en måned holdes til det er ferdig. */
+const MONTH_PREFIXES: ReadonlySet<string> = (() => {
+  const prefixes = new Set<string>();
+  for (const month of MONTH_NAMES) {
+    for (let n = 1; n <= month.length; n++) {
+      prefixes.add(month.slice(0, n));
+    }
+  }
+  return prefixes;
+})();
+/** Høyst så mange mellomrom mellom «1.» og månedsnavnet (en lengre rekke er aldri en dato - og holder skanningen lineær). */
+const MAX_DATE_GAP = 3;
+
 /** Maks antall tegn `looksLikeUrl` ser bakover (ett «ord» uten mellomrom). */
 const MAX_URL_SCAN = 120;
 
@@ -174,12 +194,61 @@ export class SentenceChunker {
       return isDigit(prev) || DOTTED_PREFIXES.has(token) || (token.length === 1 && isLetter(token)) || this.looksLikeUrl(buffer, i) ? "hold" : "cut";
     }
     if (isWhitespace(next)) {
+      // FIX-8: «den 1. mai» - et dagstall (1-31) + punktum + månedsnavn er IKKE en setningsslutt. Avgjøres av ordet etter (holdes til det er ferdig).
+      if (isDigit(prev)) {
+        const date = this.dateOrdinalVerdict(buffer, i);
+        if (date !== null) {
+          return date;
+        }
+      }
       return "cut"; // (også etter en adresse: «se https://x.no/side. Neste»)
     }
     if (isDigit(next) || isLetter(next)) {
       return "skip"; // 18.30, 3.5, f.eks, t.d, nrk.no - punktum rett foran tall/bokstav er ikke en setningsslutt
     }
     return "cut";
+  }
+
+  /**
+   * FIX-8: `buffer[i]` er et punktum rett etter et siffer og foran mellomrom. `"skip"` = «dagstall. måned» (ikke en grense), `"hold"` = ordet etter er ikke
+   * ferdig og kan bli et månedsnavn (vent på neste token), `null` = ikke en dato (vanlig setningsslutt). Alt er avgrenset (høyst 2 siffer, 3 mellomrom,
+   * et ord som ikke lenger er en månedsforstavelse avgjør straks), så skanningen forblir lineær.
+   */
+  private dateOrdinalVerdict(buffer: string, i: number): Verdict | null {
+    // Dagstallet: 1-2 siffer, og tegnet foran er ikke en bokstav («A1.» er en kode, «2024.» et år - ingen av dem er en dag). Skanner høyst 3 siffer.
+    let start = i;
+    while (start > 0 && isDigit(buffer[start - 1]) && i - start < 3) {
+      start -= 1;
+    }
+    const digits = i - start;
+    const before = start > 0 ? buffer[start - 1] : undefined;
+    if (digits < 1 || digits > 2 || isLetter(before)) {
+      return null;
+    }
+    const day = Number(buffer.slice(start, i));
+    if (day < 1 || day > 31) {
+      return null;
+    }
+    // Mellomrommet (kun mellomrom/tab - et linjeskift er en setningsslutt) og ordet etter.
+    let j = i + 1;
+    while (j < buffer.length && (buffer[j] === " " || buffer[j] === "\t") && j - i <= MAX_DATE_GAP) {
+      j += 1;
+    }
+    if (j - i - 1 > MAX_DATE_GAP || (j < buffer.length && isWhitespace(buffer[j]))) {
+      return null;
+    }
+    if (j >= buffer.length) {
+      return "hold"; // kun mellomrom hittil: ordet er ikke sett
+    }
+    let k = j;
+    while (k < buffer.length && isLetter(buffer[k])) {
+      k += 1;
+    }
+    const word = buffer.slice(j, k).toLowerCase();
+    if (k >= buffer.length) {
+      return MONTH_PREFIXES.has(word) ? "hold" : null; // ordet kan fortsette: «ma» -> «mai»/«mars», men «de» (-> «deretter») avgjøres straks
+    }
+    return MONTH_NAMES.has(word) ? "skip" : null;
   }
 
   /** Er «ordet» (tegn uten mellomrom) som ender på `i` en adresse (`…://…`, `www.…`) eller en e-postadresse (`…@…`)? Skanner høyst `MAX_URL_SCAN` tegn bakover. */
