@@ -201,14 +201,14 @@ describe("B: fysiske/kritiske handlinger (lås, alarm, lys, klima, bil, critical
     ["home-assistant", "critical_lock"], ["home-assistant", "critical_alarm"], ["home-assistant", "critical_cover"], ["home-assistant", "critical_valve"], ["home-assistant", "critical_switch"],
     ["home-assistant", "critical_scene"], ["home-assistant", "critical_script"], ["home-assistant", "critical_climate_mode"],
     ["car", "lock"], ["car", "unlock"], ["car", "climate_set"], ["car", "charge_set"],
-    // allowlist-tankegang: en NY/ukjent handling i de fysiske navnerommene er fysisk til noen bevisst legger den på lese-listen
+    // en NY/ukjent handling i de fysiske navnerommene er fysisk (ingen allowlist som kan åpnes ved en feil)
     ["home-assistant", "open_garage_v2"], ["car", "honk"]
   ];
 
-  it("regelen er ren og fail-closed: kun kjente LESE-handlinger i `home-assistant`/`car` er bindbare; alt annet der (også ukjent/ugyldig) er fysisk; andre navnerom er uendret", () => {
+  it("regelen er ren og fail-closed: ENHVER handling i `home-assistant`/`car` er fysisk (FIX-9: også lese-handlinger; ugyldig inndata likeså); andre navnerom er uendret", () => {
     for (const [tool, action] of PHYSICAL) expect(autonomyActionBlocker(tool, action), `${tool}.${action}`).toEqual({ code: "physical_action_not_bindable", tool_id: tool, action });
-    for (const read of ["list_states", "read_state", "read_state_detail", "read_states_detail", "read_critical_state"]) expect(autonomyActionBlocker("home-assistant", read), read).toBeNull();
-    expect(autonomyActionBlocker("car", "read_vehicle_state")).toBeNull();
+    for (const read of ["list_states", "read_state", "read_state_detail", "read_states_detail", "read_critical_state"]) expect(autonomyActionBlocker("home-assistant", read), read).toEqual({ code: "physical_action_not_bindable", tool_id: "home-assistant", action: read });
+    expect(autonomyActionBlocker("car", "read_vehicle_state")).toEqual({ code: "physical_action_not_bindable", tool_id: "car", action: "read_vehicle_state" });
     for (const other of [["telegram", "notify"], ["test_gate", "close"], ["email", "send"], ["github", "merge_pr"], ["docker", "stop_container"]]) expect(autonomyActionBlocker(other[0], other[1]), other.join(".")).toBeNull();
     // ugyldig inndata er alltid nektet (aldri en stille «bindbar»)
     for (const bad of [[undefined, "x"], ["home-assistant", undefined], ["", "x"], ["x", ""], [null, null], [5, "x"]]) expect(autonomyActionBlocker(bad[0], bad[1]), String(bad)).not.toBeNull();
@@ -217,13 +217,13 @@ describe("B: fysiske/kritiske handlinger (lås, alarm, lys, klima, bil, critical
     expect(autonomyActionBlocker("Home-Assistant", "lock_set")).toBeNull();
   });
 
-  it("bind-tid: ALLE fysiske/kritiske handlinger avvises med stabil årsakskode og ingenting lagres; lese-handlinger er ikke bindbare (default-deny) og andre navnerom kun når definisjonen sier det", async () => {
+  it("bind-tid: ALLE fysiske/kritiske handlinger avvises med stabil årsakskode og ingenting lagres; også lese-handlinger i de fysiske navnerommene (FIX-9), og andre navnerom er bindbare kun når definisjonen sier det", async () => {
     for (const [tool, action] of PHYSICAL) {
       await expect(bind(tool, action, { entity: "x" }), `${tool}.${action}`).rejects.toMatchObject({ name: "SituationActActionForbiddenError", message: `situation_autonomy_action_forbidden:physical_action_not_bindable:${tool}.${action}` });
     }
     expect(await db.engine.listAutonomyPolicies(TENANT_A, "home")).toEqual([]);
-    // WP-G4b K1 (D-484): navnerom-vakten slipper kun kjente lese-handlinger forbi (testet rent over), men bindbarhet er nå DEFAULT-DENY: en lesing er ikke en handling og ingen definisjon erklærer den bindbar.
-    await expect(bind("home-assistant", "read_state", { entity: "lock.x" })).rejects.toMatchObject({ name: "SituationActActionForbiddenError", message: "situation_autonomy_action_forbidden:action_not_bindable:home-assistant.read_state" });
+    // WP-G4b fiks-runde 1 (FIX-9): ENHVER handling i et fysisk navnerom er nektet av navnerom-vakten, også en lesing (en lesing er aldri en autonom ACT og kan ikke åpnes av en definisjon).
+    await expect(bind("home-assistant", "read_state", { entity: "lock.x" })).rejects.toMatchObject({ name: "SituationActActionForbiddenError", message: "situation_autonomy_action_forbidden:physical_action_not_bindable:home-assistant.read_state" });
     expect(await db.engine.listAutonomyPolicies(TENANT_A, "home")).toEqual([]);
     // Et annet navnerom er bindbart KUN fordi definisjonen erklærer det (`test_actuator.close` i G4Db-gatewayen).
     await bind("test_actuator", "close", { situation_id: "{{situation_id}}" });
