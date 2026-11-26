@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
   CAR_CRITICAL_OPS, CAR_READ_ACTION, CarTransport, HOME_CRITICAL_OPS, HOME_CRITICAL_READ_ACTION, HomeAssistantCriticalTransport, PersonalActionJournal, RECONCILE_FAILED_MIN_AGE_MS, actionRequestDigest,
   carCriticalToolDefinitions, executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, parseCarTargets, personalActionIndex, reconcilePersonalAction,
-  type PersonalActionExecutorDeps, type PersonalActionReconcileDeps, type SecretProvider, type ToolGateway
+  type CriticalOpSpec, type PersonalActionExecutorDeps, type PersonalActionReconcileDeps, type SecretProvider, type ToolGateway
 } from "../src/index.ts";
 import { FakeCarAdapter } from "./support/fake-car-adapter.ts";
 import { FakeHomeAssistant } from "./support/fake-home-assistant.ts";
@@ -120,6 +121,8 @@ describe("A: applied - den ønskede sluttilstanden er bevist av en ny lesing", (
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ decision: "ALLOW", reason: "postcondition_observed", tool_id: "home-assistant", action: "critical_lock", payload: { result: "applied", basis: "postcondition_observed", attempts: 1, domain: "home", target_ref: "lock.front_door", source: "owner_route" } });
     expect(JSON.stringify(rows[0]).toLowerCase()).not.toMatch(/token|password|code|secret/);
+    // fiks-runde 1 (M54): NØYAKTIG disse nøklene - ingen parametre, observert tilstand eller annet innhold i revisjonen
+    expect(rows[0]!.payload).toEqual({ action_id: id, domain: "home", target_ref: "lock.front_door", result: "applied", basis: "postcondition_observed", attempts: 1, source: "owner_route" });
   });
 
   it("en replay med SAMME idempotensnøkkel gir nå det lagrede utfallet `SUCCESS` uten å sende noe (avstemmingen er ikke en bakdør for retry - den gjør kun at nøkkelens svar blir sant)", async () => {
@@ -315,7 +318,11 @@ describe("C: det avstemmingen IKKE påstår", () => {
     await base("pers-act-aaaaaaaa-0000-0000-0000-000000000002", { ...row, space: "home" });
     await base("pers-act-aaaaaaaa-0000-0000-0000-000000000003", { ...row, status: "requested" });
     await base("pers-act-aaaaaaaa-0000-0000-0000-000000000004", { ...row, domain: "car", tool: "car", action: "lock", target: "bil" });
-    for (const bad of ["", "nope", "pers-act-", "pers-act-AAAAAAAA-0000-0000-0000-000000000001", "pers-act-aaaaaaaa-0000-0000-0000-00000000000g", `pers-act-aaaaaaaa-0000-0000-0000-000000000001' OR 1=1 --`]) {
+    for (const bad of [
+      "", "nope", "pers-act-", "pers-act-AAAAAAAA-0000-0000-0000-000000000001", "pers-act-aaaaaaaa-0000-0000-0000-00000000000g", `pers-act-aaaaaaaa-0000-0000-0000-000000000001' OR 1=1 --`,
+      // fiks-runde 1 (X02): ankeret i begynnelsen - en gyldig id med noe FORAN (eller en kapslet id) er aldri en id
+      "xpers-act-aaaaaaaa-0000-0000-0000-000000000001", " pers-act-aaaaaaaa-0000-0000-0000-000000000001", "../pers-act-aaaaaaaa-0000-0000-0000-000000000001", "pers-act-pers-act-aaaaaaaa-0000-0000-0000-000000000001", "\npers-act-aaaaaaaa-0000-0000-0000-000000000001"
+    ]) {
       await expect(rig.reconcile(bad), JSON.stringify(bad)).rejects.toThrow("personal_action_reconcile_id_invalid");
     }
     await expect(rig.reconcile("pers-act-ffffffff-0000-0000-0000-000000000000")).rejects.toThrow("personal_action_not_found");
@@ -476,5 +483,205 @@ describe("E: idempotens og samtidighet", () => {
     expect(ha.serviceCalls()).toHaveLength(commands);
     readOnly(rig);
     expect(rig.gatewayCalls.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+/** Samme rigg, men gatewayen er en stub som gir NØYAKTIG det testen bestemmer (kun lese-handlingen kan nås): for å styre hva lesingen gir (fiendtlig årsak, uleselig tilstand). */
+function reconcileVia(rig: Rig, result: unknown, id: string, who: IdentityContext = owner): ReturnType<typeof reconcilePersonalAction> {
+  const gateway = { get: (toolId: string, action: string) => rig.h.gateway.get(toolId, action), execute: async () => result } as unknown as Pick<ToolGateway, "execute" | "get">;
+  return reconcilePersonalAction({ executor: { ...rig.executor, gateway }, domains: new Map([["home", { toolId: "home-assistant", readAction: HOME_CRITICAL_READ_ACTION }]]), now: LATER }, who, { action_id: id });
+}
+
+describe("F: fiks-runde 1 (LOW-1) - failed krever målt klokkesamsvar, ingen nyere handling og en lagret før-tilstand", () => {
+  it("HA-klokken 5 min BAK Jarvis og en endring som ser eldre ut enn forespørselen (kommandoen kjørte, en tredjepart reverterte): en MÅLT skjevhet (HTTP-`Date`) gir unknown `ha_clock_skew` - raden står og forsøket telles; målingen lagres som et tall", async () => {
+    const rig = homeRig();
+    ha.dateSkewMs = -5 * 60_000;
+    const id = await unknownLock(rig, ago(210_000)); // 90 s etter forespørselen på HAs klokke = 210 s FØR forespørselen på Jarvis' (HA 300 s bak)
+    const out = await rig.reconcile(id);
+    expect(out).toMatchObject({ resolution: "unknown", basis: "ha_clock_skew", action: { status: "outcome_unknown", reconcile_attempts: 1, reconcile_basis: "ha_clock_skew" } });
+    expect(Math.abs(Number(out.observed?.["clock_skew_ms"]) + 300_000)).toBeLessThanOrEqual(2_000);
+    expect(Math.abs(Number((out.action.reconciled_state as Record<string, JsonValue>)["clock_skew_ms"]) + 300_000)).toBeLessThanOrEqual(2_000);
+    ha.dateSkewMs = 5 * 60_000; // HA FREM: samme avvisning (begge retninger)
+    expect(await rig.reconcile(id)).toMatchObject({ resolution: "unknown", basis: "ha_clock_skew", action: { reconcile_attempts: 2 } });
+    readOnly(rig);
+  });
+
+  it("klokkene i takt (innen grensen) eller en HA-tjener uten `Date`: som før - uendret tilstand med gammel `last_changed` gir failed", async () => {
+    const rig = homeRig();
+    ha.dateSkewMs = -10_000; // 10 s bak: innen grensen på 30 s
+    const inTolerance = await unknownLock(rig, ago(2 * HOUR));
+    expect(await rig.reconcile(inTolerance)).toMatchObject({ resolution: "failed", basis: "no_state_change_since_request" });
+    ha.dateSkewMs = null;
+    ha.omitDate = true;
+    const noDate = await unknownLock(rig, ago(2 * HOUR));
+    const out = await rig.reconcile(noDate);
+    expect(out).toMatchObject({ resolution: "failed", basis: "no_state_change_since_request" });
+    expect(out.observed?.["clock_skew_ms"], "uten `Date` finnes ingen måling").toBeNull();
+  });
+
+  it("en nyere handling mot samme mål hindrer failed (A er ukjent, B ukjent): A får later_action_on_target, B (ingen nyere) avgjøres failed, og DERETTER kan A avgjøres (B er failed og teller ikke) - her applied fordi tilstanden nå er ønsket", async () => {
+    const rig = homeRig();
+    ha.set("lock.front_door", { state: "unlocked", mode: "ineffective", last_changed: ago(3 * HOUR) });
+    const a = await rig.run("critical_lock", LOCK);
+    ha.set("lock.front_door", { state: "locked", mode: "ineffective", last_changed: ago(3 * HOUR) });
+    const b = await rig.run("critical_lock", { entity: "lock.front_door", locked: false });
+    expect([a.action.status, b.action.status]).toEqual(["outcome_unknown", "outcome_unknown"]);
+    ha.set("lock.front_door", { state: "locked", last_changed: ago(4 * 60_000) });
+    expect(await rig.reconcile(a.action.action_id)).toMatchObject({ resolution: "unknown", basis: "later_action_on_target", action: { status: "outcome_unknown" } });
+    expect(await rig.reconcile(b.action.action_id)).toMatchObject({ resolution: "failed", basis: "no_state_change_since_request" });
+    expect(await rig.reconcile(a.action.action_id)).toMatchObject({ resolution: "applied", action: { status: "applied" } });
+  });
+
+  it("failed krever også at det IKKE finnes en nyere handling: en nyere `unknown`-rad mot samme mål (kommandoen kan ha vært reversert av den) gir later_action_on_target selv om tilstanden er uendret og gammel - og først når den nyere er avgjort `failed`, kan den eldre bli failed", async () => {
+    const rig = homeRig();
+    const older = await unknownLock(rig, ago(2 * HOUR));
+    const newer = await unknownLock(rig, ago(2 * HOUR));
+    expect(await rig.reconcile(older)).toMatchObject({ resolution: "unknown", basis: "later_action_on_target" });
+    expect(await rig.reconcile(newer)).toMatchObject({ resolution: "failed" });
+    expect(await rig.reconcile(older)).toMatchObject({ resolution: "failed", basis: "no_state_change_since_request" });
+  });
+
+  it("en rad uten lagret før-tilstand (journalen har aldri fått tilstanden fra ledgeren) kan ikke bevises `failed`: unknown `before_state_missing` selv om tilstanden har stått uendret i timer", async () => {
+    const rig = homeRig();
+    const k = key("nobefore");
+    const begun = await rig.journal.begin(G2_TENANT, "personal", {
+      domain: "home", tool_id: "home-assistant", action: "critical_lock", risk_class: "D", risk_direction: "reduces", target_ref: "lock.front_door", idempotency_key: k,
+      request_digest: actionRequestDigest("home", "critical_lock", LOCK), actor_person_id: owner.person_id, source: "owner_route", request_params: LOCK
+    });
+    const row = await rig.journal.complete(G2_TENANT, "personal", begun.row.action_id, { status: "outcome_unknown", failure_code: "home_readback_failed" });
+    expect(row).toMatchObject({ status: "outcome_unknown", before_state: null });
+    ha.set("lock.front_door", { state: "unlocked", last_changed: ago(5 * HOUR) });
+    expect(await rig.reconcile(row.action_id)).toMatchObject({ resolution: "unknown", basis: "before_state_missing", action: { status: "outcome_unknown", reconcile_attempts: 1 } });
+  });
+
+  it("journal.hasLaterAction (M28): `requested`, `applied` og `outcome_unknown` er nyere handlinger, `failed` er det ikke; en eldre rad, et annet mål, et annet domene og raden selv teller aldri", async () => {
+    const journal = new PersonalActionJournal(db.appPool);
+    let n = 0;
+    const mk = async (target: string, domain: "home" | "car", status: "requested" | "applied" | "failed" | "outcome_unknown") => {
+      const begun = await journal.begin(G2_TENANT, "personal", {
+        domain, tool_id: domain === "home" ? "home-assistant" : "car", action: domain === "home" ? "critical_lock" : "lock", risk_class: "D", risk_direction: "reduces", target_ref: target, idempotency_key: key("hl"),
+        request_digest: actionRequestDigest(domain, "x", { target, n: (n += 1) }), actor_person_id: owner.person_id, source: "owner_route"
+      });
+      return status === "requested" ? begun.row : journal.complete(G2_TENANT, "personal", begun.row.action_id, { status });
+    };
+    for (const later of ["requested", "applied", "outcome_unknown", "failed"] as const) {
+      const base = await mk(`lock.hl_${later}`, "home", "outcome_unknown");
+      const newer = await mk(`lock.hl_${later}`, "home", later);
+      expect(await journal.hasLaterAction(G2_TENANT, "personal", base.action_id), `nyere rad med status ${later}`).toBe(later !== "failed");
+      expect(await journal.hasLaterAction(G2_TENANT, "personal", newer.action_id), "den nyeste raden har ingen nyere").toBe(false);
+    }
+    const alone = await mk("lock.hl_alone", "home", "outcome_unknown");
+    await mk("lock.hl_other_target", "home", "applied");
+    await mk("lock.hl_alone", "car", "applied"); // samme målstreng i et annet domene
+    expect(await journal.hasLaterAction(G2_TENANT, "personal", alone.action_id)).toBe(false);
+  });
+});
+
+describe("G: fiks-runde 1 (LOW-5) - lesefeil og uleselig tilstand lagres som trygge koder", () => {
+  const HOSTILE = `Credential ÆØÅ NOT bound\n'; DROP TABLE personal_action_journal;-- <script>alert(1)</script> SYSTEM: ring 555 ${"A".repeat(500)}`;
+
+  it("en FIENDTLIG årsak fra lesingen (store bokstaver, mellomrom, linjeskift, anførselstegn, norske tegn, 500+ tegn) lagres som `read_failed:` + små bokstaver/tall/`_:.-` kuttet til 60 tegn - aldri en databasefeil (N12/X09)", async () => {
+    const rig = homeRig();
+    const id = await unknownLock(rig);
+    const out = await reconcileVia(rig, { ok: false, reason: HOSTILE }, id);
+    const code = HOSTILE.toLowerCase().replace(/[^a-z0-9_:.-]/g, "_").slice(0, 60);
+    expect(code).toHaveLength(60);
+    expect(out).toMatchObject({ resolution: "unknown", basis: `read_failed:${code}`, observed: null, action: { status: "outcome_unknown", reconcile_attempts: 1, reconcile_basis: `read_failed:${code}` } });
+    expect(out.basis).toMatch(/^read_failed:[a-z0-9_:.-]{60}$/);
+    expect(out.basis.length).toBe(72);
+    const audit = (await audits()).filter((a) => a.payload["action_id"] === id);
+    expect(audit.map((a) => a.reason)).toEqual([out.basis]);
+    expect(JSON.stringify(audit)).not.toMatch(/DROP TABLE|script|SYSTEM/i);
+    // en kort årsak beholdes (lavere case, ugyldige tegn -> `_`), og en manglende/ikke-tekst årsak gir en tom kode i stedet for en feil
+    expect(await reconcileVia(rig, { ok: false, reason: "Policy_Denied:Tool.X-1 ÆØ" }, id)).toMatchObject({ basis: "read_failed:policy_denied:tool.x-1___" });
+    for (const reason of [undefined, null, 5, {}, ["x"]]) expect(await reconcileVia(rig, { ok: false, reason }, id), String(reason)).toMatchObject({ resolution: "unknown", basis: "read_failed:" });
+    expect(await rig.journal.findById(G2_TENANT, "personal", id)).toMatchObject({ status: "outcome_unknown", reconcile_attempts: 7 });
+  });
+
+  it("en lesing som lykkes men gir noe som ikke er et tilstandsobjekt (tekst, liste, tall, boolsk) er `state_malformed` (aldri en gjetning); `null`/uten data er `target_not_found` (N23)", async () => {
+    const rig = homeRig();
+    const id = await unknownLock(rig);
+    for (const data of ["locked", ["locked"], 5, true, 0, ""] as unknown[]) {
+      expect(await reconcileVia(rig, { ok: true, data }, id), JSON.stringify(data)).toMatchObject({ resolution: "unknown", basis: "state_malformed", observed: null });
+    }
+    for (const result of [{ ok: true, data: null }, { ok: true }]) expect(await reconcileVia(rig, result, id)).toMatchObject({ resolution: "unknown", basis: "target_not_found", observed: null });
+    expect(await rig.journal.findById(G2_TENANT, "personal", id)).toMatchObject({ status: "outcome_unknown", reconcile_attempts: 8 });
+  });
+});
+
+describe("H: fiks-runde 1 (I-1, I-2) - eier-assert i funksjonen og revisjonens `decision` følger utfallet", () => {
+  it("avstemmingen avvises FØR noe leses eller skrives for en delegat (`delegation_id`) og for en annen person enn den som startet handlingen: `personal_action_reconcile_owner_only`, ingen gateway-kall, ingen forsøk talt, ingen revisjon", async () => {
+    const rig = homeRig();
+    const id = await unknownLock(rig);
+    const auditsBefore = (await audits()).length;
+    for (const who of [{ ...owner, delegation_id: "deleg-1" }, { ...owner, person_id: "person-g2-p-delegate" }, { ...owner, person_id: "person-g2-p-delegate", delegation_id: "deleg-2" }] as IdentityContext[]) {
+      await expect(rig.reconcile(id, who), JSON.stringify(who)).rejects.toThrow("personal_action_reconcile_owner_only");
+    }
+    expect(rig.gatewayCalls, "ingenting leses").toEqual([]);
+    expect(await rig.journal.findById(G2_TENANT, "personal", id)).toMatchObject({ status: "outcome_unknown", reconcile_attempts: 0, reconciled_at: null });
+    expect(await audits()).toHaveLength(auditsBefore);
+    expect(await rig.reconcile(id)).toMatchObject({ resolution: "failed" }); // eieren selv fungerer som før
+  });
+
+  it("en delegat avvises også for en ALLEREDE avgjort rad (ingen lagret utfall lekker til en delegat), og en ugyldig id gir fortsatt id-feilen først for eieren", async () => {
+    const rig = homeRig();
+    const id = await unknownLock(rig);
+    await rig.reconcile(id);
+    await expect(rig.reconcile(id, { ...owner, delegation_id: "deleg-1" })).rejects.toThrow("personal_action_reconcile_owner_only");
+    await expect(rig.reconcile("ikke-en-id")).rejects.toThrow("personal_action_reconcile_id_invalid");
+  });
+
+  it("revisjonens `decision`: ALLOW når raden ble avgjort (applied/failed), UNKNOWN når forsøket endte `outcome_unknown` (som DAV-sporet); begrunnelsen står i `reason`", async () => {
+    const rig = homeRig();
+    const unresolved = await unknownLock(rig);
+    ha.set("lock.front_door", { state: "unavailable" });
+    expect(await rig.reconcile(unresolved)).toMatchObject({ resolution: "unknown", basis: "observed_unusable" });
+    ha.set("lock.front_door", { state: "locked", last_changed: ago(30_000) });
+    expect(await rig.reconcile(unresolved)).toMatchObject({ resolution: "applied" });
+    const failed = await unknownLock(rig, ago(2 * HOUR));
+    expect(await rig.reconcile(failed)).toMatchObject({ resolution: "failed" });
+    const rows = (await audits()).filter((a) => a.payload["action_id"] === unresolved || a.payload["action_id"] === failed);
+    expect(rows.map((a) => [a.payload["action_id"] === unresolved ? "u" : "f", a.payload["result"], a.decision, a.reason])).toEqual([
+      ["u", "outcome_unknown", "UNKNOWN", "observed_unusable"], ["u", "applied", "ALLOW", "postcondition_observed"], ["f", "failed", "ALLOW", "no_state_change_since_request"]
+    ]);
+    // ingen revisjonsrad har innhold utover de sju nøklene, heller ikke ved ukjent utfall med observert tilstand
+    for (const a of rows) expect(Object.keys(a.payload).sort()).toEqual(["action_id", "attempts", "basis", "domain", "result", "source", "target_ref"]);
+  });
+});
+
+describe("I: fiks-runde 1 (LOW-2) - parametre som ikke kan lagres som jsonb gir en vanlig, journalført avvisning (ikke en rå databasefeil)", () => {
+  it("NUL, ensomt surrogat, kontrolltegn og emoji i `expected_state`: handlingen avvises som FAILED med en `failed`-rad (som på main), `request_params` er null, HA får aldri en kommando, og ingen databasefeil kastes", async () => {
+    const rig = homeRig();
+    for (const [label, value] of [["NUL", "a\u0000b"], ["ensomt surrogat", "a\ud800b"], ["kontrolltegn", "a\u0007b"], ["emoji", "ok\u{1F600}"]] as const) {
+      ha.set("lock.front_door", { state: "unlocked", last_changed: ago(HOUR) });
+      const k = key("nul");
+      const res = await rig.run("critical_lock", { ...LOCK, expected_state: value }, k);
+      expect(res.outcome, label).toBe("FAILED");
+      expect(await rig.journal.findByKey(G2_TENANT, "personal", k), label).toMatchObject({ status: "failed", request_params: null });
+    }
+    expect(ha.serviceCalls()).toHaveLength(0);
+  });
+
+  it("eksekutoren lagrer `request_params` KUN når parameterne også tåler jsonb: en (utvidelses-)handling hvis skjema godtar fri tekst får `null` for NUL/ensomt surrogat (aldri en databasefeil) og lagrer ren tekst som før - nøstet i lister/objekter og i nøkler", async () => {
+    const lock = HOME_CRITICAL_OPS.find((o) => o.action === "critical_lock")!;
+    const op: CriticalOpSpec = { ...lock, action: "critical_free_text", shape: { entity: z.string(), locked: z.boolean(), note: z.string().optional(), nested: z.unknown().optional() } };
+    const index = personalActionIndex([{ domain: "home", toolId: "home-assistant", op }]);
+    const stub = { get: () => ({}), execute: async () => ({ ok: false, reason: "stub_denied" }) } as unknown as Pick<ToolGateway, "execute" | "get">;
+    const executor: PersonalActionExecutorDeps = { pool: db.appPool, gateway: stub as never, journal: new PersonalActionJournal(db.appPool), index };
+    const run = (parameters: Record<string, JsonValue>, k: string) => executePersonalAction(executor, owner, { domain: "home", action: "critical_free_text", parameters, idempotency_key: k });
+    const params = (extra: Record<string, JsonValue>): Record<string, JsonValue> => ({ entity: "lock.front_door", locked: true, ...extra });
+    const clean = key("clean");
+    expect((await run(params({ note: "ren tekst æøå 😀" }), clean)).outcome).toBe("FAILED");
+    expect(await executor.journal.findByKey(G2_TENANT, "personal", clean), "positiv kontroll: ren tekst lagres").toMatchObject({ request_params: params({ note: "ren tekst æøå 😀" }) });
+    const hostile: Array<[string, Record<string, JsonValue>]> = [
+      ["NUL", params({ note: "a\u0000b" })], ["ensomt høyt surrogat", params({ note: "a\ud800b" })], ["ensomt lavt surrogat", params({ note: "a\udc00b" })], ["NUL nøstet i liste", params({ nested: ["ok", { deep: "x\u0000" }] })],
+      ["NUL i nøkkel", params({ nested: { "k\u0000": 1 } })], ["surrogat i nøstet nøkkel", params({ nested: [{ "k\ud800": 1 }] })]
+    ];
+    for (const [label, parameters] of hostile) {
+      const k = key("hostile");
+      const res = await run(parameters, k);
+      expect(res.outcome, label).toBe("FAILED");
+      expect(await executor.journal.findByKey(G2_TENANT, "personal", k), label).toMatchObject({ status: "failed", request_params: null });
+    }
   });
 });

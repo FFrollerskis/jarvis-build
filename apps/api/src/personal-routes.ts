@@ -70,7 +70,7 @@ export interface PersonalRouteContext {
 const DOMAIN = /^(home|car)$/;
 /** Avstemmingens bevisste feilkoder -> HTTP-status. `personal_action_target_busy` = en handling (eller en annen avstemming) har målet akkurat nå: ingenting er lest eller skrevet, prøv på nytt. */
 const RECONCILE_ERROR_STATUS: Readonly<Record<string, number>> = {
-  personal_action_reconcile_id_invalid: 400, personal_action_not_found: 404,
+  personal_action_reconcile_id_invalid: 400, personal_action_reconcile_owner_only: 403, personal_action_not_found: 404,
   personal_action_not_reconcilable: 409, personal_action_domain_not_enabled: 409, personal_action_target_busy: 409
 };
 const ACTION_STATUS: readonly string[] = ["requested", "applied", "failed", "outcome_unknown"];

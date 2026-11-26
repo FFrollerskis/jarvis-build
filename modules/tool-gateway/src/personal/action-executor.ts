@@ -2,7 +2,7 @@ import type pg from "pg";
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
 import { isUnknownOutcomeReason, type ToolGateway } from "../gateway.ts";
-import { PersonalActionJournal, actionRequestDigest, type ActionDomain, type ActionSource, type ActionStatus, type PersonalActionRow } from "./action-journal.ts";
+import { PersonalActionJournal, actionRequestDigest, jsonbSafe, type ActionDomain, type ActionSource, type ActionStatus, type PersonalActionRow } from "./action-journal.ts";
 import { zRecord, type CriticalOpSpec, type Params } from "./critical-ops.ts";
 
 /**
@@ -142,7 +142,8 @@ async function executeLocked(deps: PersonalActionExecutorDeps, identity: Identit
   const space = identity.memory_space_id as MemorySpace;
 
   // Migrasjon 144: parameterne lagres (for avstemmingen) KUN når de består handlingens strenge skjema - aldri rå klient-JSON (gatewayen avviser uansett en forespørsel som ikke består; da blir raden `failed` og trenger ikke avstemmes).
-  const validParameters = zRecord(entry.op.shape).safeParse(input.parameters).success;
+  // ... OG bare når de tåler jsonb (NUL/ensomt surrogat gir en rå databasefeil ved INSERT i stedet for en vanlig avvisning: fiks-runde 1, LOW-2); da lagres `null`, og gatewayen avviser/avgjør forespørselen som før.
+  const validParameters = zRecord(entry.op.shape).safeParse(input.parameters).success && jsonbSafe(input.parameters);
   const begun = await deps.journal.begin(tenantId, space, {
     domain: entry.domain, tool_id: entry.toolId, action: entry.op.action, risk_class: "D", risk_direction: entry.op.direction(input.parameters), target_ref: target,
     idempotency_key: input.idempotency_key, request_digest: actionRequestDigest(entry.domain, entry.op.action, input.parameters), actor_person_id: identity.person_id, source: input.source ?? "owner_route",

@@ -80,6 +80,22 @@ export function sanitizeActionState(value: unknown, depth = 0): JsonValue {
 
 const asRow = (row: unknown): PersonalActionRow => row as PersonalActionRow;
 
+const LONE_SURROGATE = /\p{Cs}/u; // med `u`-flagget matcher `\p{Cs}` kun et ENSOMT surrogat (et gyldig par leses som ett kodepunkt)
+const textFitsJsonb = (text: string): boolean => !text.includes("\u0000") && !LONE_SURROGATE.test(text);
+/**
+ * Kan verdien lagres i en Postgres `jsonb`-kolonne? `\u0000` og ensomme surrogater (i tekst OG i nøkler, også nøstet) gir en rå databasefeil ved `INSERT` (22P05/22P02), ikke en vanlig avvisning; det samme gjør tall/strukturer
+ * som ikke lar seg serialisere (bigint, sykliske strukturer, urimelig dybde). `false` = lagre aldri (WP-G2c fiks-runde 1, LOW-2): eksekutoren lagrer da `request_params = null`, raden er ellers uendret.
+ */
+export function jsonbSafe(value: unknown, depth = 0): boolean {
+  if (depth > 16) return false;
+  if (typeof value === "string") return textFitsJsonb(value);
+  if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number" || typeof value === "function" || typeof value === "symbol") return true; // serialiseres til null/utelates
+  if (typeof value === "bigint") return false;
+  if (Array.isArray(value)) return value.every((v) => jsonbSafe(v, depth + 1));
+  if (typeof value === "object") return Object.entries(value as Record<string, unknown>).every(([k, v]) => textFitsJsonb(k) && jsonbSafe(v, depth + 1));
+  return false;
+}
+
 export class PersonalActionJournal {
   constructor(private readonly pool: pg.Pool) {}
 
@@ -183,7 +199,8 @@ export class PersonalActionJournal {
       }
       const row = asRow(rows[0]);
       await writeAudit(client, identity, {
-        type: "personal.action_reconciled", decision: "ALLOW", reason: patch.basis, tool_id: row.tool_id, action: row.action,
+        // `decision` følger utfallet (som DAV-sporet): ALLOW når raden ble avgjort (`applied`/`failed`), UNKNOWN når forsøket endte `outcome_unknown` (fiks-runde 1, I-2).
+        type: "personal.action_reconciled", decision: patch.status === "outcome_unknown" ? "UNKNOWN" : "ALLOW", reason: patch.basis, tool_id: row.tool_id, action: row.action,
         payload: { action_id: row.action_id, domain: row.domain, target_ref: row.target_ref, result: patch.status, basis: patch.basis, attempts: row.reconcile_attempts, source: "owner_route" }
       });
       return { row, updated: true };

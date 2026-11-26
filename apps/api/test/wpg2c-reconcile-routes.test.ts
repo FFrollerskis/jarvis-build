@@ -85,7 +85,7 @@ describe("A: rekkefølge og porter - grant -> eier -> step-up -> avstemming", ()
 
 describe("B: feilkoder - kun våre egne, med riktig status; alt annet er generisk (aldri en intern feiltekst)", () => {
   const cases: Array<[string, number]> = [
-    ["personal_action_reconcile_id_invalid", 400], ["personal_action_not_found", 404], ["personal_action_not_reconcilable", 409], ["personal_action_domain_not_enabled", 409], ["personal_action_target_busy", 409]
+    ["personal_action_reconcile_id_invalid", 400], ["personal_action_reconcile_owner_only", 403], ["personal_action_not_found", 404], ["personal_action_not_reconcilable", 409], ["personal_action_domain_not_enabled", 409], ["personal_action_target_busy", 409]
   ];
   for (const [code, status] of cases) {
     it(`${code} -> ${status} med koden i svaret`, async () => {
