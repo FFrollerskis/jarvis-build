@@ -352,27 +352,34 @@ export class CommsStore {
     // mottatt mindre enn `START_TIE_MARGIN_MS` etter denne registreringen kan heller ikke løfte den (en START mottatt mens denne transaksjonen holdt låsen ucommittet har høyere sekvens, men er innenfor marginen).
     const { seq, at } = await this.nextSeq(client);
     const slot = OPT_OUT_SLOT[input.source];
-    const existing = await client.query(
-      `SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 AND channel = $3 AND account_ref = $4 AND status = 'active' LIMIT 1`,
-      [tenantId, input.recipient_hash, input.channel, slot]
-    );
-    if (existing.rowCount === 1) {
-      // En senere STOP i samme spor «absorberes» i raden, men registreringen mistes ikke: sekvensen økes, så en START som ble mottatt før denne STOP-en aldri kan løfte raden.
-      const id = (existing.rows[0] as { opt_out_id: string }).opt_out_id;
-      // `GREATEST`: registreringstiden kan aldri gå bakover (triggeren avviser det), heller ikke om databasens klokke skulle stilles tilbake - en STOP skal aldri feile på det.
-      await client.query(
-        `UPDATE comms_recipient_opt_outs SET stop_seq = $3, stop_db_at = GREATEST(COALESCE(stop_db_at, $4::timestamptz), $4::timestamptz) WHERE tenant_id = $1 AND opt_out_id = $2 AND (stop_seq IS NULL OR stop_seq < $3)`,
-        [tenantId, id, seq, at]
+    // FIX-6 (K03): låsen over er den PRIMÆRE serialiseringen, men skrivingen er i tillegg idempotent (`ON CONFLICT DO NOTHING` + ny lesing), så en manglende lås aldri kan gi eieren (`record_opt_out`) eller en leverandørfeil (21610) en
+    // `duplicate key`-feil på sporets unike indeks: den som taper kappløpet om sporet absorberes i vinnerens rad. Bevist uavhengig av hverandre (`optout-concurrency.test.ts`: låsen er der, og skrivingen tåler samtidighet uten den).
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const existing = await client.query(
+        `SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 AND channel = $3 AND account_ref = $4 AND status = 'active' LIMIT 1`,
+        [tenantId, input.recipient_hash, input.channel, slot]
       );
-      return { opt_out_id: id, created: false };
+      if (existing.rowCount === 1) {
+        // En senere STOP i samme spor «absorberes» i raden, men registreringen mistes ikke: sekvensen økes, så en START som ble mottatt før denne STOP-en aldri kan løfte raden.
+        const id = (existing.rows[0] as { opt_out_id: string }).opt_out_id;
+        // `GREATEST`: registreringstiden kan aldri gå bakover (triggeren avviser det), heller ikke om databasens klokke skulle stilles tilbake - en STOP skal aldri feile på det.
+        await client.query(
+          `UPDATE comms_recipient_opt_outs SET stop_seq = $3, stop_db_at = GREATEST(COALESCE(stop_db_at, $4::timestamptz), $4::timestamptz) WHERE tenant_id = $1 AND opt_out_id = $2 AND (stop_seq IS NULL OR stop_seq < $3)`,
+          [tenantId, id, seq, at]
+        );
+        return { opt_out_id: id, created: false };
+      }
+      const id = newId("optout");
+      const inserted = await client.query(
+        `INSERT INTO comms_recipient_opt_outs (tenant_id, opt_out_id, memory_space_id, channel, account_ref, recipient_hash, recipient_hint, source, evidence_ref, recorded_by, session_id, task_id, created_at, stop_seq, stop_db_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         ON CONFLICT (tenant_id, channel, account_ref, recipient_hash) WHERE status = 'active' DO NOTHING RETURNING opt_out_id`,
+        [tenantId, id, space, input.channel, slot, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock(), seq, at]
+      );
+      if (inserted.rowCount === 1) return { opt_out_id: id, created: true };
+      // Mistet kappløpet om sporet (en annen skriver la inn den aktive raden mellom lesingen og skrivingen - kun mulig uten mottakerlåsen): les raden på nytt og absorber STOP-en i den.
     }
-    const id = newId("optout");
-    await client.query(
-      `INSERT INTO comms_recipient_opt_outs (tenant_id, opt_out_id, memory_space_id, channel, account_ref, recipient_hash, recipient_hint, source, evidence_ref, recorded_by, session_id, task_id, created_at, stop_seq, stop_db_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-      [tenantId, id, space, input.channel, slot, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock(), seq, at]
-    );
-    return { opt_out_id: id, created: true };
+    throw new Error("comms_opt_out_slot_unstable");
   }
 
   /**
