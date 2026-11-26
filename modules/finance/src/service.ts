@@ -2362,6 +2362,10 @@ export class FinanceService {
 
         const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
         if (!intent.provider_ref) throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
+        // Fiks-runde 2 (FIX-B, forsvar i dybden): `provider_status` er en OBSERVASJON og kan stå AUTHORIZED mens intensjonen er avsluttet lokalt - en oppfrisking som melder AUTHORIZED etter en lokal cancel
+        // skriver den tilbake (AUTHORIZED har ingen tilstandsovergang i `applyVippsPaymentOutcome`). Capture er kun mulig fra `provider_acknowledged` (`PAYMENT_INTENT_TRANSITIONS`: eneste tilstand med vei til
+        // `settled`); `cancelled`/`failed`/`settled` avvises FØR reservasjon, credential-krav og leverandørkall. Sjekken leser raden etter `FOR SHARE`-låsen over, så en cancel som commitet først sees her.
+        if (intent.state !== "provider_acknowledged") throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status, intent.state);
         if (intent.provider_status !== "AUTHORIZED") throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
         if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
         const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering FØR reservasjon (ugyldig beløp reserverer aldri)

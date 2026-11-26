@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import {
-  FinanceService, IdempotencyKeyConflictError, PaymentIntentNotFoundError, PaymentIntentNotVippsError, ProviderOutcomeUnknownError, StripeTransport, VippsCredentialsUnavailableError, VippsTransport,
+  FinanceService, IdempotencyKeyConflictError, PaymentIntentNotAuthorizedError, PaymentIntentNotFoundError, PaymentIntentNotVippsError, ProviderOutcomeUnknownError, StripeTransport, VippsCredentialsUnavailableError, VippsTransport,
   type PaymentIntent, type StripeCredentials, type VippsCredentials
 } from "../src/index.ts";
 import { Gate, StripeFake, VippsFake } from "./wpf1-fakes.ts";
@@ -22,6 +22,8 @@ import { Gate, StripeFake, VippsFake } from "./wpf1-fakes.ts";
  *   FIX-10 testhull: Vipps-refusjonens nøkkel avgjøres FØR tilstand; `apply` tar intensjonslåsen FØRST; kjøretidsprobe (ingen tx/radlås under credential-oppslag og leverandørkall) for Vipps-cancel/capture/refund og Stripe-refusjon.
  * WP-FIN2 fiks-runde 2 (samme fil, nederst):
  *   FIX-A  stale-CREATED-sveipet fanger en intensjon fra `createPayment` i dokumentert minimalform (status og statustidspunkt = NULL) når innsendingen er eldre enn 24 t, og ikke før.
+ *   FIX-B  `submitVippsCapture.prepare` krever også at intensjonens LOKALE tilstand tillater capture (`provider_acknowledged`): en oppfrisking som melder AUTHORIZED etter lokal cancel skriver
+ *          `provider_status` tilbake, og da avvises capturen likevel (typet feil, ingen reservasjon, ingen leverandørkall).
  * Ingen nettverk: `fetch` er stubbet, resten er testdobler.
  */
 let stop: (() => Promise<void>) | undefined;
@@ -639,4 +641,75 @@ describe("FIX-A (fiks-runde 2): EXPIRED_PAYMENT_WITH_ACTIVE_INTENT for en intens
     await adminPool.query("UPDATE payment_intents SET provider_status_updated_at = now() - interval '25 hours' WHERE payment_intent_id = $1", [intent.payment_intent_id]);
     await expectFlagAfterSweep(svc, intent.payment_intent_id, true);
   });
+});
+
+// === Fiks-runde 2 / FIX-B: capture krever at intensjonens LOKALE tilstand tillater det ===========================================================
+describe("FIX-B (fiks-runde 2): submitVippsCapture krever lokal tilstand provider_acknowledged - ikke bare provider_status AUTHORIZED", () => {
+  it("oppfrisking som melder AUTHORIZED etter lokal cancel skriver provider_status tilbake, men capturen avvises (typet feil) uten leverandørkall, uten reservasjon og uten flagg", async () => {
+    const vipps = new VippsFake(); // getPayment melder alltid AUTHORIZED
+    const svc = fakeService(vipps);
+    const intent = await authorizedIntent(svc, 10_000);
+    const capture = await draftCapture(svc, intent.payment_intent_id, 10_000);
+    await svc.cancelVippsPayment(TENANT, "business", intent.payment_intent_id);
+    expect(await intentRow(intent.payment_intent_id)).toMatchObject({ state: "cancelled", provider_status: "CANCELLED" });
+    await svc.refreshVippsPaymentState(TENANT, "business", intent.payment_intent_id);
+    // forutsetningen (ellers er testen tom): tilbakeskrivingen har skjedd, men intensjonen er fortsatt lokalt avbrutt
+    expect(await intentRow(intent.payment_intent_id)).toMatchObject({ state: "cancelled", provider_status: "AUTHORIZED" });
+
+    const err = await svc.submitVippsCapture(TENANT, "business", capture.capture_id).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PaymentIntentNotAuthorizedError);
+    expect((err as Error).message).toContain("cancelled"); // den lokale tilstanden står i feilen (provider_status alene ville villedet)
+    expect(vipps.captureCalls).toHaveLength(0);
+    const cap = (await adminPool.query("SELECT state, submitted_at, first_submit_attempt_at, anomaly_flags FROM vipps_captures WHERE capture_id = $1", [capture.capture_id])).rows[0];
+    expect(cap).toMatchObject({ state: "draft", submitted_at: null, first_submit_attempt_at: null, anomaly_flags: [] }); // ingen reservasjon
+    expect((await intentRow(intent.payment_intent_id)).anomaly_flags).not.toContain("PROVIDER_STATE_CONFLICT");
+    expect(await eventTypes(intent.payment_intent_id)).not.toContain("captured");
+  });
+
+  for (const localState of ["cancelled", "failed", "settled"] as const) {
+    it(`lokal tilstand ${localState} (provider_ref og AUTHORIZED står igjen): capturen avvises uten leverandørkall og capture-raden er urørt`, async () => {
+      const vipps = new VippsFake();
+      const svc = fakeService(vipps);
+      const intent = await authorizedIntent(svc, 10_000);
+      const capture = await draftCapture(svc, intent.payment_intent_id, 4_000);
+      await adminPool.query("UPDATE payment_intents SET state = $2 WHERE payment_intent_id = $1", [intent.payment_intent_id, localState]);
+      const err = await svc.submitVippsCapture(TENANT, "business", capture.capture_id).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PaymentIntentNotAuthorizedError);
+      expect((err as Error).message).toContain(localState);
+      expect(vipps.captureCalls).toHaveLength(0);
+      expect((await captureRow(capture.capture_id)).state).toBe("draft");
+    });
+  }
+
+  it("uendret flyt: capture mot provider_acknowledged + AUTHORIZED går som før (ett leverandørkall, settled, intensjonen fullt oppgjort)", async () => {
+    const vipps = new VippsFake();
+    const svc = fakeService(vipps);
+    const intent = await authorizedIntent(svc, 10_000);
+    const capture = await draftCapture(svc, intent.payment_intent_id, 10_000);
+    expect((await svc.submitVippsCapture(TENANT, "business", capture.capture_id)).state).toBe("settled");
+    expect(vipps.captureCalls).toHaveLength(1);
+    expect((await intentRow(intent.payment_intent_id)).state).toBe("settled");
+  });
+
+  it("samtidig cancel + oppfrisking (AUTHORIZED) og capture, 60 runder: aldri `cancelled` med innsendt/oppgjort capture, aldri deadlock", async () => {
+    const vipps = new VippsFake(); // getPayment melder alltid AUTHORIZED, også etter cancel
+    const svc = fakeService(vipps);
+    let cancelledRounds = 0;
+    const violations: string[] = [];
+    for (let round = 0; round < 60; round++) {
+      const intent = await authorizedIntent(svc, 10_000);
+      const capture = await draftCapture(svc, intent.payment_intent_id, 10_000);
+      const results = await Promise.allSettled([
+        svc.cancelVippsPayment(TENANT, "business", intent.payment_intent_id).then(() => svc.refreshVippsPaymentState(TENANT, "business", intent.payment_intent_id)),
+        sleep(Math.random() * 30).then(() => svc.submitVippsCapture(TENANT, "business", capture.capture_id))
+      ]);
+      for (const r of results) if (r.status === "rejected") expect(String((r.reason as Error).message), `runde ${round}`).not.toMatch(/deadlock/i);
+      const row = await intentRow(intent.payment_intent_id);
+      const cap = await captureRow(capture.capture_id);
+      if (row.state === "cancelled") cancelledRounds += 1;
+      if (row.state === "cancelled" && (cap.state === "submitted" || cap.state === "settled")) violations.push(`runde ${round}: intent=${row.state} provider_status=${row.provider_status} capture=${cap.state} flags=${row.anomaly_flags.join(",")}`);
+    }
+    expect(violations).toEqual([]);
+    expect(cancelledRounds).toBeGreaterThan(0); // proben har faktisk nådd cancel + tilbakeskrivingen (ikke en tom kjøring)
+  }, 120_000);
 });

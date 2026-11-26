@@ -472,8 +472,12 @@ export class PaymentIntentNotVippsError extends Error {
  * precondition som Stripe (kun refunder en FAKTISK oppgjort betaling).
  */
 export class PaymentIntentNotAuthorizedError extends Error {
-  constructor(readonly paymentIntentId: string, readonly providerStatus: string | null) {
-    super(`payment_intent_not_authorized:${paymentIntentId}:${providerStatus ?? "unknown"}`);
+  /**
+   * `localState` (fiks-runde 2, FIX-B) er satt når det er intensjonens LOKALE tilstand som avviser capturen (ikke `provider_ref`/`provider_status`): en oppfrisking som melder AUTHORIZED etter en lokal
+   * cancel skriver `provider_status` tilbake, så `providerStatus` alene ville gitt en villedende melding («not_authorized:...:AUTHORIZED»). Meldingen er uendret når den ikke er satt.
+   */
+  constructor(readonly paymentIntentId: string, readonly providerStatus: string | null, readonly localState?: PaymentIntentState) {
+    super(`payment_intent_not_authorized:${paymentIntentId}:${providerStatus ?? "unknown"}${localState === undefined ? "" : `:local_state=${localState}`}`);
     this.name = "PaymentIntentNotAuthorizedError";
   }
 }
