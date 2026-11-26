@@ -93,6 +93,41 @@ describe("hemmeligheter i samtalen", () => {
  * WP-SEC2 K9 (JARVIS-013 ende-til-ende): en eier-melding med en SKJULT, DELT eller JSON-formet hemmelighet lagres ikke i `messages`, gir ingen minneuttrekk, når ikke modellkallet (spion) og gir eier-merknaden (kun typen).
  * D-369 («vanlig eier-tekst er trusted minnekilde») er IKKE endret og ikke med her. Tokens bygges sammensatt (ingen ferdige nøkkelformer i kilden).
  */
+/**
+ * Som `setup()`, men databasen husker radene: `MessageStore.history` (som bygger modellforespørselen) returnerer det som faktisk ble LAGRET. Da er «modellkallet ser aldri hemmeligheten» en ekte påstand
+ * (i `setup()` er historikken alltid tom, så modellen ser aldri meldingen uansett).
+ */
+function setupStateful() {
+  const stored: Array<{ message_id: string; role: string; content: string; created_at: string; restricted: boolean }> = [];
+  const modelInputs: string[] = [];
+  const ingests: Array<{ text: string; pasted: boolean | undefined }> = [];
+  const query = async (sql: string, params?: unknown[]) => {
+    const q = String(sql);
+    if (q.includes("INSERT INTO messages") && params) {
+      stored.push({ message_id: String(params[0]), role: String(params[3]), content: String(params[4]), created_at: new Date().toISOString(), restricted: q.includes("restricted") });
+      return { rows: [], rowCount: 1 };
+    }
+    if (q.includes("FROM messages") && q.includes("SELECT")) return { rows: [...stored].reverse(), rowCount: stored.length };
+    return { rows: [], rowCount: 0 };
+  };
+  const client = { query, release: () => undefined };
+  const pool = { connect: async () => client, query } as unknown as pg.Pool;
+  const gateway = {
+    complete: async (input: CompleteInput) => {
+      modelInputs.push(JSON.stringify(input.request));
+      return { text: "modellsvar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "scripted", model: "scripted-1" };
+    },
+    stream: async () => { throw new Error("ikke brukt"); },
+    completeWithTools: async () => { throw new Error("ikke brukt"); }
+  } as unknown as ModelGateway;
+  const engine = new ConversationEngine({
+    messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway,
+    tasks: {} as unknown as TaskService, worker: {} as unknown as InProcessWorker, trace: new MemoryTraceSink(),
+    memory: { contextFor: async () => "", ingest: async (_i, text, opts) => { ingests.push({ text, pasted: opts?.pasted }); } }
+  });
+  return { engine, stored, modelInputs, ingests };
+}
+
 describe("WP-SEC2 K9: skjulte, delte og JSON-formede hemmeligheter i en eier-melding", () => {
   const gh = ["gh", "p_"].join("") + "Zx3Qk9Lm2Vb7Nc4Rt8Wy1Hd5Fs6Jg0Pa8TnX";
   const zwsp = String.fromCodePoint(0x200b);
@@ -111,10 +146,11 @@ describe("WP-SEC2 K9: skjulte, delte og JSON-formede hemmeligheter i en eier-mel
   ];
   for (const c of cases) {
     it(`${c.label}: ikke lagret, ikke i modellkallet, ingen minneuttrekk, eier får merknad (kun typen)`, async () => {
-      const { engine, savedMessages, modelInputs, ingests } = setup();
+      const { engine, stored: rows, modelInputs, ingests } = setupStateful();
       const reply = await engine.handle(identity, c.text);
-      const stored = savedMessages.join("\n");
+      const stored = rows.map((r) => r.content).join("\n");
       const sent = modelInputs.join("\n");
+      expect(rows.some((r) => r.role === "user")).toBe(true);
       for (const leak of c.leaks) {
         expect(stored, `lagret: ${leak}`).not.toContain(leak);
         expect(sent, `modell: ${leak}`).not.toContain(leak);
@@ -129,10 +165,11 @@ describe("WP-SEC2 K9: skjulte, delte og JSON-formede hemmeligheter i en eier-mel
   }
 
   it("en melding uten hemmeligheter (også med blanke tegn, emoji og JSON) går som før: lagret uendret, minnet får teksten", async () => {
-    const { engine, savedMessages, ingests } = setup();
+    const { engine, stored: rows, modelInputs, ingests } = setupStateful();
     const text = `Pappa bor i Oslo 👨‍👩‍👧 og {"token_count":12,"status":"ok"}`;
     await engine.handle(identity, text);
-    expect(savedMessages.join("\n")).toContain(text);
+    expect(rows.map((r) => r.content).join("\n")).toContain(text);
+    expect(modelInputs.join("\n")).toContain("Pappa bor i Oslo");
     expect(ingests).toEqual([{ text, pasted: false }]);
   });
 });
