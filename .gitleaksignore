@@ -177,3 +177,13 @@ e8c23d4aaf5fefed111a0fa7e05145196e608b57:modules/comms/test/policy.test.ts:disco
 # fingerprint printed by `gitleaks detect --log-opts="origin/main..HEAD"` next to
 # this one.
 e498cdf5790872e61e91b658b30b31e45a5f42d8:apps/api/test/wpn1-job-status.test.ts:generic-api-key:38
+
+# WP-N1b fiks-runde 2 (FIX-A): gitleaks' generic-api-key rule flagged a TEST FIXTURE list in
+# apps/api/test/support/n1b-unknown-ids.ts (commit 2f4965af, line 13): ten environment-variable NAMES
+# (made-up, finance-looking credential references of the form JARVIS_<NAME>_SECRET/_KEY/_TOKEN) written one after
+# another in a string array; the rule reads `<key-word>", "<next name>` as a key/value pair. No value of any kind exists
+# here: the names are inputs to a test that proves unknown credential references are withheld from cloud models
+# (they are never resolved against a vault or sent anywhere). Verified manually. The list was rebuilt from plain stems
+# in a later commit, so the current file no longer triggers the rule, but gitleaks scans full history and the original
+# commit stays in the branch history (merged with a two-parent merge commit, so the hash stays stable).
+2f4965af13da245508ed3c5926553754247a5672:apps/api/test/support/n1b-unknown-ids.ts:generic-api-key:13
