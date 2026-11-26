@@ -11,8 +11,12 @@ import { normalizeRecipient, optOutHash, type CommsChannel } from "./channels.ts
  *  - Uten noen avmeldingsrad er oppførselen identisk med før (ett ekstra lese-oppslag per `notify`). Med ALLE comms-flagg AV pakkes ingenting inn (`commsRuntime.guardLegacyNotifyTransport` returnerer transporten uendret).
  *  - En avmeldt mottaker gir `PolicyDeniedError("recipient_opted_out")` (melding `comms_policy_denied:recipient_opted_out`) FØR noe forlater prosessen. Feilen er et policy-avslag, ikke en leverandørfeil, og teller ikke mot
  *    connector-helse (g4). Et oppslag som feiler (databasen utilgjengelig) feiler LUKKET (`opt_out_check_unavailable`): vi sender aldri uten å ha sjekket.
- *  - En mottaker vakten ikke kan normalisere (f.eks. et Slack-kanalnavn eller et nummer uten landkode) kan ikke ha en avmeldingsrad (registeret nøkles på normalisert identifikator) og slippes videre til den eksisterende transporten,
- *    som validerer selv (E.164 for telefon). Dette er ikke et nytt hull: avmeldinger registreres alltid på normalisert form.
+ *  - FIX-4 (fiks-runde 1): DISCORD er strengt. `DiscordTransport` setter `channel_id` RÅTT inn i URL-en (`/channels/${id}/messages`), så en verdi vakten ikke kunne normalisere (`123456789012345678/messages?`) ble SENDT mot den avmeldte kanalen.
+ *    En Discord-mottaker som ikke er NØYAKTIG en snowflake (`^\d{17,20}$`, uten trim: det som sjekkes er det som sendes) avvises derfor med `comms_policy_denied:recipient_invalid` FØR noe forlater prosessen. Discord-id-er er alltid snowflakes.
+ *  - Telefon (Twilio/Telnyx/WhatsApp): en mottaker vakten ikke kan normalisere (f.eks. et nummer uten landkode) kan ikke ha en avmeldingsrad (registeret nøkles på normalisert identifikator) og slippes videre til transporten, som validerer
+ *    selv (`assertE164`, ingen normalisering). Dette er ikke et nytt hull: avmeldinger registreres alltid på normalisert form. Slack-ID-er (`C…`/`D…`/`G…`/`U…`/`W…`, også små bokstaver og mellomrom rundt) normaliseres og sjekkes.
+ *  - UDEKKET OG DOKUMENTERT (runbook, DEFERRED): Slack-KANALNAVN (`#general`, `@kari`) kan ikke ha en avmeldingsrad (registeret er nøklet på ID) og slippes gjennom (eierens egne varsel-kanaler må fortsette å virke; en kanalpost er ikke per mottaker);
+ *    worker-prosessen har egne transporter; og generiske automasjonsverktøy (n8n/make/zapier-MCP) er en sjette, udekket vei.
  *  - Tenant: identitetens tenant OG webhook-tenanten (`JARVIS_COMMS_TENANT_ID`), fordi en innkommende STOP skrives dit. Avmeldinger i en tredje tenant sees ikke (tenant-isolasjon), og eierens egne varsler er IKKE unntatt: har eieren
  *    selv sendt STOPP fra sitt eget nummer, er det også avmeldt (leverandøren ville uansett avvist sendingen). Eieren løfter den med en START fra samme nummer.
  *  - Dekker KUN api-prosessen (der comms-kjøretiden finnes); en worker-prosess har egne transporter og er IKKE dekket (se runbook §10, PARTIAL).
@@ -31,6 +35,9 @@ export interface LegacyNotifyGuardDeps {
   readonly extraTenants?: () => readonly string[];
   readonly warn?: (event: Record<string, unknown>) => void;
 }
+
+/** Discord-id-er er alltid snowflakes (17-20 siffer). Matches mot den RÅ verdien, uten trim: transporten setter den uendret inn i URL-en (FIX-4). `\d` er kun ASCII-sifre og `$` matcher kun ved slutten (ikke før en avsluttende linjeskift). */
+const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
 
 /** (kanal, normalisert mottaker) for en `notify`-handling, eller `null` når verktøyet ikke er et eldre `notify`-verktøy eller mottakeren ikke kan normaliseres. */
 export function legacyNotifyTarget(toolId: string, parameters: Record<string, JsonValue>): { channel: CommsChannel; recipient: string } | null {
@@ -51,6 +58,11 @@ export function guardLegacyNotifyTransport(toolId: string, inner: ToolTransport,
 }
 
 async function assertNotOptedOut(toolId: string, parameters: Record<string, JsonValue>, context: ToolInvocationContext, deps: LegacyNotifyGuardDeps): Promise<void> {
+  // FIX-4: Discord sender verdien rått i URL-en, så alt annet enn en ren snowflake stoppes her (og sendes aldri); sjekken gjøres på NØYAKTIG den verdien transporten får.
+  if (toolId === "discord") {
+    const raw = parameters[LEGACY_NOTIFY_TARGETS["discord"]!.parameter];
+    if (typeof raw !== "string" || !DISCORD_SNOWFLAKE.test(raw)) throw new PolicyDeniedError("comms_policy_denied:recipient_invalid");
+  }
   const target = legacyNotifyTarget(toolId, parameters);
   if (target === null) return;
   const tenants = [...new Set([context.identity.tenant_id, ...(deps.extraTenants?.() ?? [])])];
