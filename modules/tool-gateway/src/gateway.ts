@@ -1067,7 +1067,7 @@ export class ToolGateway {
     // WP-AUTH2a (JARVIS-014): klasse C-pipelinen (kun for klasse C med adapter og modus observe/enforce; ellers `null` = alt under er som før). Pipelinen ERSTATTER den gamle klasse C-preflight-lesingen for handlingen.
     // Replay: har ledgeren allerede en rad for nøkkelen (ikke `failed`), hoppes preflight over - tilstanden har flyttet seg ved handlingen selv, og ledger-porten svarer med det lagrede utfallet.
     const classCRun = this.classCPipeline?.begin(definition, { requestDigest: requestDigestOf(request), isRegistered: (toolId, action) => this.get(toolId, action) !== undefined }) ?? null;
-    const classCRead = (action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> => invokeRead(definition, action, parameters, credential, invocationContext);
+    const classCRead = (action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> => invokeRead(definition, action, parameters, credential, invocationContext, this.classCPipeline?.readTimeoutMs ?? CLASS_C_READ_TIMEOUT_MS);
     const classCAudit = (): Record<string, unknown> => (classCRun === null ? {} : { class_c: classCRun.auditBlock() });
     if (classCRun !== null) {
       const replay = ledgerKey !== undefined ? await this.peekLedgerStatus(tenantId, ledgerKey).catch(() => null) : null;
@@ -1653,10 +1653,10 @@ function invokePreflight(
  * `JARVIS_TOOL_CALL_ABORT=off`, der kun selve avbruddet av forespørselen er av): en hengende lesing skal aldri holde en mutasjon for alltid. Kaster ved feil/tidsavbrudd (`tool_timeout`); pipelinen gjør det til fail-lukket utfall.
  */
 function invokeRead(
-  definition: ToolDefinition, action: string, parameters: Record<string, JsonValue>, credential: string, invocationContext: ToolInvocationContext
+  definition: ToolDefinition, action: string, parameters: Record<string, JsonValue>, credential: string, invocationContext: ToolInvocationContext, capMs: number
 ): Promise<{ external_id?: string; data?: JsonValue }> {
   return withTimeout(
     (signal) => invokeWithCallSignal(definition.transport, action, parameters, credential, invocationContext, signal),
-    Math.min(definition.timeout_ms, CLASS_C_READ_TIMEOUT_MS)
+    Math.min(definition.timeout_ms, capMs)
   );
 }

@@ -93,7 +93,7 @@ interface Rig {
 }
 
 let keyCounter = 0;
-function rig(mode: ClassCMode | "absent", options: { def?: Partial<ToolDefinition>; adapters?: ClassCAdapter[]; defClass?: "B" | "C" | "D" } = {}): Rig {
+function rig(mode: ClassCMode | "absent", options: { def?: Partial<ToolDefinition>; adapters?: ClassCAdapter[]; defClass?: "B" | "C" | "D"; readTimeoutMs?: number } = {}): Rig {
   const store = new StateStore();
   const killSwitch = new KillSwitch();
   const controls = new OwnerControls(killSwitch);
@@ -103,7 +103,7 @@ function rig(mode: ClassCMode | "absent", options: { def?: Partial<ToolDefinitio
   const gw = new ToolGateway(db.appPool, policy, { name: "t", get: async () => "cred" }, controls, undefined, {
     classDPipeline: { enforce: true, notifier: { ready: () => true, notify: async () => undefined } },
     credentialBinding: { owner_person_id: "person-owner", owner_tenants: ["tenant-a"], internalRefs: new Set<string>() },
-    ...(mode === "absent" ? {} : { classCPipeline: createClassCPipeline({ mode, adapters: options.adapters ?? [stateAdapter()] }) })
+    ...(mode === "absent" ? {} : { classCPipeline: createClassCPipeline({ mode, adapters: options.adapters ?? [stateAdapter()], ...(options.readTimeoutMs !== undefined ? { readTimeoutMs: options.readTimeoutMs } : {}) }) })
   } as never);
   gw.register({
     tool_id: "gen-c", action: "mutate", description: "syntetisk", input_schema: strictParams, capability_class: options.defClass ?? "C", scopes: ["gen:write"], reversible: true,
@@ -248,6 +248,19 @@ describe("C: enforce - preflight-avslag FØR noe reserveres eller utføres", () 
       expect(await hanging.run(), `abort=${abort}`).toEqual({ ok: false, reason: "class_c_preflight_failed:s:timeout" });
       expect(hanging.store.calls).toEqual(["read_state"]);
     }
+  });
+
+  it("lesefristen er det MINSTE av verktøyets frist og pipelinens tak: en hengende lesing slippes etter taket (50 ms), ikke etter verktøyets frist (2 s)", async () => {
+    const r = rig("enforce", { readTimeoutMs: 50 });
+    r.store.hooks.hangRead = () => true;
+    const started = Date.now();
+    expect(await r.run()).toEqual({ ok: false, reason: "class_c_preflight_failed:s:timeout" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    const stricter = rig("enforce", { readTimeoutMs: 5_000, def: { timeout_ms: 50 } }); // verktøyets egen frist er strengere enn taket: den gjelder
+    stricter.store.hooks.hangRead = () => true;
+    const t0 = Date.now();
+    expect(await stricter.run()).toEqual({ ok: false, reason: "class_c_preflight_failed:s:timeout" });
+    expect(Date.now() - t0).toBeLessThan(1_000);
   });
 
   it("lykket kall: som observe, men raden er `succeeded` etter en BEKREFTET etterkontroll", async () => {

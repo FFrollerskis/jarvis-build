@@ -566,14 +566,20 @@ export function isClassCOwnerOverride(def: Pick<ToolDefinition, "tool_id" | "act
 export interface ClassCPipelineOptions {
   mode: ClassCMode;
   adapters: readonly ClassCAdapter[];
+  /** Øvre frist (ms) for ÉN lesing i pipelinen; gatewayen bruker `min(timeout_ms, dette)`. Heltall 1..60000, standard `CLASS_C_READ_TIMEOUT_MS`. */
+  readTimeoutMs?: number;
 }
 
 export class ClassCPipeline {
   readonly mode: ClassCMode;
+  readonly readTimeoutMs: number;
   private readonly adapters = new Map<string, ClassCAdapter>();
 
   constructor(options: ClassCPipelineOptions) {
     this.mode = options.mode;
+    const readTimeoutMs = options.readTimeoutMs ?? CLASS_C_READ_TIMEOUT_MS;
+    if (!Number.isInteger(readTimeoutMs) || readTimeoutMs < 1 || readTimeoutMs > 60_000) throw new Error("class_c_read_timeout_invalid");
+    this.readTimeoutMs = readTimeoutMs;
     for (const adapter of options.adapters) {
       if (!ADAPTER_KEY.test(adapter.key)) throw new Error(`class_c_adapter_key_invalid:${adapter.key}`);
       const [toolId, ...rest] = adapter.key.split(".");

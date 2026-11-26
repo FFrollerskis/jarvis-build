@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { JsonValue } from "@jarvis/contracts";
 import {
   CLASS_C_AUDIT_MAX_CHARS,
+  CLASS_C_READ_TIMEOUT_MS,
   CLASS_C_OWNER_OVERRIDE_ACTIONS,
   ClassCPipeline,
   canonicalJson,
@@ -205,6 +206,12 @@ describe("E: registeret og eierens kontrollhandlinger", () => {
     expect(new ClassCPipeline({ mode: "enforce", adapters: [adapter("items.rename")] }).begin({ ...def, action: "other" })).toBeNull();
     expect(new ClassCPipeline({ mode: "observe", adapters: [adapter("items.rename")] }).begin(def)?.mode).toBe("observe");
     expect(new ClassCPipeline({ mode: "enforce", adapters: [adapter("items.rename")] }).begin(def)?.mode).toBe("enforce");
+  });
+  it("lesefristen valideres ved oppsett (heltall 1..60000) og har en trygg standard", () => {
+    expect(new ClassCPipeline({ mode: "observe", adapters: [] }).readTimeoutMs).toBe(CLASS_C_READ_TIMEOUT_MS);
+    expect(new ClassCPipeline({ mode: "observe", adapters: [], readTimeoutMs: 1 }).readTimeoutMs).toBe(1);
+    expect(new ClassCPipeline({ mode: "observe", adapters: [], readTimeoutMs: 60_000 }).readTimeoutMs).toBe(60_000);
+    for (const bad of [0, -5, 60_001, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) expect(() => new ClassCPipeline({ mode: "observe", adapters: [], readTimeoutMs: bad }), String(bad)).toThrow("class_c_read_timeout_invalid");
   });
   it("adapterKeys er sortert og describe bærer kun navn", () => {
     const p = new ClassCPipeline({ mode: "observe", adapters: [adapter("zeta.run"), adapter("alfa.run")] });
