@@ -56,7 +56,11 @@ export type SignedApproval = z.infer<typeof SignedApprovalSchema>;
 /** Payloaden som signeres/verifiseres: alt unntatt selve signaturen. */
 export type ApprovalPayload = Omit<SignedApproval, "signature">;
 
-/** SHA-256 (hex) av parametrenes kanoniske JSON - DEN ENE definisjonen, brukt av signerer og verifikator. */
+/**
+ * SHA-256 (hex) av parametrenes kanoniske JSON - DEN ENE definisjonen, brukt av signerer og verifikator.
+ * WP-T1 (JARVIS-102): `request_digest` (request-digest.ts) bruker SAMME serialisering (`canonicalStringify`) og binder i tillegg verktøy, handling, tenant og person i ÉN digest; en Approval v2 binder den.
+ * Denne funksjonen er UENDRET (signerte godkjenninger i omløp er hashet slik): for parametre uten `idempotency_key` er `parametersDigest(p) === hashApprovalParameters(p)` (låst av test).
+ */
 export function hashApprovalParameters(parameters: Record<string, JsonValue>): string {
   return createHash("sha256").update(canonicalStringify(parameters), "utf8").digest("hex");
 }
