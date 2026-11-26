@@ -1,4 +1,6 @@
+import { readdirSync, readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { DEFAULT_RETENTION_DAYS, DEFAULT_SNAPSHOT_RETENTION_DAYS, MAX_RETENTION_DAYS, MAX_SNAPSHOT_RETENTION_DAYS, MIN_RETENTION_DAYS, VisionService } from "@jarvis/vision";
@@ -16,6 +18,7 @@ let vision: VisionService;
 let url = "";
 let urlNoRetention = "";
 let urlDormant = "";
+let urlLeaky = "";
 const closers: Array<() => Promise<void>> = [];
 
 type Grant = { person_id: string; tenant_id: string; channel: string; auth_strength: string; session_id: string; memory_space: string; device_id: string };
@@ -24,14 +27,21 @@ const OWNER_ID = (identity: IdentityContext): boolean =>
   identity.delegation_id === undefined && ((identity.person_id === T.owner && identity.tenant_id === T.tenant) || (identity.person_id === T2.owner && identity.tenant_id === T2.tenant));
 const grant = (over: Partial<Grant> = {}): Grant => ({ person_id: T.owner, tenant_id: T.tenant, channel: "web", auth_strength: "signed", session_id: "s-owner", memory_space: "home", device_id: "web-owner", ...over });
 
-function makeDeps(mode: "full" | "no_retention" | "dormant"): ApiDeps {
+/** En tjeneste hvis visning/endring bærer FLERE felt enn ruten skal gi videre (en fremtidig kolonne, en lekkasje): ruten må bygge svaret eksplisitt. */
+const LEAKY_VIEW = { configured: true, retention_days: 12, snapshot_retention_days: 4, effective_snapshot_retention_days: 4, updated_at: "2026-11-20T10:00:00.000Z", tenant_id: "tenant-lekkasje", actor_person_id: "person-lekkasje", memory_space_id: "home-lekkasje", note: "hemmelig-lekkasje" };
+const leakyService = {
+  getRetentionView: async () => LEAKY_VIEW,
+  applyRetentionPolicy: async () => ({ changed: true, shortened: { retention_days: false, snapshot_retention_days: false }, previous: LEAKY_VIEW, current: LEAKY_VIEW })
+};
+
+function makeDeps(mode: "full" | "no_retention" | "dormant" | "leaky"): ApiDeps {
   return {
     grants: { verify: async (token: string) => (grants.has(token) ? { ok: true, grant: grants.get(token) } : { ok: false, reason: "grant_invalid" }) },
     identity: { resolveIdentity: async (i: Record<string, string>) => ({ ok: true, identity: { ...i, memory_space_id: i["memory_space"] } }) },
     owner: { tenant_id: T.tenant, person_id: T.owner },
     ownerGate: OWNER_ID,
     ...(mode !== "dormant"
-      ? { vision: { cameras: {}, capture: {}, lastSeen: {}, inventory: {}, maxUploadBytes: 64 * 1024, ...(mode === "full" ? { retention: vision } : {}) } }
+      ? { vision: { cameras: {}, capture: {}, lastSeen: {}, inventory: {}, maxUploadBytes: 64 * 1024, ...(mode === "full" ? { retention: vision } : mode === "leaky" ? { retention: leakyService } : {}) } }
       : {})
   } as unknown as ApiDeps;
 }
@@ -57,6 +67,7 @@ beforeAll(async () => {
   url = await listen(makeDeps("full"));
   urlNoRetention = await listen(makeDeps("no_retention"));
   urlDormant = await listen(makeDeps("dormant"));
+  urlLeaky = await listen(makeDeps("leaky"));
 }, 240_000);
 
 afterAll(async () => {
@@ -345,5 +356,51 @@ describe("isolasjon: space og tenant", () => {
   it("ingen svar inneholder tenant-, person- eller aktørnavn", async () => {
     const texts = [(await get()).text, (await set({ retention_days: 33, snapshot_retention_days: 3 })).text, (await set({ retention_days: 1, snapshot_retention_days: 1 })).text, (await set({ retention_days: 0, snapshot_retention_days: 1 })).text];
     for (const text of texts) expect(text).not.toMatch(new RegExp(`${T.tenant}|${T.owner}|${T2.tenant}|actor_person_id|tenant_id|person_id`));
+  });
+});
+
+describe("svaret bygges eksplisitt: kun de fem feltene + faste standarder/grenser, selv om tjenesten gir mer", () => {
+  it("en tjeneste som returnerer ekstra felt (tenant, aktør, rom, notat) lekker ingenting gjennom get eller set", async () => {
+    const WHITELIST = ["applies_to", "configured", "defaults", "effective_snapshot_retention_days", "limits", "retention_days", "snapshot_retention_days", "updated_at"];
+    const read = await get("owner-signed", urlLeaky);
+    expect(read.status).toBe(200);
+    expect(Object.keys(read.body["data"]["retention"]).sort()).toEqual(WHITELIST);
+    const written = await set({ retention_days: 12, snapshot_retention_days: 4 }, "owner-signed", urlLeaky);
+    expect(written.status, written.text).toBe(200);
+    expect(Object.keys(written.body["data"]).sort()).toEqual(["changed", "retention", "shortened"]);
+    expect(Object.keys(written.body["data"]["retention"]).sort()).toEqual(WHITELIST);
+    for (const text of [read.text, written.text]) expect(text).not.toMatch(/lekkasje|actor_person_id|tenant_id|memory_space_id|note/);
+  });
+});
+
+describe("aldri et modellverktøy: eier-ruten er eneste vei til skriving av vinduene", () => {
+  const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+  const strip = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/[^\n]*/g, "$1");
+  const sources = (): Array<{ file: string; code: string }> => {
+    const out: Array<{ file: string; code: string }> = [];
+    for (const base of ["apps/api/src", ...readdirSync(`${ROOT}modules`).map((m) => `modules/${m}/src`), ...readdirSync(`${ROOT}packages`).map((p) => `packages/${p}/src`)]) {
+      let entries: string[] = [];
+      try { entries = readdirSync(`${ROOT}${base}`, { recursive: true }) as string[]; } catch { continue; }
+      for (const entry of entries) if (entry.endsWith(".ts")) out.push({ file: `${base}/${entry}`, code: strip(readFileSync(`${ROOT}${base}/${entry}`, "utf8")) });
+    }
+    return out;
+  };
+
+  it("`applyRetentionPolicy` er definert i tjenesten og kalt KUN fra eier-ruten; ingen verktøy, intent, transport eller annen kode skriver vinduene, og ruten finnes ikke utenfor vision-routes", () => {
+    const all = sources();
+    expect(all.length).toBeGreaterThan(300); // skanningen er ikke tom
+    expect(all.filter((f) => f.code.includes("applyRetentionPolicy")).map((f) => f.file).sort()).toEqual(["apps/api/src/vision-routes.ts", "modules/vision/src/service.ts"]);
+    expect(all.filter((f) => f.code.includes("vision.retention_set")).map((f) => f.file)).toEqual(["modules/vision/src/service.ts"]);
+    expect(all.filter((f) => /\/vision\/retention\//.test(f.code)).map((f) => f.file)).toEqual(["apps/api/src/vision-routes.ts"]);
+    expect(all.filter((f) => /setRetentionPolicy\(/.test(f.code) && /tool|intent|transport/i.test(f.file)).map((f) => f.file)).toEqual([]);
+    // ingen modellvendt verktøydefinisjon nevner retensjonsruten eller de to tjenestemetodene
+    expect(all.filter((f) => /(tool|intent|surface|capabilit)/i.test(f.file) && /(retention_set|retention_get|applyRetentionPolicy|getRetentionView)/.test(f.code)).map((f) => f.file)).toEqual([]);
+  });
+
+  it("ruten er `owner_write`/`owner_read` i rutetabellen (aldri `device`), og `confirm`-nøklene finnes bare på `set`", () => {
+    const code = strip(readFileSync(`${ROOT}apps/api/src/vision-routes.ts`, "utf8"));
+    expect(code).toContain('"/vision/retention/get": { access: "owner_read", action: "retention_get", keys: [] }');
+    expect(code).toContain('"/vision/retention/set": { access: "owner_write", action: "retention_set", keys: ["retention_days", "snapshot_retention_days", "confirm", "confirm_memory_space"] }');
+    expect(code.match(/confirm_memory_space/g)?.length).toBeGreaterThanOrEqual(2);
   });
 });

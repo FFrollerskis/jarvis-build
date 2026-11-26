@@ -276,7 +276,7 @@ describe("3. ingen personopplysninger, hemmeligheter eller finansdata i kortet",
     for (const i of card(r).items) for (const v of Object.values(i.facts ?? {})) expect(["string", "number", "boolean", "object"]).toContain(typeof v);
     expect(item(r, "poller").facts).toMatchObject({ consecutive_failures: 0, next_delay_ms: 0 });
     expect(item(r, "maintenance_light").facts).toMatchObject({ failed: 0, tombstones_failed: 0, temp_files_truncated: false });
-    expect(item(r, "maintenance_guard").facts).toMatchObject({ running: false, running_since: null, skipped_ticks: 0 });
+    expect(item(r, "maintenance_guard").facts).toMatchObject({ running: false, running_since: null, skipped_ticks: 0, abandoned_runs: 0 }); // en negativ teller (-3) blir 0, aldri et negativt antall i rapporten
   });
 
   it("ikke finansavledet: samme kort for en skymodell (`restrictFinance`) som for en full bygging, og kildekoden leser ingen finanskilde (kun vision_retention_policies)", async () => {
