@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { createServer as createNetServer } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
-import { CoreRequestNotSentError, isRequestNotSent } from "../src/core-errors.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CoreRequestNotSentError, classifyFetchFailure, isRequestNotSent } from "../src/core-errors.ts";
 import { HttpCoreClient } from "../src/server.ts";
 import type { CoreClient, VoiceIdentity } from "../src/session.ts";
 import { IDENTITY, ScriptedCore, TestClient, fixtureToken, sleep, startGateway, trackUncaught, type RunningGateway } from "./wpv2-harness.ts";
@@ -26,6 +26,7 @@ afterEach(async () => {
   }
   tracker = trackUncaught();
   expect(tracker.errors).toEqual([]);
+  vi.restoreAllMocks();
 });
 
 /** En port ingen lytter på (lyttet og lukket) - IKKE port 9 (fetch-spesifikasjonen blokkerer den med «bad port» uten nettverk). */
@@ -113,12 +114,28 @@ describe("FIX-5: klassifisering - kun BEVIS for at ingenting ble sendt frigjør 
   });
 });
 
+describe("FIX-5: classifyFetchFailure (brukt rundt fetch mot Core)", () => {
+  it("bevist ikke sendt: CoreRequestNotSentError med KUN en kort kode (også fra delfeil i en aggregate uten egen kode, og uten kode i det hele tatt); ellers uendret feil", () => {
+    const refused = classifyFetchFailure(withCause(sysErr("ECONNREFUSED", "connect")));
+    expect(refused).toBeInstanceOf(CoreRequestNotSentError);
+    expect((refused as Error).message).toBe("core_unreachable:ECONNREFUSED");
+    const aggregate = classifyFetchFailure(withCause(new AggregateError([sysErr("EHOSTUNREACH", "connect"), sysErr("ECONNREFUSED", "connect")], "x")));
+    expect((aggregate as Error).message).toBe("core_unreachable:EHOSTUNREACH"); // første delfeil med kode
+    const noCode = classifyFetchFailure(withCause(Object.assign(new Error("connect failed"), { syscall: "connect" })));
+    expect((noCode as Error).message).toBe("core_unreachable:connect"); // aldri meldingsteksten
+    const reset = withCause(sysErr("ECONNRESET", "read"));
+    expect(classifyFetchFailure(reset)).toBe(reset); // samme objekt: ukjent utfall røres ikke
+    const abort = Object.assign(new Error("aborted"), { name: "AbortError" });
+    expect(classifyFetchFailure(abort)).toBe(abort);
+  });
+});
+
 describe("FIX-5: HttpCoreClient klassifiserer ekte nettverksfeil (Node-fetch, ingen mock)", () => {
   it("lukket port: chat() og chatStream() kaster CoreRequestNotSentError; en socket serveren dreper, HTTP 500 og en Core-frist gjør IKKE det", async () => {
     const dead = new HttpCoreClient(`http://127.0.0.1:${await closedPort()}`);
     await expect(dead.chat(PROVEN_ID, "hei")).rejects.toBeInstanceOf(CoreRequestNotSentError);
     await expect(dead.chatStream(PROVEN_ID, "hei", () => undefined)).rejects.toBeInstanceOf(CoreRequestNotSentError);
-    await expect(dead.chat(PROVEN_ID, "hei")).rejects.toThrow(/^core_unreachable:/);
+    await expect(dead.chat(PROVEN_ID, "hei")).rejects.toThrow(/^core_unreachable:ECONNREFUSED$/); // kun en kort kode: aldri adresse, port eller innhold
 
     const destroyed: string[] = [];
     const destroyPort = await closedPort();
@@ -155,12 +172,20 @@ describe("FIX-5: replay_final etter Core-feil", () => {
   };
 
   it("Core nektet tilkobling (beviselig ikke nådd): claimen frigjøres, samme id kan sendes på nytt, og lykkes når Core er oppe - kommandoen går ikke tapt", async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(" "));
+    });
     const port = await closedPort();
     gateway = await startGateway({ core: splitCore(`http://127.0.0.1:${port}`) });
     const client = await new TestClient(gateway.url).connect();
     await client.startProven({ ...IDENTITY });
     replay(client, "u-closed");
     expect(await errorsAfter(client, 1)).toEqual(["core_error"]);
+    const coreLog = logs.filter((l) => l.includes("voice_core_error"));
+    expect(coreLog).toHaveLength(1);
+    expect(coreLog[0]).toContain('"request_not_sent":true');
+    expect(coreLog[0]).toContain("core_unreachable:ECONNREFUSED");
     replay(client, "u-closed"); // samme id: IKKE utterance_already_completed
     expect(await errorsAfter(client, 2)).toEqual(["core_error", "core_error"]);
 
@@ -182,8 +207,13 @@ describe("FIX-5: replay_final etter Core-feil", () => {
     gateway = await startGateway({ core: splitCore(`http://127.0.0.1:${port}`) });
     const client = await new TestClient(gateway.url).connect();
     await client.startProven({ ...IDENTITY });
+    const logs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(" "));
+    });
     replay(client, "u-unknown");
     expect(await errorsAfter(client, 1)).toEqual(["core_error"]);
+    expect(logs.filter((l) => l.includes("voice_core_error"))[0]).toContain('"request_not_sent":false');
     replay(client, "u-unknown");
     expect(await errorsAfter(client, 2)).toEqual(["core_error", "utterance_already_completed:u-unknown"]);
     expect(hits).toHaveLength(1);
