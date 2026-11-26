@@ -4,6 +4,7 @@ import { EvChangeClassSchema } from "../constitution.ts";
 import type { ChangeLedgerInput } from "../change-ledger.ts";
 import { CHANGE_KINDS, derivedKindsFromPaths, minimumClassForKind, minimumClassForKinds, type ChangeKind } from "./change-kind.ts";
 import { FORBIDDEN_CONFIDENCE_BASES, atLeast, classRank, maxClass, sensitiveTouches } from "./common.ts";
+import { MIGRATION_PHASES, MigrationFactsSchema, evaluateMigrationStep, type MigrationGateState } from "./migration-gate.ts";
 
 /**
  * EV-5 (Evolution Masterplan v1.2 kap. 12): Change Proposal Engine. Jarvis hopper aldri fra «jeg fant noe» til «jeg endret production»; hver
@@ -17,6 +18,19 @@ export const EvidenceItemSchema = z
     trust: z.enum(["trusted", "untrusted", "quarantined"]),
     /** Kilde-proveniens (URL/tabell/issue-id) - aldri et resonnement fra modellen. */
     provenance: z.string().min(1).max(500)
+  })
+  .strict();
+
+/**
+ * WP-EV0 (H2-0.9): hvilket trinn i migrasjonsgaten (`migration-gate.ts`) forslaget er. Faktaene er PÅSTANDER fra forslagsstilleren (verifiseres på nytt av eier/utfører med
+ * målte data); tilstanden (hvilke trinn som er gjort) hentes ALLTID fra endringsregisteret, aldri herfra.
+ */
+export const MigrationStepProposalSchema = z
+  .object({
+    migration_id: z.string().min(1).max(200),
+    phase: z.enum(MIGRATION_PHASES),
+    deploy_id: z.string().min(1).max(200).nullable(),
+    facts: MigrationFactsSchema
   })
   .strict();
 
@@ -46,7 +60,9 @@ export const ChangeProposalSchema = z
     data_impact: z.object({ schema: z.boolean(), retention: z.boolean(), delete: z.boolean(), rls_or_tenant: z.boolean(), migration_plan: z.string().max(1000).optional() }).strict(),
     test_plan: z.array(z.enum(["unit", "integration", "security", "eval", "load", "voice", "physical"])).min(1),
     rollback: z.object({ point: z.string().min(3).max(300), trigger: z.string().min(3).max(300), data_recovery: z.string().min(3).max(300) }).strict(),
-    owner_impact: z.object({ credentials: z.boolean(), money: z.boolean(), legal: z.boolean(), physical: z.boolean(), approval: z.boolean() }).strict()
+    owner_impact: z.object({ credentials: z.boolean(), money: z.boolean(), legal: z.boolean(), physical: z.boolean(), approval: z.boolean() }).strict(),
+    /** Påkrevd for ENHVER skjemaendring (typen «schema», `data_impact.schema`, SQL-/migrasjonssti eller dette feltet selv): trinnet i expand -> ... -> contract. */
+    migration: MigrationStepProposalSchema.optional()
   })
   .strict();
 export type ChangeProposal = z.infer<typeof ChangeProposalSchema>;
@@ -62,6 +78,15 @@ export interface ProposalVerdict {
   kind: ChangeKind | null;
   derived_kinds: ChangeKind[];
   kind_minimum_class: EvChangeClass | null;
+}
+
+/** Kontekst som Authority Plane (ikke forslagsstilleren) leverer. Uten `migration` kan et skjemaforslag aldri verifiseres og avvises (fail-closed). */
+export interface ProposalContext {
+  migration?: {
+    /** Migrasjonens tilstand utledet av endringsregisteret (`migrationStateFromLedger`); tom `steps` = ny migrasjon. Kan kaste (= utilgjengelig). */
+    stateOf: (migrationId: string) => MigrationGateState;
+    now: () => Date;
+  };
 }
 
 /** Årsaker som kun forklarer en heving av klassen - de avviser aldri forslaget (forslaget går til eier/review med den høyere klassen). */
@@ -82,7 +107,7 @@ const SENSITIVE_PRIMARY_REQUIRED = (p: ChangeProposal): boolean => {
  * `needs_owner`: E2 eller eier-påvirkning (credentials/penger/juridisk/fysisk/approval). Ellers `accepted_for_review` (E0/E1): går videre
  * til uavhengig review + CI/evals - aldri direkte til production.
  */
-export function validateProposal(raw: unknown, constitution: Pick<Constitution, "classify">): ProposalVerdict {
+export function validateProposal(raw: unknown, constitution: Pick<Constitution, "classify">, context: ProposalContext = {}): ProposalVerdict {
   const parsed = ChangeProposalSchema.safeParse(raw);
   if (!parsed.success) {
     return {
@@ -103,11 +128,36 @@ export function validateProposal(raw: unknown, constitution: Pick<Constitution, 
   const declaredFloor = minimumClassForKind(p.kind);
   const personalityNeedsOwner = p.kind === "personality" && p.personality_scope !== "internal";
   derived = atLeast(atLeast(atLeast(derived, declaredFloor), minimumClassForKinds(derivedKinds)), personalityNeedsOwner ? "E2" : "E0");
-  const effective = maxClass(derived, p.claimed_class);
-  if (classRank(derived) > classRank(p.claimed_class)) reasons.push(`class_raised_by_rules:${p.claimed_class}->${derived}`);
   const raisedKinds = derivedKinds.filter((k) => classRank(minimumClassForKind(k)) > classRank(declaredFloor));
   if (raisedKinds.length > 0) reasons.push(`kind_raised_by_paths:${p.kind}->${raisedKinds.join("+")}`);
   if (personalityNeedsOwner) reasons.push("personality_customer_facing_requires_owner");
+
+  // WP-EV0 (H2-0.9): ENHVER skjemaendring er E2 og går gjennom migrasjonsgaten, hvert trinn som sin egen endring. Tilstanden kommer fra endringsregisteret.
+  const schemaChange = p.migration !== undefined || p.kind === "schema" || p.data_impact.schema || touches.migrations || derivedKinds.includes("schema");
+  if (schemaChange) {
+    derived = atLeast(derived, "E2");
+    if (p.migration === undefined) reasons.push("migration_gate_step_required");
+    else {
+      let gateVerdict: ReturnType<typeof evaluateMigrationStep> | null = null;
+      try {
+        const gate = context.migration;
+        if (gate !== undefined) {
+          const state = gate.stateOf(p.migration.migration_id);
+          gateVerdict = evaluateMigrationStep(state, {
+            migration_id: p.migration.migration_id, phase: p.migration.phase, change_id: p.proposal_id, deploy_id: p.migration.deploy_id,
+            now: gate.now().toISOString(), facts: p.migration.facts
+          });
+        }
+      } catch {
+        gateVerdict = null;
+      }
+      if (gateVerdict === null) reasons.push("migration_state_unavailable");
+      else reasons.push(...gateVerdict.reasons.map((r) => `migration_gate:${r}`));
+    }
+  }
+
+  const effective = maxClass(derived, p.claimed_class);
+  if (classRank(derived) > classRank(p.claimed_class)) reasons.push(`class_raised_by_rules:${p.claimed_class}->${derived}`);
 
   if (effective === "E3") reasons.push("e3_forbidden_for_evolution_engine");
   const badBasis = p.confidence_basis.filter((b) => FORBIDDEN_CONFIDENCE_BASES.has(b));

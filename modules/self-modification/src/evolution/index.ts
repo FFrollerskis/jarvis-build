@@ -1,5 +1,6 @@
 export * from "./common.ts";
 export * from "./change-kind.ts";
+export * from "./migration-gate.ts";
 export * from "./proposal.ts";
 export * from "./radar.ts";
 export * from "./evals.ts";
