@@ -961,20 +961,28 @@ export class OpenLoopService {
         });
         if (result === "inserted") detected++; else updated++;
       }
+      // WP-FIN2 fiks-runde 1 (FIX-8): i tillegg til kort med avviksflagg overflates et kort med en INNSENDING UTEN SVAR som er eldre enn leasen (120 s i `CardService`; her 5 minutter med margin): `submitCard`
+      // reserverer markøren `submitted_at` FØR Wallester-kallet, og krasjer prosessen midt i kallet står kortet som `draft` uten leverandør-id og UTEN flagg - uten dette ble det aldri synlig før
+      // eieren prøvde å sende det inn igjen. Rent lesende; markøren ryddes av eierens avklaring (FINANCE_D_CHAIN §11.3 A) og loopen lukkes da selv (`autoResolveStale`).
       const { rows: cardRows } = await client.query(
-        `SELECT card_id, name, anomaly_flags FROM provider_cards WHERE tenant_id = $1 AND jsonb_array_length(anomaly_flags) > 0`,
+        `SELECT card_id, name, anomaly_flags FROM provider_cards
+          WHERE tenant_id = $1 AND (jsonb_array_length(anomaly_flags) > 0
+             OR (state = 'draft' AND provider_card_id IS NULL AND submitted_at IS NOT NULL AND submitted_at < now() - interval '5 minutes'))`,
         [tenantId]
       );
       for (const row of cardRows as Array<{ card_id: string; name: string; anomaly_flags: string[] }>) {
         const detectionKey = `card_anomaly_attention:card:${row.card_id}`;
         currentKeys.push(detectionKey);
+        const unansweredSubmit = row.anomaly_flags.length === 0;
         const result = await upsertOpenLoop(client, {
           open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
           company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
           activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
           loop_type: "card_anomaly_attention", detection_key: detectionKey,
-          reason: `Kort «${row.name}» (${row.card_id}) har uløste kortavvik: ${row.anomaly_flags.join(", ")}`,
-          next_action: `Undersøk kort ${row.card_id}`,
+          reason: unansweredSubmit
+            ? `Kort «${row.name}» (${row.card_id}) har en innsending til Wallester uten svar (reservasjonen er eldre enn 5 minutter - prosessen kan ha stoppet midt i kallet). Utfallet er ukjent`
+            : `Kort «${row.name}» (${row.card_id}) har uløste kortavvik: ${row.anomaly_flags.join(", ")}`,
+          next_action: unansweredSubmit ? `Sjekk hos Wallester om det finnes et kort med referanse ${row.card_id} før noe sendes inn på nytt (FINANCE_D_CHAIN §11.3 A)` : `Undersøk kort ${row.card_id}`,
           priority: "high", owner_person_id: null, due_at: null
         });
         if (result === "inserted") detected++; else updated++;
