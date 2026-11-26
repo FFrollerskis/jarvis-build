@@ -3,6 +3,7 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import { ALL_DOMAINS } from "./domain-pause.ts";
+import { classifyDelivery, type MorningSummaryDelivery } from "./morning-summary-delivery.ts";
 
 /**
  * WP-G4b K5 (D-484, Q-75 pkt 8, JARVIS-115 f): MORGENOPPSUMMERING av nattlige kamerahendelser.
@@ -15,8 +16,11 @@ import { ALL_DOMAINS } from "./domain-pause.ts";
  *    etiketter, bilder, navn, kategorier, tidspunkter eller antall. Situasjonenes `reason`/fakta leses ALDRI av dette steget - kun en telling i databasen avgjør OM meldingen sendes.
  *  - Hvilke hendelser teller: åpne `vision`-situasjoner på `remember` med prioritet over `low` (nøyaktig det stille timer holder tilbake, jf. `heldByQuietHours`), som aldri er varslet (`last_notified_at IS NULL`) og ble åpnet i den siste natten
  *    (vinduet [start, slutt) av stille timer). En hendelse som likevel ble varslet individuelt (observasjonen lå fortsatt i oppslagsvinduet da stille timer sluttet) telles ikke; er det ingenting igjen, sendes ingenting.
- *  - IDEMPOTENT (ett sammendrag per natt, ingen dobbeltsending ved omstart): nøkkelen `situation-morning-summary:<tenant>:<rom>:<slutt-tidspunkt>` er en ToolGateway-idempotensnøkkel (varig i `tool_executions`); det sjekkes FØR noe sendes, og
- *    et ukjent utfall (en krasj midt i sendingen) sendes aldri på nytt (høyst én gang er tryggere enn to).
+ *  - IDEMPOTENT (ett sammendrag per natt, ingen dobbeltsending ved omstart): nøkkelen `situation-morning-summary:<tenant>:<rom>:<slutt-tidspunkt>` er en ToolGateway-idempotensnøkkel (varig i `tool_executions`); det sjekkes FØR noe sendes.
+ *    Hva som sendes på nytt og hva som ALDRI gjør det (fiks-runde 1, review A LOW-1 - ærlig): en krasj midt i sendingen (raden står som `reserved`) og et gateway-tidsavbrudd (`unverified`) er ukjent utfall og sendes aldri på nytt (høyst én
+ *    gang er tryggere enn to). En REN transportfeil på klasse B (f.eks. ECONNRESET, avvist av leverandøren) er derimot ikke et ukjent utfall for gatewayen: ledgeren får `failed` (gatewayens `mayDuplicateOnRetry` utelater klasse B bevisst), og
+ *    neste tikk innenfor etterfyllingsvinduet sender på nytt - i verste fall ETT ekstra sammendrag (konstant, innholdsfri, lavrisiko). Telegram-transporten er delt kode og er ikke endret for å fange det. Samtidige kall for samme natt
+ *    gir nøyaktig ett `sent` (taperne får `already_sent`).
  *  - Etterfylling begrenset: en tikk som kommer sent (nedetid) sender fortsatt sammendraget for natten som nettopp sluttet, men ikke senere enn `MORNING_SUMMARY_CATCH_UP_MS` etter slutten.
  *  - Pause (domenet `vision` eller hele motoren) og kill switch (i gatewayen) stopper sendingen; den prøves igjen neste tikk innenfor etterfyllingsvinduet.
  *  - AV med mindre situasjonsflaggene er på: tjenesten bygges kun av `apps/api` når `JARVIS_SITUATION_SIGNALS` OG `JARVIS_SITUATION_VISION` er på (ingen nytt flagg), og kun løperen kaller den.
@@ -59,7 +63,7 @@ export function morningSummaryKey(tenantId: string, memorySpace: string, nightEn
 export type MorningSummaryStatus =
   /** Sendt nå (bekreftet av ToolGateway). */
   | "sent"
-  /** Allerede sendt (eller utfallet er ukjent etter en krasj): aldri på nytt. */
+  /** Allerede sendt (eller utfallet er ukjent etter en krasj/tidsavbrudd, eller et samtidig kall sendte): aldri på nytt. */
   | "already_sent"
   /** Ingen stille timer konfigurert (eller deaktivert), ingen natt å oppsummere. */
   | "no_quiet_hours"
@@ -118,13 +122,13 @@ export class MorningSummaryService {
     if (gathered.paused) return { status: "paused", night_end: nightEnd };
     if (gathered.held === 0) return { status: "nothing_to_report", night_end: nightEnd };
 
-    let ok = false;
+    let status: MorningSummaryDelivery = "failed";
     try {
-      const result = await gateway.execute({ identity, tool_id: "telegram", action: "notify", parameters: { message: MORNING_SUMMARY_MESSAGE }, idempotency_key: key });
-      ok = result.ok;
+      // FIX-11 (i): kun kallet som FAKTISK sendte får `sent`; et samtidig kall som tapte kappløpet om idempotensnøkkelen får `already_sent` (se `classifyDelivery`).
+      status = classifyDelivery(await gateway.execute({ identity, tool_id: "telegram", action: "notify", parameters: { message: MORNING_SUMMARY_MESSAGE }, idempotency_key: key }));
     } catch {
-      ok = false;
+      status = "failed";
     }
-    return { status: ok ? "sent" : "failed", night_end: nightEnd };
+    return { status, night_end: nightEnd };
   }
 }
