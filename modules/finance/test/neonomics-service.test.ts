@@ -669,3 +669,89 @@ describe("H: bank-avviksdeteksjon + tenant-isolasjon", () => {
     expect(serialized).not.toContain("fake-client");
   });
 });
+
+describe("I: WP-FIN2 fiks-runde 1 (FIX-5) - transaksjoner med ukjent/manglende leverandørstatus settes i karantene", () => {
+  const FLAG = "BANK_TRANSACTION_STATUS_UNKNOWN";
+  const rowOf = async (bankAccountId: string, providerTransactionId: string): Promise<BankTransaction> =>
+    (await banking.listBankTransactions(TENANT_A, "business", { bank_account_id: bankAccountId })).find((r) => r.provider_transaction_id === providerTransactionId) as BankTransaction;
+
+  it("en side med kjente og ukjente statuser feiler ikke og paginering fortsetter; ukjente lagres som pending + flagget, aldri booked", async () => {
+    freshServices();
+    const { bankAccountId } = await syncedAccountId();
+    const good = providerTx();
+    const weird = providerTx({ status: "unknown", amountOre: 7_000 });
+    const pending = providerTx({ status: "pending", bookingDate: null });
+    const weird2 = providerTx({ status: "unknown", direction: "credit", amountOre: 5_000 });
+    gateway.onListTransactions = async (_acc, pageToken) =>
+      pageToken === null ? { transactions: [good, weird, pending], nextPageToken: "page2" } : { transactions: [weird2], nextPageToken: null };
+    const result = await banking.syncTransactions(TENANT_A, "business", bankAccountId);
+    expect(result).toMatchObject({ inserted: 4, transitioned: 0, corrections_flagged: 0, quarantined: 2, pages: 2 });
+    for (const tx of [weird, weird2]) {
+      const row = await rowOf(bankAccountId, tx.id);
+      expect(row.status).toBe("pending"); // aldri booked
+      expect(row.anomaly_flags).toEqual([FLAG]);
+      expect(row.reconciliation_state).toBe("unmatched");
+      expect(row.direction).toBe(tx.direction);
+    }
+    expect((await rowOf(bankAccountId, good.id)).status).toBe("booked");
+    expect((await rowOf(bankAccountId, good.id)).anomaly_flags).toEqual([]);
+    expect((await rowOf(bankAccountId, pending.id)).anomaly_flags).toEqual([]);
+    // gjentatt synk: ingen duplikater, karantenen telles på nytt, flagget ligger fast (ingen dobbel-flagging)
+    const again = await banking.syncTransactions(TENANT_A, "business", bankAccountId);
+    expect(again).toMatchObject({ inserted: 0, quarantined: 2 });
+    expect((await rowOf(bankAccountId, weird.id)).anomaly_flags).toEqual([FLAG]);
+    expect(await banking.listBankTransactions(TENANT_A, "business", { bank_account_id: bankAccountId })).toHaveLength(4);
+  });
+
+  it("en karantene-rad avstemmes ALDRI (selv med matchende referanse og beløp) før banken sender en kjent status; da går den vanlige veien og flagget fjernes", async () => {
+    freshServices();
+    const { bankAccountId } = await syncedAccountId();
+    const intent = await finance.createPaymentIntent(TENANT_A, "business", {
+      idempotency_key: `idem-${randomUUID()}`, purpose: "Karantenetest", amount_ore: 25_000,
+      vendor_name: "Leverandør AS", vendor_provider_ref: "98765432101", account_code: "bank-karantene",
+      counter_account_code: bankAccountId, provider: "neonomics"
+    });
+    await finance.submitPaymentIntent(TENANT_A, "business", intent.payment_intent_id, { getCredentials: async () => null });
+    const tx = providerTx({ status: "unknown", referenceText: `Betaling ${intent.payment_intent_id}` });
+    gateway.onListTransactions = async () => ({ transactions: [tx], nextPageToken: null });
+    await banking.syncTransactions(TENANT_A, "business", bankAccountId);
+    const blocked = await banking.reconcileBankTransactions(TENANT_A, "business");
+    expect(blocked).toMatchObject({ matched_by_reference: 0, matched_by_amount_date: 0 });
+    const quarantined = await rowOf(bankAccountId, tx.id);
+    expect(quarantined).toMatchObject({ status: "pending", reconciliation_state: "unmatched", matched_payment_intent_id: null });
+    expect((await finance.getPaymentIntent(TENANT_A, "business", intent.payment_intent_id))?.reconciliation_state).not.toBe("matched");
+
+    gateway.onListTransactions = async () => ({ transactions: [{ ...tx, status: "booked" }], nextPageToken: null });
+    const resolved = await banking.syncTransactions(TENANT_A, "business", bankAccountId);
+    expect(resolved).toMatchObject({ inserted: 0, transitioned: 1, quarantined: 0 });
+    const booked = await rowOf(bankAccountId, tx.id);
+    expect(booked.status).toBe("booked");
+    expect(booked.anomaly_flags).toEqual([]); // selv-korrigerende
+    expect((await banking.reconcileBankTransactions(TENANT_A, "business")).matched_by_reference).toBe(1);
+  });
+
+  it("kjent status `pending` på en karantene-rad fjerner flagget uten å bokføre", async () => {
+    freshServices();
+    const { bankAccountId } = await syncedAccountId();
+    const tx = providerTx({ status: "unknown", bookingDate: null });
+    gateway.onListTransactions = async () => ({ transactions: [tx], nextPageToken: null });
+    await banking.syncTransactions(TENANT_A, "business", bankAccountId);
+    gateway.onListTransactions = async () => ({ transactions: [{ ...tx, status: "pending" }], nextPageToken: null });
+    await banking.syncTransactions(TENANT_A, "business", bankAccountId);
+    expect(await rowOf(bankAccountId, tx.id)).toMatchObject({ status: "pending", anomaly_flags: [] });
+  });
+
+  it("ukjent status på en allerede BOKET rad: raden (beløp/status) røres ikke - kun et synlig flagg; aldri en stille overskriving eller nedgradering", async () => {
+    freshServices();
+    const { bankAccountId } = await syncedAccountId();
+    const tx = providerTx({ status: "booked", amountOre: 12_345 });
+    gateway.onListTransactions = async () => ({ transactions: [tx], nextPageToken: null });
+    await banking.syncTransactions(TENANT_A, "business", bankAccountId);
+    gateway.onListTransactions = async () => ({ transactions: [{ ...tx, status: "unknown", amountOre: 99 }], nextPageToken: null });
+    const result = await banking.syncTransactions(TENANT_A, "business", bankAccountId);
+    expect(result).toMatchObject({ inserted: 0, transitioned: 0, corrections_flagged: 0, quarantined: 1 });
+    const row = await rowOf(bankAccountId, tx.id);
+    expect(row).toMatchObject({ status: "booked", anomaly_flags: [FLAG] });
+    expect(Number(row.amount_ore)).toBe(12_345);
+  });
+});
