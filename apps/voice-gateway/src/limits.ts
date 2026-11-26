@@ -220,10 +220,10 @@ export function peerKey(req: Pick<IncomingMessage, "socket" | "headers">): strin
 export type ConnectionRefusal = "global_limit" | "peer_limit";
 
 /**
- * Hvor langt en tilkobling har kommet (FIX-2): `pending` = ingen velformet `start` ennå, `unproven` = startet uten enhetsbevis,
- * `proven` = Core har autorisert enheten. Kun `proven` er vernet mot utkasting.
+ * Hvor langt en tilkobling har kommet (FIX-2): `pending` = ingen velformet `start` ennå (eller et avslått/feilet bevis), `unproven` = startet uten enhetsbevis,
+ * `authorizing` = Core-autorisering pågår (FIX-2 runde 2, F11), `proven` = Core har autorisert enheten. `authorizing` og `proven` er vernet mot utkasting.
  */
-export type ConnectionState = "pending" | "unproven" | "proven";
+export type ConnectionState = "pending" | "unproven" | "authorizing" | "proven";
 
 /** Opak håndtak for én tilkobling i `ConnectionTracker` (gis til `claimUnproven`/`markProven`/`release`). */
 export interface ConnectionTicket {
@@ -238,8 +238,12 @@ export type AdmitResult = { ok: true; ticket: ConnectionTicket } | { ok: false; 
  * Teller samtidige tilkoblinger totalt og per peer, og skiller BEVISTE fra ubeviste (FIX-2).
  *
  * Er det fullt (globalt eller for peeren), kastes den ELDSTE ikke-beviste tilkoblingen (pending/unproven) ut for å gi plass - en bevist enhet
- * skal alltid kunne koble til når det bare er ubeviste som fyller opp. Finnes ingen å kaste ut (alt er bevist), avvises den nye. Alder =
- * innsettingsrekkefølge. Når to tilkoblinger kan ha samme peer-adresse uten å være samme klient (proxy), er dette det som holder eieren inne.
+ * skal normalt kunne koble til når det bare er ubeviste som fyller opp. Finnes ingen å kaste ut (alt er bevist, eller autorisering pågår), avvises den
+ * nye. Alder = innsettingsrekkefølge. Når to tilkoblinger kan ha samme peer-adresse uten å være samme klient (proxy), er dette det som holder eieren inne.
+ *
+ * FIX-2 (runde 2, F11): en tilkobling med PÅGÅENDE Core-autorisering (`authorizing`) kastes ikke ut (ellers kunne churn ta eieren midt i håndtrykket).
+ * Det som ikke er dekket: vinduet FØR `start` er mottatt (tilkoblingen er `pending` og utkastbar i ca. en halv tur-retur-tid), og en angriper som holder
+ * ALLE peerens plasser i `authorizing` med søppelbevis mens Core er treg (høyst Core-fristen per bevis, og én autorisering om gangen per tilkobling).
  */
 export class ConnectionTracker {
   private readonly tickets = new Set<ConnectionTicket>();
@@ -274,6 +278,29 @@ export class ConnectionTracker {
     const ticket: ConnectionTicket = { peer, state: "pending", evict };
     this.tickets.add(ticket);
     return { ok: true, ticket };
+  }
+
+  /**
+   * FIX-2 (runde 2, F11): Core-autorisering pågår for tilkoblingen. Den kastes IKKE ut før vedtaket foreligger (høyst Core-fristen) - ellers kunne churn fra samme
+   * peer kaste ut eierens tilkobling MIDT i håndtrykket, før `markProven` (målt med 80 ms Core-svar: eier 6/30 ved 50 nye tilkoblinger/s, 0/30 ved 100/s). Teller
+   * ikke som ubevist sesjon. `false` = tilkoblingen er allerede kastet ut/frigjort (ingen autorisering skal gjøres for en død tilkobling). En allerede BEVIST
+   * tilkobling (ny `start` på samme socket) forblir bevist.
+   */
+  beginAuthorizing(ticket: ConnectionTicket): boolean {
+    if (!this.tickets.has(ticket)) {
+      return false;
+    }
+    if (ticket.state !== "proven") {
+      ticket.state = "authorizing";
+    }
+    return true;
+  }
+
+  /** Vedtaket ble et avslag eller en feil: tilbake til `pending` (ingen sesjon, ingen grant) og utkastbar igjen - en angriper kan ikke holde en plass med søppelbevis. */
+  endAuthorizing(ticket: ConnectionTicket): void {
+    if (this.tickets.has(ticket) && ticket.state === "authorizing") {
+      ticket.state = "pending";
+    }
   }
 
   /** Enheten er bevist (Core har utstedt en grant): vernet mot utkasting, og teller ikke mot ubevist-taket. */
@@ -322,7 +349,8 @@ export class ConnectionTracker {
 
   private oldestEvictable(match: (t: ConnectionTicket) => boolean): ConnectionTicket | undefined {
     for (const t of this.tickets) {
-      if (t.state !== "proven" && match(t)) {
+      // Kun `pending` og `unproven` kan kastes ut: `authorizing` (vedtaket pågår) og `proven` er vernet.
+      if ((t.state === "pending" || t.state === "unproven") && match(t)) {
         return t;
       }
     }

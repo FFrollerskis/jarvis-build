@@ -698,6 +698,11 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         return;
       }
 
+      // FIX-2 (runde 2, F11): mens Core avgjør, kan tilkoblingen ikke kastes ut av churn fra samme peer (state `authorizing`); en allerede utkastet tilkobling
+      // (`false`) får ingen autorisering - den er på vei bort. Avslag/feil gir `pending` (utkastbar) igjen; bevist gir `proven`.
+      if (!tracker.beginAuthorizing(ticket)) {
+        return;
+      }
       let result: VoiceAuthorizationResult;
       try {
         result = await options.core.authorizeVoiceSession({
@@ -712,6 +717,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           device_proof: proof
         });
       } catch (err) {
+        tracker.endAuthorizing(ticket);
         console.error(
           JSON.stringify({ msg: "voice_authority_error", error: (err as Error).message.slice(0, 200) })
         );
@@ -725,6 +731,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
       }
 
       if (!result.ok) {
+        tracker.endAuthorizing(ticket);
         // Et avvist bevis starter INGEN sesjon - heller ikke en nedgradert
         // `CLIENT_ASSERTED`-sesjon. En nedgradering hadde vært teknisk trygg
         // (D-122 gjør `CLIENT_ASSERTED` rent innstrammende), men den ville
