@@ -88,7 +88,7 @@ import {
   KnowledgeSearchTransport, knowledgeToolDefinitions,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
-  assertRequestDigestModeValid, emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, schedulerSource, DailyScheduler, runConnectorHealthSweep,
+  assertRequestDigestModeValid, emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, parseLedgerReconcileConfig, runLedgerReconcileForAllTenants, tasksSource, schedulerSource, DailyScheduler, runConnectorHealthSweep,
   CONNECTOR_REGISTRY, FORBIDDEN_MODEL_TOOL_IDS, listConnectorStatus,
   CloudflareTransport, INFRA_GATED_TOOL_IDS, cloudControlToolDefinitions, parseCloudflareMutationZones,
   InfisicalTransport, LangfuseTransport, PostgresOpsTransport, parseInfisicalRotationIds, parsePostgresOpsConfig,
@@ -196,6 +196,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   await assertRuntimeRoleSafe(pool);
   // WP-T1 (JARVIS-102): en ukjent JARVIS_TOOL_REQUEST_DIGEST (typo) stopper oppstarten i stedet for å kjøre i en modus eieren ikke trodde (tom/usatt = off).
   assertRequestDigestModeValid(process.env);
+  // WP-T1 K5 (JARVIS-103): avstemming av verktøy-ledgeren er AV som standard; kun eksakt `on` slår den på, og en ukjent verdi eller en ugyldig TTL stopper oppstarten (aldri en stille standard).
+  const toolLedgerConfig = parseLedgerReconcileConfig(process.env);
   // BO-09: Langfuse-sink når konfigurert (D-27), ellers JSONL - samme mesh-observability overalt.
   const trace = traceSinkFromEnv(process.env["JARVIS_TRACE_FILE"] ?? "var/traces.jsonl");
   // K1 (Sovereign graduation, D-164): FØR denne sliceen var `killSwitch`/
@@ -1606,6 +1608,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     ...(visionRuntime !== null ? { vision: visionRuntime.api } : {}),
     // WP-G4 fiks-runde (D-466, B-MEDIUM-5): `/situations/signals/*` finnes KUN med JARVIS_SITUATION_SIGNALS=on (ellers 404, identisk med main).
     ...(situationSignals.api !== null ? { situationSignals: situationSignals.api } : {}),
+    // WP-T1 K5 (JARVIS-103): eierens ledger-kø og -avgjørelse (`/tool-ledger/queue|resolve`) finnes KUN med JARVIS_TOOL_LEDGER_RECONCILE=on (ellers 404, identisk med main). Eier-porten er DET SAMME predikatet som kontrollsentrene.
+    ...(toolLedgerConfig.enabled ? { toolLedger: { pool, gateway: toolGateway, ownerGate: ownerPredicate(ownerAuthority) } } : {}),
     // WP-D2 (UA-3 «churn/product usage»): produktbruk-webhooken er AV som standard - ruten finnes først når eieren har satt JARVIS_PRODUCT_USAGE_TENANT_ID (en bedrifts-tenant;
     // tjenesten avviser alt annet). Hemmeligheten leses ved HVERT kall via den delte kjeden (Infisical-primær, .env-fallback), slik at rotasjon gjelder umiddelbart; er den
     // borte eller kortere enn 32 tegn svarer ruten 503 (fail closed).
@@ -2048,6 +2052,13 @@ porter: se docs/RUNTIME_GATES.md`;
     const result = await runOperationalRetentionSweep(pool);
     console.log(JSON.stringify({ msg: "operational_retention_sweep_completed", ...result }));
   });
+  // WP-T1 K5 (JARVIS-103, Q-63 pkt 7): utløp/avstemming av `reserved`/`unverified` i verktøy-ledgeren (`reserved` eldre enn TTL -> `unknown_outcome`, `unverified` eldre enn TTL -> `needs_resolution`; kun statusflytting og revisjon, aldri en
+  // automatisk retry eller et leverandørkall). Idempotent per tenant, så et nytt forsøk (D-442) er trygt. KUN registrert med JARVIS_TOOL_LEDGER_RECONCILE=on (AV = ingenting nytt kjører og ingen rad får de nye statusene).
+  if (toolLedgerConfig.enabled) {
+    new DailyScheduler(
+      pool, "tool-ledger-reconcile", envHour("JARVIS_TOOL_LEDGER_RECONCILE_HOUR", 5)
+    ).start(() => failOnSweepFailures("tool-ledger-reconcile", (failures) => runLedgerReconcileForAllTenants(pool, toolLedgerConfig, failures)));
+  }
   // WP-K (D-471, JARVIS-053): oppbevaring for den varige policy-journalen (`policy_decisions`, migrasjon 108) - SAMME mønster og klokkeslett som sveipet over, men egen jobb (egen claim/retry/helse i
   // `scheduler_state`, så en feil her aldri skjuler resultatet av det eksisterende sveipet). Kun registrert når journalen er PÅ (AV = ingenting nytt kjører); `prune_policy_decisions()` har et fast gulv på 30 dager.
   if (policyAuditSink) {

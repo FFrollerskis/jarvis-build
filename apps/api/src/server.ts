@@ -33,6 +33,7 @@ import {
 } from "@jarvis/comms";
 import type { ConversationEngine } from "./conversation.ts";
 import { handlePersonalRoute, type PersonalApiDeps } from "./personal-routes.ts";
+import { handleToolLedgerRoute, type ToolLedgerApiDeps } from "./tool-ledger-routes.ts";
 import { handleVisionRoute, type VisionApiDeps } from "./vision-routes.ts";
 import { handleSituationSignalRoute, type SituationSignalApiDeps } from "./situation-signal-routes.ts";
 import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
@@ -177,6 +178,11 @@ export interface ApiDeps {
    * DORMANT: uten verdien finnes ingen av rutene (404, identisk med main); `main.ts` setter den KUN med `JARVIS_SITUATION_SIGNALS=on`. Aldri et modellverktøy.
    */
   situationSignals?: SituationSignalApiDeps;
+  /**
+   * WP-T1 K5 (JARVIS-103, Q-63 pkt 7): eierens kø over verktøy-ledger-rader som venter på en avgjørelse, og avgjørelsen selv (`/tool-ledger/queue` og `/tool-ledger/resolve`, se `tool-ledger-routes.ts`).
+   * DORMANT: uten verdien finnes ingen av rutene (404, identisk med main); `main.ts` setter den KUN med `JARVIS_TOOL_LEDGER_RECONCILE=on`. Aldri et modellverktøy.
+   */
+  toolLedger?: ToolLedgerApiDeps;
   /**
    * WP-D2 (UA-3 «churn/product usage»): innkommende webhook for produktbruk-hendelser fra eierens egne produkter (`POST /webhooks/product-usage`). DORMANT: uten verdien
    * svarer ruten 404; `main.ts` setter den KUN når `JARVIS_PRODUCT_USAGE_TENANT_ID` er satt. Det finnes ingen identitet å oppløse her: autentiseringen ER HMAC-signaturen
@@ -1352,6 +1358,17 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   // WP-G4 fiks-runde (B-MEDIUM-5): `/situations/signals/*` finnes KUN når `deps.situationSignals` er satt (JARVIS_SITUATION_SIGNALS=on); ellers faller alt til den vanlige 404-en. Ruten håndterer selv grant/eier/step-up.
   if (deps.situationSignals && url.pathname.startsWith("/situations/signals/")) {
     const handled = await handleSituationSignalRoute(req, url.pathname, deps.situationSignals, {
+      authed: (keys, maxBytes) => authedRequest(req, res, deps, keys, maxBytes),
+      requireOwner: (identity, subject) => requireOwner(res, deps, identity, subject),
+      json: (status, body) => json(res, status, body),
+      requestId: () => requestIdOf(res)
+    });
+    if (handled) return;
+  }
+
+  // WP-T1 K5 (JARVIS-103): rutene under `/tool-ledger/` finnes KUN når `deps.toolLedger` er satt (JARVIS_TOOL_LEDGER_RECONCILE=on); ellers faller alt til den vanlige 404-en. Ruten håndterer selv grant/eier/step-up (tool-ledger-routes.ts).
+  if (deps.toolLedger && url.pathname.startsWith("/tool-ledger/")) {
+    const handled = await handleToolLedgerRoute(req, url.pathname, deps.toolLedger, {
       authed: (keys, maxBytes) => authedRequest(req, res, deps, keys, maxBytes),
       requireOwner: (identity, subject) => requireOwner(res, deps, identity, subject),
       json: (status, body) => json(res, status, body),

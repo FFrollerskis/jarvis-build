@@ -1234,7 +1234,9 @@ export class ToolGateway {
         }
         // Q-34 P2-oppfølging: en retry med SAMME idempotency_key etter `unverified` skal ALDRI utløse en ny mutasjon og ALDRI bli ok:true -
         // den ser NØYAKTIG det samme sanne, ikke-suksessfulle resultatet som den opprinnelige kalleren fikk.
-        if (row?.status === "unverified") {
+        // WP-T1 K5: `needs_resolution` er en `unverified`-rad som utløpssveipet har flagget for eieren: samme svar (den lagrede årsaken), aldri en ny mutasjon. `unknown_outcome` (en `reserved`-rad som er avstemt som ukjent)
+        // faller til «execution_in_flight_or_outcome_unknown» under - også aldri en ny mutasjon.
+        if (row?.status === "unverified" || row?.status === "needs_resolution") {
           await writeAudit(client, request.identity, { ...corr,
             type: "tool.postcondition_unverified", decision: "ALLOW",
             tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class,
@@ -1598,13 +1600,13 @@ export class ToolGateway {
   async reconcile(tenantId: string, limit = 50): Promise<Array<{
     idempotency_key: string; tool_id: string; action: string; external_id: string | null;
     reason: string | null; before_state: JsonValue | null; recovery: string;
-    /** WP-F1: `unverified` (utført men ikke bekreftet / utfall ukjent) eller `reserved` (krasj midt i kallet, eldre enn 5 min). */
+    /** WP-F1: `unverified` (utført men ikke bekreftet / utfall ukjent) eller `reserved` (krasj midt i kallet, eldre enn 5 min). WP-T1 K5: også `unknown_outcome`/`needs_resolution` (avstemt av utløpssveipet; venter på eierens avgjørelse). */
     status: string; executed_at: string; after_state: JsonValue | null;
   }>> {
     const rows = await withTenantTransaction(this.pool, tenantId, async (client) =>
       (await client.query(
         `SELECT idempotency_key, tool_id, action, external_id, postcondition_reason, before_state, after_state, status, executed_at
-           FROM tool_executions WHERE status = 'unverified' OR (status = 'reserved' AND executed_at < now() - interval '5 minutes') ORDER BY executed_at DESC LIMIT $1`, [Math.min(Math.max(limit, 1), 200)]
+           FROM tool_executions WHERE status IN ('unverified', 'unknown_outcome', 'needs_resolution') OR (status = 'reserved' AND executed_at < now() - interval '5 minutes') ORDER BY executed_at DESC LIMIT $1`, [Math.min(Math.max(limit, 1), 200)]
       )).rows as Array<{
         idempotency_key: string; tool_id: string; action: string; external_id: string | null; postcondition_reason: string | null;
         before_state: JsonValue | null; after_state: JsonValue | null; status: string; executed_at: Date

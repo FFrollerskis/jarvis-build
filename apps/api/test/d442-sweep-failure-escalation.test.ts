@@ -338,7 +338,8 @@ describe("D-442: main.ts forkaster aldri et sveipresultat (kildenivå-vakt, main
     expect(viaCollector.map((m) => m[1]).sort()).toEqual([
       "business-events-sync", "business-open-loop-sweep", "business-scoring-recalc", "conversation-graph-sync",
       "finance-reconcile-sweep", "finance-spend-integrity-sweep", "growth-action-recommendation-sweep", "neonomics-sweep", "stripe-payment-sync",
-      "support-inbox-sync", "vipps-payment-sync", "wallester-sweep"
+      // WP-T1 K5 (JARVIS-103): ledger-avstemmingen er idempotent per tenant (en ny kjøring finner ingenting), så et nytt forsøk via samleren er trygt; jobben finnes KUN med JARVIS_TOOL_LEDGER_RECONCILE=on.
+      "support-inbox-sync", "tool-ledger-reconcile", "vipps-payment-sync", "wallester-sweep"
     ]);
     for (const [, job, , args] of viaCollector) {
       // WP-K (JARVIS-054): `person_id: "system"`-sveipene tar kjøringens korrelasjon (`run`) som ETTERFØLGENDE valgfritt argument; samleren er fortsatt det siste av de obligatoriske.
