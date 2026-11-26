@@ -12,7 +12,10 @@ import { CENTER_ROWS, ROWS } from "./support/n1b-rows.ts";
  *     eller fjernes uten at runbooken følger med feller testen. Foreldede tall («23 stier», «R01-R23», «de 23 stiene») er forbudt, og tallene som omtaler tabellen er lik radantallet.
  *  B. SQL-SNIPPENE: HVER `-c "SELECT ..."` i NAS-stegene kjøres mot en ekte, migrert database (superbruker, kun lesing). Runde 1 hadde `audit_events.created_at` (kolonnen heter `at`) i to steg og en plassholder (`<finanstypene>`) i SQL. En snippet som ikke kjører, eller som ikke er en ren
  *     SELECT, feller testen; forventningene i steg 1-4 (migrasjon 140, kolonnen, rettighetene, umerkede rader) kontrolleres mot de faktiske verdiene; finanstypene i steg 7h er NØYAKTIG de i koden.
- *  C. AKTIVERINGSREKKEFØLGEN nevner ALLE kontrollsenter-flaggene (`CONTROL_CENTER_FLAGS`): et nytt senterflagg i koden uten en plass i rekkefølgen feller testen (Sikkerhet-flagget manglet i runde 1).
+ *  C. AKTIVERINGSREKKEFØLGEN nevner ALLE kontrollsenter-flaggene (`CONTROL_CENTER_FLAGS`): et nytt senterflagg i koden uten en plass i rekkefølgen feller testen (Sikkerhet-flagget manglet i runde 1). Fiks-runde 2 (FIX-B): steg 8-LISTEN
+ *     over flagg er pinnet for seg (ikke bare «et sted i NAS-seksjonen»: 7n nevner Sikkerhet-flagget også, så et flagg som falt ut av steg 8 slapp forbi).
+ *  D. FORBEHOLDENE rundt de ekte skyturene (fiks-runde 2, FIX-B): 7g-7q kjøres KUN mot en TEST-tenant med syntetiske data (felles forbehold øverst, og i 7m som slår vakten AV og 7n som fryser en kobling); Sikkerhet-flagget slås på MIDLERTIDIG
+ *     kun for 7n (steg 3 og 7n sier det, og steg 3 grupperer ikke lenger Sikkerhet under «bygges uten finansavledet tilstand»).
  */
 const RUNBOOK = readFileSync(fileURLToPath(new URL("../../../docs/runbooks/WPN1_RESTRICTED_HISTORY.md", import.meta.url)), "utf8");
 
@@ -121,14 +124,25 @@ describe("C: aktiveringsrekkefølgen nevner ALLE kontrollsenter-flaggene (og ing
   const order = section(/^\*\*Rekkefølge \(Q-66 alternativ A\):\*\*/m, /^## /m);
   const nas = section(/^## NAS-verifisering/m, /^\*\*Rollback:\*\*/m);
 
-  it("hvert flagg i `CONTROL_CENTER_FLAGS` står i rekkefølgen (fullt navn eller `_SUFFIKS` etter et fullt navn), og i steg 8", () => {
+  /** Teksten til ETT nummerert steg i NAS-seksjonen (fra `<id>. **` til neste nummererte steg eller en blank linje); innrykkede fortsettelseslinjer hører til steget. */
+  const step = (id: string): string => {
+    const start = nas.search(new RegExp(`^${id}\\. \\*\\*`, "m"));
+    expect(start, `steg ${id} mangler i NAS-seksjonen`).toBeGreaterThanOrEqual(0);
+    const rest = nas.slice(start + 1);
+    const end = rest.search(/\n(?:\d+[a-z]?\. \*\*|\*\*Felles forbehold|\n)/);
+    return end < 0 ? nas.slice(start) : nas.slice(start, start + 1 + end);
+  };
+
+  it("hvert flagg i `CONTROL_CENTER_FLAGS` står i rekkefølgen (fullt navn eller `_SUFFIKS` etter et fullt navn), og i STEG 8-listen selv (ikke bare et sted i NAS-seksjonen: 7n nevner `_SECURITY` også)", () => {
     const flags = Object.values(CONTROL_CENTER_FLAGS);
     expect(flags.length).toBe(8);
+    const step8 = step("8");
+    expect(step8).toMatch(/^8\. \*\*Først nå\*\*/);
     for (const f of flags) {
       const suffix = f.replace("JARVIS_CONTROL_CENTER", "");
       const mentioned = (text: string): boolean => text.includes(f) || text.includes(`\`${suffix}\``) || text.includes(`\`${suffix}=`);
       expect(mentioned(order), `${f} mangler i aktiveringsrekkefølgen (steg 3)`).toBe(true);
-      expect(mentioned(nas), `${f} mangler i NAS-steg 8`).toBe(true);
+      expect(mentioned(step8), `${f} mangler i NAS-steg 8 (selve listen)`).toBe(true);
     }
     expect(order).toContain("JARVIS_CONTROL_CENTER_SECURITY");
   });
@@ -138,5 +152,48 @@ describe("C: aktiveringsrekkefølgen nevner ALLE kontrollsenter-flaggene (og ing
     expect(nas).toContain("7g-7q");
     expect(nas).toMatch(/INGEN egen revisjonsrad/);
     expect(nas).not.toMatch(/7g-7m/);
+  });
+});
+
+describe("D: forbeholdene rundt de ekte skyturene (7g-7q): KUN TEST-tenant/syntetiske data, og Sikkerhet-flagget er bare midlertidig på for 7n", () => {
+  const order = section(/^\*\*Rekkefølge \(Q-66 alternativ A\):\*\*/m, /^## /m);
+  const nas = section(/^## NAS-verifisering/m, /^\*\*Rollback:\*\*/m);
+  const step = (id: string): string => {
+    const start = nas.search(new RegExp(`^${id}\\. \\*\\*`, "m"));
+    expect(start, `steg ${id} mangler`).toBeGreaterThanOrEqual(0);
+    const rest = nas.slice(start + 1);
+    const end = rest.search(/\n(?:\d+[a-z]?\. \*\*|\*\*Felles forbehold|\n)/);
+    return end < 0 ? nas.slice(start) : nas.slice(start, start + 1 + end);
+  };
+
+  it("et FELLES forbehold står rett før 7g og sier TEST-tenant, syntetiske data og aldri produksjon, og at vakten slås PÅ igjen etter 7m", () => {
+    const at = nas.search(/^\*\*Felles forbehold for 7g-7q/m);
+    expect(at, "det felles forbeholdet mangler").toBeGreaterThanOrEqual(0);
+    expect(at, "forbeholdet skal stå FØR 7g").toBeLessThan(nas.search(/^7g\. \*\*/m));
+    const common = nas.slice(at, nas.search(/^7g\. \*\*/m));
+    expect(common).toMatch(/TEST-tenant/);
+    expect(common).toMatch(/syntetiske data/);
+    expect(common).toMatch(/aldri mot produksjon/);
+    expect(common).toMatch(/vakten PÅ igjen etter 7m/);
+  });
+
+  it("7m (slår vakten AV) og 7n (fryser en kobling) sier hver for seg «KUN TEST-tenant/syntetiske data»; 7m sier også «aldri produksjon»", () => {
+    for (const id of ["7m", "7n"]) expect(step(id), id).toMatch(/KUN TEST-tenant\/syntetiske data/);
+    expect(step("7m")).toMatch(/aldri produksjon/);
+    expect(step("7m")).toMatch(/PÅ igjen/);
+    expect(step("7n")).toMatch(/aldri en ekte produksjonskobling/);
+  });
+
+  it("7n krever Sikkerhet-flagget MIDLERTIDIG (kun for dette steget, av igjen før steg 8), og steg 3 gir det som eneste unntak fra «ingen kontrollsenter-flagg før 7g-7q»", () => {
+    expect(step("7n")).toMatch(/JARVIS_CONTROL_CENTER_SECURITY=on` slått på MIDLERTIDIG bare for dette steget/);
+    expect(step("7n")).toMatch(/av igjen etterpå, før steg 8/);
+    expect(order).toMatch(/Eneste unntak \(fiks-runde 2\):\*\* `JARVIS_CONTROL_CENTER_SECURITY=on` slås på MIDLERTIDIG, kun mot en TEST-tenant og kun for steg 7n/);
+    expect(step("8")).toMatch(/kun var midlertidig på for 7n/);
+  });
+
+  it("steg 3 grupperer IKKE lenger Sikkerhet under «bygges uten finansavledet tilstand» (filtreres per element, rad R24); Minne/Agent/Drift/Personvern gjør det", () => {
+    expect(order).not.toMatch(/Sikkerhet\/Minne\/Agent\/Drift\/Personvern bygges uten finansavledet tilstand/);
+    expect(order).toMatch(/Sikkerhet FILTRERES per element med vakten på/);
+    expect(order).toMatch(/rad R24\), Minne\/Agent\/Drift\/Personvern bygges uten finansavledet tilstand/);
   });
 });

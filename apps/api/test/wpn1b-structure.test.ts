@@ -15,6 +15,7 @@ import { CENTER_ROWS, ROWS } from "./support/n1b-rows.ts";
  *  E. `personal.finance_read` (eierens HTTP-rute, ingen modell i løkka, Q-9) har ingen modellflate og får aldri en: en kildevakt feller det hvis den noen gang kobles til verktøyregisteret, flatene eller en modellløkke.
  *  F. K2-KLASSIFISERINGEN dekker HELE modellflaten: hvert verktøynavnerom på en flate er klassifisert (et nytt navnerom feller testen til noen har vurdert om det kan bære finansavledet innhold), og i de fire navnerommene med
  *     håndtert innhold er HVER handling plassert nøyaktig ett sted (håndtert med en rad i kartleggingstabellen / skrive-handling bak bekreftelseskortet / vurdert uten finans). Ukjent = finans (strengeste regel).
+ *  I. (fiks-runde 2, FIX-B) Kommentarer i produksjonskoden og runbooken viser kun til N1/N1b-testfiler som FINNES (tre kommentarer pekte på `wpn1b-*-structure.test.ts`/`-note.test.ts`, som ikke fantes).
  */
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const read = (rel: string): string => readFileSync(`${root}${rel}`, "utf8");
@@ -285,6 +286,32 @@ describe("G: ÉN lokalitetsregel (fiks-runde 1, FIX-7/A80): ingen ny leverandør
     expect(countBy(re)).toEqual(ALLOWED);
   });
 
+  /**
+   * FIX-C f (fiks-runde 2): den siterte-literal-vakten over ser ikke en lokalitetsregel skrevet som REGEX eller prefikssjekk (`/^(ollama|gemma|hermes)/i.test(provider)`, `provider.startsWith("ollama")` er ikke et
+   * siterte navn alene). Her telles de NAKNE ordene (`\b(ollama|gemma_local|local_llm|local_vision|scripted)\b`) i koden (kommentarer fjernet) med en EKSAKT tillatelsesliste: en ny forekomst i en kjent fil (flere enn
+   * under) eller i en ny fil feller testen. Vurder da om koden tar en LOKALITETSbeslutning (bruk i så fall `financeLockServedLocally`/`servedByCloud`, aldri en egen liste eller regex) før du oppdaterer tallet.
+   * Grense: en regel som bruker KUN en stamme uten et helt leverandørnavn (`/^gemma/`) fanges ikke her (kodegjennomgang).
+   */
+  const ALLOWED_BARE: Readonly<Record<string, number>> = {
+    "apps/api/src/chat-candidates.ts": 1, "apps/api/src/control-center/ai.ts": 3, "apps/api/src/conversation.ts": 1, "apps/api/src/evolution-source.ts": 4, "apps/api/src/golden-suite.ts": 1, "apps/api/src/main.ts": 2,
+    "apps/api/src/run-rate.ts": 5, "apps/api/src/self-model-readers.ts": 1, "apps/api/src/vision-runtime.ts": 1, "apps/api/src/worker-main.ts": 1, "modules/executive/src/ai-mesh/report.ts": 1, "modules/memory/src/embedding.ts": 3,
+    "modules/model-gateway/src/capability-registry.ts": 6, "modules/model-gateway/src/council.ts": 3, "modules/model-gateway/src/mesh-smoke.ts": 3, "modules/model-gateway/src/model-gateway.ts": 1,
+    "modules/model-gateway/src/override-parser.ts": 1, "modules/model-gateway/src/pricing.ts": 5, "modules/situations/src/assist.ts": 3, "modules/tasks/src/coding.ts": 1, "modules/vision/src/classifier.ts": 1,
+    "packages/provider-adapters/src/index.ts": 2, "packages/provider-adapters/src/local-llm.ts": 1, "packages/provider-adapters/src/ollama.ts": 1, "packages/provider-adapters/src/scripted.ts": 3
+  };
+
+  it("FIX-C f - de NAKNE leverandørnavnene (regex, prefikssjekk, identifikator - ikke bare siterte literaler) står kun i den kjente listen filer med de kjente antallene", () => {
+    const re = new RegExp(`\\b(?:${localProviders().join("|")})\\b`, "g");
+    expect(countBy(re)).toEqual(ALLOWED_BARE);
+  });
+
+  it("FIX-C f - den nye vakten er strengere enn den siterte: hver fil med et sitert navn er også med blant de nakne (de nakne er en obermengde, filene og antallene)", () => {
+    const quoted = new RegExp(`["'\`](?:${localProviders().join("|")})["'\`]`, "g");
+    const q = countBy(quoted);
+    for (const [file, n] of Object.entries(q)) expect(ALLOWED_BARE[file] ?? 0, file).toBeGreaterThanOrEqual(n);
+    expect(Object.keys(ALLOWED_BARE).length).toBeGreaterThan(Object.keys(q).length);
+  });
+
   it("de tre kjente lokalitetsavgjørelsene er ÉN funksjon: gatewayen og executive-tjenesten tar `servedLocally` (= `financeLockServedLocally`) som INNDATA - ingen av dem har en leverandørliste", () => {
     for (const rel of ["modules/tool-gateway/src/gateway.ts", "modules/executive/src/service.ts", "modules/tool-gateway/src/finance-withheld.ts", "modules/business/src/transport.ts", "modules/conversation-graph/src/transport.ts"]) {
       expect(code(read(rel)), rel).not.toMatch(new RegExp(`["'\`](?:${localProviders().join("|")})["'\`]`));
@@ -298,5 +325,47 @@ describe("H: ledningen av `financeGuard` (fiks-runde 1, FIX-1): Sikkerhet-senter
     expect(code(read("apps/api/src/control-center/register.ts"))).toContain("...(wiring.financeGuard === true ? { financeGuard: true } : {}),");
     expect(code(read("apps/api/src/control-center/security.ts"))).toContain("const strict = restrict && deps.financeGuard === true;");
     expect(Object.keys(countBy(/\bfinanceGuard\b/g)).sort()).toEqual(["apps/api/src/control-center/register.ts", "apps/api/src/control-center/security.ts", "apps/api/src/main.ts"]);
+  });
+
+  it("FIX-C d - PLASSERINGEN: spredningen står på øverste nivå INNE I argumentobjektet til det ene `registerControlCenters(controlCenters, { ... })`-kallet i `main.ts` (teksten alene var ikke nok: flyttet etter kallet, eller inn i et nøstet objekt, er ledningen død uten at teksten endres)", () => {
+    const main = code(read("apps/api/src/main.ts"));
+    expect((main.match(/\bregisterControlCenters\s*\(/g) ?? []).length, "main.ts kaller registerControlCenters nøyaktig én gang").toBe(1);
+    const start = main.indexOf("registerControlCenters(controlCenters,");
+    expect(start, "fant ikke kallet").toBeGreaterThanOrEqual(0);
+    const open = main.indexOf("{", start);
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < main.length; i += 1) {
+      if (main[i] === "{") depth += 1;
+      else if (main[i] === "}" && --depth === 0) { close = i; break; }
+    }
+    expect(close, "ubalansert argumentobjekt").toBeGreaterThan(open);
+    const argument = main.slice(open, close + 1);
+    const spread = "...(restrictedContextGuard.enabled ? { financeGuard: true as const } : {})";
+    const at = argument.indexOf(spread);
+    expect(at, "spredningen står IKKE i argumentobjektet til registerControlCenters-kallet").toBeGreaterThan(0);
+    expect(argument.indexOf(spread, at + 1), "spredningen står nøyaktig én gang").toBe(-1);
+    let nesting = 0;
+    for (let i = 0; i < at; i += 1) { if (argument[i] === "{") nesting += 1; else if (argument[i] === "}") nesting -= 1; }
+    expect(nesting, "spredningen står i et NØSTET objekt/en funksjon, ikke på øverste nivå av argumentobjektet").toBe(1);
+  });
+});
+
+describe("I: kommentarer i produksjonskoden og runbooken viser kun til N1/N1b-testfiler som FINNES (fiks-runde 2, FIX-B)", () => {
+  const testNames = new Set(["apps", "modules", "packages"].flatMap((top) =>
+    readdirSync(`${root}${top}`, { withFileTypes: true }).filter((e) => e.isDirectory()).flatMap((e) => { try { return readdirSync(`${root}${top}/${e.name}/test`); } catch { return []; } })
+  ));
+  const REF = /\b(wpn1b?-[a-z0-9-]+\.test\.ts)\b/g;
+  const sources: Array<[string, string]> = [...files.map((f): [string, string] => [f.slice(root.length), readFileSync(f, "utf8")]), ["docs/runbooks/WPN1_RESTRICTED_HISTORY.md", read("docs/runbooks/WPN1_RESTRICTED_HISTORY.md")]];
+
+  it("skanneren ser testfilene og et realistisk antall henvisninger (ikke en tom match)", () => {
+    expect(testNames.size).toBeGreaterThan(500);
+    for (const known of ["wpn1b-structure.test.ts", "wpn1b-model-scope.test.ts", "wpn1b-finance-withheld.test.ts"]) expect(testNames.has(known), known).toBe(true);
+    expect(sources.flatMap(([, text]) => [...text.matchAll(REF)]).length).toBeGreaterThan(10);
+  });
+
+  it("hver henvisning (`wpn1-*.test.ts`/`wpn1b-*.test.ts`, også i kommentarer) i produksjonskoden og runbooken peker på en testfil som finnes", () => {
+    const dead = sources.flatMap(([file, text]) => [...text.matchAll(REF)].map((m) => [file, m[1] as string] as const).filter(([, name]) => !testNames.has(name)));
+    expect(dead, "henvisning til en testfil som ikke finnes (feil filnavn i en kommentar?)").toEqual([]);
   });
 });
