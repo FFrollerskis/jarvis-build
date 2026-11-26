@@ -33,7 +33,7 @@ const PROVIDER_METHODS = new Set([
 /** Egne tjenestemetoder som selv gjør leverandør-I/O (credential-oppslag/nettverkskall) og derfor aldri kan kalles fra en transaksjon. EKSPLISITT liste (en sync*-prefiks ville truffet lokale DB-metoder som `syncIntentFlags`); at hvert navn finnes som metode låses under. */
 export const IO_SERVICE_METHODS: readonly string[] = [
   "gateway", "providerCallOutsideLock", "runSubmitPlan", "prefetchCredentialsFor", "lifecycleAction",
-  "refreshStripePaymentState", "refreshVippsPaymentState", "refreshNeonomicsPaymentState", "syncPendingStripePayments", "syncPendingVippsPayments", "syncPendingNeonomicsPayments",
+  "refreshStripePaymentState", "refreshStripeRefundState", "refreshVippsPaymentState", "refreshNeonomicsPaymentState", "syncPendingStripePayments", "syncPendingVippsPayments", "syncPendingNeonomicsPayments",
   "syncCardState", "syncAuthorizations", "syncTransactions", "syncAccounts", "syncBalances",
   "submitPaymentIntent", "submitStripeRefund", "submitVippsCapture", "submitVippsRefund", "submitCard", "cancelVippsPayment",
   "activateCard", "freezeCard", "unfreezeCard", "closeCard", "updateSpendPolicy", "createConsent", "verifyConsent", "getConsentAuthorizationUrl", "listBanks",

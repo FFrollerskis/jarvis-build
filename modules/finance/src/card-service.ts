@@ -691,10 +691,10 @@ export class CardService {
     tx: { id: string; authorizationId: string | null; type: "purchase" | "refund" | "reversal" | "fee" | "unknown"; amountOre: number; currency: string; merchantName: string | null; merchantCategoryCode: string | null; channel: string; transactionAt: string | null; settledAt: string | null },
     count: (n: { inserted: number; corrections: number }) => void
   ): Promise<void> {
-    // Deterministisk autorisasjon<->oppgjør-lenking (§9).
+    // Deterministisk autorisasjon<->oppgjør-lenking (§9). WP-FIN2 (D-486, K9a): kun mot autorisasjoner på SAMME kort - et oppgjør som peker på et annet korts autorisasjon lenkes ikke (tidligere ingen `card_id`-predikat).
     let authorizationRowId: string | null = null;
     if (tx.authorizationId) {
-      const auth = await client.query(`SELECT authorization_id, status, amount_ore FROM card_authorizations WHERE tenant_id = $1 AND provider_authorization_id = $2`, [tenantId, tx.authorizationId]);
+      const auth = await client.query(`SELECT authorization_id, status, amount_ore FROM card_authorizations WHERE tenant_id = $1 AND provider_authorization_id = $2 AND card_id = $3`, [tenantId, tx.authorizationId, cardId]);
       if (auth.rows.length > 0) authorizationRowId = (auth.rows[0] as { authorization_id: string }).authorization_id;
     }
     const flags: string[] = [];

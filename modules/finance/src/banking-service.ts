@@ -358,7 +358,7 @@ export class BankingService {
           if (!existing) continue;
           const economicallyChanged = Number(existing.amount_ore) !== tx.amountOre || existing.currency !== tx.currency || existing.direction !== tx.direction;
           if (existing.status === "booked" && economicallyChanged) {
-            await this.appendBankAnomalyFlags(client, existing.bank_transaction_id, ["BANK_TRANSACTION_CORRECTION_CONFLICT"]);
+            await this.appendBankAnomalyFlags(client, tenantId, existing.bank_transaction_id, ["BANK_TRANSACTION_CORRECTION_CONFLICT"]);
             correctionsFlagged++;
             continue;
           }
@@ -458,7 +458,7 @@ export class BankingService {
               } else {
                 // Referansen peker på intenten, men beløp/valuta/retning
                 // avviker - et EKTE avvik, aldri en stille match.
-                await this.appendBankAnomalyFlags(client, tx.bank_transaction_id, ["PAYMENT_BANK_TRANSACTION_MISMATCH"]);
+                await this.appendBankAnomalyFlags(client, tenantId, tx.bank_transaction_id, ["PAYMENT_BANK_TRANSACTION_MISMATCH"]);
                 mismatchFlagged++;
               }
               continue;
@@ -598,12 +598,13 @@ export class BankingService {
     });
   }
 
-  private async appendBankAnomalyFlags(client: pg.PoolClient, bankTransactionId: string, flags: readonly BankAnomalyType[]): Promise<void> {
+  /** WP-FIN2 (D-486, K9b): låst til `tenantId` som de tre i service.ts (samme funnklasse; tidligere kun `WHERE bank_transaction_id = $1`). */
+  private async appendBankAnomalyFlags(client: pg.PoolClient, tenantId: string, bankTransactionId: string, flags: readonly BankAnomalyType[]): Promise<void> {
     await client.query(
       `UPDATE bank_transactions SET anomaly_flags = (
          SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(anomaly_flags || $2::jsonb) AS v
-       ), updated_at = now() WHERE bank_transaction_id = $1`,
-      [bankTransactionId, JSON.stringify(flags)]
+       ), updated_at = now() WHERE tenant_id = $3 AND bank_transaction_id = $1`,
+      [bankTransactionId, JSON.stringify(flags), tenantId]
     );
   }
 }
