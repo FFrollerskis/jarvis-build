@@ -134,7 +134,10 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
   // Review N1: en REPLAY der leverandøren KAN ha utført mutasjonen - journalraden er `outcome_unknown`, eller ledgeren har en rad for nøkkelen som ikke er `failed` (reservert/ukjent/utført: forrige forsøk nådde
   // gatewayens reservasjon). Da bærer en avvisning fra en port FØR leverandøren (varsler ikke klar, frys, leverandørlesing feiler, `precondition_changed` fordi endringen allerede er gjort) ingen NY opplysning om
   // utfallet - den skal aldri låse raden som terminal `failed` (en `failed` rad kan aldri avklares mer, og ville sagt «mislyktes» om noe som kan være utført).
-  const mayHaveMutated = !begun.created && (begun.row.status === "outcome_unknown" || (prior !== null && prior.status !== "failed"));
+  // WP-P3 fiks-runde 1 (107c): det samme gjelder en journalrad som står `requested` uten ledger-rad. Den eies av et ANNET kall som kan være i gang (det samtidige duplikatet har ikke nådd ledger-reservasjonen ennå) eller av en
+  // krasj FØR gatewayen; en port-avvisning av dette kallet sier ingenting om det andre kallets utfall. Låste vi raden som terminal `failed`, ville vinnerens `complete(applied)` kaste `growth_write_journal_terminal_status` etter at
+  // leverandøren er mutert (ledger `succeeded`, journal `failed`, kommando aldri `executed`). Raden står åpen; en senere replay (porten åpen) utfører én gang, og gatewayens ledger-reservasjon hindrer en dobbel mutasjon.
+  const mayHaveMutated = !begun.created && (begun.row.status === "outcome_unknown" || (prior !== null && prior.status !== "failed") || (begun.row.status === "requested" && prior === null));
   // Review N2/N1: en krasj mellom journalen og kommandoen leges ved en replay: en `outcome_unknown` rad gir kommandoen `execution_unknown` (idempotent; en avbrutt/erstattet kommando blir stående slik den er).
   const healCommand = async (): Promise<"executed" | "execution_unknown" | null> =>
     input.command_id !== undefined && begun.row.status === "outcome_unknown" ? markCommand(deps.pool, tenantId, space, input.command_id, begun.row, false) : null;

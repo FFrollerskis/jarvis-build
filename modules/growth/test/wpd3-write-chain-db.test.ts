@@ -1525,3 +1525,126 @@ describe("V4: WP-P3 K2 (JARVIS-107) - replay-sikkerhet: ledger-leddet, helingen 
     });
   });
 });
+
+describe("V5: WP-P3 fiks-runde 1 (107c) - samtidig duplikat med samme nøkkel: en port-avvisning av det ene kallet FØR ledgeren er reservert låser aldri journalraden som `failed` mens det andre kallet utfører", () => {
+  type ExecDeps = Parameters<typeof executeGrowthWrite>[0];
+  type ExecResult = Awaited<ReturnType<typeof executeGrowthWrite>>;
+  const thaw = () => controls.unfreezeConnector("googleads");
+  beforeEach(thaw);
+  afterAll(thaw);
+  const journalRow = async (id: string) => (await adminPool.query(`SELECT status, failure_code FROM growth_write_journal WHERE write_id = $1`, [id])).rows[0] as { status: string; failure_code: string | null };
+  const ledgerRow = async (key: string) => (await adminPool.query(`SELECT status FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [A, key])).rows[0] as { status: string } | undefined;
+  const inputFor = (key: string, commandId?: string) => ({ idempotency_key: key, provider: "google_ads", action: "set_campaign_budget", ...(commandId !== undefined ? { command_id: commandId } : {}), parameters: { customer_id: CID, campaign_id: "101", amount_ore: 40_000 } });
+  /** To porter som avviser FØR ledgeren reserveres (klasse D-varsleren er ikke klar, eieren har fryst connectoren). */
+  const ports = {
+    notifier: { close: () => { state.notifierReady = false; }, open: () => { state.notifierReady = true; }, reason: "class_d_notifier_not_ready" },
+    frozen: { close: () => { controls.freezeConnector("googleads"); }, open: () => { thaw(); }, reason: "connector_frozen" }
+  } as const;
+  type Settled = { value: ExecResult } | { error: string };
+  const settle = (p: Promise<ExecResult>): Promise<Settled> => p.then((value) => ({ value }), (error: unknown) => ({ error: String((error as Error).message) }));
+  const valueOf = (s: Settled): ExecResult => { if ("error" in s) throw new Error(`kallet kastet: ${s.error}`); return s.value; };
+
+  /**
+   * Deterministisk kappløp UTEN tidsavhengighet: kall A (journalraden er `requested`, ingen ledger-rad) holdes rett FØR gatewayen, duplikatet B kjører helt ferdig mens porten er stengt (avvist FØR ledgeren reserveres),
+   * porten åpnes og A slippes. `hold: "vendor"` holder i stedet A INNE i leverandørkallet (ledgeren er da `reserved`).
+   */
+  async function race(port: keyof typeof ports, opts: { commandId?: string; hold?: "gateway" | "vendor" } = {}) {
+    const key = uniq("p3-v5");
+    const input = inputFor(key, opts.commandId);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let reachedHold!: () => void;
+    const reached = new Promise<void>((resolve) => { reachedHold = resolve; });
+    let calls = 0;
+    const gw = { get: gateway.get.bind(gateway), execute: async (req: Parameters<typeof gateway.execute>[0]) => { calls += 1; if (opts.hold !== "vendor" && calls === 1) { reachedHold(); await released; } return gateway.execute(req); } };
+    const deps = { ...exec, gateway: gw as never } as ExecDeps;
+    const original = gads.handler;
+    if (opts.hold === "vendor") gads.handler = async (r) => { if (gads.isMutation(r)) { reachedHold(); await released; } return original(r); };
+    const first = settle(executeGrowthWrite(deps, owner, input));
+    try {
+      await reached;
+      const before = { journal: (await journal.findByKey(A, "business", key))?.status, ledger: (await ledgerRow(key))?.status };
+      ports[port].close();
+      const second = await executeGrowthWrite(deps, owner, input);
+      ports[port].open();
+      release();
+      return { key, input, before, first: await first, second, gatewayCalls: calls };
+    } finally {
+      ports[port].open();
+      release();
+      gads.handler = original;
+      await first;
+    }
+  }
+
+  it.each(["notifier", "frozen"] as const)("A holdes FØR gatewayen (ingen ledger-rad), duplikatet B avvises av porten `%s`: B er UKJENT og rører ikke raden, A fullfører `applied` uten unntak, ledger `succeeded`, nøyaktig ÉN leverandørmutasjon", async (port) => {
+    const out = await race(port);
+    expect(out.before).toEqual({ journal: "requested", ledger: undefined });
+    const first = valueOf(out.first); // før fiksen: growth_write_journal_terminal_status (B hadde låst raden som terminal `failed`)
+    const second = out.second;
+    expect(second).toMatchObject({ outcome: "UNKNOWN", reason: ports[port].reason, replayed: true });
+    expect(second.write.status).toBe("requested"); // B bærer den lagrede raden uendret
+    expect(first).toMatchObject({ outcome: "SUCCESS", replayed: false });
+    expect(first.write.status).toBe("applied");
+    expect(second.write.write_id).toBe(first.write.write_id);
+    expect(await journalRow(first.write.write_id)).toEqual({ status: "applied", failure_code: null });
+    expect(await ledgerRow(out.key)).toEqual({ status: "succeeded" });
+    expect(gMut()).toHaveLength(1);
+    expect(gads.budgets.get("11")?.micros).toBe(400_000_000);
+    expect(out.gatewayCalls).toBe(2);
+  });
+
+  it("kommando-bundet: B avvises av porten mens A utfører: kommandoen blir `executed` MED beviset (A sin journalrad), B markerer ingenting", async () => {
+    const commandId = uniq("cmd-p3-v5");
+    await seedCommand(commandId, 50_000, 40_000);
+    const out = await race("notifier", { commandId });
+    const first = valueOf(out.first); // før fiksen: kastet, og kommandoen ble stående `pending_execution`
+    expect(out.second).toMatchObject({ outcome: "UNKNOWN", reason: "class_d_notifier_not_ready", command_status: null });
+    expect(first).toMatchObject({ outcome: "SUCCESS", command_status: "executed" });
+    expect(await commandStatus(commandId)).toEqual({ status: "executed", execution_write_id: first.write.write_id });
+    expect(await journalRow(first.write.write_id)).toEqual({ status: "applied", failure_code: null });
+    expect(gMut()).toHaveLength(1);
+  });
+
+  it("kontroll: A holdes INNE i leverandørkallet (ledger `reserved`), duplikatet avvises av porten: UKJENT, raden står `requested` til A fullfører `applied` (uendret atferd, ledger-leddet)", async () => {
+    const out = await race("notifier", { hold: "vendor" });
+    expect(out.before).toEqual({ journal: "requested", ledger: "reserved" });
+    expect(out.second).toMatchObject({ outcome: "UNKNOWN", reason: "class_d_notifier_not_ready", replayed: true });
+    const first = valueOf(out.first);
+    expect(first).toMatchObject({ outcome: "SUCCESS", replayed: false });
+    expect(await journalRow(first.write.write_id)).toEqual({ status: "applied", failure_code: null });
+    expect(gMut()).toHaveLength(1);
+  });
+
+  it("kontroll: en NY forespørsel som avvises av porten er fortsatt terminal `failed`, og en `requested` rad uten ledger-rad (krasj FØR gatewayen) utføres fortsatt av en replay når porten er åpen", async () => {
+    state.notifierReady = false;
+    const fresh = await executeGrowthWrite(exec, owner, inputFor(uniq("p3-v5-fresh")));
+    expect(fresh).toMatchObject({ outcome: "FAILED", reason: "class_d_notifier_not_ready", replayed: false });
+    expect(await journalRow(fresh.write.write_id)).toEqual({ status: "failed", failure_code: "class_d_notifier_not_ready" });
+    state.notifierReady = true;
+    const key = uniq("p3-v5-crash");
+    const crashing = { get: gateway.get.bind(gateway), execute: async () => { throw new Error("simulated_crash_before_gateway"); } };
+    await expect(executeGrowthWrite({ ...exec, gateway: crashing as never }, owner, inputFor(key))).rejects.toThrow("simulated_crash_before_gateway");
+    expect(await ledgerRow(key)).toBeUndefined();
+    const replay = await executeGrowthWrite(exec, owner, inputFor(key));
+    expect(replay).toMatchObject({ outcome: "SUCCESS", replayed: true });
+    expect(replay.write.status).toBe("applied");
+    expect(gMut()).toHaveLength(1);
+  });
+
+  it("en `requested` rad som blir etterlatt etter en krasj FØR gatewayen og deretter møter en port-avvisning står åpen (UKJENT), og en senere replay med åpen port utfører nøyaktig én gang", async () => {
+    const key = uniq("p3-v5-crash-port");
+    const crashing = { get: gateway.get.bind(gateway), execute: async () => { throw new Error("simulated_crash_before_gateway"); } };
+    await expect(executeGrowthWrite({ ...exec, gateway: crashing as never }, owner, inputFor(key))).rejects.toThrow("simulated_crash_before_gateway");
+    state.notifierReady = false;
+    const blocked = await executeGrowthWrite(exec, owner, inputFor(key));
+    expect(blocked).toMatchObject({ outcome: "UNKNOWN", reason: "class_d_notifier_not_ready", replayed: true });
+    expect(await journalRow(blocked.write.write_id)).toEqual({ status: "requested", failure_code: null });
+    expect(gMut()).toHaveLength(0);
+    state.notifierReady = true;
+    const done = await executeGrowthWrite(exec, owner, inputFor(key));
+    expect(done).toMatchObject({ outcome: "SUCCESS", replayed: true });
+    expect(done.write.write_id).toBe(blocked.write.write_id);
+    expect(gMut()).toHaveLength(1);
+  });
+});
