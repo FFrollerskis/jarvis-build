@@ -2533,9 +2533,17 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (!authed) return;
       const infra = await infraGate.statusDurable();
       // WP-P3 K4 (JARVIS-094): frosne connectorer leses fra det VARIGE registeret (alle, sortert) - ikke en hardkodet liste og ikke prosess-lokal tilstand. Lesefeil eller ingen `controls` => readable=false og tom liste; feilteksten lekker aldri.
+      // WP-P3 fiks-runde 1 (JARVIS-094, eier-grensen): det globale registeret (ALLE frosne connector-id-er, også finans- og `model:`-id-er) er en eier-opplysning, men ruten har bare grant. Det listes derfor KUN for den suverene eieren
+      // (`deps.ownerGate`, samme predikat som `requireOwner`; fail-closed: mangler porten, kaster den eller svarer den noe annet enn `true`, er kalleren ikke eieren). Alle andre får `[]` og readable=false, og registeret leses ikke.
+      let isOwner = false;
+      try {
+        isOwner = deps.ownerGate !== undefined && deps.ownerGate(authed.identity) === true;
+      } catch {
+        isOwner = false;
+      }
       let frozen: string[] = [];
       let frozenReadable = false;
-      if (controls) {
+      if (controls && isOwner) {
         try {
           frozen = (await controls.listFrozenConnectorsDurable()).map((r) => r.connector_id).sort();
           frozenReadable = true;
