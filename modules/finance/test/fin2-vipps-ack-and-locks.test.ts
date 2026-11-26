@@ -374,6 +374,32 @@ describe("FIX-9: capture-reservasjonen tar intensjonen i FOR SHARE (lås-rekkef�
     }
   });
 
+  it("lås-MODUS: en annen transaksjon som holder intensjonen i FOR SHARE blokkerer IKKE reservasjonen (delt lås) - leverandørkallet går av; først `apply` (FOR UPDATE) venter til holderen er ferdig", async () => {
+    const vipps = new VippsFake();
+    const svc = fakeService(vipps);
+    const intent = await authorizedIntent(svc, 10_000);
+    const capture = await draftCapture(svc, intent.payment_intent_id, 4_000);
+    const holder = await adminPool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT 1 FROM payment_intents WHERE payment_intent_id = $1 FOR SHARE", [intent.payment_intent_id]);
+      const pending = svc.submitVippsCapture(TENANT, "business", capture.capture_id);
+      // reservasjonen (FOR SHARE) er kompatibel med holderen: leverandørkallet skal gå av UTEN at holderen frigis (en FOR UPDATE i `prepare` ville stått fast her)
+      const deadline = Date.now() + 8_000;
+      while (vipps.captureCalls.length === 0 && Date.now() < deadline) await sleep(50);
+      expect(vipps.captureCalls).toHaveLength(1);
+      // `apply` tar intensjonen FOR UPDATE og må vente på holderen: capturen er ikke oppgjort ennå
+      await sleep(300);
+      expect((await captureRow(capture.capture_id)).state).toBe("submitted");
+      await holder.query("COMMIT");
+      expect((await pending).state).toBe("settled");
+      expect(vipps.captureCalls).toHaveLength(1);
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+  });
+
   it("flere samtidige reservasjoner av ULIKE captures på samme intensjon blokkerer ikke hverandre (FOR SHARE er delt) og gir ingen deadlock", async () => {
     const vipps = new VippsFake();
     const svc = fakeService(vipps);

@@ -329,6 +329,10 @@ describe("FIX-6: Fiken-lesere (listContacts, listBankAccounts, listJournalEntrie
     ["listJournalEntries", () => fiken().listJournalEntries(), "fiken.list_journal_entries", "journalEntryId", { journalEntryId: 3, description: "x", date: "2026-11-25", lines: [{ debit: 100 }] }]
   ] as const;
   for (const [name, call, operation, idField, valid] of readers) {
+    it(`${name}: en id som siffer-streng («42») er gyldig og elementet returneres uendret`, async () => {
+      route([{ ...valid, [idField]: "42" }]);
+      expect(await call()).toEqual([{ ...valid, [idField]: "42" }]);
+    });
     it(`${name}: gyldig liste passerer UENDRET (alle felt bevares, f.eks. bilagslinjer)`, async () => {
       route([valid]);
       expect(await call()).toEqual([valid]);
@@ -343,7 +347,10 @@ describe("FIX-6: Fiken-lesere (listContacts, listBankAccounts, listJournalEntrie
       ["id mangler", [{ ...valid, [idField]: undefined }], undefined, `${idField}_missing`],
       ["id er ikke et positivt heltall", [{ ...valid, [idField]: -4 }], undefined, `${idField}_invalid`],
       ["id er en brøk", [{ ...valid, [idField]: 1.5 }], undefined, `${idField}_invalid`],
-      ["id er en tekst som ikke er siffer", [{ ...valid, [idField]: "abc" }], undefined, `${idField}_invalid`]
+      ["id er en tekst som ikke er siffer", [{ ...valid, [idField]: "abc" }], undefined, `${idField}_invalid`],
+      ["id er 0 (ikke positivt)", [{ ...valid, [idField]: 0 }], undefined, `${idField}_invalid`],
+      ["id er teksten «0»", [{ ...valid, [idField]: "0" }], undefined, `${idField}_invalid`],
+      ["id utenfor trygt heltallsområde", [{ ...valid, [idField]: 1e21 }], undefined, `${idField}_invalid`]
     ] as const) {
       it(`${name}: ${label} -> typet feil ${code}`, async () => {
         route(body, rawText);
