@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
 import { FailoverStt, FailoverTts, Pcm16Resampler, withLocalSttReserve, withLocalTtsReserve } from "../src/failover.ts";
 import { VoiceHealth } from "../src/health.ts";
@@ -6,6 +6,17 @@ import { VoiceSession, type SessionEvents, type VoiceIdentity } from "../src/ses
 import { MarkerStt, type SttAdapter, type SttStream } from "../src/stt.ts";
 import type { TtsAdapter, TtsPlayback } from "../src/tts.ts";
 import { EXTERNAL_VERIFIED, LOCAL, ScriptedCore, sleep } from "./wpv2-harness.ts";
+
+// Rutingporten kan bare AVSLÅ en lokal behandler hvis noe er galt (D-122 regel 1: lokal er alltid tillatt) - for å bevise at failover FAKTISK
+// konsulterer `evaluateSpeechRouting` for reserven, avslår denne mocken en bestemt (lokal) testbehandler.
+vi.mock("@jarvis/contracts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@jarvis/contracts")>();
+  const evaluate: typeof actual.evaluateSpeechRouting = (processor, memorySpace, authority) => {
+    const real = actual.evaluateSpeechRouting(processor, memorySpace, authority);
+    return processor.processor_id === "wpv2-test-denied-local" ? { ...real, allowed: false } : real;
+  };
+  return { ...actual, evaluateSpeechRouting: evaluate };
+});
 
 /**
  * WP-V2 K4: failover SKY -> LOKAL. Regler: kun før første ramme, kun når lokal er available() og rutingporten slipper den gjennom,
@@ -123,6 +134,25 @@ describe("FailoverTts: regler", () => {
     expect((await collect(tts.synthesize("hei", undefined, { memorySpace: "health", authority: "SERVER_VERIFIED" }))).error).toBeUndefined();
   });
 
+  it("rutingporten (evaluateSpeechRouting) konsulteres for reserven: en avslått reserve brukes ikke selv om den er lokal og tilgjengelig (TTS og STT)", async () => {
+    const denied = { ...LOCAL, processor_id: "wpv2-test-denied-local" };
+    const primary = fakeTts("cloud", EXTERNAL_VERIFIED, "fail-first", 1);
+    const reserve = fakeTts("local", denied, "ok", 2);
+    const tts = new FailoverTts(primary, reserve, { log: () => undefined });
+    const { error } = await collect(tts.synthesize("hei", undefined, CTX));
+    expect(error?.message).toBe("openai_tts_error_503");
+    expect(reserve.calls).toBe(0);
+    const sttPrimary = stt("cloud", EXTERNAL_VERIFIED, "fail");
+    const sttReserve = stt("local", denied, "ok");
+    const adapter = new FailoverStt(sttPrimary, sttReserve, { log: () => undefined });
+    const stream = adapter.startStream(CTX);
+    stream.pushAudio(Buffer.alloc(4));
+    await expect(stream.end()).rejects.toThrow("openai_stt_error_500");
+    expect(sttReserve.streams).toBe(0);
+    // Uten sesjonskontekst brukes den lokale reserven uten rutingvurdering (kun lokal tillates) - ingen avslag å konsultere.
+    expect((await collect(tts.synthesize("hei"))).frames).toHaveLength(3);
+  });
+
   it("cooldown: etter en primærfeil hoppes primæren over (ingen ny ventetid per chunk); etter cooldown prøves den igjen", async () => {
     let now = 1_000;
     const primary = fakeTts("cloud", EXTERNAL_VERIFIED, "fail-first", 1);
@@ -163,8 +193,11 @@ describe("FailoverTts: regler", () => {
     const playback = tts.synthesize("hei", undefined, CTX);
     const done = collect(playback);
     await sleep(40);
+    const cancelledAt = Date.now();
     playback.cancel();
     const { frames, error } = await done;
+    // cancel() avbryter primæren UMIDDELBART (ikke først når 5 s-fristen for første ramme går ut).
+    expect(Date.now() - cancelledAt).toBeLessThan(1_000);
     expect(error).toBeUndefined();
     expect(frames).toEqual([]);
     expect(reserve.calls).toBe(0);
