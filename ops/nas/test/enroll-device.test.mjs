@@ -56,7 +56,8 @@ describe("ops/nas/enroll-device.sh", () => {
       "compose", "--env-file", r.envFile, "-f", DEFAULT_COMPOSE,
       "run", "--rm", "--no-deps",
       "-e", `JARVIS_PUBLIC_VOICE_BASE_URL=${BASE}`,
-      "migrate", "node", "--experimental-transform-types", "apps/api/src/enroll-ticket-main.ts", "--path", "dashboard"
+      // WP-S1: skriptet er kun for nettlesere, så typen er alltid `web_browser` (billetten bærer den; serveren setter enhetstypen fra den)
+      "migrate", "node", "--experimental-transform-types", "apps/api/src/enroll-ticket-main.ts", "--kind", "web_browser", "--path", "dashboard"
     ]);
     // Aldri api/worker (de har bevisst ikke admin-databasetilgang).
     expect(r.dockerArgs).not.toContain("api");

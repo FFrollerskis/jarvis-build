@@ -216,7 +216,7 @@
 <div id="status"></div>
 <div id="enroll">
   <p>Denne enheten er ikke innrullert ennå. Kjør på maskinen som eier Jarvis:
-     <code>pnpm --filter @jarvis/api enroll-ticket</code> (på NAS-en: <code>ops/nas/enroll-device.sh https://adressen-du-ser-i-nettleseren</code>) og åpne lenken den skriver ut, eller lim inn billetten under.</p>
+     <code>pnpm --filter @jarvis/api enroll-ticket --kind web_browser</code> (på NAS-en: <code>ops/nas/enroll-device.sh https://adressen-du-ser-i-nettleseren</code>) og åpne lenken den skriver ut, eller lim inn billetten under.</p>
   <form id="enroll-form">
     <input id="enroll-ticket" placeholder="Innrullerings-billett …" autocomplete="off">
     <button>Innrullér</button>
@@ -505,7 +505,8 @@
     unknown_device: "Enheten er ikke registrert for denne personen/tenanten.",
     unknown_memory_space: "Memory space finnes ikke i denne tenanten.",
     malformed_evidence: "Forespørselen var feilformet.",
-    device_authority_revoked: "Enhetens nøkkel ble tilbakekalt akkurat idet sesjonen skulle utstedes."
+    device_authority_revoked: "Enhetens nøkkel ble tilbakekalt akkurat idet sesjonen skulle utstedes.",
+    channel_not_allowed_for_device_kind: "Enhetstypen tillater ikke taleflaten (WP-S1). Be eieren rulle enheten inn på nytt som nettleser: ny innrulleringsbillett med type web_browser (se docs/runbooks/WPS1_STEPUP_CHANNEL_BINDING.md)."
   };
 
   function showMetrics(m) {

@@ -1,6 +1,6 @@
 import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from "node:crypto";
 import type pg from "pg";
-import type { IdentityContext } from "@jarvis/contracts";
+import { DeviceKindSchema, deviceKindFromLegacyLabel, type DeviceKind, type DeviceKindSource, type IdentityContext } from "@jarvis/contracts";
 import type { ApproverDevice, DeviceRegistry } from "@jarvis/policy";
 import { withTenantTransaction } from "../db/pool.ts";
 import { writeAudit } from "./audit-writer.ts";
@@ -64,6 +64,43 @@ const MAX_OUTSTANDING_CHALLENGES = 5_000;
 const MAX_OUTSTANDING_CHALLENGES_PER_DEVICE = 10;
 const CHALLENGE_TTL_MS = 60_000;
 
+/** Det en innrulling/seeding oppgir om en enhet. `kind` er den eldre fritekst-etiketten (informativ, ALDRI autoritet); typen er `device_kind`. */
+export interface RegisterDeviceInput {
+  device_id: string;
+  kind: string;
+  public_key_pem: string;
+  /** Typen serveren har bestemt. Uten den utledes typen av etiketten (kun betrodd server-side seeding/tester; `DeviceEnrollmentService` gir alltid en eksplisitt type). */
+  device_kind?: DeviceKind;
+  device_kind_source?: DeviceKindSource;
+}
+
+export interface LockedDeviceKey {
+  fingerprint: string;
+  device_kind: DeviceKind;
+  device_kind_source: DeviceKindSource;
+}
+
+export interface EnrollmentTargetRow {
+  /** Den eldre fritekst-etiketten (`devices.kind`), uendret. */
+  label: string;
+  has_key: boolean;
+  revoked: boolean;
+  device_kind: DeviceKind;
+  device_kind_source: DeviceKindSource;
+}
+
+/** Bestemmer (type, kilde) som skal skrives. Eksplisitt type valideres mot den lukkede listen (kaster ved ugyldig); uten type utledes den av den eldre etiketten (`legacy_label` kun når etiketten er en kjent førstepartsverdi). */
+function resolveRegisteredKind(device: RegisterDeviceInput): { device_kind: DeviceKind; device_kind_source: DeviceKindSource } {
+  if (device.device_kind !== undefined) {
+    const kind = DeviceKindSchema.parse(device.device_kind);
+    const source: DeviceKindSource = kind === "legacy_unknown" ? "unclassified" : (device.device_kind_source ?? "trusted_provisioning");
+    if (kind !== "legacy_unknown" && source === "unclassified") throw new Error("device_kind_source_inconsistent");
+    return { device_kind: kind, device_kind_source: source };
+  }
+  const derived = deviceKindFromLegacyLabel(device.kind);
+  return { device_kind: derived.device_kind, device_kind_source: derived.mapped ? "legacy_label" : "unclassified" };
+}
+
 export class DeviceService {
   private readonly challenges = new Map<string, { device_id: string; expires: number }>();
 
@@ -87,23 +124,28 @@ export class DeviceService {
   async registerDeviceOn(
     client: pg.PoolClient,
     principal: { tenant_id: string; person_id: string },
-    device: { device_id: string; kind: string; public_key_pem: string }
+    device: RegisterDeviceInput
   ): Promise<boolean> {
     assertEd25519PublicKeyPem(device.public_key_pem); // valider PEM OG nøkkeltype før lagring
     if (await this.isKeyRevokedOn(client, principal.tenant_id, device.public_key_pem)) {
       throw new RevokedDeviceKeyError();
     }
+    const resolved = resolveRegisteredKind(device);
     let result;
     try {
+      // WP-S1: typen (`device_kind`) og hvem som bestemte den skrives KUN herfra. Databasevakten (migrasjon 149, `devices_kind_guard`) avviser enhver annen UPDATE som endrer typen; variabelen settes
+      // KUN rett rundt denne ene setningen og nullstilles umiddelbart (den er transaksjonslokal). Kalleren har allerede vurdert innrullingsreglene (`DeviceEnrollmentService`) eller er betrodd (`registerDeviceTrusted`).
+      await client.query("SELECT set_config('jarvis.device_kind_change', 'on', true)");
       result = await client.query(
-        `INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem, device_kind, device_kind_source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (device_id) DO UPDATE
-           SET public_key_pem = EXCLUDED.public_key_pem, kind = EXCLUDED.kind
+           SET public_key_pem = EXCLUDED.public_key_pem, kind = EXCLUDED.kind,
+               device_kind = EXCLUDED.device_kind, device_kind_source = EXCLUDED.device_kind_source
          WHERE devices.tenant_id = EXCLUDED.tenant_id AND devices.person_id = EXCLUDED.person_id
            AND devices.revoked_at IS NULL
          RETURNING device_id`,
-        [device.device_id, principal.tenant_id, principal.person_id, device.kind, device.public_key_pem]
+        [device.device_id, principal.tenant_id, principal.person_id, device.kind, device.public_key_pem, resolved.device_kind, resolved.device_kind_source]
       );
     } catch (err) {
       // En kolliderende rad i en ANNEN tenant er ikke synlig under RLS, så
@@ -116,6 +158,8 @@ export class DeviceService {
         return false;
       }
       throw err;
+    } finally {
+      await client.query("SELECT set_config('jarvis.device_kind_change', '', true)").catch(() => undefined);
     }
     if (!result.rowCount) {
       return false;
@@ -123,7 +167,7 @@ export class DeviceService {
     await writeAudit(
       client,
       { tenant_id: principal.tenant_id, person_id: principal.person_id, device_id: device.device_id },
-      { type: "device.registered", payload: { device_id: device.device_id, kind: device.kind } }
+      { type: "device.registered", payload: { device_id: device.device_id, kind: device.kind, device_kind: resolved.device_kind } }
     );
     return true;
   }
@@ -141,10 +185,7 @@ export class DeviceService {
    * strukturelt, fordi `SessionGrantService.verify()` sammenligner mot
    * nøkkelens fingerprint slik den står NÅ.
    */
-  async registerDeviceTrusted(
-    identity: IdentityContext,
-    device: { device_id: string; kind: string; public_key_pem: string }
-  ): Promise<void> {
+  async registerDeviceTrusted(identity: IdentityContext, device: RegisterDeviceInput): Promise<void> {
     const written = await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
       this.registerDeviceOn(client, identity, device)
     );
@@ -295,14 +336,34 @@ export class DeviceService {
   async lockDeviceKeyOn(
     client: pg.PoolClient,
     principal: { tenant_id: string; person_id: string; device_id: string }
-  ): Promise<{ fingerprint: string } | null> {
+  ): Promise<LockedDeviceKey | null> {
+    // WP-S1: enhetstypen leses i SAMME låste lesing som nøkkelen. Autorisasjonskjernen vurderer kanalbindingen mot DENNE verdien (aldri en separat, senere lesing), så en samtidig typeendring serialiseres mot
+    // autorisasjonen akkurat som en samtidig nøkkelrotasjon (D-131b).
     const result = await client.query(
-      `SELECT public_key_pem FROM devices
+      `SELECT public_key_pem, device_kind, device_kind_source FROM devices
         WHERE device_id = $1 AND tenant_id = $2 AND person_id = $3 AND revoked_at IS NULL FOR UPDATE`,
       [principal.device_id, principal.tenant_id, principal.person_id]
     );
-    const pem = (result.rows[0] as { public_key_pem: string | null } | undefined)?.public_key_pem;
-    return pem ? { fingerprint: fingerprintPem(pem) } : null;
+    const row = result.rows[0] as { public_key_pem: string | null; device_kind: DeviceKind; device_kind_source: DeviceKindSource } | undefined;
+    return row?.public_key_pem ? { fingerprint: fingerprintPem(row.public_key_pem), device_kind: row.device_kind, device_kind_source: row.device_kind_source } : null;
+  }
+
+  /**
+   * WP-S1 (K3): leser OG låser (`FOR UPDATE`) MÅLRADEN en innrulling skal skrive, med typen og kilden, så innrullingsreglene (kan typen endres? kan denne enheten re-nøkles av den autoriserende enheten?) vurderes mot
+   * raden slik den står når skrivingen skjer - aldri en ulåst lesing som en samtidig innrulling kan gjøre foreldet. Returnerer `null` hvis enheten ikke finnes for (tenant, person). Kalles ETTER billett-konsumeringen
+   * (samme låsrekkefølge som `FamilyService.endMembership`: billett før enhetsrad).
+   */
+  async lockEnrollmentTargetOn(
+    client: pg.PoolClient,
+    principal: { tenant_id: string; person_id: string; device_id: string }
+  ): Promise<EnrollmentTargetRow | null> {
+    const result = await client.query(
+      `SELECT kind, public_key_pem, revoked_at, device_kind, device_kind_source FROM devices
+        WHERE device_id = $1 AND tenant_id = $2 AND person_id = $3 FOR UPDATE`,
+      [principal.device_id, principal.tenant_id, principal.person_id]
+    );
+    const row = result.rows[0] as { kind: string; public_key_pem: string | null; revoked_at: Date | null; device_kind: DeviceKind; device_kind_source: DeviceKindSource } | undefined;
+    return row ? { label: row.kind, has_key: Boolean(row.public_key_pem), revoked: row.revoked_at !== null, device_kind: row.device_kind, device_kind_source: row.device_kind_source } : null;
   }
 
   /**

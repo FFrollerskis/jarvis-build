@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { AuthStrength, Channel, IdentityContext, MemorySpace } from "@jarvis/contracts";
+import { channelAllowedForDeviceKind, displayKindLabel, type AuthStrength, type Channel, type IdentityContext, type MemorySpace, type StepUpBindingMode } from "@jarvis/contracts";
 import { withTenantTransaction } from "../db/pool.ts";
 import { writeAudit } from "./audit-writer.ts";
 import type { DeviceService } from "./device-service.ts";
@@ -50,7 +50,16 @@ import type { SessionRef, SessionService } from "./session-service.ts";
  * grant-mutasjon - se `DeviceService.lockDeviceKeyOn()`. Låsen holdes til
  * commit/rollback, så en SAMTIDIG rotasjon for samme enhet serialiseres mot
  * denne autorisasjonen i stedet for å kunne smette imellom.
+ *
+ * WP-S1 (JARVIS-111, Q-71): KANALBINDING. Kanalen i et grant var en PÅSTAND fra en klient med en gyldig nøkkel: `auth_strength: "signed"` ble gitt for enhver kanal, og step-up godtar `signed` fra
+ * web/desktop/api/mobile. Samme låste lesing som gir nøkkelen (steg 1b) gir nå OGSÅ enhetens type (`devices.device_kind`, satt av serveren ved innrulling), og kanalen sjekkes mot tabellen type -> tillatte kanaler
+ * (`@jarvis/contracts`, `device-kind.ts`) FØR noen sesjons-/grant-mutasjon. Typen leses derfor under SAMME radlås som fingerprinten: en samtidig typeendring serialiseres mot autorisasjonen akkurat som en
+ * samtidig nøkkelrotasjon (D-131b), og et bevis kan aldri brukes mot en type som sto i raden før låsen ble tatt.
+ *   - `enforce`: en kanal som ikke hører til typen nektes (`channel_not_allowed_for_device_kind`), fail-closed og uten sideeffekt (ingen sesjon, ingen grant; avslaget revideres i egen transaksjon med type/kanal/modus).
+ *   - `observe` (STANDARD, også uten verdi): grantet utstedes som før (identisk med main), og en revisjonsrad `identity.channel_binding_would_deny` forteller at enforce ville nektet. Eieren gjennomgår dem før enforce.
  */
+export type ChannelBindingMode = StepUpBindingMode;
+
 export interface DeviceAuthorityDeps {
   /** SAMME pool som tjenestene under - transaksjonen eies her, ikke i dem. */
   pool: pg.Pool;
@@ -58,6 +67,8 @@ export interface DeviceAuthorityDeps {
   identity: IdentityService;
   grants: SessionGrantService;
   devices: DeviceService;
+  /** WP-S1: kun den eksakte verdien `enforce` nekter; alt annet (utelatt, `observe`, en feiltolket verdi) er `observe`. `main.ts` gir den parsede `JARVIS_STEPUP_CHANNEL_BINDING`. */
+  channelBindingMode?: ChannelBindingMode;
 }
 
 /** Påstanden, etter at enhetsbeviset ER verifisert av kalleren. */
@@ -76,7 +87,7 @@ export interface ProvenDeviceRequest {
   proven_key_fingerprint: string;
 }
 
-export type DeviceAuthorityDenialReason = IdentityDenialReason | "device_authority_revoked";
+export type DeviceAuthorityDenialReason = IdentityDenialReason | "device_authority_revoked" | "channel_not_allowed_for_device_kind";
 
 export type DeviceAuthorityOutcome =
   | { ok: true; identity: IdentityContext; session: SessionRef; grant: IssuedSessionGrant }
@@ -105,7 +116,8 @@ export async function authorizeProvenDevice(
     device_id: request.device_id
   };
 
-  let outcome: DeviceAuthorityOutcome;
+  const bindingMode: ChannelBindingMode = deps.channelBindingMode === "enforce" ? "enforce" : "observe";
+  let outcome: DeviceAuthorityOutcome | { ok: false; reason: DeviceAuthorityDenialReason; audit: Record<string, unknown> };
   try {
     outcome = await withTenantTransaction(deps.pool, request.tenant_id, async (client) => {
       // 1. FULL autorisasjon FØR enhver sesjons-sideeffekt. Ved avslag her har
@@ -128,6 +140,14 @@ export async function authorizeProvenDevice(
       });
       if (!lockedKey || lockedKey.fingerprint !== request.proven_key_fingerprint) {
         return { ok: false, reason: "device_authority_revoked" } as const;
+      }
+
+      // 1c. WP-S1: KANALBINDING mot typen fra SAMME låste lesing. Fail-closed: en type som ikke er i den lukkede listen (kan ikke stå i databasen, men en lesing skal aldri gi en tilfeldig sann verdi)
+      //     tillater ingen kanal. I `enforce` avslås FØR sesjon/grant; i `observe` fortsetter alt som før og «ville nektet» revideres under (i samme transaksjon som grantet).
+      const bindingAllowed = channelAllowedForDeviceKind(lockedKey.device_kind, request.channel);
+      const bindingFact = { mode: bindingMode, device_kind: displayKindLabel(lockedKey.device_kind), channel: request.channel };
+      if (!bindingAllowed && bindingMode === "enforce") {
+        return { ok: false, reason: "channel_not_allowed_for_device_kind", audit: bindingFact } as const;
       }
 
       // 2. Først NÅ røres server-eid sesjonstilstand.
@@ -156,6 +176,15 @@ export async function authorizeProvenDevice(
         nowMs
       );
 
+      if (!bindingAllowed) {
+        // observe: ingenting nektes (= main), men «ville nektet» står i revisjonssporet så eieren kan gjennomgå det før enforce. `decision: ALLOW` fordi autorisasjonen ble gitt; raden er en observasjon, ikke et avslag.
+        await writeAudit(
+          client,
+          { ...subject, session_id: session.session_id },
+          { type: "identity.channel_binding_would_deny", decision: "ALLOW", reason: "channel_not_allowed_for_device_kind", payload: bindingFact }
+        );
+      }
+
       const identity = deps.identity.buildContext({ ...request, session_id: session.session_id });
       await writeAudit(
         client,
@@ -175,7 +204,10 @@ export async function authorizeProvenDevice(
   if (!outcome.ok) {
     // Avslaget skjedde FØR enhver skriving. Audit-raden skrives i sin EGEN
     // transaksjon - den skal overleve nettopp fordi ingenting annet gjorde det.
-    await deps.identity.recordDenial(subject, outcome.reason);
+    // WP-S1: et kanalbindingsavslag bærer type/kanal/modus i revisjonsraden (aldri i svaret til klienten).
+    const audit = "audit" in outcome ? outcome.audit : undefined;
+    await deps.identity.recordDenial(subject, outcome.reason, "identity.denied", audit);
+    return { ok: false, reason: outcome.reason };
   }
   return outcome;
 }

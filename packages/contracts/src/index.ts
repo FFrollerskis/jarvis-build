@@ -8,6 +8,8 @@ export * from "./model.ts";
 export * from "./speech.ts";
 export * from "./voice-authority.ts";
 export * from "./session-grant.ts";
+export * from "./device-kind.ts";
+export * from "./stepup-binding.ts";
 export * from "./mobility.ts";
 export * from "./env.ts";
 export * from "./owner-config.ts";

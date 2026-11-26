@@ -12,7 +12,7 @@ final class ChatModel: ObservableObject {
     @Published var sessionId = "-"
     @Published var deviceVerified = false
     /// D-131 funn 2: engangs-billett fra en lokal eier-handling
-    /// (`pnpm --filter @jarvis/api enroll-ticket`). Kreves KUN første gang -
+    /// (`pnpm --filter @jarvis/api enroll-ticket --kind iphone`; typen settes av serveren fra billetten). Kreves KUN første gang -
     /// anonym innrullering finnes ikke lenger.
     @Published var enrollmentTicket = ""
     @AppStorage("jarvis.server") var server = "http://192.168.1.10:3010"
@@ -43,7 +43,7 @@ final class ChatModel: ObservableObject {
             let ticket = enrollmentTicket.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !ticket.isEmpty else {
                 messages.append(("system",
-                    "Enheten er ikke innrullert. Kjør `pnpm --filter @jarvis/api enroll-ticket` på Jarvis-maskinen og lim inn billetten."))
+                    "Enheten er ikke innrullert. Kjør `pnpm --filter @jarvis/api enroll-ticket --kind iphone` på Jarvis-maskinen og lim inn billetten."))
                 return
             }
             try await client.enrollWithTicket(kind: "iphone",

@@ -197,6 +197,9 @@ public actor JarvisClient {
     ///   - `enrollWithTicket(...)` - en engangs-billett fra en lokal
     ///     eier-handling (`pnpm --filter @jarvis/api enroll-ticket`), som er
     ///     den eneste veien inn for aller FØRSTE enhet.
+    ///
+    /// WP-S1 (JARVIS-111): `kind` er kun en PÅSTÅTT etikett (revideres, aldri autoritet). Enhetstypen (`iphone`, `watch`, ...) settes av SERVEREN fra billetten, som eieren utstedte med `--kind` (`docs/runbooks/WPS1_STEPUP_CHANNEL_BINDING.md`);
+    /// klienten kan ikke velge eller endre den. En `device_proof`-innrullering (`enrollWithExistingDevice`) endrer aldri typen. Serveren nekter en kanal som ikke hører til typen (`channel_not_allowed_for_device_kind`).
     public func enrollWithTicket(kind: String, publicKeyPem: String, ticket: String) async throws {
         try await enroll(kind: kind, publicKeyPem: publicKeyPem,
                          enrollment: ["kind": "enrollment_ticket", "ticket": ticket])

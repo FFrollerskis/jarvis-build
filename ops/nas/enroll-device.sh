@@ -6,6 +6,8 @@
 # Hvorfor via `migrate`-tjenesten: kun den har admin-databasetilgangen CLI-en trenger for å lagre billetten (som SHA-256). api/worker har den bevisst IKKE (Remediering del 2),
 # så hintet `pnpm --filter @jarvis/api enroll-ticket` på innrulleringssiden virker ikke i compose-oppsettet på NAS-en.
 # Valgfri 3. parameter: tenant-id (WP-D2) - for å innrullere enheten i en bedrifts-tenant (ops/nas/enroll-device.sh <adresse> dashboard tenant-kundeoppfolging).
+# WP-S1 (JARVIS-111): skriptet er kun for NETTLESERE (lenken åpnes i en nettleser), så enhetstypen er alltid `web_browser` (kanalene web og voice). Å rulle inn en iPhone, Watch, Mac osv. gjøres med CLI-en
+# direkte og en eksplisitt `--kind` (se docs/runbooks/WPS1_STEPUP_CHANNEL_BINDING.md); typen har ingen standard der.
 # Billetten skrives KUN til terminalen - aldri til fil, logg eller chat. Engangs, gyldig i 15 minutter. Valgfritt miljø: JARVIS_ENV_FILE, JARVIS_COMPOSE_FILE.
 set -euo pipefail
 
@@ -57,6 +59,6 @@ command -v docker >/dev/null 2>&1 || { echo "docker finnes ikke - kjør dette p�
 
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" run --rm --no-deps \
   -e "JARVIS_PUBLIC_VOICE_BASE_URL=$BASE" \
-  migrate node --experimental-transform-types apps/api/src/enroll-ticket-main.ts --path "$PATH_ARG" ${TENANT_ARGS[@]+"${TENANT_ARGS[@]}"}
+  migrate node --experimental-transform-types apps/api/src/enroll-ticket-main.ts --kind web_browser --path "$PATH_ARG" ${TENANT_ARGS[@]+"${TENANT_ARGS[@]}"}
 
 echo "Åpne lenken ovenfor i nettleseren du vil innrullere: marker den med musen (ikke dobbeltklikk) og lim den inn i adressefeltet. Lim aldri billetten eller lenken inn i chat." >&2

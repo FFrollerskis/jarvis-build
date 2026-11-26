@@ -465,7 +465,11 @@ export const SERVICE_ENV = {
     "JARVIS_SITUATION_BUS_INTERVAL_SECONDS", "JARVIS_SITUATION_LOG_RETENTION_DAYS",
     // WP-N1 (Q-66, JARVIS-101): «begrenset»-merking av samtalehistorikken (messages.restricted) og utførelseslås for finance/finance_* mot skymodeller (Q-64 pkt 3). AV som standard (kun eksakt «on»), api-only,
     // ingen hemmeligheter. Uten denne linjen når en verdi i `.env` aldri containeren og flagget ville vært stille virkningsløst (vakt: `wpn1-guard-env.test.ts`).
-    "JARVIS_RESTRICTED_CONTEXT_GUARD"],
+    "JARVIS_RESTRICTED_CONTEXT_GUARD",
+    // WP-S1 (JARVIS-111, Q-71): server-side kanalbinding for step-up. `observe` (standard, også uten verdi) = dagens atferd + revisjon av «ville nektet»; `enforce` = en kanal som ikke hører til enhetstypen nektes. Kun den eksakte
+    // verdien `enforce` håndhever (en skrivefeil blir observe og meldes i /infra/status). Høyrisiko-flaggene som venter på bindingen (JARVIS_PERSONAL_*, JARVIS_GROWTH_WRITE_PLATFORMS, JARVIS_COMMS_OUTBOUND, JARVIS_SITUATION_SIGNALS) har
+    // INGEN effekt uten `enforce`. Api-only (autorisasjonskjernen og innrullingen kjører i api-prosessen), ingen hemmeligheter. Uten denne linjen når en verdi i `.env` aldri containeren og modusen ville vært stille virkningsløs.
+    "JARVIS_STEPUP_CHANNEL_BINDING"],
   worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...WORKER_CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
     // WP-C1 (D-32 / Q-45a): vertsside job-runner (JARVIS_JOB_RUNNER=host). Socket-katalogen og tokenfilen monteres inn via infra/job-runner/docker-compose.job-runner.yml
     // (valgfri override) - uten den, og med tomme verdier her, feiler hver kodejobb lukket som før.

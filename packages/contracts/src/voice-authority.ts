@@ -110,7 +110,12 @@ export const VoiceAuthorizationDenialReasonSchema = z.enum([
    * skulle utstedes (tilbakekalt i vinduet etter `verifyChallenge()`).
    * Fail-closed - sesjons-sideeffekten rulles tilbake, ingen grant utstedes.
    */
-  "device_authority_revoked"
+  "device_authority_revoked",
+  /**
+   * WP-S1 (JARVIS-111): kanalen `voice` hører ikke til enhetens type (`devices.device_kind`; tillatt for nettleser og talegateway). Kun i modus `enforce`. Må stå her: talegatewayen parser svaret strengt, og en ukjent
+   * årsak ville blitt til «autoriteten utilgjengelig» i stedet for et klart avslag.
+   */
+  "channel_not_allowed_for_device_kind"
 ]);
 export type VoiceAuthorizationDenialReason = z.infer<typeof VoiceAuthorizationDenialReasonSchema>;
 

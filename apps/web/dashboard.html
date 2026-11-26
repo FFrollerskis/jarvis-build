@@ -495,7 +495,7 @@
 <div id="status"></div>
 <div id="enroll">
   <p>Denne enheten er ikke innrullert ennå. Kjør på maskinen som eier Jarvis:
-     <code>pnpm --filter @jarvis/api enroll-ticket</code> (på NAS-en: <code>ops/nas/enroll-device.sh https://adressen-du-ser-i-nettleseren</code>) og åpne lenken den skriver ut, eller lim inn billetten under.</p>
+     <code>pnpm --filter @jarvis/api enroll-ticket --kind web_browser</code> (på NAS-en: <code>ops/nas/enroll-device.sh https://adressen-du-ser-i-nettleseren</code>) og åpne lenken den skriver ut, eller lim inn billetten under.</p>
   <form id="enroll-form">
     <input id="enroll-ticket" placeholder="Innrullerings-billett …" autocomplete="off">
     <button>Innrullér</button>

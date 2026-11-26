@@ -20,8 +20,13 @@
 // er innrullert (`enrollment.kind = "device_proof"`).
 //
 // Bruk:
-//   node --experimental-transform-types src/enroll-ticket-main.ts \
+//   node --experimental-transform-types src/enroll-ticket-main.ts --kind <type> \
 //     [--tenant <id>] [--person <id>] [--device <id>] [--ttl-minutes <n>] [--path <side>]
+//
+// WP-S1 (JARVIS-111): `--kind` er PÅKREVD og er eierens valg av ENHETSTYPE. Billetten bærer typen, og serveren setter `devices.device_kind` fra den ved innrulling
+// (klienten kan ikke velge eller endre den). Typen avgjør hvilke kanaler enheten kan få en økt for (`packages/contracts/src/device-kind.ts`): iphone (mobile), mac/windows (desktop),
+// web_browser (web og voice), watch, voice_gateway, telegram_gateway, api_client (api) og service (system). Det finnes ingen standardtype med vilje: en Watch som ved en glipp ble rullet
+// inn som en nettleser ville fått step-up-evne. Å endre typen på en EKSISTERENDE enhet gjøres ved å utstede en ny billett med riktig `--kind` og `--device <id>` og rulle enheten inn på nytt.
 //
 // Uten flagg brukes SAMME validerte eier-konfig som `seedOwner()`
 // (JARVIS_TENANT_ID / JARVIS_OWNER_PERSON_ID).
@@ -36,6 +41,7 @@
 // til siden eieren faktisk trenger akkurat da (f.eks. `--path dashboard`),
 // uten en ekstra manuell navigering etter innrullering.
 import { ownerConfigOrExit } from "./owner.ts";
+import { ENROLLABLE_DEVICE_KINDS, EnrollableDeviceKindSchema } from "@jarvis/contracts";
 import { adminConfigFromEnv, createEnrollmentTicket, createPool } from "@jarvis/core";
 
 function flag(name: string): string | undefined {
@@ -56,12 +62,21 @@ if (!Number.isFinite(ttlMinutes) || ttlMinutes <= 0 || ttlMinutes > 120) {
   process.exit(2);
 }
 
+// WP-S1: enhetstypen er eierens eksplisitte valg (ingen standard). Valideres FØR noe kobles til databasen.
+const kindParsed = EnrollableDeviceKindSchema.safeParse(flag("kind"));
+if (!kindParsed.success) {
+  console.error(`mangler eller ugyldig --kind (${ENROLLABLE_DEVICE_KINDS.join(" | ")}): enhetstypen avgjør hvilke kanaler enheten kan bruke, og har ingen standard`);
+  process.exit(2);
+}
+const deviceKind = kindParsed.data;
+
 const adminPool = createPool(adminConfigFromEnv());
 try {
   const created = await createEnrollmentTicket(adminPool, {
     tenant_id: tenantId,
     person_id: personId,
     ...(deviceId !== undefined ? { device_id: deviceId } : {}),
+    device_kind: deviceKind,
     ttl_minutes: ttlMinutes
   });
   // Hemmeligheten skrives til stdout på eierens egen terminal og ingen andre
@@ -75,6 +90,7 @@ try {
   console.log(`  tenant: ${tenantId}`);
   console.log(`  person: ${personId}`);
   console.log(`  enhet:  ${deviceId ?? "(enhver device_id for denne personen)"}`);
+  console.log(`  type:   ${created.device_kind} (settes av serveren fra billetten; klienten kan ikke endre den)`);
   console.log(`  utloper: ${created.expires_at.toISOString()}`);
   console.log("");
   // D-260 (Tobias direkte i chat: gjentatte "enrollment_ticket_invalid"-feil

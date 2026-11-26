@@ -7,7 +7,7 @@ import { parseCouncilProposals } from "./council-proposals.ts";
 import { fileURLToPath } from "node:url";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
-import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
+import { applyStepUpBindingGate, assertNoSweepFailures, describeStepUpBinding, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { buildSelfModelReaders } from "./self-model-readers.ts";
 import { backupStatusSourceFromEnv } from "./backup-status.ts";
@@ -184,6 +184,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-E1 (UA-5, JARVIS-068): incident-produsentene (AV som standard) - parses tidlig, fordi driftsstatus-verktøyet (`executive.get_infra_status`) og produsent-løkka begge leser den.
   const incidentProducerConfig = parseIncidentProducerConfig(process.env);
   process.env["JARVIS_PROCESS"] ??= "api"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
+  // WP-S1 (JARVIS-111, Q-71): server-side kanalbinding for step-up. Modusen (`JARVIS_STEPUP_CHANNEL_BINDING=observe|enforce`, standard observe) og den FAIL-CLOSED koblingen: høyrisiko-flaggene som venter på bindingen
+  // (JARVIS_PERSONAL_*, JARVIS_GROWTH_WRITE_PLATFORMS, JARVIS_COMMS_OUTBOUND med avhengige, JARVIS_SITUATION_SIGNALS) har INGEN effekt uten `enforce`. De fire flaggfamiliene under leser `stepUpGate.env` (en kopi uten de
+  // blokkerte flaggene), aldri `process.env`; hvert flagg som er slått på men blokkert meldes i oppstartsloggen og i `/infra/status`. Ingen krasj, ingen stille suksess.
+  const stepUpGate = applyStepUpBindingGate(process.env);
+  if (stepUpGate.setting.enforced || stepUpGate.blocked.length > 0 || stepUpGate.setting.invalid_value !== null) {
+    console.log(JSON.stringify({ msg: "stepup_channel_binding", ...describeStepUpBinding(stepUpGate) }));
+  }
   const pool = createPool(configFromEnv());
   // Migrasjoner kjøres av admin-bruker i drift (compose: `migrate`-tjenesten); her antas app-bruker å ha skjema fra før.
   // D-395 (JARVIS-075): flagget kjører migratoren med ADMIN-konfig i en egen, kortlivet pool - aldri med runtime-rollen (Q-21) - og feiler
@@ -272,7 +279,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // autoritets-mønstrene over. `SessionGrantService` er en ren, tilstandsløs
   // `pool`-innpakning ved konstruksjon (ingen side-effekt å flytte tidligere) -
   // ÉN delt instans, ALDRI en duplikat parallell konstruksjon.
-  const grantService = new SessionGrantService(pool);
+  const grantService = new SessionGrantService(pool, { channelBindingMode: stepUpGate.setting.mode });
   // D-104 (UA-5 Production Operations Control Plane v1): global infra-eksekusjonsmodus - EN NY, SNEVRERE bryter enn `killSwitch` over (som forblir
   // strengest/uendret). Gjelder KUN registrerte infra-tool_id-er (`infraToolIds` under). D-438 (JARVIS-025): modusen er DELT med worker-prosessen via
   // `owner_control_state` og leses LIVE av `PolicyGateway` (ingen cache/timer); varige overganger krever eier-autoritet (`ownerControlAuthority`).
@@ -844,7 +851,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-D3 (UA-4 Growth, D-459): skrivehandlinger mot annonse-/analyseplattformene + eksperimentregisteret. ALT er AV som standard: uten `JARVIS_GROWTH_WRITE_PLATFORMS` registreres INGEN skriveverktøy, og uten
   // `JARVIS_GROWTH_EXPERIMENTS=on` ingen eksperimentverktøy - verktøylister, utvalg og rate-grenser er da identiske med main, og `deps.growthWrites` (rutene) finnes ikke (404). Skriving krever dessuten
   // eierens EGNE konto-/eiendoms-id-er i `JARVIS_GROWTH_WRITE_TARGETS` (mål-autorisasjon i gatewayen, fail-closed). Kun API-prosessen registrerer dem (worker/bakgrunn er read-only).
-  const growthWriteConfig = growthWriteConfigFromEnv(process.env);
+  const growthWriteConfig = growthWriteConfigFromEnv(stepUpGate.env);
   const growthWriteEnabled = growthWriteConfig.platforms.size > 0;
   const growthExperimentsEnabled = process.env["JARVIS_GROWTH_EXPERIMENTS"] === "on";
   const growthWriteTransports = growthWriteEnabled
@@ -864,18 +871,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const evolutionApprovalOn = flagOn(process.env, CONTROL_FEATURE_FLAGS.evolutionApproval) && controlCenters.has("evolution");
   // WP-G1 (D-463, UA-7): felles utgående kommunikasjon + signerte innkommende webhooks. DORMANT og NOT VERIFIED: alt AV = ingenting konstrueres (identisk med main). Ugyldig konfigurasjon kaster og stopper oppstarten.
   const commsRuntime = buildCommsRuntime({
-    env: process.env, pool, graph: conversationGraphService, business: businessService, secrets: readSecretProvider,
+    env: stepUpGate.env, pool, graph: conversationGraphService, business: businessService, secrets: readSecretProvider,
     warn: (event) => console.error(JSON.stringify({ msg: "comms_warn", ...event }))
   });
   // WP-G2 (D-464, UA-8 Personal Twin): kritiske hjem-/bilhandlinger, familie, helse-inntak, Apple CalDAV/CardDAV, personlig økonomi-lesing og kontekstmotor. ALT er AV som standard: uten `JARVIS_PERSONAL_*`-flagg er
   // `personal.tools` tom, `filterTools` identiteten og `personal.deps` `undefined` (verktøylister, utvalg, rate-grenser og ruter er identiske med main, ingen ekstra loggline). Kun API-prosessen kobler det inn.
-  const personal = createPersonalWiring({ env: process.env, pool, gateway: toolGateway, readSecret: (ref) => readSecretProvider.get(ref), ownerPersonId: owner.owner_person_id, controls: { killSwitch, ownerControls } });
+  const personal = createPersonalWiring({ env: stepUpGate.env, pool, gateway: toolGateway, readSecret: (ref) => readSecretProvider.get(ref), ownerPersonId: owner.owner_person_id, controls: { killSwitch, ownerControls } });
   const personalLog = personal.describe();
   if (personalLog) console.log(JSON.stringify(personalLog));
   // WP-G4 (D-466, UA-10): samlet hendelsesabonnement (abonnementsregister, inntaksbuss, hendelsesløper, kildeporter). ALT er AV som standard: uten `JARVIS_SITUATION_SIGNALS=on` er `tools` tom, `runner` null og ingenting logges
   // (verktøylister, utvalg, intents, rate-grenser, ruter og det daglige sveipet er identiske med main). Helse-/visjonsporten tas strukturelt inn fra de ALLEREDE konstruerte tjenestene (denne filen er en godkjent helse-importør).
   const situationSignals = createSituationSignalsWiring({
-    env: process.env, pool, engine: situationEngine, domainPauses: situationDomainPauses, gateway: toolGateway, modelGateway: gateway, ownerIdentity, ownerTenant: owner.tenant_id,
+    env: stepUpGate.env, pool, engine: situationEngine, domainPauses: situationDomainPauses, gateway: toolGateway, modelGateway: gateway, ownerIdentity, ownerTenant: owner.tenant_id,
     // WP-G4b K4: assist-vakten følger den SENTRALE lokalitetsregelen (samme `financeLockServedLocally` som finanslåsen; ingen egen kopi): en lokal identitet med ugyldig URL er `cloud` og forkastes.
     isLocalProvider: (provider) => financeLockServedLocally({ provider, model: "" }),
     ownerPersonId: owner.owner_person_id, incidents: incidentService, vision: visionService, health: healthService, killSwitch,
@@ -1378,7 +1385,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const enrollmentService = new DeviceEnrollmentService({
     pool,
     devices: deviceService,
-    grants: grantService
+    grants: grantService,
+    // WP-S1: samme modus som autoritetene under (enhetstypen settes alltid av serveren; modusen styrer kun om en lavtillits-enhet nektes å re-nøkle en høytillits-enhet).
+    channelBindingMode: stepUpGate.setting.mode
   });
   // Autoritetene eier sin egen transaksjon (D-131 funn 3: hele autorisasjonen
   // må kunne rulles tilbake ved avslag), og trenger derfor SAMME pool som
@@ -1388,7 +1397,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     devices: deviceService,
     sessions: sessionService,
     identity: identityService,
-    grants: grantService
+    grants: grantService,
+    // WP-S1 (JARVIS-111): kanalbindingen håndheves i den DELTE autorisasjonskjernen (`authorizeProvenDevice`) for både `/session/authorize` og `/voice/session/authorize`.
+    channelBindingMode: stepUpGate.setting.mode
   };
   // D-125 (UA-7, FEMTE slice): ÉN delt `ConversationEngine`-instans. Den er
   // hevet ut av `deps`-literalen fordi den inngående Telegram-banen skal bruke
@@ -1563,6 +1574,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // WP-E1 review (M3): eier-porten for incident-livssyklus, reparasjon, driftsoversikt og skymutasjoner = DET SAMME predikatet som kontrollsentrene (`ownerPredicate`), bygget fra DEN SAMME `ownerAuthority`
     // som Policy Gateway. Ingen egen sammenligning her - uten verdien nektes alle (`owner_required`).
     ownerGate: ownerPredicate(ownerAuthority),
+    // WP-S1: modusen og blokkerte flagg vises (kun for eieren) i `/infra/status`.
+    stepUpBinding: describeStepUpBinding(stepUpGate),
     identity: identityService,
     devices: deviceService,
     grants: grantService,

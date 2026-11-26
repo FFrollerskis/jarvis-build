@@ -89,7 +89,12 @@ export const SessionGrantDenialReasonSchema = z.enum([
    * slutter å virke i det øyeblikket nøkkelen bak det ikke lenger gjelder,
    * uten at noen må huske å rydde opp i grant-tabellen.
    */
-  "device_authority_revoked"
+  "device_authority_revoked",
+  /**
+   * WP-S1 (JARVIS-111): grantets kanal hører ikke til enhetens type (`devices.device_kind`) slik typen står NÅ. Kun i modus `enforce`; i `observe` nektes ingenting. Et grant utstedt FØR `enforce` ble slått på (eller
+   * før en typeendring) slutter dermed å virke umiddelbart i stedet for å leve ut sin levetid med en kanal serveren ikke lenger tillater.
+   */
+  "channel_not_allowed_for_device_kind"
 ]);
 export type SessionGrantDenialReason = z.infer<typeof SessionGrantDenialReasonSchema>;
 
@@ -119,7 +124,12 @@ export const DeviceEnrollmentDenialReasonSchema = z.enum([
   /** Enheten er TILBAKEKALT og kan aldri rulles inn igjen (JARVIS-050). */
   "device_revoked",
   /** Nøkkelen er tidligere tilbakekalt (under en annen device_id) og kan aldri gjenbrukes. */
-  "key_revoked"
+  "key_revoked",
+  /**
+   * WP-S1 (JARVIS-111): en enhet med lavere tillit (typen har ingen step-up-kanal) kan ikke vitne for å re-nøkle en ANNEN enhet som har en step-up-kanal; da ville en kompromittert Watch/stemme-enhet kunne overta en
+   * iPhone/Mac/nettleser-enhet og dermed omgå kanalbindingen. Kun i modus `enforce` (i `observe` tillates det og revideres som «ville nektet»).
+   */
+  "authorizing_device_kind_not_allowed"
 ]);
 export type DeviceEnrollmentDenialReason = z.infer<typeof DeviceEnrollmentDenialReasonSchema>;
 
@@ -170,7 +180,11 @@ export const DeviceEnrollmentRequestSchema = z
     device: z
       .object({
         device_id: z.string().min(1),
-        kind: z.string().min(1),
+        /**
+         * WP-S1: den KLIENT-PÅSTÅTTE etiketten (eldre klienter sender den fortsatt: `web`, `iphone`, `watch`). Den er ALDRI autoritet: enhetstypen (`devices.device_kind`) bestemmes av serveren fra innrullingsbilletten, og
+         * en `device_proof`-innrullering endrer aldri typen. Valgfri, så nye klienter kan utelate den; en avvikende verdi revideres kun (`claimed_kind`, `claimed_kind_matches`).
+         */
+        kind: z.string().min(1).optional(),
         public_key_pem: z.string().min(1)
       })
       .strict(),

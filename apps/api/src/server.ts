@@ -38,7 +38,7 @@ import { handleSituationSignalRoute, type SituationSignalApiDeps } from "./situa
 import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import { confirmationRestrictsOrigin } from "./restricted-context-guard.ts";
-import type { IdentityContext, JsonValue } from "@jarvis/contracts";
+import type { IdentityContext, JsonValue, StepUpBindingStatus } from "@jarvis/contracts";
 import {
   FORBIDDEN_IDENTITY_BODY_KEYS, HttpError, RateLimiter, clientKey, newRequestId, readJsonBody, readRawBodyGuarded, readRawBodyLimited, webhookBodyGuardFor, type WebhookBodyReadConfig
 } from "./http-guard.ts";
@@ -209,6 +209,11 @@ export interface ApiDeps {
    * eier-tenant, ingen delegasjon), aldri en egen sammenligning her. FAIL-CLOSED: uten verdien (eller ved en kastet feil) nektes alle med `owner_required`.
    */
   ownerGate?: (identity: IdentityContext) => boolean;
+  /**
+   * WP-S1 (JARVIS-111, Q-71): modusen for server-side kanalbinding (`JARVIS_STEPUP_CHANNEL_BINDING`) og høyrisiko-flaggene som er blokkert fordi den ikke er `enforce`. Vises KUN for den suverene eieren i `/infra/status`
+   * (nøkkelen `stepup_binding`); utelatt = nøkkelen finnes ikke i svaret (identisk med main).
+   */
+  stepUpBinding?: StepUpBindingStatus;
   /**
    * WP-D3 (UA-4 Growth, D-459): eier-rutene for SKRIVING mot annonse-/analyseplattformene (`POST /growth/mutate`), lesing (`/growth/read`), journal (`/growth/writes/list`) og eksperimentregisteret
    * (`/growth/experiments`). DORMANT: uten verdien svarer rutene 404; `main.ts` setter den KUN når `JARVIS_GROWTH_WRITE_PLATFORMS` er ikke-tom (skriving) eller `JARVIS_GROWTH_EXPERIMENTS=on` (eksperimenter).
@@ -2584,7 +2589,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         // gateway.health er PER PROSESS (denne API-prosessen): workerens helse sees ikke her (JARVIS-025-resten er DEFERRED).
         connector_health_scope: "api_process",
         frozen_connectors: frozen,
-        frozen_connectors_readable: frozenReadable
+        frozen_connectors_readable: frozenReadable,
+        // WP-S1: modus og blokkerte flagg er en eier-opplysning (de røper hvilke høyrisiko-kapabiliteter som er forsøkt slått på): kun for den suverene eieren, og kun når `main.ts` har gitt den (aldri for en annen grant).
+        ...(isOwner && deps.stepUpBinding !== undefined ? { stepup_binding: deps.stepUpBinding } : {})
       });
     }
   }

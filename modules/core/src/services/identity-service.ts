@@ -121,10 +121,12 @@ export class IdentityService {
   async recordDenial(
     subject: { tenant_id: string; person_id: string; device_id: string; session_id?: string },
     reason: string,
-    type = "identity.denied"
+    type = "identity.denied",
+    payload?: Record<string, unknown>
   ): Promise<void> {
     await withTenantTransaction(this.pool, subject.tenant_id, async (client) => {
-      await writeAudit(client, subject, { type, decision: "DENY", reason });
+      // WP-S1: valgfri `payload` (f.eks. enhetstype/kanal/modus ved et kanalbindingsavslag) så eieren kan se HVA som ble nektet uten å lete i andre tabeller. Aldri hemmeligheter.
+      await writeAudit(client, subject, { type, decision: "DENY", reason, ...(payload !== undefined ? { payload } : {}) });
     });
   }
 

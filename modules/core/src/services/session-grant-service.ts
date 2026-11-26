@@ -2,10 +2,12 @@ import { createHash, randomBytes } from "node:crypto";
 import type pg from "pg";
 import {
   SESSION_GRANT_TTL_MS,
+  channelAllowedForDeviceKind,
   type AuthStrength,
   type Channel,
   type MemorySpace,
-  type SessionGrantDenialReason
+  type SessionGrantDenialReason,
+  type StepUpBindingMode
 } from "@jarvis/contracts";
 import { withTenantTransaction } from "../db/pool.ts";
 import { writeAudit } from "./audit-writer.ts";
@@ -79,8 +81,20 @@ export function grantIdFromToken(token: string): string {
   return sha256Hex(token);
 }
 
+export interface SessionGrantServiceOptions {
+  /**
+   * WP-S1 (JARVIS-111): DYBDEFORSVAR for kanalbindingen. Utstedelsen (`authorizeProvenDevice`) er den primære håndhevelsen; i `enforce` sjekker `verify()` i tillegg at grantets kanal fortsatt hører til enhetens type
+   * SLIK DEN STÅR NÅ, så et grant utstedt før `enforce` ble slått på (eller før en typeendring) ikke lever ut levetiden sin med en kanal serveren ikke lenger tillater. Kun den eksakte verdien `enforce` nekter; i
+   * `observe` (standard) er `verify()` uendret.
+   */
+  channelBindingMode?: StepUpBindingMode;
+}
+
 export class SessionGrantService {
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(
+    private readonly pool: pg.Pool,
+    private readonly options: SessionGrantServiceOptions = {}
+  ) {}
 
   /**
    * Utsteder et grant PÅ EN EKSISTERENDE TRANSAKSJONSKLIENT.
@@ -180,7 +194,7 @@ export class SessionGrantService {
         `SELECT g.person_id, g.device_id, g.session_id, g.memory_space, g.channel, g.auth_strength,
                 g.device_key_fingerprint, g.revoked_at,
                 (EXTRACT(EPOCH FROM g.expires_at) * 1000)::bigint AS expires_at_ms,
-                d.public_key_pem
+                d.public_key_pem, d.device_kind
            FROM session_grants g
            LEFT JOIN devices d ON d.device_id = g.device_id AND d.tenant_id = g.tenant_id
           WHERE g.grant_id = $1`,
@@ -198,6 +212,7 @@ export class SessionGrantService {
             revoked_at: Date | null;
             expires_at_ms: string;
             public_key_pem: string | null;
+            device_kind: string | null;
           }
         | undefined;
       // Kan skje hvis `jarvis_session_grant_tenant()` fant en rad som RLS
@@ -233,6 +248,10 @@ export class SessionGrantService {
       // alle utestående grants for enheten uten noen opprydningsjobb.
       if (!row.public_key_pem || fingerprintPem(row.public_key_pem) !== row.device_key_fingerprint) {
         return deny("device_authority_revoked");
+      }
+      // WP-S1: dybdeforsvar (kun `enforce`): grantets kanal MÅ fortsatt høre til enhetens type slik den står nå. Fail-closed for en type som ikke er i den lukkede listen.
+      if (this.options.channelBindingMode === "enforce" && !channelAllowedForDeviceKind(row.device_kind, row.channel)) {
+        return deny("channel_not_allowed_for_device_kind");
       }
 
       return {

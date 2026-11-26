@@ -22,7 +22,7 @@ struct JarvisWatchApp: App {
 final class WatchModel: ObservableObject {
     @Published var status = "…"
     /// D-131 funn 2: engangs-billett fra en lokal eier-handling
-    /// (`pnpm --filter @jarvis/api enroll-ticket`). Anonym innrullering finnes
+    /// (`pnpm --filter @jarvis/api enroll-ticket --kind watch`; typen settes av serveren fra billetten). Anonym innrullering finnes
     /// ikke lenger - klokken kan ikke lenger skrive sin egen nøkkel uten bevis.
     @Published var enrollmentTicket = ""
     @Published var enrolled = false

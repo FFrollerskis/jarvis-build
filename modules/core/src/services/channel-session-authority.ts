@@ -54,6 +54,11 @@ import type { SessionRef } from "./session-service.ts";
  *
  * Et avslag er et normalt, revidert utfall - ikke en feil. `authorize()` kaster
  * aldri på avslag, og returnerer ALDRI en delvis autoritet.
+ *
+ * WP-S1 (JARVIS-111): kanalen er fortsatt en PÅSTAND fra klienten, men serveren sjekker den nå mot enhetens
+ * type (`devices.device_kind`) i autorisasjonskjernen (`authorizeProvenDevice`, se den filen): i `enforce`
+ * nektes en kanal som ikke hører til typen med `channel_not_allowed_for_device_kind`; i `observe` (standard)
+ * revideres «ville nektet». `ChannelSchema`-valideringen over er uendret (ukjent kanal gir `unknown_channel`).
  */
 export interface ChannelSessionAuthorityDeps extends DeviceAuthorityDeps {
   devices: DeviceService;
@@ -97,7 +102,9 @@ export type ChannelAuthorizationDenialReason =
   /** D-131 funn 3: `channel` var ikke en verdi i kontraktens `ChannelSchema`. */
   | "unknown_channel"
   /** D-131 funn 1: enhetens nøkkel forsvant mellom bevis og utstedelse - fail-closed. */
-  | "device_authority_revoked";
+  | "device_authority_revoked"
+  /** WP-S1 (JARVIS-111): kanalen hører ikke til enhetens type (kun i modus `enforce`; se `device-authority.ts`). */
+  | "channel_not_allowed_for_device_kind";
 
 export type ChannelAuthorizationResult =
   | { ok: true; identity: IdentityContext; session: SessionRef; grant: SessionGrant }
