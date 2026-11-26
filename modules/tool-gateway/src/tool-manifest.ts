@@ -70,6 +70,14 @@ const JARVIS_CORE_NAMESPACES = new Set([
 const FINANCIAL_NAMESPACES = /^(finance|finance_[a-z]+)$/;
 
 /**
+ * WP-T1 (K4): eies handlingens tilstand av Jarvis selv (DB-baserte domenenavnerom), i motsetning til en ekstern leverandør? ÉN kilde til sannhet (samme sett som `owner` i manifestet);
+ * brukes av den deterministiske nøkkelkrav-listen (`idempotency-requirements.ts`).
+ */
+export function isJarvisCoreNamespace(tool_id: string): boolean {
+  return JARVIS_CORE_NAMESPACES.has(tool_id);
+}
+
+/**
  * WP-N1 (Q-64 pkt 3): er verktøy-id-en et finansnavnerom (`finance`, `finance_*`)? ÉN kilde til sannhet: samme mønster som `inferDataZone`/`inferSensitivity` under. Utførelseslåsen i `ToolGateway.execute()`
  * bruker denne i stedet for en egen liste, så et nytt `finance_*`-navnerom automatisk er låst også ved utførelse.
  */

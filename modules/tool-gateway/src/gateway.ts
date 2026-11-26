@@ -1072,7 +1072,8 @@ export class ToolGateway {
     const digestMode: RequestDigestMode = this.options?.requestDigestMode ?? requestDigestMode();
     let requestDigestValue: string | undefined;
     if (digestMode !== "off") {
-      if (dedupeApplies && definition.idempotency === "required" && !request.idempotency_key) {
+      // Nødbrytere og selvgjenopprettings-handlinger (`exemptFromAbortGuard`) MÅ virke uten nøkkel, uansett hva en definisjon sier.
+      if (dedupeApplies && definition.idempotency === "required" && !exemptFromAbortGuard && !request.idempotency_key) {
         if (digestMode === "enforce") return deny(IDEMPOTENCY_KEY_REQUIRED);
         await this.auditObservation(request, definition, "tool.idempotency_key_missing_observed", IDEMPOTENCY_KEY_REQUIRED, {}, corr, policyDecisionId);
       }

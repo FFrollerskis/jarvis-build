@@ -1,0 +1,2066 @@
+[
+ {
+  "key": "business.assign_open_loop",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.cancel_followup",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.clear_manual_override",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.close_lead",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.close_opportunity",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.complete_followup",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.create_company",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.create_contact",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.create_followup",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.create_lead",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.create_opportunity",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.defer_open_loop",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.delete_lead",
+  "class": "C",
+  "effect": "delete",
+  "external": false,
+  "mode": "required",
+  "rule": "R5_delete"
+ },
+ {
+  "key": "business.delete_opportunity",
+  "class": "C",
+  "effect": "delete",
+  "external": false,
+  "mode": "required",
+  "rule": "R5_delete"
+ },
+ {
+  "key": "business.link_product_account",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.recalculate_score",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.record_activity",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.resolve_open_loop",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.set_manual_override",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.set_next_action",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.set_open_loop_next_action",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.sync_business_events",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.update_lead",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.update_lead_status",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.update_opportunity",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "business.update_opportunity_stage",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "calendar.create_event",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "consent.record_decision",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "consent.set_enforcement_policy",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.add_obligation",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.add_version",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.complete_obligation",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.create_contract",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.link_counterparty",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.reopen_obligation",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.set_owner",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.set_renewal_date",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.set_status",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.set_termination_deadline",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "contract.waive_obligation",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "discord.notify",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "docker.redeploy_container",
+  "class": "D",
+  "effect": "control",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "docker.start_container",
+  "class": "D",
+  "effect": "control",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "docker.stop_container",
+  "class": "D",
+  "effect": "control",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "drive.create_file",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "drive.create_folder",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "drive.create_permission",
+  "class": "D",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "drive.delete_permanent",
+  "class": "D",
+  "effect": "delete",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "drive.delete_permission",
+  "class": "D",
+  "effect": "delete",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "drive.move",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "drive.rename",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "drive.trash",
+  "class": "C",
+  "effect": "delete",
+  "external": true,
+  "mode": "required",
+  "rule": "R5_delete"
+ },
+ {
+  "key": "drive.update_content",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "drive.update_permission",
+  "class": "D",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "dropbox.create_folder",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "dropbox.upload_file",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "email.send",
+  "class": "D",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "executive.activate_kill_switch",
+  "class": "D",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R0_safety_switch"
+ },
+ {
+  "key": "executive.cancel_task",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "executive.deactivate_kill_switch",
+  "class": "D",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R0_safety_switch"
+ },
+ {
+  "key": "executive.disable_finance_kill_switch",
+  "class": "D",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R0_safety_switch"
+ },
+ {
+  "key": "executive.enable_finance_kill_switch",
+  "class": "D",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R0_safety_switch"
+ },
+ {
+  "key": "executive.freeze_connector",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "executive.pause_domain",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "executive.restore_credential",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R0_safety_switch"
+ },
+ {
+  "key": "executive.resume_domain",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "executive.revoke_credential",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "executive.revoke_device",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "executive.unfreeze_connector",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance.bind_vendor_provider",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance.cancel_payment_intent",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance.create_payment_intent",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance.create_vendor",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance.disable_kill_switch",
+  "class": "D",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R0_safety_switch"
+ },
+ {
+  "key": "finance.enable_kill_switch",
+  "class": "D",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R0_safety_switch"
+ },
+ {
+  "key": "finance.reconcile_payment_intent",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance.revoke_vendor_provider_binding",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance.settle_payment_intent",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance.submit_payment_intent",
+  "class": "D",
+  "effect": "pay",
+  "external": false,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "finance_neonomics.complete_consent_callback",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_neonomics.create_consent",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "finance_neonomics.reconcile_bank_transactions",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_neonomics.refresh_payment_state",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_neonomics.revoke_consent",
+  "class": "C",
+  "effect": "control",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_neonomics.run_bank_anomaly_detection",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_neonomics.run_provider_anomaly_detection",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_neonomics.sync_accounts",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_neonomics.sync_balances",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_neonomics.sync_transactions",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_neonomics.verify_consent",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_spend.cancel_procurement_item",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_spend.cancel_recurring_commitment",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_spend.create_procurement_item",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_spend.create_recurring_commitment",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_spend.pause_recurring_commitment",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_spend.resume_recurring_commitment",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_spend.run_spend_anomaly_detection",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_spend.run_spend_reconciliation",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_spend.sync_internal_spend",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_spend.update_procurement_item",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_spend.update_recurring_commitment",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "finance_stripe.request_refund",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_stripe.run_provider_anomaly_detection",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_stripe.submit_refund",
+  "class": "D",
+  "effect": "pay",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "finance_vipps.cancel_payment",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_vipps.request_capture",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_vipps.request_refund",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_vipps.run_provider_anomaly_detection",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_vipps.submit_capture",
+  "class": "D",
+  "effect": "pay",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "finance_vipps.submit_refund",
+  "class": "D",
+  "effect": "pay",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "finance_wallester.activate_card",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_wallester.close_card",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_wallester.create_card",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_wallester.freeze_card",
+  "class": "B",
+  "effect": "control",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_wallester.reconcile_card_transactions",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_wallester.run_card_anomaly_detection",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_wallester.submit_card",
+  "class": "C",
+  "effect": "pay",
+  "external": true,
+  "mode": "required",
+  "rule": "R3_money"
+ },
+ {
+  "key": "finance_wallester.sync_authorizations",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_wallester.sync_card_state",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_wallester.sync_transactions",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_wallester.unfreeze_card",
+  "class": "C",
+  "effect": "control",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "finance_wallester.update_spend_policy",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "gce.reset_instance",
+  "class": "D",
+  "effect": "control",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "gce.start_instance",
+  "class": "D",
+  "effect": "control",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "gce.stop_instance",
+  "class": "D",
+  "effect": "control",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "github.cancel_workflow_run",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "github.comment_on_issue",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "github.create_branch",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "github.create_issue",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "github.create_pr",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "github.delete_branch",
+  "class": "D",
+  "effect": "delete",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "github.dispatch_workflow",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "github.merge_pr",
+  "class": "D",
+  "effect": "control",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "github.request_reviewers",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "github.rerun_workflow_run",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "github.set_labels",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "github.update_issue",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "github.update_pr",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "google_sheets.append_row",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "google_sheets.update_range",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "google_veo.generate_video",
+  "class": "C",
+  "effect": "pay",
+  "external": true,
+  "mode": "required",
+  "rule": "R3_money"
+ },
+ {
+  "key": "googleads.sync_campaigns",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "googleads.sync_spend",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "googleads.sync_tracking_tags",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "governance.add_key_result",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "governance.create_decision",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "governance.create_goal",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "governance.create_risk",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "governance.create_scenario",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "governance.reverse_decision",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "governance.update_goal_status",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "governance.update_key_result_progress",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "governance.update_risk",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "governance.update_scenario_status",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.attribute_from_tracking",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.attribute_to_campaign",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.cancel_execution_command",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.create_campaign",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.create_experiment",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.generate_execution_command",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.generate_marketing_observations",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.record_spend_event",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.register_campaign_tracking_tag",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.set_budget",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.set_campaign_status",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "growth.set_experiment_status",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "higgsfield.generate_video",
+  "class": "C",
+  "effect": "pay",
+  "external": true,
+  "mode": "required",
+  "rule": "R3_money"
+ },
+ {
+  "key": "home-assistant.alarm_set",
+  "class": "D",
+  "effect": "control",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "home-assistant.climate_set",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "home-assistant.light_set",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "home-assistant.lock_set",
+  "class": "D",
+  "effect": "control",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "hubspot.create_object",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "hubspot.update_object",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "jira.create_issue",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "jira.transition_issue",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "jira.update_issue",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "kling.generate_video",
+  "class": "C",
+  "effect": "pay",
+  "external": true,
+  "mode": "required",
+  "rule": "R3_money"
+ },
+ {
+  "key": "linear.create_issue",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "linear.update_issue",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "make.run_scenario",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "mcp_zapier.call_tool",
+  "class": "D",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "memory.approve_proposal",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "memory.propose",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "memory.reject_proposal",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "metaads.sync_campaigns",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "metaads.sync_spend",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "microsoft_outlook.send_mail",
+  "class": "D",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R2_class_d"
+ },
+ {
+  "key": "n8n.activate_workflow",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "n8n.deactivate_workflow",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "notion.create_page",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "onedrive.create_folder",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "openai_images.generate_image",
+  "class": "C",
+  "effect": "pay",
+  "external": true,
+  "mode": "required",
+  "rule": "R3_money"
+ },
+ {
+  "key": "operations.create_runbook",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.create_task",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.create_vendor",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.escalate_task",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.link_runbook",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.link_vendor",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.set_due_at",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.set_owner",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.set_priority",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.set_runbook_active",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.set_status",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.set_vendor_status",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "operations.update_runbook_content",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "owner_controls.activate_kill_switch",
+  "class": "D",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R0_safety_switch"
+ },
+ {
+  "key": "owner_controls.deactivate_kill_switch",
+  "class": "D",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R0_safety_switch"
+ },
+ {
+  "key": "owner_controls.freeze_connector",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "owner_controls.restore_credential",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R0_safety_switch"
+ },
+ {
+  "key": "owner_controls.revoke_credential",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "owner_controls.revoke_device",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "owner_controls.set_connector_credential",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "owner_controls.unfreeze_connector",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "pipedrive.create_object",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "pipedrive.update_object",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "product.create_item",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "product.link_reporter",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "product.set_owner",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "product.set_priority",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "product.set_status",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "run_rate.record_connector_maintenance",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "runway.generate_video",
+  "class": "C",
+  "effect": "pay",
+  "external": true,
+  "mode": "required",
+  "rule": "R3_money"
+ },
+ {
+  "key": "sentry.update_issue",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "situations.clear_autonomy_policy",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "situations.pause_all",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "situations.pause_domain",
+  "class": "C",
+  "effect": "control",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "situations.release_stuck_act_claim",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "situations.set_autonomy_policy",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "situations.set_notification_policy",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "situations.unpause_all",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "situations.unpause_domain",
+  "class": "C",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "slack.notify",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "spotify.add_to_queue",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "support.add_internal_note",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "support.assign_ticket",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "support.create_ticket",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "support.ingest_message",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "support.reply",
+  "class": "C",
+  "effect": "send",
+  "external": false,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "support.set_priority",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "support.set_status",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "support.update_ticket",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "tasks.delegate_background_task",
+  "class": "B",
+  "effect": "write",
+  "external": false,
+  "mode": "optional",
+  "rule": "R7b_internal_state"
+ },
+ {
+  "key": "telegram.notify",
+  "class": "B",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "telnyx.notify",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "todoist.close_task",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "todoist.create_task",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "todoist.reopen_task",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "todoist.update_task",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "trello.close_card",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "trello.create_card",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "trello.reopen_card",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "trello.update_card",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "required",
+  "rule": "R6_external_not_idempotent"
+ },
+ {
+  "key": "twilio.notify",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ },
+ {
+  "key": "vercel.cancel_deployment",
+  "class": "B",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "vercel.promote_deployment",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "vercel.rollback_deployment",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "vercel.upsert_env",
+  "class": "C",
+  "effect": "write",
+  "external": true,
+  "mode": "optional",
+  "rule": "R7a_external_idempotent"
+ },
+ {
+  "key": "whatsapp.notify",
+  "class": "C",
+  "effect": "send",
+  "external": true,
+  "mode": "required",
+  "rule": "R4_outbound"
+ }
+]

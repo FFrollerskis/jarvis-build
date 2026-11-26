@@ -510,6 +510,18 @@ describe("E: nøkkelkravet (K4) i enforce", () => {
     expect(t.mutations).toBe(3);
   });
 
+  it("nødbrytere og selvgjenopprettings-handlinger krever ALDRI nøkkel, selv om en definisjon er (feil)merket `required`", async () => {
+    const t = new Counter();
+    const g = gateway("enforce", [
+      def({ tool_id: "executive", action: "deactivate_kill_switch", capability_class: "D", idempotency: "required" }, t),
+      def({ tool_id: "owner_controls", action: "restore_credential", capability_class: "C", idempotency: "required" }, t)
+    ]);
+    expect(await run(g, undefined, {}, identity, "executive", "deactivate_kill_switch")).toMatchObject({ ok: true });
+    expect(await run(g, undefined, { credential_ref: "X" }, identity, "owner_controls", "restore_credential")).toMatchObject({ ok: true });
+    expect(t.mutations).toBe(2);
+    expect((await auditRows("tool.denied", "executive")).filter((r) => r.reason === "idempotency_key_required")).toEqual([]);
+  });
+
   it("klasse D under håndhevet pipeline: den eksisterende `class_d_idempotency_key_required` har forrang (samme kode som før), og et avvist duplikat sender ikke eier-varsel", async () => {
     const t = new Counter();
     const notifier = new FakeNotifier();

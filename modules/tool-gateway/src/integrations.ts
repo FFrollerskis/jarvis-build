@@ -5,6 +5,7 @@ import { authorizeDockerTarget, type DockerMutationAction } from "./docker-targe
 import { authorizeGceTarget, type GceMutationAction } from "./gce-target-policy.ts";
 import type { ToolDefinition, ToolTransport } from "./gateway.ts";
 import { withheldFromCloudTransport } from "./finance-withheld.ts";
+import { applyIdempotencyDecisions } from "./idempotency-requirements.ts";
 import {
   financeConnectorIdsForCredentialRef, financeCredentialRefForProvider,
   SUBMIT_PAYMENT_INTENT_RECOVERY, SUBMIT_STRIPE_REFUND_RECOVERY, SUBMIT_VIPPS_CAPTURE_RECOVERY, SUBMIT_VIPPS_REFUND_RECOVERY,
@@ -122,7 +123,8 @@ export function firstWaveTools(
     if (typeof zone !== "string" || typeof instanceName !== "string") return { allowed: false, reason: "missing_target_parameters" };
     return authorizeGceTarget(action, zone, instanceName, gceMutationTargets);
   };
-  return [
+  // WP-T1 (K4): hver produksjonsdefinisjon får en eksplisitt `idempotency` fra den deterministiske nøkkelkrav-listen (idempotency-requirements.ts); uten modus observe/enforce har feltet ingen virkning.
+  return applyIdempotencyDecisions([
     {
       tool_id: "github", action: "read_issues", description: "Les issues (untrusted ingestion)",
       input_schema: record({ repo: z.string() }), capability_class: "A",
@@ -4382,7 +4384,7 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("business")
     },
     ...(config.additionalTools ?? [])
-  ];
+  ]);
 }
 
 /**
