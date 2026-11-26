@@ -1,5 +1,5 @@
 import { PRODUCTION_SURFACE } from "./support/fast-path-harness.ts";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
@@ -13,6 +13,7 @@ import type { ResensitizeSweepSummary } from "@jarvis/memory";
 import type { MeshStatus } from "@jarvis/model-gateway";
 import type { ConnectorStatus } from "@jarvis/tool-gateway";
 import { boundariesSection, buildEvolutionReport, costSection, maintenanceSection, memorySection, proposalsSection, type EvolutionContext, type EvolutionSourceDeps } from "../src/evolution-source.ts";
+import { backupStatusSourceFromEnv } from "../src/backup-status.ts";
 
 /**
  * WP-B (D-452): evolusjonskildene mot ekte Postgres som `jarvis_app`-avledet rolle (RLS): SQL-en mot endringsregisteret, cost_events, scheduler_state og incidents er riktig, tenant-skopet og kun lesende.
@@ -116,6 +117,70 @@ describe("evolusjonskildene mot ekte Postgres", () => {
     expect(text).toContain("Forfalt nå:");
     expect(text).toContain("failed_jobs_review");
     expect(text).not.toMatch(/Forfalt nå:[^.]*health_check/);
+  });
+
+  /**
+   * WP-OPS2a K4 (EV-19-koblingen): HELE kjeden mot ekte Postgres og en EKTE statusfil på disk: filen -> den ekte leseren (`backupStatusSourceFromEnv`) -> `maintenanceSection`. Fixturen har en åpen hendelse (change freeze PÅ), så den
+   * muterende restore-oppgaven stoppes av freeze i stedet for å gi ATTENTION. Kun lesing: filen er uendret etterpå.
+   */
+  describe("EV-19 K4: backup-statusfilen (ekte fil, ekte leser, ekte scheduler_state)", () => {
+    const at = (msAgo: number): string => new Date(NOW.getTime() - msAgo).toISOString();
+    const HOUR = 3_600_000;
+    const DAY = 24 * HOUR;
+    const raw = (over: { generatedAgo?: number; restoreAgo?: number | null } = {}): Record<string, unknown> => ({
+      schema: 1, generated_at: at(over.generatedAgo ?? 10 * 60_000), first_seen_at: at(60 * DAY), last_tick_at: at(10 * 60_000),
+      backup: { state: "ok", last_set: "jarvis-backup-20261015T020000Z", last_set_at: at(10 * HOUR), size_bytes: 1000, duration_s: 30, sets_on_disk: 3, interval_hours: 24, next_due_at: null, consecutive_failures: 0, last_error_code: null },
+      offsite: { state: "not_configured", adapter: null, last_success_at: null, last_verified_at: null, last_set: null, verification: null, consecutive_failures: 0, last_error_code: null },
+      restore_verify: {
+        state: over.restoreAgo === null ? "never_run" : "ok", interval_days: 30, last_attempt_at: null, last_success_at: over.restoreAgo === null ? null : at(over.restoreAgo ?? 3 * DAY), last_set: null, duration_s: 60, fetch_duration_s: null,
+        tables: 90, rows: 1000, source: "local", reported_by: "local", consecutive_failures: 0, last_error_code: null
+      },
+      heartbeat: { configured: false, last_ping_at: null, last_ping_kind: null, last_ping_ok: null, last_error_code: null }
+    });
+    const sectionFor = async (content: string | null) => {
+      const dir = await mkdtemp(join(tmpdir(), "jarvis-ev19-backup-"));
+      const file = join(dir, "backup-status.json");
+      if (content !== null) await writeFile(file, content);
+      const before = content === null ? null : { text: await readFile(file, "utf8"), mtime: (await stat(file)).mtimeMs };
+      const section = await maintenanceSection(ctx(deps({ backupStatus: backupStatusSourceFromEnv({ JARVIS_BACKUP_STATUS_FILE: file }) })));
+      if (before !== null) expect({ text: await readFile(file, "utf8"), mtime: (await stat(file)).mtimeMs }).toEqual(before); // kun lesing
+      return section;
+    };
+
+    it("gyldig, fersk fil: backup_status og restore-oppgaven er dekket (8 av 23) og ikke forfalt; bare den ukoblede daily-brief-jobben er det", async () => {
+      const s = await sectionFor(JSON.stringify(raw()));
+      const text = s.findings.join("\n");
+      expect(text).toContain("8 av 23 vedlikeholdsoppgaver har en utfører");
+      expect(text).toMatch(/Forfalt nå: failed_jobs_review\./);
+      expect(text).not.toContain("backup_status,");
+      expect(text).not.toContain("Stoppet:");
+    });
+
+    it("gammel `generated_at` (2 døgn) gir «forfalt» for backup_status, og en aldri-verifisert restore stoppes av change freeze (åpen hendelse) i stedet for å gi ATTENTION alene", async () => {
+      const old = await sectionFor(JSON.stringify(raw({ generatedAgo: 2 * DAY })));
+      expect(old.findings.join("\n")).toMatch(/Forfalt nå: failed_jobs_review, backup_status\./);
+      expect(old.status).toBe("ATTENTION");
+      const neverVerified = await sectionFor(JSON.stringify(raw({ restoreAgo: null })));
+      expect(neverVerified.findings.join("\n")).toContain("Stoppet: disaster_recovery_sample_restore (change_freeze)");
+      expect(neverVerified.findings.join("\n")).toMatch(/Forfalt nå: failed_jobs_review\./);
+    });
+
+    it("manglende fil og ugyldig innhold (ikke JSON, feil skjema) gir «ikke dekket»: 6 av 23, ingen falsk «forfalt», og årsaken oppgis uten filinnhold", async () => {
+      for (const content of [null, "dette er ikke json", JSON.stringify({ schema: 2 }), JSON.stringify({ ...raw(), generated_at: "ikke-en-dato" })]) {
+        const s = await sectionFor(content);
+        const text = s.findings.join("\n");
+        expect(text, String(content).slice(0, 20)).toContain("6 av 23 vedlikeholdsoppgaver har en utfører");
+        expect(text).toContain("backup_status og disaster_recovery_sample_restore er ikke vurdert");
+        expect(text).not.toMatch(/Forfalt nå:[^.]*backup_status/);
+        expect(JSON.stringify(s)).not.toContain("dette er ikke json");
+      }
+    });
+
+    it("hele rapporten: EV-19 er kun lesing (`acts: false`), og uten kilde er rapporten som før (ingen backup-oppgaver dekket)", async () => {
+      const without = await buildEvolutionReport(deps());
+      expect(without.acts).toBe(false);
+      expect(without.sections.find((x) => x.ev === "EV-19")?.findings.join("\n")).toContain("6 av 23 vedlikeholdsoppgaver har en utfører");
+    });
   });
 
   it("EV-0/EV-8: åpne hendelser telles per tenant og rom (RLS) og slår på change freeze", async () => {

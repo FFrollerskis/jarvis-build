@@ -253,7 +253,7 @@ const age = (hours: number): string => (hours >= 48 ? `${nb1(hours / 24)} d` : `
 const label = (c: BackupErrorCode | null): string => (c === null ? "ukjent årsak" : ERROR_LABELS[c]);
 const INVALID_REASON: Record<string, string> = { unreadable: "filen kan ikke leses", too_large: "filen er for stor", not_json: "ugyldig JSON", bad_schema: "ukjent eller ugyldig format", timeout: "lesingen tok for lang tid" };
 /** Klokketoleranse (NAS mot API): et tidspunkt lenger frem enn dette er et avvik, ikke «nå» (samme 5 minutter som backup-tikket bruker for sett). */
-const FUTURE_SKEW_HOURS = 5 / 60;
+export const FUTURE_SKEW_HOURS = 5 / 60;
 /** Timer et tidspunkt ligger FREM i tid utover klokketoleransen, ellers null. Et slikt tidspunkt kan aldri bevise ferskhet (review F14). */
 const hoursAhead = (now: Date, at: string | null): number | null => {
   if (at === null) return null;
@@ -358,8 +358,8 @@ export function observeBackupStatus(read: BackupStatusRead, now: Date, threshold
 }
 
 /**
- * EV-19-vedlikeholdskatalogen (`MAINTENANCE_CATALOG`) har `backup_status` (daglig) og `disaster_recovery_sample_restore` (månedlig). Dette er `last_run` for dem, så
- * vedlikeholdsdekningen kan vise dem som FAKTISK utført (statusfilen sist skrevet / siste vellykkede restore-verifisering) i stedet for «ukjent».
+ * EV-19-vedlikeholdskatalogen (`MAINTENANCE_CATALOG`) har `backup_status` (daglig) og `disaster_recovery_sample_restore` (månedlig). Dette er `last_run` for dem (statusfilen sist skrevet / siste vellykkede restore-verifisering).
+ * WP-OPS2a K4: koblet inn i `maintenanceSection` (`evolution-source.ts`, `backupCoverage`) - men KUN når filen er lest uten feil og gyldig; ellers er oppgavene «ikke dekket», aldri en fabrikkert tid.
  */
 export function backupMaintenanceLastRun(snapshot: BackupStatusSnapshot): Record<string, string> {
   const out: Record<string, string> = { backup_status: snapshot.generated_at };

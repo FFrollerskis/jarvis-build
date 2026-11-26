@@ -4,6 +4,7 @@ import type { SloReport } from "@jarvis/executive";
 import type { MeshStatus } from "@jarvis/model-gateway";
 import type { ConnectorStatus } from "@jarvis/tool-gateway";
 import type { Ev0BootStatus } from "../src/ev0-boot.ts";
+import type { BackupStatusRead, BackupStatusSnapshot } from "../src/backup-status.ts";
 import {
   MAINTENANCE_COVERAGE, boundariesSection, buildEvolutionReport, costSection, createEvolutionReportProvider, credentialsSection, dormantSection, goldenSection, healSection, maintenanceSection, memorySection, memorySourceKind, modelRouteSection, proposalsSection, radarSection, redTeamSection,
   type EvolutionContext, type EvolutionSourceDeps
@@ -214,10 +215,15 @@ describe("EV-19: vedlikeholdsplan", () => {
     const text = s.findings.join("\n");
     expect(text).toContain("Forfalt nå:");
     expect(text).toContain("health_check");
-    const covered = Object.keys(MAINTENANCE_COVERAGE).length;
-    expect(text).toContain(`${covered} av ${MAINTENANCE_CATALOG.length} vedlikeholdsoppgaver har en utfører`);
+    // WP-OPS2a K4: tabellen har nå 8 oppføringer, men de to backup-oppgavene regnes som dekket KUN når backup-statusfilen er lest uten feil. Uten en kilde (som her) er dekningen fortsatt de seks gamle.
+    const staticCoverage = Object.keys(MAINTENANCE_COVERAGE).length;
+    const withoutBackupSource = Object.values(MAINTENANCE_COVERAGE).filter((c) => c.by !== "backup").length;
+    expect(staticCoverage).toBe(8);
+    expect(withoutBackupSource).toBe(6);
+    expect(text).toContain(`${withoutBackupSource} av ${MAINTENANCE_CATALOG.length} vedlikeholdsoppgaver har en utfører`);
     expect(text).toContain("ikke koblet ennå");
     expect(text).toContain("backup_status");
+    expect(text).toContain("disaster_recovery_sample_restore");
   });
   it("nylig kjørte planlagte jobber er ikke forfalt (rapport-dekkede oppgaver regnes som kjørt når rapporten leses)", async () => {
     const recent = new Date(NOW.getTime() - 3_600_000).toISOString();
@@ -228,6 +234,135 @@ describe("EV-19: vedlikeholdsplan", () => {
   it("hver dekning peker på en oppgave som finnes i katalogen (ingen råtnende kobling)", () => {
     const ids = new Set(MAINTENANCE_CATALOG.map((t) => t.id));
     for (const id of Object.keys(MAINTENANCE_COVERAGE)) expect(ids.has(id), id).toBe(true);
+  });
+});
+
+/**
+ * WP-OPS2a K4 (EV-19-koblingen, kun lesing): backup-statusfilen (`ops/backup/schedule.mjs`) gir `last_run` for `backup_status` (daglig) og `disaster_recovery_sample_restore` (månedlig). Dekket KUN når filen er lest uten feil og gyldig;
+ * en ulesbar/manglende fil, en feilende kilde eller klokkeavvik gir «ikke dekket» - aldri en fabrikkert tid og aldri en falsk «forfalt».
+ */
+describe("EV-19 K4: backup-status koblet inn", () => {
+  const H = 3_600_000;
+  const D = 24 * H;
+  const iso = (msAgo: number): string => new Date(NOW.getTime() - msAgo).toISOString();
+  const recent = iso(H);
+  const quietJobs: Handler = [/FROM scheduler_state/, () => [{ job_name: "connector-health-sweep", last: recent }, { job_name: "daily-brief", last: recent }]];
+  const noIncidents: Handler = [/FROM incidents/, () => [{ n: 0 }]];
+  const openIncident: Handler = [/FROM incidents/, () => [{ n: 2 }]];
+  const snapshot = (over: { generatedAgo?: number; restoreAgo?: number | null; restoreState?: BackupStatusSnapshot["restore_verify"]["state"] } = {}): BackupStatusSnapshot => {
+    const restoreAgo = over.restoreAgo === undefined ? 3 * D : over.restoreAgo;
+    return {
+      generated_at: iso(over.generatedAgo ?? 10 * 60_000), first_seen_at: iso(60 * D), last_tick_at: iso(10 * 60_000),
+      backup: { state: "ok", last_set: "jarvis-backup-20261015T020000Z", last_set_at: iso(10 * H), size_bytes: 1000, duration_s: 30, sets_on_disk: 3, interval_hours: 24, next_due_at: null, consecutive_failures: 0, last_error_code: null },
+      offsite: { state: "ok", adapter: "local", last_success_at: iso(10 * H), last_verified_at: iso(10 * H), last_set: null, verification: "sha256", consecutive_failures: 0, last_error_code: null },
+      restore_verify: {
+        state: over.restoreState ?? (restoreAgo === null ? "never_run" : "ok"), interval_days: 30, last_attempt_at: null, last_success_at: restoreAgo === null ? null : iso(restoreAgo), last_set: null,
+        duration_s: 60, fetch_duration_s: null, tables: 90, rows: 1000, source: "local", reported_by: "local", consecutive_failures: 0, last_error_code: null
+      },
+      heartbeat: { configured: false, last_ping_at: null, last_ping_kind: null, last_ping_ok: null, last_error_code: null }
+    };
+  };
+  const ok = (snap: BackupStatusSnapshot): (() => Promise<BackupStatusRead>) => async () => ({ kind: "ok", snapshot: snap });
+  const run = (backupStatus: EvolutionSourceDeps["backupStatus"], handlers: Handler[] = [quietJobs, noIncidents], seen: string[] = []) =>
+    maintenanceSection(ctxOf(deps({ handlers, pool: fakePool([...handlers, [/DISTINCT ON \(job_name\)/, () => []]], seen), ...(backupStatus ? { backupStatus } : {}) })));
+  const uncoveredList = (s: { findings: string[] }): string[] => {
+    const line = s.findings.find((f) => /er ikke koblet ennå: /.test(f));
+    return line === undefined ? [] : line.replace(/^.*er ikke koblet ennå: /, "").replace(/\.$/, "").split(", ");
+  };
+  const dueList = (s: { findings: string[] }): string[] => {
+    const line = s.findings.find((f) => f.startsWith("Forfalt nå:"));
+    return line === undefined ? [] : line.replace(/^Forfalt nå: /, "").replace(/\.$/, "").split(", ");
+  };
+
+  it("gyldig, fersk fil med vellykket restore-verifisering: begge backup-oppgavene er dekket (8 av 23) og IKKE forfalt - `last_run` kom fra filen", async () => {
+    const s = await run(ok(snapshot()));
+    expect(s.status).toBe("OK");
+    expect(s.findings.join("\n")).toContain(`8 av ${MAINTENANCE_CATALOG.length} vedlikeholdsoppgaver har en utfører`);
+    expect(dueList(s)).toEqual([]);
+    expect(s.summary_no).toContain("Ingenting forfalt blant de 8 koblede oppgavene");
+    expect(s.source).toContain("backup");
+    expect(s.findings.join("\n")).toContain("15 er ikke koblet ennå");
+    expect(uncoveredList(s)).not.toContain("backup_status");
+    expect(uncoveredList(s)).not.toContain("disaster_recovery_sample_restore");
+  });
+
+  it("gammel `generated_at` (over ett døgn): backup_status er forfalt (ATTENTION); under ett døgn er den det ikke", async () => {
+    const old = await run(ok(snapshot({ generatedAgo: 25 * H })));
+    expect(old.status).toBe("ATTENTION");
+    expect(dueList(old)).toEqual(["backup_status"]);
+    const fresh = await run(ok(snapshot({ generatedAgo: 23 * H })));
+    expect(dueList(fresh)).toEqual([]);
+    expect(fresh.status).toBe("OK");
+  });
+
+  it("restore-verifisering eldre enn 30 dager er forfalt; yngre er det ikke", async () => {
+    expect(dueList(await run(ok(snapshot({ restoreAgo: 31 * D }))))).toEqual(["disaster_recovery_sample_restore"]);
+    expect(dueList(await run(ok(snapshot({ restoreAgo: 29 * D }))))).toEqual([]);
+  });
+
+  it("UTEN `restore_verify.last_success_at` får kun backup_status en `last_run`: restore-oppgaven er dekket men forfalt - ATTENTION (ærlig) når freeze er av, og «Stoppet (change_freeze)» uten ATTENTION når freeze er på", async () => {
+    const neverVerified = snapshot({ restoreAgo: null });
+    const calm = await run(ok(neverVerified));
+    expect(calm.status).toBe("ATTENTION");
+    expect(dueList(calm)).toEqual(["disaster_recovery_sample_restore"]);
+    expect(calm.findings.join("\n")).toContain("8 av 23 vedlikeholdsoppgaver har en utfører");
+    const frozen = await run(ok(neverVerified), [quietJobs, openIncident]);
+    expect(dueList(frozen)).toEqual([]);
+    expect(frozen.findings.join("\n")).toContain("Stoppet: disaster_recovery_sample_restore (change_freeze)");
+    expect(frozen.status).toBe("OK");
+  });
+
+  it("ingen kilde, manglende fil, ulesbar fil (alle årsaker) og en kilde som kaster: «ikke dekket» (6 av 23) - ikke forfalt, ingen fabrikkert tid, og sier hvorfor", async () => {
+    const failures: Array<[string, EvolutionSourceDeps["backupStatus"], RegExp]> = [
+      ["ingen kilde", undefined, /ingen backup-statusfil er montert/],
+      ["missing", async () => ({ kind: "missing" }), /finnes ikke/],
+      ["unreadable", async () => ({ kind: "invalid", reason: "unreadable" }), /kunne ikke leses \(unreadable\)/],
+      ["too_large", async () => ({ kind: "invalid", reason: "too_large" }), /kunne ikke leses \(too_large\)/],
+      ["not_json", async () => ({ kind: "invalid", reason: "not_json" }), /kunne ikke leses \(not_json\)/],
+      ["bad_schema", async () => ({ kind: "invalid", reason: "bad_schema" }), /kunne ikke leses \(bad_schema\)/],
+      ["timeout", async () => ({ kind: "invalid", reason: "timeout" }), /kunne ikke leses \(timeout\)/],
+      ["kaster", async () => { throw new Error("EACCES /secret/path"); }, /lesingen av backup-statusfilen feilet/],
+      ["synkront kast", () => { throw new Error("boom"); }, /lesingen av backup-statusfilen feilet/]
+    ];
+    for (const [name, source, why] of failures) {
+      const s = await run(source);
+      const text = s.findings.join("\n");
+      expect(text, name).toContain("6 av 23 vedlikeholdsoppgaver har en utfører");
+      expect(text, name).toMatch(why);
+      expect(text, name).toContain("backup_status og disaster_recovery_sample_restore er ikke vurdert");
+      expect(dueList(s), name).toEqual([]); // ukjent er ikke «forfalt»
+      expect(uncoveredList(s), name).toEqual(expect.arrayContaining(["backup_status", "disaster_recovery_sample_restore"])); // oppgis som «ikke koblet», ikke skjult
+      expect(text, name).toContain("17 er ikke koblet ennå");
+      expect(s.status, name).toBe("OK");
+      expect(JSON.stringify(s), name).not.toContain("EACCES");
+      expect(JSON.stringify(s), name).not.toContain("/secret");
+    }
+  });
+
+  it("klokkeavvik: en `generated_at` frem i tid (over 5 min) gir «ikke dekket» for begge; en `last_success_at` frem i tid gir «ikke dekket» for restore alene - aldri en fabrikkert ferskhet", async () => {
+    const skewed = await run(ok(snapshot({ generatedAgo: -60 * 60_000 })));
+    expect(skewed.findings.join("\n")).toContain("6 av 23 vedlikeholdsoppgaver har en utfører");
+    expect(skewed.findings.join("\n")).toContain("klokkeavvik");
+    expect(dueList(skewed)).toEqual([]);
+    const restoreAhead = await run(ok(snapshot({ restoreAgo: -2 * D })));
+    expect(restoreAhead.findings.join("\n")).toContain("7 av 23 vedlikeholdsoppgaver har en utfører");
+    expect(restoreAhead.findings.join("\n")).toContain("klokkeavvik");
+    expect(dueList(restoreAhead)).toEqual([]);
+    expect(uncoveredList(restoreAhead)).toContain("disaster_recovery_sample_restore");
+    expect(uncoveredList(restoreAhead)).not.toContain("backup_status");
+    // innenfor klokketoleransen (cron-jitter, 2 min): fortsatt dekket og ikke forfalt
+    const jitter = await run(ok(snapshot({ generatedAgo: -2 * 60_000 })));
+    expect(jitter.findings.join("\n")).toContain("8 av 23 vedlikeholdsoppgaver har en utfører");
+    expect(dueList(jitter)).toEqual([]);
+  });
+
+  it("ingen skriving: kun lesende SQL, og hele rapporten har `acts: false`", async () => {
+    const seen: string[] = [];
+    await run(ok(snapshot()), [quietJobs, noIncidents], seen);
+    expect(seen.length).toBeGreaterThan(0);
+    for (const sql of seen) expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER)\b/i);
+    const report = await buildEvolutionReport(deps({ backupStatus: ok(snapshot()), handlers: [quietJobs, noIncidents] }));
+    expect(report.acts).toBe(false);
   });
 });
 

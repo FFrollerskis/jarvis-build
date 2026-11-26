@@ -250,7 +250,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     connectors: () => listConnectorStatus(toolGateway),
     killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
     mesh: () => gateway.meshStatus(),
-    toolSurface: () => modelToolSurface
+    toolSurface: () => modelToolSurface,
+    // WP-OPS2a K4 (EV-19-koblingen, kun lesing): samme backup-statuskilde som selvdiagnosen gir `last_run` for backup_status og disaster_recovery_sample_restore (uten kilde er de ikke dekket).
+    ...(backupStatusSource ? { backupStatus: backupStatusSource } : {})
   };
   const evolutionReports = createEvolutionReportProvider(evolutionSourceDeps);
   const evolutionReadiness = createEvolutionReadinessProvider(evolutionSourceDeps);

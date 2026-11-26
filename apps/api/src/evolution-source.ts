@@ -10,6 +10,7 @@ import {
   type CostPoint, type CredentialState, type FreezeVerdict, type MaintenanceTask, type MeasuredFact, type MemoryFact, type MemorySourceKind, type ReadinessFacts, type ReadinessVerdict
 } from "@jarvis/self-modification";
 import { readSchedulerHealth, type ConnectorStatus, type MeshToolMapping } from "@jarvis/tool-gateway";
+import { FUTURE_SKEW_HOURS, backupMaintenanceLastRun, type BackupStatusRead } from "./backup-status.ts";
 import { monthTrendSamples } from "./cost-trend.ts";
 import type { Ev0BootStatus } from "./ev0-boot.ts";
 import type { RadarState } from "./evolution-radar.ts";
@@ -44,6 +45,11 @@ export interface EvolutionSourceDeps {
   radar?: RadarState;
   /** EV-10: siste nattlige omregning av lagret sensitivitet (D-451 `memory-resensitize-sweep`); null/udefinert = ikke kjørt siden oppstart. Kun tellinger - aldri innhold. */
   resensitize?: () => ResensitizeSweepSummary | null;
+  /**
+   * WP-OPS2a K4 (EV-19-koblingen, kun lesing): backup-status fra den skrivebeskyttede statusfilen (`backupStatusSourceFromEnv`, samme kilde som selvdiagnosen). Gir `last_run` for `backup_status` og `disaster_recovery_sample_restore`.
+   * Uten kilde (eller når filen ikke kan leses) er de to oppgavene «ikke dekket» - aldri en fabrikkert tid.
+   */
+  backupStatus?: (() => Promise<BackupStatusRead>) | undefined;
   /** Ekstra seksjoner (senere deler): hver leverer sin egen fail-soft seksjon. */
   extraSections?: ReadonlyArray<(ctx: EvolutionContext) => Promise<EvolutionSection>>;
 }
@@ -322,41 +328,99 @@ export async function credentialsSection(ctx: EvolutionContext): Promise<Evoluti
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // EV-19: vedlikeholdsplan (hva er forfalt; ingenting kjøres herfra)
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
-/** Hvem utfører (eller dekker) en vedlikeholdsoppgave i dag. Alt som ikke står her har ingen utfører ennå (DEFERRED) og telles som «ikke koblet». */
-export const MAINTENANCE_COVERAGE: Readonly<Record<string, { by: "scheduler"; job: string } | { by: "report"; ev: string }>> = {
+/**
+ * Hvem utfører (eller dekker) en vedlikeholdsoppgave i dag. Alt som ikke står her har ingen utfører ennå (DEFERRED) og telles som «ikke koblet».
+ * WP-OPS2a K4: `by: "backup"` = backup-tikket (`ops/backup/schedule.mjs`, hvert 15. minutt) skriver statusfilen API-et leser; `last_run` kommer derfra. Tabellen sier hvem som UTFØRER; om oppgaven er dekket akkurat nå avgjør `backupCoverage`
+ * (kun når filen er lest uten feil og er gyldig).
+ */
+export const MAINTENANCE_COVERAGE: Readonly<Record<string, { by: "scheduler"; job: string } | { by: "report"; ev: string } | { by: "backup" }>> = {
   health_check: { by: "scheduler", job: "connector-health-sweep" },
   expired_credentials: { by: "scheduler", job: "connector-health-sweep" },
   failed_jobs_review: { by: "scheduler", job: "daily-brief" },
   cost_optimization: { by: "report", ev: "EV-16" },
   cost_spike_review: { by: "report", ev: "EV-16" },
-  model_candidates: { by: "report", ev: "EV-12" }
+  model_candidates: { by: "report", ev: "EV-12" },
+  backup_status: { by: "backup" },
+  disaster_recovery_sample_restore: { by: "backup" }
 };
+
+/** Samme klokketoleranse som backup-status-leseren (`FUTURE_SKEW_HOURS`, 5 min): et tidspunkt lenger frem enn dette er et avvik, ikke «nå». */
+const BACKUP_FUTURE_SKEW_MS = FUTURE_SKEW_HOURS * 3_600_000;
+
+export interface BackupCoverage {
+  /** Hvilke av backup-oppgavene som er dekket akkurat nå (en utfører finnes OG filen er lest uten feil). */
+  covered: ReadonlySet<string>;
+  /** `last_run` fra filen - kun for dekkede oppgaver med et ekte, ikke-fremtidig tidspunkt. */
+  last_run: Readonly<Record<string, string>>;
+  /** Hvorfor noe ikke er dekket (fast tekst; aldri filinnhold eller feiltekst), eller null. */
+  note: string | null;
+}
+
+/**
+ * WP-OPS2a K4: tolker backup-statusfilen til vedlikeholdsdekning. Ren funksjon. `null` = ingen kilde er montert.
+ *  - Manglende/ulesbar/ugyldig fil, en kilde som kaster og `generated_at` frem i tid (klokkeavvik) gir INGEN dekning: oppgavene står som «ikke koblet», aldri forfalt og aldri med en fabrikkert tid.
+ *  - Gyldig fil: `backup_status` har `last_run = generated_at`. `disaster_recovery_sample_restore` har `last_run = restore_verify.last_success_at` når den finnes; er den aldri verifisert, er oppgaven dekket MEN uten `last_run`
+ *    (dermed forfalt - ærlig, en månedlig restore-verifisering som aldri er gjort er forfalt); står `last_success_at` frem i tid (klokkeavvik), er restore-oppgaven ikke dekket.
+ */
+export function backupCoverage(read: Settled<BackupStatusRead> | null, now: Date): BackupCoverage {
+  const uncovered = (why: string): BackupCoverage => ({ covered: new Set(), last_run: {}, note: `backup_status og disaster_recovery_sample_restore er ikke vurdert: ${why}.` });
+  if (read === null) return uncovered("ingen backup-statusfil er montert (JARVIS_BACKUP_STATUS_FILE er ikke satt)");
+  if (!read.ok) return uncovered("lesingen av backup-statusfilen feilet");
+  const value = read.v;
+  if (value === null || typeof value !== "object") return uncovered("lesingen av backup-statusfilen ga et ugyldig svar");
+  if (value.kind === "missing") return uncovered("backup-statusfilen finnes ikke (backup-skriptet har ikke kjørt, eller mappen er ikke montert)");
+  if (value.kind === "invalid") return uncovered(`backup-statusfilen kunne ikke leses (${/^[a-z_]{1,20}$/.test(String(value.reason)) ? String(value.reason) : "ukjent"})`);
+  if (value.kind !== "ok") return uncovered("lesingen av backup-statusfilen ga et ugyldig svar");
+  const lastRun = backupMaintenanceLastRun(value.snapshot);
+  const ahead = (at: string | undefined): boolean => at !== undefined && new Date(at).getTime() - now.getTime() > BACKUP_FUTURE_SKEW_MS;
+  const generated = lastRun["backup_status"];
+  if (generated === undefined || ahead(generated)) return uncovered("backup-statusfilen er datert frem i tid (klokkeavvik mellom NAS og API) - alderen kan ikke bevises");
+  const covered = new Set<string>(["backup_status"]);
+  const last_run: Record<string, string> = { backup_status: generated };
+  const restore = lastRun["disaster_recovery_sample_restore"];
+  let note: string | null = null;
+  if (restore === undefined) covered.add("disaster_recovery_sample_restore"); // aldri verifisert: dekket, uten `last_run` (forfalt)
+  else if (ahead(restore)) note = "disaster_recovery_sample_restore er ikke vurdert: siste restore-verifisering er datert frem i tid (klokkeavvik)";
+  else {
+    covered.add("disaster_recovery_sample_restore");
+    last_run["disaster_recovery_sample_restore"] = restore;
+  }
+  return { covered, last_run, note };
+}
 
 const MONTHLY_CAPS = { radar: 4, eval: 4, red_team: 1, shadow: 1 } as const;
 
 export async function maintenanceSection(ctx: EvolutionContext): Promise<EvolutionSection> {
   const rows = await ctx.pool.query<{ job_name: string; last: string | null }>(`SELECT job_name, max(completed_at)::text AS last FROM scheduler_state WHERE completed_at IS NOT NULL GROUP BY job_name`);
   const lastByJob = new Map(rows.rows.map((r) => [r.job_name, r.last]));
-  const covered: MaintenanceTask[] = MAINTENANCE_CATALOG.filter((t) => t.id in MAINTENANCE_COVERAGE);
+  // WP-OPS2a K4: backup-statusfilen leses fail-soft (kun lesing). Uten en kilde, eller når filen ikke kan leses, er backup-oppgavene ikke dekket.
+  const backup = backupCoverage(ctx.deps.backupStatus === undefined ? null : await settle(() => ctx.deps.backupStatus!()), ctx.now);
+  const isCovered = (id: string): boolean => {
+    const c = MAINTENANCE_COVERAGE[id];
+    return c !== undefined && (c.by !== "backup" || backup.covered.has(id));
+  };
+  const covered: MaintenanceTask[] = MAINTENANCE_CATALOG.filter((t) => isCovered(t.id));
   const last_run: Record<string, string | undefined> = {};
   for (const t of covered) {
     const c = MAINTENANCE_COVERAGE[t.id]!;
     if (c.by === "report") last_run[t.id] = ctx.now.toISOString();
+    else if (c.by === "backup") { const at = backup.last_run[t.id]; if (at !== undefined) last_run[t.id] = at; }
     else { const last = lastByJob.get(c.job); if (last) last_run[t.id] = new Date(last).toISOString(); }
   }
   const { verdict: freeze } = await computeFreeze(ctx);
   const plan = dueMaintenance({ now: ctx.now, last_run, change_freeze: freeze.frozen, cap_usage: {}, caps: MONTHLY_CAPS }, covered);
-  const uncovered = MAINTENANCE_CATALOG.filter((t) => !(t.id in MAINTENANCE_COVERAGE));
+  const uncovered = MAINTENANCE_CATALOG.filter((t) => !isCovered(t.id));
   const findings = [
     plan.run.length === 0 ? "Ingen koblede vedlikeholdsoppgaver er forfalt." : `Forfalt nå: ${plan.run.join(", ")}.`,
     ...(plan.blocked.length > 0 ? [`Stoppet: ${plan.blocked.map((b) => `${b.id} (${b.reason})`).join(", ")}.`] : []),
-    `${covered.length} av ${MAINTENANCE_CATALOG.length} vedlikeholdsoppgaver har en utfører i dag (planlagt jobb eller denne rapporten); ${uncovered.length} er ikke koblet ennå: ${uncovered.map((t) => t.id).join(", ")}.`,
-    "Planen er en oversikt; ingen oppgave kjøres herfra, og muterende vedlikehold stoppes av change freeze."
+    `${covered.length} av ${MAINTENANCE_CATALOG.length} vedlikeholdsoppgaver har en utfører i dag (planlagt jobb, denne rapporten eller backup-statusfilen); ${uncovered.length} er ikke koblet ennå: ${uncovered.map((t) => t.id).join(", ")}.`,
+    ...(backup.note !== null ? [`Merk: ${backup.note}${backup.note.endsWith(".") ? "" : "."}`] : []),
+    "Planen er en oversikt; ingen oppgave kjøres herfra (backup-oppgavene utføres av backup-skriptet på verten), og muterende vedlikehold stoppes av change freeze."
   ];
   return {
     ev: "EV-19", title_no: "Vedlikeholdsplan", mode: "observe", status: plan.run.length > 0 ? "ATTENTION" : "OK",
     summary_no: plan.run.length > 0 ? `${plan.run.length} koblet(e) vedlikeholdsoppgave(r) er forfalt.` : `Ingenting forfalt blant de ${covered.length} koblede oppgavene; ${uncovered.length} har ingen utfører ennå.`,
-    findings, source: "scheduler_state + vedlikeholdskatalogen (EV-19)", observed_at: ctx.now.toISOString()
+    findings, source: "scheduler_state + backup-status.json + vedlikeholdskatalogen (EV-19)", observed_at: ctx.now.toISOString()
   };
 }
 
