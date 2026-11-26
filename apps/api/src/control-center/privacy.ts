@@ -73,22 +73,33 @@ const DOC_PATH = /^docs\/[A-Za-z0-9_./-]{1,120}\.md$/;
 const cleanLabel = (text: string): string => text.replace(/[`*_]/g, "").replace(/\s+/g, " ").trim().slice(0, 80);
 
 /**
- * Gjennomgang L4: DPIA-etiketten (`trigger`, kolonnen «Trigger» i §3) er FRI TEKST (opptil 80 tegn) fra et dokument og gikk ufiltrert til modellen som elementets etikett. Et dokument kan endres av andre enn eieren
- * (en PR, en kodejobb), så etiketten er ubetrodd data. Den slippes bare gjennom hvis ALT dette holder - ellers vises `DPIA-trigger N` (og `label_filtered: true` i måledata):
- *  - tillatt tegnsett (bokstaver inkl. æøå, tall, mellomrom og `, . : - / ( ) & +` - ingen markup, anførselstegn, klammer, linjeskift eller `<>[]{}|\\` ), maks 80 tegn og maks 12 ord;
- *  - ingen instruksjonslignende innhold (ordene «ignorer»/«ignore», «instruks»/«instruction», «prompt», «system», «assistent», «du må/skal», «kall»/«kjør»/«slett»/«send», «verktøy»/«tool», nøkkel/passord/token, URL, @);
- *  - ingen hemmelighet (`scanForSecrets` endrer den ikke).
- * Låst mot det ekte dokumentet (alle dets etiketter passerer) og mot fiendtlige etiketter av tester.
+ * Gjennomgang L4 + H2 N5 (WP-SEC2): DPIA-etiketten (`trigger`, kolonnen «Trigger» i §3) er FRI TEKST fra et dokument og var tidligere en SVARTELISTE (tegnsett, lengde, instruksjonslignende ord): alt som ikke traff et
+ * kjent angrepsord slapp gjennom til modellen som elementets etikett. Et dokument kan endres av andre enn eieren (en PR, en kodejobb), så etiketten er ubetrodd data, og en svarteliste mister mot enhver formulering
+ * den ikke kjenner. Nå er det en HVITELISTE: kun en ETIKETT SOM ER EKSAKT LIK (etter NFC og sammenslåing av blanke) en av de kjente radene i `docs/security/PROCESSING_INVENTORY.md` §3 (`DPIA_TRIGGER_LABELS`)
+ * slipper gjennom, og det som returneres er alltid KONSTANTEN, aldri inndataene. Alt annet gir `DPIA-trigger N` (og `label_filtered: true` i måledata). `scanForSecrets`-sjekken beholdes som ekstra sikring.
+ * Driftvakt: `wph2-privacy-doc-reader.test.ts` leser det ekte dokumentet og feller når en rad ikke står i konstanten (og omvendt) - en ny/omdøpt rad i §3 krever en bevisst oppdatering her.
  */
-const DPIA_LABEL_MAX_CHARS = 80;
-const DPIA_LABEL_MAX_WORDS = 12;
-const DPIA_LABEL_CHARS = /^[A-Za-zÆØÅæøå0-9][A-Za-zÆØÅæøå0-9 ,.:\-/()&+]*$/;
-const INSTRUCTION_LIKE = /(ignor|disregard|forget|overrid|prompt|instruks|instruction|\bsystem\b|assistent|assistant|developer|jailbreak|\bdu\s+(?:må|skal|kan|bør)(?![A-Za-zÆØÅæøå])|\byou\s+(?:must|should|can|are|will)\b|\bkall\b|\bcall\b|\bexecute\b|\bkjør(?![A-Za-zÆØÅæøå])|\bslett(?![A-Za-zÆØÅæøå])|\bdelete\b|\bsend(?![A-Za-zÆØÅæøå])|\bverktøy(?![A-Za-zÆØÅæøå])|\btool\b|\bnøkkel(?![A-Za-zÆØÅæøå])|\bpassord(?![A-Za-zÆØÅæøå])|\bpassword\b|\btoken\b|https?|www\.|@)/i;
+export const DPIA_TRIGGER_LABELS: readonly string[] = [
+  "Særlige kategorier (helse)",
+  "Lokasjon",
+  "Kamera/bilder/syn",
+  "Stemme/lydopptak",
+  "Kundedata/CRM",
+  "Annonse-/analysesporing og attribusjon (produksjonssporing)",
+  "Kommunikasjon på tvers av kanaler",
+  "Kunnskapskilder (dokumenter, e-postvedlegg)",
+  "Ny ekstern behandler uten verifiserte vilkår",
+  "Finansdata",
+  "Automatiserte beslutninger med rettsvirkning/betydelig effekt",
+  "Deling på tvers av memory spaces"
+];
+const DPIA_LABEL_SET: ReadonlySet<string> = new Set(DPIA_TRIGGER_LABELS);
+const normalizeDpiaLabel = (text: string): string => text.normalize("NFC").replace(/\s+/gu, " ").trim();
 
 export function safeDpiaLabel(label: string, index: number): { label: string; filtered: boolean } {
-  const text = label.trim();
-  const ok = text !== "" && text.length <= DPIA_LABEL_MAX_CHARS && DPIA_LABEL_CHARS.test(text) && text.split(/\s+/).length <= DPIA_LABEL_MAX_WORDS && !INSTRUCTION_LIKE.test(text) && scanForSecrets(text).text === text;
-  return ok ? { label: text, filtered: false } : { label: `DPIA-trigger ${index + 1}`, filtered: text !== "" };
+  const text = normalizeDpiaLabel(label);
+  const known = DPIA_LABEL_SET.has(text) && scanForSecrets(text).text === text;
+  return known ? { label: text, filtered: false } : { label: `DPIA-trigger ${index + 1}`, filtered: text !== "" };
 }
 
 /** Radene i en markdown-tabell (uten overskrift og skillelinje), som celler. */

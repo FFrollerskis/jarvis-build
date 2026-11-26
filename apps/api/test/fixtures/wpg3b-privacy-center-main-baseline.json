@@ -81,27 +81,27 @@
      "summary_no": "0 av 2 DPIA-triggere har godkjent DPIA (slik dokumentet erklærer; ingen juridisk verifisering). 2 advarsel.",
      "items": [
       {
-       "id": "dpia:2",
-       "label": "Helse",
-       "status": "WARN",
-       "detail_no": "UTKAST/ikke godkjent; 1 DPIA-dokument(er) oppgitt, 1 finnes IKKE.",
-       "facts": {
-        "approved": false,
-        "documents": 1,
-        "missing_documents": 1,
-        "unknown_documents": 0,
-        "label_filtered": false
-       }
-      },
-      {
        "id": "dpia:1",
-       "label": "Kamera og bilder",
+       "label": "Kamera/bilder/syn",
        "status": "WARN",
        "detail_no": "UTKAST/ikke godkjent; 1 DPIA-dokument(er) oppgitt.",
        "facts": {
         "approved": false,
         "documents": 1,
         "missing_documents": 0,
+        "unknown_documents": 0,
+        "label_filtered": false
+       }
+      },
+      {
+       "id": "dpia:2",
+       "label": "Særlige kategorier (helse)",
+       "status": "WARN",
+       "detail_no": "UTKAST/ikke godkjent; 1 DPIA-dokument(er) oppgitt, 1 finnes IKKE.",
+       "facts": {
+        "approved": false,
+        "documents": 1,
+        "missing_documents": 1,
         "unknown_documents": 0,
         "label_filtered": false
        }
@@ -657,27 +657,27 @@
      "summary_no": "0 av 2 DPIA-triggere har godkjent DPIA (slik dokumentet erklærer; ingen juridisk verifisering). 2 advarsel.",
      "items": [
       {
-       "id": "dpia:2",
-       "label": "Helse",
-       "status": "WARN",
-       "detail_no": "UTKAST/ikke godkjent; 1 DPIA-dokument(er) oppgitt, 1 finnes IKKE.",
-       "facts": {
-        "approved": false,
-        "documents": 1,
-        "missing_documents": 1,
-        "unknown_documents": 0,
-        "label_filtered": false
-       }
-      },
-      {
        "id": "dpia:1",
-       "label": "Kamera og bilder",
+       "label": "Kamera/bilder/syn",
        "status": "WARN",
        "detail_no": "UTKAST/ikke godkjent; 1 DPIA-dokument(er) oppgitt.",
        "facts": {
         "approved": false,
         "documents": 1,
         "missing_documents": 0,
+        "unknown_documents": 0,
+        "label_filtered": false
+       }
+      },
+      {
+       "id": "dpia:2",
+       "label": "Særlige kategorier (helse)",
+       "status": "WARN",
+       "detail_no": "UTKAST/ikke godkjent; 1 DPIA-dokument(er) oppgitt, 1 finnes IKKE.",
+       "facts": {
+        "approved": false,
+        "documents": 1,
+        "missing_documents": 1,
         "unknown_documents": 0,
         "label_filtered": false
        }

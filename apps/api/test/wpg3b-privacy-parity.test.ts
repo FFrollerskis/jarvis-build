@@ -15,6 +15,9 @@ import { ScriptedPool, type ScriptedRule } from "./support/scripted-pool.ts";
  * `baseline_sha` i fixturen). Samme komposisjon som main (ScriptedPool + fast klokke + en liten syntetisk behandlingsoversikt, så opptaket ikke avhenger av innholdet i `docs/`) skal gi nøyaktig samme rapport etter
  * endringen når `vision` ikke er koblet inn - også når flagget `JARVIS_VISION_ENABLED` er AV selv om en kilde er gitt (se `wpg3b-privacy-vision-card.test.ts`).
  *
+ * WP-SEC2 (H2 N5, D-487): opptaket er regenerert ÉN gang etter at DPIA-etiketten ble en hviteliste (`safeDpiaLabel`). Den syntetiske oversikten bruker nå to EKTE etiketter (`Kamera/bilder/syn`, `Særlige kategorier (helse)`), og en
+ * engangs-sammenligning (gammel svarteliste fra `ee41c011` mot ny hviteliste, samme fiksur) ga byte-identisk rapport; eneste endring i fixturen er etikettene og dermed sorteringen av de to DPIA-radene.
+ *
  * Regenerere opptaket (kun etter en bevisst endring av selve senteret, og si det i rapporten): `JARVIS_RECORD_BASELINES=1 pnpm exec vitest run apps/api/test/wpg3b-privacy-parity.test.ts` som `postgres`-bruker.
  */
 const NOW = new Date("2026-11-14T10:00:00.000Z");
@@ -58,8 +61,8 @@ const INVENTORY = [
   "",
   "| Trigger | Eksempel | Krever | Dokument | Status |",
   "|---|---|---|---|---|",
-  "| Kamera og bilder | k | ja | `docs/UA9_VISION_DPIA.md` | UTKAST |",
-  "| Helse | h | ja | `docs/finnes-ikke.md` | UTKAST |",
+  "| Kamera/bilder/syn | k | ja | `docs/UA9_VISION_DPIA.md` | UTKAST |",
+  "| Særlige kategorier (helse) | h | ja | `docs/finnes-ikke.md` | UTKAST |",
   "",
   "## 4. Slutt",
   ""

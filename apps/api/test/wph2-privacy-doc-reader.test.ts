@@ -1,10 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { ControlCenterRegistry, type ControlCenterReport } from "@jarvis/executive";
-import { DOC_BACKOFF_BASE_MS, DOC_BACKOFF_MAX_MS, DocReader, createPrivacyCenter, safeDpiaLabel, type DocRead } from "../src/control-center/privacy.ts";
+import { DOC_BACKOFF_BASE_MS, DOC_BACKOFF_MAX_MS, DPIA_TRIGGER_LABELS, DocReader, createPrivacyCenter, parseProcessingInventory, safeDpiaLabel, type DocRead } from "../src/control-center/privacy.ts";
 
 /**
  * WP-H2 gjennomgang L4 (Personvern-senteret leser et dokument fra en montert mappe):
@@ -214,12 +215,42 @@ describe("3. cache på mtime/størrelse/inode", () => {
   });
 });
 
-describe("4. DPIA-etiketter (fri tekst fra dokumentet) filtreres før modellen ser dem", () => {
-  it("de ekte etikettene i behandlingsoversikten passerer uendret (æøå, parenteser, skråstrek, bindestrek, komma)", () => {
-    for (const label of [
-      "Særlige kategorier (helse)", "Lokasjon", "Kamera/bilder/syn", "Stemme/lydopptak", "Kundedata/CRM", "Kommunikasjon på tvers av kanaler", "Kunnskapskilder (dokumenter, e-postvedlegg)",
-      "Ny ekstern behandler uten verifiserte vilkår", "Finansdata", "Automatiserte beslutninger med rettsvirkning/betydelig effekt", "Deling på tvers av memory spaces"
-    ]) expect(safeDpiaLabel(label, 0), label).toEqual({ label, filtered: false });
+describe("4. DPIA-etiketter (fri tekst fra dokumentet): HVITELISTE (H2 N5, WP-SEC2) - kun eksakte, kjente etiketter når modellen", () => {
+  const REAL_DOC = join(dirname(fileURLToPath(import.meta.url)), "../../..", REL);
+
+  it("de ekte etikettene i behandlingsoversikten passerer uendret (æøå, parenteser, skråstrek, bindestrek, komma) og gir alltid KONSTANTEN", () => {
+    expect(DPIA_TRIGGER_LABELS).toHaveLength(12);
+    for (const label of DPIA_TRIGGER_LABELS) expect(safeDpiaLabel(label, 0), label).toEqual({ label, filtered: false });
+    // Etter NFC og sammenslåing av blanke: NFD-skrivemåte, doble mellomrom og omkringliggende blanke gir samme konstant.
+    expect(safeDpiaLabel("  Kunnskapskilder   (dokumenter, e-postvedlegg) ", 0)).toEqual({ label: "Kunnskapskilder (dokumenter, e-postvedlegg)", filtered: false });
+    expect(safeDpiaLabel("Lokasjon".normalize("NFD"), 0)).toEqual({ label: "Lokasjon", filtered: false });
+    expect(safeDpiaLabel("Særlige kategorier (helse)".normalize("NFD"), 0)).toEqual({ label: "Særlige kategorier (helse)", filtered: false });
+  });
+
+  it("DRIFTVAKT: hver rad i §3 i det EKTE dokumentet står i konstanten (en ny eller omdøpt rad feller testen), og konstanten har ingen rad som ikke står i dokumentet", () => {
+    const parsed = parseProcessingInventory(readFileSync(REAL_DOC, "utf8"));
+    const docLabels = parsed.dpia.map((row) => row.trigger);
+    expect(docLabels.length).toBeGreaterThanOrEqual(12);
+    const known = new Set(DPIA_TRIGGER_LABELS);
+    const missingInConstant = docLabels.filter((label) => !known.has(label));
+    expect(missingInConstant, `rader i PROCESSING_INVENTORY.md §3 som mangler i DPIA_TRIGGER_LABELS: ${JSON.stringify(missingInConstant)}`).toEqual([]);
+    const stale = DPIA_TRIGGER_LABELS.filter((label) => !docLabels.includes(label));
+    expect(stale, `etiketter i DPIA_TRIGGER_LABELS som ikke lenger står i dokumentet: ${JSON.stringify(stale)}`).toEqual([]);
+    // Og gjennom hele kjeden: ingen av de ekte radene blir filtrert.
+    docLabels.forEach((label, index) => expect(safeDpiaLabel(label, index), label).toEqual({ label, filtered: false }));
+  });
+
+  it("en harmløs, men ukjent etikett er også filtrert (hvitliste, ikke svarteliste): bare eksakte konstanter slipper gjennom", () => {
+    for (const label of ["Helse", "Lokasjon og sporing", "lokasjon", "LOKASJON", "Lokasjon.", "Lokasjon ", "Kamera og bilder", "Ny behandler", "Finansdata (utvidet)", "Finans data", "en to tre fire fem seks sju åtte ni ti elleve tolv"]) {
+      const out = safeDpiaLabel(label, 4);
+      if (label === "Lokasjon ") expect(out, label).toEqual({ label: "Lokasjon", filtered: false }); // kun blanke rundt trimmes
+      else expect(out, label).toEqual({ label: "DPIA-trigger 5", filtered: true });
+    }
+    // Skjulte tegn i en ellers kjent etikett: ikke lenger eksakt.
+    expect(safeDpiaLabel("Lokasjon\u200b", 0)).toEqual({ label: "DPIA-trigger 1", filtered: true });
+    expect(safeDpiaLabel("Lo\u200bkasjon", 0)).toEqual({ label: "DPIA-trigger 1", filtered: true });
+    expect(safeDpiaLabel("Lokasjon\u202e", 0)).toEqual({ label: "DPIA-trigger 1", filtered: true });
+    expect(safeDpiaLabel("Ｌokasjon", 0)).toEqual({ label: "DPIA-trigger 1", filtered: true }); // fullbredde L
   });
 
   it("instruksjonslignende, markup-, lenke-, hemmelighet- og for lange etiketter erstattes av `DPIA-trigger N` (filtered: true)", () => {
@@ -249,7 +280,7 @@ describe("4. DPIA-etiketter (fri tekst fra dokumentet) filtreres før modellen s
     expect(safeDpiaLabel("", 2)).toEqual({ label: "DPIA-trigger 3", filtered: false });
     expect(safeDpiaLabel("  ", 0)).toEqual({ label: "DPIA-trigger 1", filtered: false });
     expect(safeDpiaLabel("a".repeat(81), 0).filtered).toBe(true);
-    expect(safeDpiaLabel("en to tre fire fem seks sju åtte ni ti elleve tolv", 0).filtered).toBe(false);
+    expect(safeDpiaLabel("en to tre fire fem seks sju åtte ni ti elleve tolv", 0).filtered).toBe(true); // hvitliste: ikke lenger tillatt bare fordi den er kort og harmløs
     expect(safeDpiaLabel("en to tre fire fem seks sju åtte ni ti elleve tolv tretten", 0).filtered).toBe(true);
   });
 
