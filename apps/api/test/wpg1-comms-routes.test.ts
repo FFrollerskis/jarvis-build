@@ -55,8 +55,12 @@ const authDeps = {
 interface WebhookCall { provider: CommsWebhookProvider; req: WebhookRequest }
 function stubWebhookService(respond: (provider: CommsWebhookProvider, req: WebhookRequest) => WebhookResponse | Promise<WebhookResponse> = () => ({ status: 200, body: { received: true, events: { received: 1, inserted: 1 } } })) {
   const calls: WebhookCall[] = [];
-  const service = { handle: async (provider: CommsWebhookProvider, req: WebhookRequest) => { calls.push({ provider, req }); return respond(provider, req); } } as unknown as CommsWebhookService;
-  return { service, calls };
+  const rejected: Array<{ provider: CommsWebhookProvider; reason: string }> = [];
+  const service = {
+    handle: async (provider: CommsWebhookProvider, req: WebhookRequest) => { calls.push({ provider, req }); return respond(provider, req); },
+    noteRejectedBeforeSignature: (provider: CommsWebhookProvider, reason: string) => { rejected.push({ provider, reason }); }
+  } as unknown as CommsWebhookService;
+  return { service, calls, rejected };
 }
 
 interface GatewayCall { identity: IdentityContext; tool_id: string; action: string; parameters: Record<string, JsonValue>; idempotency_key?: string }
@@ -209,10 +213,11 @@ describe("B: signerte webhook-ruter", () => {
   });
 
   it("for stor kropp gir 413 FØR tjenesten kalles (også uten gyldig signatur); akkurat på grensen slippes gjennom", async () => {
-    const { service, calls } = stubWebhookService();
+    const { service, calls, rejected } = stubWebhookService();
     const base = await listen({ comms: { webhooks: { service, providers: new Set<CommsWebhookProvider>(["slack"]) } } });
     expect((await post(base, "/webhooks/comms/slack", Buffer.alloc(WEBHOOK_MAX_BYTES + 1, 0x61))).status).toBe(413);
     expect(calls).toHaveLength(0);
+    expect(rejected, "413 meldes til tjenesten (leverandør og årsakskode) så driften ser det").toEqual([{ provider: "slack", reason: "payload_too_large" }]);
     expect((await post(base, "/webhooks/comms/slack", Buffer.alloc(WEBHOOK_MAX_BYTES, 0x20))).status).toBe(200);
     expect(calls).toHaveLength(1);
   });

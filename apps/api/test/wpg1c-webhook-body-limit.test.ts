@@ -18,6 +18,7 @@ let chain: Chain;
 let baseUrl = "";
 let close: () => Promise<void>;
 const warnings: Array<Record<string, unknown>> = [];
+let logSinkDown = false;
 let n = 0;
 
 const sign = (raw: Buffer, secret = META_SECRET): string => `sha256=${createHmac("sha256", secret).update(raw).digest("hex")}`;
@@ -50,7 +51,7 @@ beforeAll(async () => {
   chain = await startChain("g1c2b", { JARVIS_COMMS_WEBHOOKS: "slack,meta,twilio,telnyx", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: "https://hooks.example.com" });
   await authorizeAll(chain, [["whatsapp", PHONE_ID, "meta_whatsapp"]]);
   const service = new CommsWebhookService({
-    store: chain.store, graph: chain.graph, config: chain.config, clock: chain.now, warn: (w) => warnings.push(w),
+    store: chain.store, graph: chain.graph, config: chain.config, clock: chain.now, warn: (w) => { if (logSinkDown) throw new Error("log sink down"); warnings.push(w); },
     secrets: { get: async (ref) => (ref === WEBHOOK_SECRET_REFS.meta ? META_SECRET : "fake-secret-for-test-0000") }
   });
   const providers = new Set<CommsWebhookProvider>(["slack", "meta", "twilio", "telnyx"]);
@@ -109,6 +110,16 @@ describe("FIX-1: byte-grensen er per leverandør", () => {
       { msg: "comms_webhook_rejected", provider: "slack", reason: "payload_too_large" }
     ]);
     expect(JSON.stringify(warnings)).not.toContain("hemmelig-tekst");
+  }, 60_000);
+
+  it("en feil i loggen endrer aldri svaret: 413 forblir 413 selv om logg-sluken kaster", async () => {
+    logSinkDown = true;
+    try {
+      expect((await post("meta", Buffer.alloc(4 * MIB + 5, 0x61))).status).toBe(413);
+      expect((await post("twilio", bodyOfSize(256 * 1024 + 5))).status).toBe(413);
+    } finally {
+      logSinkDown = false;
+    }
   }, 60_000);
 
   it("signaturen vurderes fortsatt FØR kroppen tolkes: en stor Meta-batch (under grensen) med feil signatur gir 401, ingenting skrives til databasen", async () => {

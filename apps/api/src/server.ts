@@ -1896,7 +1896,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       try {
         rawBody = await readRawBodyLimited(req, COMMS_WEBHOOK_MAX_BYTES_BY_PROVIDER[commsWebhookProvider]);
       } catch (err) {
-        if (err instanceof HttpError && err.status === 413) deps.comms.webhooks.service.noteRejectedBeforeSignature(commsWebhookProvider, "payload_too_large");
+        if (err instanceof HttpError && err.status === 413) {
+          // En loggfeil skal aldri endre svaret: leverandøren skal fortsatt få 413 (ikke 500) selv om logghjelperen kaster.
+          try { deps.comms.webhooks.service.noteRejectedBeforeSignature(commsWebhookProvider, "payload_too_large"); } catch { /* bevisst ignorert */ }
+        }
         throw err;
       }
     }
