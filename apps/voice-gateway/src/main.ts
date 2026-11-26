@@ -1,6 +1,8 @@
 import "./normalize-env.ts";
 import { envPort } from "@jarvis/contracts";
 import { VoiceHealth } from "./health.ts";
+import { UtteranceJournal } from "./journal.ts";
+import { DEFAULT_VOICE_LIMITS, ProcessSlots } from "./limits.ts";
 import { createVoiceGateway, HttpCoreClient } from "./server.ts";
 import { selectSpeechAdapters } from "./adapter-selection.ts";
 import { LocalWhisperStt, OpenAiStt, RemoteWhisperStt } from "./stt.ts";
@@ -70,7 +72,12 @@ const sessionOptions = {
 // og kjeden faller videre til den deterministiske test-adapteren uendret.
 const openAiStt = new OpenAiStt();
 const openAiTts = new OpenAiTts();
-const localWhisperStt = new LocalWhisperStt();
+// WP-V2 (K2): samtidige lokale prosesser er begrenset (CPU-tung whisper, lett piper) - se `VoiceLimits` og runbooken for begrunnelsen.
+const whisperSlots = new ProcessSlots(DEFAULT_VOICE_LIMITS.maxConcurrentWhisper, DEFAULT_VOICE_LIMITS.processQueueTimeoutMs);
+const piperSlots = new ProcessSlots(DEFAULT_VOICE_LIMITS.maxConcurrentPiper, DEFAULT_VOICE_LIMITS.processQueueTimeoutMs);
+const localWhisperStt = new LocalWhisperStt(
+  undefined, undefined, undefined, undefined, undefined, undefined, whisperSlots
+);
 // D-403: eierens egen Whisper-server (typisk PC-ens GPU over Tailscale). Kun aktiv med JARVIS_STT_REMOTE_URL på en PRIVAT adresse; faller
 // selv tilbake til lokal whisper.cpp når serveren ikke svarer. En ikke-privat/ugyldig adresse avvises (fail-closed) og logges her.
 const remoteWhisperStt = new RemoteWhisperStt(process.env["JARVIS_STT_REMOTE_URL"], {
@@ -83,7 +90,20 @@ const remoteWhisperStt = new RemoteWhisperStt(process.env["JARVIS_STT_REMOTE_URL
 if (process.env["JARVIS_STT_REMOTE_URL"]?.trim() && !remoteWhisperStt.available()) {
   console.error(JSON.stringify({ msg: "stt_remote_whisper_rejected", reason: "JARVIS_STT_REMOTE_URL er ugyldig eller ikke en privat adresse (loopback/RFC1918/Tailscale) - ignorert" }));
 }
-const localPiperTts = new LocalPiperTts();
+const localPiperTts = new LocalPiperTts(undefined, undefined, undefined, piperSlots);
+if (process.env["JARVIS_PIPER_BIN"]?.trim() || process.env["JARVIS_PIPER_MODEL"]?.trim()) {
+  // WP-V2 (K1c/K6b): ÉN synlig oppstartslinje om piper-oppsettet (kun koder/tall, aldri stier): hvorfor den evt. ikke er tilgjengelig, og hvor
+  // samplerate kommer fra (env > stemmens .onnx.json > standard).
+  console.log(
+    JSON.stringify({
+      msg: "jarvis-voice-gateway piper_config",
+      available: localPiperTts.available(),
+      unavailable_reason: localPiperTts.unavailableReason() ?? null,
+      sample_rate: localPiperTts.sampleRate,
+      sample_rate_source: localPiperTts.sampleRateSource
+    })
+  );
+}
 // REMEDIERING DEL 1 (JARVIS-080): INGEN stille fallback til MarkerStt/FakeTts - oppstarten
 // feiler lukket uten en ekte adapter (se `adapter-selection.ts`).
 function selectOrExit() {
@@ -97,7 +117,17 @@ function selectOrExit() {
 const { stt, tts } = selectOrExit();
 const health = new VoiceHealth();
 
-const server = createVoiceGateway({ core: new HttpCoreClient(coreUrl), stt, tts, health, vad, session: sessionOptions });
+// WP-V2 (K5, v2.1 §14): ÉN utterance-journal for hele prosessen - delt av alle sesjoner (før: laget per sesjonsstart).
+const journal = new UtteranceJournal();
+const server = createVoiceGateway({ core: new HttpCoreClient(coreUrl), stt, tts, health, vad, session: sessionOptions, journal });
+// WP-V2 (K1): en feil ved oppstart (typisk EADDRINUSE) skal STOPPE prosessen synlig - `createVoiceGateway` har en `error`-lytter som
+// bare logger, så uten denne ville en mislykket `listen()` gitt en prosess som lever uten å lytte.
+server.on("error", (err: NodeJS.ErrnoException) => {
+  console.error(JSON.stringify({ msg: "jarvis-voice-gateway server_error", code: err.code ?? "unknown", listening: server.listening }));
+  if (!server.listening) {
+    process.exit(1);
+  }
+});
 server.listen(port, () => {
   console.log(
     JSON.stringify({

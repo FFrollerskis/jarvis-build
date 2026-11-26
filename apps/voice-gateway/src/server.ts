@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
   MemorySpaceSchema,
@@ -12,9 +12,11 @@ import {
   type VoiceSessionGrant
 } from "@jarvis/contracts";
 import { debugDumpEnabled } from "./debug-audio-dump.ts";
+import { deadlineSignal } from "./deadline.ts";
 import { VoiceHealth } from "./health.ts";
+import { UtteranceJournal } from "./journal.ts";
+import { ConnectionTracker, TokenBucket, peerKey, resolveLimits, type VoiceLimits } from "./limits.ts";
 import {
-  UtteranceJournal,
   VoiceSession,
   type CoreClient,
   type CoreReply,
@@ -33,8 +35,15 @@ import type { VadAdapter } from "./vad.ts";
  * server→ {type:"state"|"partial"|"final"|"reply"|"tool_activity"|"tts_frame"|"tts_cancelled"|"metrics"|"error", ...}
  * Gatewayen eier transport og lydkjede; Core eier samtale, minne og policy.
  */
+/** WP-V2 (K4): total turfrist mot Core (ms). En tur kan kjøre flere verktøy og en stor modell, men aldri uendelig. */
+export const DEFAULT_CORE_TURN_TIMEOUT_MS = 120_000;
+const DEFAULT_AUTHORIZE_TIMEOUT_MS = 10_000;
+
 export class HttpCoreClient implements CoreClient {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly timeouts: { turnTimeoutMs?: number; authorizeTimeoutMs?: number } = {}
+  ) {}
 
   /**
    * D-131 (uavhengig arkitektkontroll av PR #79, funn 1): `/chat` godtar ikke
@@ -83,7 +92,7 @@ export class HttpCoreClient implements CoreClient {
       body: JSON.stringify(evidence),
       // En hengende autoritet skal ikke kunne holde en talesesjon i limbo -
       // og køen av lydrammer som venter på vedtaket er ikke ubegrenset.
-      signal: AbortSignal.timeout(10_000)
+      signal: AbortSignal.timeout(this.timeouts.authorizeTimeoutMs ?? DEFAULT_AUTHORIZE_TIMEOUT_MS)
     });
     if (response.status !== 200 && response.status !== 403) {
       throw new Error(`voice_authority_${response.status}`);
@@ -92,15 +101,28 @@ export class HttpCoreClient implements CoreClient {
   }
 
   async chat(identity: VoiceIdentity, message: string): Promise<CoreReply> {
-    const response = await fetch(`${this.baseUrl}/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: this.body(identity, message)
-    });
-    if (!response.ok) {
-      throw new Error(`core_${response.status}`);
+    // WP-V2 (K4): `body()` kaster `voice_session_required` FØR noe kall (ubevist sti); fristen dekker resten.
+    const body = this.body(identity, message);
+    const deadline = deadlineSignal(this.timeouts.turnTimeoutMs ?? DEFAULT_CORE_TURN_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${this.baseUrl}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        signal: deadline.signal
+      });
+      if (!response.ok) {
+        throw new Error(`core_${response.status}`);
+      }
+      return (await response.json()) as CoreReply;
+    } catch (err) {
+      if (deadline.timedOut()) {
+        throw new Error("core_timeout");
+      }
+      throw err;
+    } finally {
+      deadline.dispose();
     }
-    return (await response.json()) as CoreReply;
   }
 
   /**
@@ -114,11 +136,32 @@ export class HttpCoreClient implements CoreClient {
     onEvent: (event: CoreStreamEvent) => void,
     signal?: AbortSignal
   ): Promise<CoreReply> {
+    // WP-V2 (K4): TOTAL turfrist (`core_timeout`) som aborterer selve forespørselen - også en strøm som har begynt å sende, men stanser.
+    // Barge-in (`signal`) er fortsatt et rent avbrudd (AbortError), ikke en feil.
+    const body = this.body(identity, message);
+    const deadline = deadlineSignal(this.timeouts.turnTimeoutMs ?? DEFAULT_CORE_TURN_TIMEOUT_MS, signal);
+    try {
+      return await this.readStream(body, onEvent, deadline.signal);
+    } catch (err) {
+      if (deadline.timedOut() && !signal?.aborted) {
+        throw new Error("core_timeout");
+      }
+      throw err;
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  private async readStream(
+    body: string,
+    onEvent: (event: CoreStreamEvent) => void,
+    signal: AbortSignal
+  ): Promise<CoreReply> {
     const response = await fetch(`${this.baseUrl}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "text/event-stream" },
-      body: this.body(identity, message),
-      ...(signal ? { signal } : {})
+      body,
+      signal
     });
     if (!response.ok || !response.body) {
       throw new Error(`core_${response.status}`);
@@ -181,8 +224,13 @@ export interface VoiceGatewayOptions {
   core: CoreClient;
   stt: SttAdapter;
   tts: TtsAdapter;
-  /** Delt journal (failover-gjenopptak i test/prod). */
+  /**
+   * Utterance-journal (failover-gjenopptak). WP-V2 (K5): ÉN prosess-delt journal - `main.ts` oppretter den, og uten verdi her lages
+   * den ÉN gang per gateway (ikke per sesjon, som før: da så et `replay_final` på en ny tilkobling aldri den forrige).
+   */
   journal?: UtteranceJournal;
+  /** WP-V2 (K2): kapasitet/rate limit-overstyring (tester). Standard: `DEFAULT_VOICE_LIMITS`. */
+  limits?: Partial<VoiceLimits>;
   health?: VoiceHealth;
   /**
    * D-353: valgfri, EKSPLISITT VAD (f.eks. `EnergyVad` med miljøvariabel-styrt terskel/hangover fra `main.ts`) - `undefined` lar
@@ -235,8 +283,74 @@ function speechRoutingBySpace(
   return bySpace;
 }
 
+/** Hjelpere for meldingsvalidering (WP-V2 K3): ubetrodd klientinput valideres FØR bruk - aldri `String(undefined)`. */
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+// Kontrolltegn (NUL, linjeskift osv.) hører ikke hjemme i en identitetsstreng.
+// eslint-disable-next-line no-control-regex
+const NO_CONTROL_CHARS_RE = /^[^\u0000-\u001f\u007f]+$/;
+
+/** Dekoder en base64-lydramme innen grensene, eller `null` (= `malformed_message`). Strengt: padding, tegnsett, partall byte (PCM16). */
+export function decodeAudioFrame(data: unknown, maxFrameBytes: number): Buffer | null {
+  if (typeof data !== "string") {
+    return null;
+  }
+  const maxEncoded = Math.ceil(maxFrameBytes / 3) * 4;
+  if (data.length === 0 || data.length > maxEncoded || data.length % 4 !== 0 || !BASE64_RE.test(data)) {
+    return null;
+  }
+  const frame = Buffer.from(data, "base64");
+  if (frame.length === 0 || frame.length > maxFrameBytes || frame.length % 2 !== 0) {
+    return null;
+  }
+  return frame;
+}
+
+function boundedString(value: unknown, maxChars: number, pattern?: RegExp): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxChars) {
+    return null;
+  }
+  if (pattern && !pattern.test(value)) {
+    return null;
+  }
+  return value;
+}
+
+/** `identity` i `start`: fire påkrevde strenger (og valgfri `provider`) innen lengdegrenser. Resultatet er en NY, hvitlistet struktur. */
+function parseClaimedIdentity(value: unknown): VoiceIdentity | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const src = value as Record<string, unknown>;
+  const person = boundedString(src["person_id"], 128, NO_CONTROL_CHARS_RE);
+  const tenant = boundedString(src["tenant_id"], 128, NO_CONTROL_CHARS_RE);
+  const device = boundedString(src["device_id"], 128, NO_CONTROL_CHARS_RE);
+  const space = boundedString(src["memory_space"], 64, NO_CONTROL_CHARS_RE);
+  if (person === null || tenant === null || device === null || space === null) {
+    return null;
+  }
+  let provider: string | undefined;
+  if (src["provider"] !== undefined) {
+    const parsed = boundedString(src["provider"], 64, NO_CONTROL_CHARS_RE);
+    if (parsed === null) {
+      return null;
+    }
+    provider = parsed;
+  }
+  return { person_id: person, tenant_id: tenant, device_id: device, memory_space: space, channel: "voice", ...(provider !== undefined ? { provider } : {}) };
+}
+
+/** Kort, hemmelighetsfri feilkode for logg (aldri meldingstekst som kan inneholde klientdata). */
+function codeOf(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(code) ? code : "unknown";
+}
+
 export function createVoiceGateway(options: VoiceGatewayOptions): Server {
   const health = options.health ?? new VoiceHealth();
+  const limits = resolveLimits(options.limits);
+  // WP-V2 (K5): ÉN journal for hele gatewayen (alle sesjoner), aldri per sesjon.
+  const journal = options.journal ?? new UtteranceJournal();
+  const tracker = new ConnectionTracker(limits.maxConnections, limits.maxConnectionsPerPeer);
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/health") {
       // D-393 (JARVIS-026): ikke lenger en konstant «ok». Talekjeden er IKKE frisk når STT eller TTS ikke er konfigurert eller er UNAVAILABLE
@@ -259,8 +373,18 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         JSON.stringify({
           service: "jarvis-voice-gateway",
           transport: "websocket",
-          stt: { name: options.stt.name, ...healthOf("stt"), processor: options.stt.processor },
-          tts: { name: options.tts.name, ...healthOf("tts"), processor: options.tts.processor, sample_rate: options.tts.sampleRate ?? DEFAULT_TTS_SAMPLE_RATE },
+          stt: { name: options.stt.name, ...healthOf("stt"), processor: options.stt.processor, ...(options.stt.status?.() ?? {}) },
+          tts: {
+            name: options.tts.name,
+            ...healthOf("tts"),
+            processor: options.tts.processor,
+            sample_rate: options.tts.sampleRate ?? DEFAULT_TTS_SAMPLE_RATE,
+            ...(options.tts.status?.() ?? {})
+          },
+          // WP-V2: observerbar kapasitet/rate limit og journal (ingen identiteter, ingen innhold).
+          limits,
+          connections: { active: tracker.active },
+          journal: { entries: journal.size, evicted_for_capacity: journal.evictedForCapacity },
           // D-390: observerbart hva sesjonene faktisk kjører med.
           session_options: options.session ?? {},
           barge_in: health.bargeInSeen ? "VERIFIED" : "READY",
@@ -296,8 +420,44 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
   const healthOf = (component: "stt" | "tts") =>
     health.snapshot({ stt: options.stt.available(), tts: options.tts.available() })[component];
 
-  const wss = new WebSocketServer({ server });
-  wss.on("connection", (ws: WebSocket) => {
+  // WP-V2 (K1/K2): `maxPayload` (ws-standarden er 100 MiB). En `error`-lytter på selve serveren er påkrevd: uten den blir en `ws`-feil en
+  // uhåndtert `error`-hendelse = uncaughtException = hele gatewayen krasjer. `clientError` dekker ødelagte HTTP-forespørsler FØR oppgradering.
+  const wss = new WebSocketServer({ server, maxPayload: limits.maxPayloadBytes });
+  wss.on("error", (err) => {
+    console.error(JSON.stringify({ msg: "voice_wss_error", code: codeOf(err) }));
+  });
+  server.on("clientError", (err, socket) => {
+    console.error(JSON.stringify({ msg: "voice_client_error", code: codeOf(err) }));
+    if (socket.writable && !socket.destroyed && codeOf(err) !== "ECONNRESET") {
+      socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+    } else {
+      socket.destroy();
+    }
+  });
+
+  wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+    // Per-tilkobling-lytter FØRST: ws emitterer `error` ved protokollbrudd (ugyldig UTF-8, reservert opcode, for stor ramme). Uten lytter
+    // krasjer en enkelt ugyldig ramme fra HVEM SOM HELST som når porten hele prosessen (målt på main). ws lukker selv med riktig kode og
+    // sender `close` etterpå - her logges kun en kode (aldri meldingsinnhold).
+    ws.on("error", (err) => {
+      console.error(JSON.stringify({ msg: "voice_ws_error", code: codeOf(err) }));
+    });
+
+    // WP-V2 (K2): kapasitet. Over grensen = definert avvisning (1013 «prøv igjen senere»), aldri et krasj og aldri en påvirkning av andre økter.
+    const peer = peerKey(req);
+    const refusal = tracker.tryAcquire(peer);
+    if (refusal !== null) {
+      console.error(JSON.stringify({ msg: "voice_connection_refused", reason: refusal }));
+      try {
+        ws.send(JSON.stringify({ type: "error", error: "voice_busy" }));
+        ws.close(1013, "voice_busy");
+      } catch {
+        ws.terminate();
+      }
+      return;
+    }
+    let socketClosed = false;
+    let closing = false;
     let session: VoiceSession | null = null;
     /**
      * D-123: grant-en som ga denne sesjonen sin autoritet. `null` = klienten
@@ -309,9 +469,45 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
     let grant: VoiceSessionGrant | null = null;
     /** D-405: stemmeinnstillinger fra klienten (ubetrodd; valideres i `VoiceSession.setVoiceSettings`). */
     let pendingVoiceSettings: unknown = undefined;
+    /** Lukker tilkoblingen definert: stopper TTS/tur, sender close-ramme, og terminerer hvis motparten ikke svarer. Idempotent. */
+    const closeConnection = (code: number, reason: string): void => {
+      if (closing) {
+        return;
+      }
+      closing = true;
+      session?.disconnect();
+      try {
+        ws.close(code, reason);
+      } catch {
+        ws.terminate();
+        return;
+      }
+      const force = setTimeout(() => {
+        if (ws.readyState !== ws.CLOSED) {
+          ws.terminate();
+        }
+      }, 5_000);
+      force.unref();
+    };
     const send = (message: Record<string, unknown>) => {
-      if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify(message));
+      if (ws.readyState !== ws.OPEN) {
+        return;
+      }
+      // WP-V2 (K2): backpressure. En klient som ikke leser (eller leser langsommere enn TTS produserer) lar `bufferedAmount` vokse uten
+      // grense. Over taket avbrytes TTS og tilkoblingen lukkes (1013) - andre økter påvirkes ikke.
+      if (ws.bufferedAmount > limits.maxBufferedBytes) {
+        console.error(JSON.stringify({ msg: "voice_backpressure_close", buffered_bytes: ws.bufferedAmount }));
+        closeConnection(1013, "slow_consumer");
+        return;
+      }
+      try {
+        ws.send(JSON.stringify(message), (err) => {
+          if (err) {
+            console.error(JSON.stringify({ msg: "voice_send_failed", code: codeOf(err) }));
+          }
+        });
+      } catch (err) {
+        console.error(JSON.stringify({ msg: "voice_send_failed", code: codeOf(err) }));
       }
     };
 
@@ -332,7 +528,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           onMetrics: (metrics) => send({ type: "metrics", metrics }),
           onError: (error) => send({ type: "error", error })
         },
-        options.journal ?? new UtteranceJournal(),
+        journal,
         typeof options.vad === "function" ? options.vad() : options.vad,
         undefined,
         undefined,
@@ -368,8 +564,34 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
      * Ingen felt fra websocket-meldingen leses noen gang som en grant.
      */
     const handleStart = async (message: Record<string, unknown>): Promise<void> => {
-      const claimed = message["identity"] as VoiceIdentity | undefined;
+      // WP-V2 (K3): klientens `start` valideres FØR bruk (type, lengde, kontrolltegn). En feil form gir `malformed_message` og røres ikke videre -
+      // og en feilaktig `start` river ikke ned en eksisterende, fungerende sesjon.
+      const rawIdentity = message["identity"];
+      let claimed: VoiceIdentity | undefined;
+      if (rawIdentity !== undefined && rawIdentity !== null) {
+        const parsed = parseClaimedIdentity(rawIdentity);
+        if (parsed === null) {
+          send({ type: "error", error: "malformed_message" });
+          return;
+        }
+        claimed = parsed;
+      }
       const proof = message["device_proof"];
+      if (proof !== undefined && (typeof proof !== "object" || proof === null || Array.isArray(proof))) {
+        send({ type: "error", error: "malformed_message" });
+        return;
+      }
+      if (proof === undefined && !claimed) {
+        send({ type: "error", error: "missing_identity" });
+        return;
+      }
+      // WP-V2 (K3, JARVIS-079): en NY `start` på en tilkoblet socket erstatter sesjonen. Den forrige MÅ stoppes først (tur, TTS, aktiv
+      // modellgenerering) - før ble `session` bare overskrevet, og forrige sesjons tur/TTS levde videre uten noen som kunne stoppe den.
+      if (session) {
+        session.disconnect();
+        session = null;
+        grant = null;
+      }
 
       if (proof === undefined) {
         // Ubevist sti - IDENTISK oppførsel med D-122. Bevisst beholdt: en
@@ -379,8 +601,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         // begrensning denne sliceen ikke er bedt om, og ville brutt
         // eksisterende webchat-/testklienter uten sikkerhetsgevinst.
         if (!claimed) {
-          send({ type: "error", error: "missing_identity" });
-          return;
+          return; // utilgjengelig: `proof === undefined && !claimed` er avvist over (hold typene ærlige)
         }
         grant = null;
         // Eksplisitt hvitliste framfor spread: en `{...claimed}` ville båret
@@ -438,6 +659,11 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           JSON.stringify({ msg: "voice_authority_error", error: (err as Error).message.slice(0, 200) })
         );
         send({ type: "error", error: "voice_authority_unavailable" });
+        return;
+      }
+
+      // WP-V2: socketen kan ha lukket mens vi ventet på Core - da startes ingen sesjon for en død tilkobling.
+      if (socketClosed || closing) {
         return;
       }
 
@@ -507,7 +733,17 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         case "audio": {
           // Autoriteten kontrolleres FØR lydrammen dekodes og mates videre -
           // ikke én ramme passerer en utløpt grant.
-          activeSession()?.pushAudio(Buffer.from(String(message["data"]), "base64"));
+          const active = activeSession();
+          if (!active) {
+            return;
+          }
+          // WP-V2 (K3, audit A2/A3): strengt validert (base64-streng, grense, partall byte) - aldri `String(undefined)` -> «undefined» -> søppelbytes.
+          const frame = decodeAudioFrame(message["data"], limits.maxAudioFrameBytes);
+          if (frame === null) {
+            send({ type: "error", error: "malformed_message" });
+            return;
+          }
+          active.pushAudio(frame);
           return;
         }
         case "voice_settings": {
@@ -523,7 +759,17 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           return;
         }
         case "replay_final": {
-          activeSession()?.replayFinal(String(message["utterance_id"]), String(message["text"]));
+          const active = activeSession();
+          if (!active) {
+            return;
+          }
+          const utteranceId = boundedString(message["utterance_id"], limits.maxUtteranceIdChars, /^[A-Za-z0-9._:-]+$/);
+          const text = boundedString(message["text"], limits.maxReplayTextChars);
+          if (utteranceId === null || text === null) {
+            send({ type: "error", error: "malformed_message" });
+            return;
+          }
+          active.replayFinal(utteranceId, text);
           return;
         }
         default:
@@ -540,26 +786,104 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
      * som hele STT-kjeden avhenger av.
      */
     let queue: Promise<void> = Promise.resolve();
+    let queued = 0;
+    const audioBucket = new TokenBucket(limits.audioFramesPerSecond, limits.audioBurst);
+    const controlBucket = new TokenBucket(limits.controlPerSecond, limits.controlBurst);
+    const rejectFlood = (reason: string): void => {
+      console.error(JSON.stringify({ msg: "voice_rate_limited", reason }));
+      send({ type: "error", error: reason });
+      closeConnection(1008, reason);
+    };
+
+    // WP-V2 (K2): inaktivitet, maksvarighet for ubevist sti, og ping/pong for halvåpne tilkoblinger. Alle timere er `unref` (holder aldri prosessen i live).
+    const idleTimer = setTimeout(() => closeConnection(1000, "idle_timeout"), limits.idleTimeoutMs);
+    idleTimer.unref();
+    let maxDurationTimer: ReturnType<typeof setTimeout> | undefined;
+    const armMaxDuration = (): void => {
+      maxDurationTimer = setTimeout(() => {
+        if (grant === null) {
+          closeConnection(1000, "max_duration");
+        } else {
+          armMaxDuration(); // bevist sti: grant-levetiden (15 min) styrer; sjekk igjen senere i tilfelle grant-en utløper uten ny start
+        }
+      }, limits.maxUnprovenSessionMs);
+      maxDurationTimer.unref();
+    };
+    armMaxDuration();
+    let alive = true;
+    ws.on("pong", () => {
+      alive = true;
+    });
+    const pingTimer = setInterval(() => {
+      if (!alive) {
+        console.error(JSON.stringify({ msg: "voice_ping_timeout" }));
+        ws.terminate();
+        return;
+      }
+      alive = false;
+      try {
+        ws.ping();
+      } catch {
+        ws.terminate();
+      }
+    }, limits.pingIntervalMs);
+    pingTimer.unref();
+
     ws.on("message", (raw) => {
+      idleTimer.refresh();
+      if (closing) {
+        return;
+      }
       let message: Record<string, unknown>;
       try {
-        message = JSON.parse(String(raw)) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(String(raw));
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          throw new Error("not_an_object");
+        }
+        message = parsed as Record<string, unknown>;
       } catch {
+        if (!controlBucket.tryTake()) {
+          rejectFlood("rate_limited");
+          return;
+        }
         send({ type: "error", error: "invalid_json" });
         return;
       }
-      queue = queue.then(() =>
-        handleMessage(message).catch((err: Error) => {
-          console.error(JSON.stringify({ msg: "voice_message_error", error: err.message.slice(0, 200) }));
-          send({ type: "error", error: "internal_error" });
-        })
-      );
+      // Rate limit per meldingsklasse: `audio` har høy rate, alt annet (start, voice_sample, replay_final, ...) en lav - de er billige å sende, men dyre å utføre.
+      if (!(message["type"] === "audio" ? audioBucket : controlBucket).tryTake()) {
+        rejectFlood("rate_limited");
+        return;
+      }
+      if (queued >= limits.maxQueuedMessages) {
+        rejectFlood("overloaded");
+        return;
+      }
+      queued += 1;
+      queue = queue.then(() => {
+        if (socketClosed) {
+          queued -= 1;
+          return;
+        }
+        return handleMessage(message)
+          .catch((err: Error) => {
+            console.error(JSON.stringify({ msg: "voice_message_error", error: err.message.slice(0, 200) }));
+            send({ type: "error", error: "internal_error" });
+          })
+          .finally(() => {
+            queued -= 1;
+          });
+      });
     });
 
     // D-30 hardening §3D: klientfrakobling midt i en tur skal aldri gi zombie-
     // generering. Aborterer upstream modellgenerering og tømmer TTS-kø - ingen
     // lyd/tekst er igjen produsert for en socket som ikke lenger lytter.
     ws.on("close", () => {
+      socketClosed = true;
+      clearTimeout(idleTimer);
+      if (maxDurationTimer !== undefined) clearTimeout(maxDurationTimer);
+      clearInterval(pingTimer);
+      tracker.release(peer);
       session?.disconnect();
     });
   });

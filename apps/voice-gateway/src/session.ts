@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   evaluateSpeechRouting,
   type MemorySpaceAuthority,
@@ -7,10 +8,17 @@ import {
 import { PassthroughAec, PassthroughNoiseSuppressor, rmsEnergy, type AudioFilter } from "./audio.ts";
 import { EnergyVad, type VadAdapter } from "./vad.ts";
 import { SentenceChunker } from "./chunker.ts";
+import { errorCode, withDeadline } from "./deadline.ts";
+import { UtteranceJournal, journalKey } from "./journal.ts";
+import { VoiceBusyError } from "./limits.ts";
+import type { SpeechCallContext } from "./speech-context.ts";
 import { sanitizeForSpeech } from "./text-sanitize.ts";
 import type { VoiceHealth } from "./health.ts";
 import type { SttAdapter, SttStream } from "./stt.ts";
 import { DEFAULT_VOICE_SETTINGS, sanitizeVoiceSettings, type TtsAdapter, type TtsPlayback, type VoiceSettings } from "./tts.ts";
+
+// WP-V2 (K5): journalen bor i journal.ts (prosess-delt, claim-før-Core, LRU+TTL). Re-eksport så eksisterende importer virker.
+export { UtteranceJournal } from "./journal.ts";
 
 /**
  * BO-12 §23: eksplisitt tilstandsmaskin. idle = før klienten har aktivert
@@ -150,6 +158,24 @@ export interface VoiceSessionOptions {
   fillerText?: string;
   /** Tal verktøystatusen («Sjekker kalenderen …») i tillegg til å sende den som tekst - første verktøy per tur. */
   speakToolActivity?: boolean;
+  /**
+   * WP-V2 (K4, JARVIS-080): frister. I MOTSETNING til D-390-innstillingene over er disse PÅ som standard - en kjede uten øvre
+   * grense lar ett hengende ledd blokkere alle senere (turnChain/ttsWorker er serielle). 0/ugyldig = standard.
+   */
+  /** Maks tid (ms) på `stt.end()` før turen forkastes med `stt_error`. */
+  sttEndTimeoutMs?: number;
+  /** Maks tid (ms) uten en ny TTS-ramme før chunken hoppes over (`tts_error`) og neste chunk tas. */
+  ttsStallTimeoutMs?: number;
+  /** Maks total syntesetid (ms) per chunk. */
+  ttsChunkTimeoutMs?: number;
+}
+
+const DEFAULT_STT_END_TIMEOUT_MS = 60_000;
+const DEFAULT_TTS_STALL_TIMEOUT_MS = 15_000;
+const DEFAULT_TTS_CHUNK_TIMEOUT_MS = 60_000;
+
+function positiveOr(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 const DEFAULT_FILLER_TEXT = "Et øyeblikk.";
@@ -191,22 +217,6 @@ export function toolActivityText(toolName: string): string {
 }
 
 /**
- * Utterance-journal: gjør turer idempotente ved failover/gjenopptak.
- * En allerede fullført utterance_id re-sendes ALDRI til Core (ingen doble
- * verktøyhandlinger). In-memory i piloten; persistent lager når gatewayen
- * får delt tilstand (dokumentert avvik).
- */
-export class UtteranceJournal {
-  private readonly completed = new Set<string>();
-  isCompleted(id: string): boolean {
-    return this.completed.has(id);
-  }
-  markCompleted(id: string): void {
-    this.completed.add(id);
-  }
-}
-
-/**
  * Full-duplex talesesjon (VOICE_ARCHITECTURE §3-§5 + BO-12): VAD → streaming
  * STT → Core (AI Mesh, streaming) → setningschunket streaming TTS, med ekte
  * barge-in: tale under avspilling stopper lyd, tømmer TTS-køen, forkaster
@@ -242,6 +252,8 @@ export class VoiceSession {
    */
   private readonly sttRouting: SpeechRoutingDecision;
   private readonly ttsRouting: SpeechRoutingDecision;
+  /** WP-V2 (K4): gis videre til adapterne (failover-adaptere dømmer reserven mot DENNE sesjonens space og tillitsnivå). */
+  private readonly speechContext: SpeechCallContext;
   /** Avslaget rapporteres ÉN gang per sesjon per retning - aldri per lydramme. */
   private sttDenialReported = false;
   private ttsDenialReported = false;
@@ -293,8 +305,11 @@ export class VoiceSession {
     private readonly vad: VadAdapter = new EnergyVad(),
     private readonly aec: AudioFilter = new PassthroughAec(),
     private readonly noise: AudioFilter = new PassthroughNoiseSuppressor(),
-    /** Failover-tilfelle: gjenoppta med kjente utterance-IDer. */
-    private readonly utteranceIdPrefix = `utt-${Date.now().toString(36)}`,
+    /**
+     * Failover-tilfelle: gjenoppta med kjente utterance-IDer. WP-V2 (K5): prefikset er en UUID, ikke `Date.now()` - journalen er nå
+     * prosess-delt, og to enheter som starter en sesjon i samme millisekund fikk før samme prefiks og dermed samme id-er.
+     */
+    private readonly utteranceIdPrefix = `utt-${randomUUID()}`,
     private readonly health?: VoiceHealth,
     /**
      * D-122 (rettelse etter arkitekt-review av PR #71): HVOR
@@ -317,6 +332,7 @@ export class VoiceSession {
     // avhenge av den.
     this.sttRouting = evaluateSpeechRouting(sttAdapter.processor, identity.memory_space, memorySpaceAuthority);
     this.ttsRouting = evaluateSpeechRouting(ttsAdapter.processor, identity.memory_space, memorySpaceAuthority);
+    this.speechContext = { memorySpace: identity.memory_space, authority: memorySpaceAuthority };
   }
 
   currentState(): VoiceState {
@@ -444,11 +460,16 @@ export class VoiceSession {
 
   /** Eksplisitt gjenopptak etter failover: samme utterance-id gir NOOP. */
   replayFinal(utteranceId: string, text: string): void {
-    if (this.journal.isCompleted(utteranceId)) {
+    // Tidlig, billig tilbakemelding. Selve vernet er den ATOMISKE `claim()` i `runTurn()` (to samtidige replay kan begge passere denne).
+    if (this.journal.isCompleted(this.journalKeyFor(utteranceId))) {
       this.events.onError(`utterance_already_completed:${utteranceId}`);
       return;
     }
     this.turnChain = this.turnChain.then(() => this.runTurn(utteranceId, text, Date.now()));
+  }
+
+  private journalKeyFor(utteranceId: string): string {
+    return journalKey(this.memorySpaceAuthority, this.identity.tenant_id, this.identity.device_id, utteranceId);
   }
 
   private beginTurn(atMs: number): void {
@@ -457,7 +478,7 @@ export class VoiceSession {
       utterance_id: `${this.utteranceIdPrefix}-${this.utteranceCounter}`,
       t_speech_start: atMs
     };
-    this.stt = this.sttAdapter.startStream();
+    this.stt = this.sttAdapter.startStream(this.speechContext);
     // D-390: lyden rett FØR speech_start (ordets begynnelse) går først inn i turen.
     if (this.preRoll.length > 0) {
       for (const f of this.preRoll) this.stt.pushAudio(f);
@@ -484,7 +505,12 @@ export class VoiceSession {
     this.turnChain = this.turnChain.then(async () => {
       let text: string;
       try {
-        text = await stt.end();
+        // WP-V2 (K4): en STT-adapter som aldri svarer skal ikke kunne blokkere turnChain (og dermed ALLE senere turer i sesjonen).
+        text = await withDeadline(
+          stt.end(),
+          positiveOr(this.options.sttEndTimeoutMs, DEFAULT_STT_END_TIMEOUT_MS),
+          "stt_end_timeout"
+        );
       } catch (err) {
         // §35: STT-feil → normalisert feil til klienten, ALDRI modellkjøring på
         // manglende transkript. D-254: den tekniske detaljen (whisper.cpp
@@ -494,8 +520,13 @@ export class VoiceSession {
         // endring + redeploy hver gang. Logg den nå server-side, samme
         // mønster som voice_core_error/voice_message_error under.
         console.error(JSON.stringify({ msg: "voice_stt_error", error: (err as Error).message.slice(0, 200) }));
-        this.health?.recordFailure("stt", (err as Error).message);
-        this.events.onError("stt_error");
+        if (err instanceof VoiceBusyError) {
+          // Overbelastning (alle lokale whisper-plasser opptatt), ikke en leverandørfeil: helsen røres ikke.
+          this.events.onError("voice_busy");
+        } else {
+          this.health?.recordFailure("stt", errorCode(err));
+          this.events.onError("stt_error");
+        }
         this.setState("listening");
         return;
       }
@@ -516,16 +547,24 @@ export class VoiceSession {
   }
 
   private async runTurn(utteranceId: string, text: string, _atMs: number, metrics?: TurnMetrics): Promise<void> {
-    if (this.journal.isCompleted(utteranceId)) {
-      this.events.onError(`utterance_already_completed:${utteranceId}`);
-      return;
-    }
     // D-390 (JARVIS-079 «zombie turn executes after disconnect»): klienten er borte - turen når aldri Core, ingen verktøy kjøres
-    // for en socket som ikke lenger lytter. Logges (aldri selve teksten).
+    // for en socket som ikke lenger lytter. Logges (aldri selve teksten). WP-V2: FØR claim - en død sesjon skal ikke oppta en nøkkel.
     if (this.closed) {
       console.error(JSON.stringify({ msg: "voice_turn_dropped_after_disconnect", utterance_id: utteranceId }));
       return;
     }
+    // WP-V2 (K5, v2.1 §14): ATOMISK claim FØR Core-kallet. `claim()` er synkron (ingen `await` mellom sjekk og skriving), så to
+    // samtidige `replay_final` for samme (enhet, id) gir ÉTT Core-kall - uansett hvilken tilkobling/sesjon de kommer fra (journalen er prosess-delt).
+    const journalId = this.journalKeyFor(utteranceId);
+    const claim = this.journal.claim(journalId);
+    if (claim !== "claimed") {
+      this.events.onError(claim === "completed" ? `utterance_already_completed:${utteranceId}` : `utterance_in_flight:${utteranceId}`);
+      return;
+    }
+    // Etter claim regnes turen som UTFØRT i ALLE utfall (også feil/avbrudd), unntatt der forespørselen BEVISELIG aldri nådde Core -
+    // et Core-kall som feilet underveis kan ha utført verktøy, og en replay skal da ikke utføre dem på nytt (Core sin ToolGateway-
+    // ledger dekker bare delvis, se journal.ts).
+    let notSent = false;
     const turnMetrics = metrics ?? { utterance_id: utteranceId, t_speech_start: Date.now() };
     const turnEpoch = this.epoch;
     this.setState("thinking");
@@ -559,7 +598,12 @@ export class VoiceSession {
       // Turen regnes fullført NÅR Core har utført den - replay etter dette er
       // idempotent-nekt. Gjelder også avbrutte turer: voice-avbrudd ruller
       // ALDRI tilbake/re-utfører allerede utførte verktøy (§17).
-      this.journal.markCompleted(utteranceId);
+      this.journal.complete(journalId);
+      // WP-V2 (JARVIS-079): ingen svar til en frakoblet klient - heller ikke fra en Core-klient som ignorerte abort-signalet.
+      if (this.closed) {
+        turnMetrics.cancelled = true;
+        return;
+      }
       this.events.onReply(reply);
       // D-262: bekrefter at Core faktisk produserte et svar OG at det ble
       // videresendt til transportlaget (`server.ts` sin `onReply` -> `ws.send`)
@@ -584,13 +628,22 @@ export class VoiceSession {
       if ((err as Error).name === "AbortError" || this.epoch !== turnEpoch) {
         // Barge-in avbrøt turen - rent avbrudd, ingen feil (§15).
         turnMetrics.cancelled = true;
-        this.journal.markCompleted(utteranceId);
+        this.journal.complete(journalId);
       } else {
         // §27: normalisert brukerrettet feil - tekniske detaljer kun i logg/audit.
         console.error(JSON.stringify({ msg: "voice_core_error", error: (err as Error).message.slice(0, 200) }));
-        this.events.onError("core_error");
+        // `voice_session_required` kastes av HttpCoreClient FØR noe HTTP-kall (ubevist sti): ingenting nådde Core.
+        notSent = (err as Error).message === "voice_session_required";
+        // WP-V2 (K4): en Core-frist er en egen, synlig feilkode (ikke bare «core_error»).
+        this.events.onError((err as Error).message === "core_timeout" ? "core_timeout" : "core_error");
       }
     } finally {
+      // Claimen avsluttes alltid: fullført (utført/forsøkt) eller frigitt (beviselig aldri sendt). En `complete` etter en tidligere `complete` er idempotent.
+      if (notSent) {
+        this.journal.release(journalId);
+      } else {
+        this.journal.complete(journalId);
+      }
       onProgress();
       if (this.activeTurnAbort === abort) {
         this.activeTurnAbort = null;
@@ -723,10 +776,10 @@ export class VoiceSession {
     this.setState("speaking");
     let primed: PrimedPlayback;
     try {
-      primed = item.primed ?? primePlayback(this.ttsAdapter, item.text, this.voiceSettings);
+      primed = item.primed ?? primePlayback(this.ttsAdapter, item.text, this.voiceSettings, this.speechContext);
     } catch (err) {
       // §36: TTS-feil forkaster ALDRI Jarvis-svaret (teksten er alt levert via onReply).
-      this.health?.recordFailure("tts", (err as Error).message);
+      this.health?.recordFailure("tts", errorCode(err));
       this.events.onError("tts_error");
       return;
     }
@@ -736,7 +789,7 @@ export class VoiceSession {
     const next = this.ttsQueue[0];
     if (next !== undefined && next.primed === undefined) {
       try {
-        next.primed = primePlayback(this.ttsAdapter, next.text, this.voiceSettings);
+        next.primed = primePlayback(this.ttsAdapter, next.text, this.voiceSettings, this.speechContext);
       } catch {
         // Rapporteres når chunken selv skal tales (samme feilvei som over).
       }
@@ -744,8 +797,10 @@ export class VoiceSession {
     const playback = primed.playback;
     this.playback = playback;
     let first = true;
+    const stallMs = positiveOr(this.options.ttsStallTimeoutMs, DEFAULT_TTS_STALL_TIMEOUT_MS);
+    const chunkMs = positiveOr(this.options.ttsChunkTimeoutMs, DEFAULT_TTS_CHUNK_TIMEOUT_MS);
     try {
-      for await (const frame of alignPcm16Frames(primedFrames(primed))) {
+      for await (const frame of alignPcm16Frames(primedFrames(primed, stallMs, chunkMs))) {
         if (this.epoch !== turnEpoch) {
           playback.cancel();
           return; // gammel lyd slippes aldri gjennom etter barge-in (§16)
@@ -760,8 +815,16 @@ export class VoiceSession {
       }
       this.health?.recordSuccess("tts");
     } catch (err) {
-      this.health?.recordFailure("tts", (err as Error).message);
-      this.events.onError("tts_error");
+      // WP-V2 (K4): en chunk som feiler/henger avbrytes ALLTID aktivt (fetch abort / prosessgruppe drept) og HOPPES OVER -
+      // neste chunk i køen tas. Før ble en hengende chunk liggende og blokkerte alle senere (ttsWorker er en serie).
+      playback.cancel();
+      if (err instanceof VoiceBusyError) {
+        this.events.onError("voice_busy");
+      } else {
+        console.error(JSON.stringify({ msg: "voice_tts_error", code: errorCode(err) }));
+        this.health?.recordFailure("tts", errorCode(err));
+        this.events.onError("tts_error");
+      }
     } finally {
       if (this.playback === playback) {
         this.playback = null;
@@ -892,8 +955,8 @@ interface PrimedPlayback {
   first: Promise<IteratorResult<Buffer>>;
 }
 
-function primePlayback(adapter: TtsAdapter, text: string, settings?: VoiceSettings): PrimedPlayback {
-  const playback = settings ? adapter.synthesize(text, settings) : adapter.synthesize(text);
+function primePlayback(adapter: TtsAdapter, text: string, settings?: VoiceSettings, context?: SpeechCallContext): PrimedPlayback {
+  const playback = adapter.synthesize(text, settings, context);
   const iterator = playback.frames[Symbol.asyncIterator]();
   const first = iterator.next();
   // Avvisningen håndteres når chunken spilles (`primedFrames` kaster den videre) - aldri en «unhandled rejection» i mellomtiden.
@@ -901,11 +964,26 @@ function primePlayback(adapter: TtsAdapter, text: string, settings?: VoiceSettin
   return { playback, iterator, first };
 }
 
-async function* primedFrames(primed: PrimedPlayback): AsyncIterable<Buffer> {
-  let result = await primed.first;
-  while (!result.done) {
-    yield result.value;
-    result = await primed.iterator.next();
+/**
+ * WP-V2 (K4): hver ramme-venting har en frist (`stallMs`) og hele chunken en total frist (`chunkMs`). Brudd kaster
+ * `DeadlineError` (fanges i `speakNext`, som avbryter avspillingen og hopper til neste chunk).
+ */
+async function* primedFrames(primed: PrimedPlayback, stallMs: number, chunkMs: number): AsyncIterable<Buffer> {
+  const startedAt = Date.now();
+  const step = (pending: Promise<IteratorResult<Buffer>>): Promise<IteratorResult<Buffer>> => {
+    const remaining = Math.max(1, chunkMs - (Date.now() - startedAt));
+    return withDeadline(pending, Math.min(stallMs, remaining), remaining <= stallMs ? "tts_chunk_timeout" : "tts_stall_timeout");
+  };
+  try {
+    let result = await step(primed.first);
+    while (!result.done) {
+      yield result.value;
+      result = await step(primed.iterator.next());
+    }
+  } finally {
+    // Tidlig utgang (barge-in, frist, feil): lukk adapterens generator slik at DENS `finally` kjører (prosess drept, fetch-leser lukket,
+    // prosessplass frigjort). Uten dette blir en forlatt generator stående parkert ved `yield`.
+    void Promise.resolve(primed.iterator.return?.()).catch(() => undefined);
   }
 }
 
