@@ -15,6 +15,12 @@ import { describe, expect, it } from "vitest";
  *   - `.getCredentials(` (credential-oppslag), kall på mottakere som heter `transport`/`gateway`/`gw` (leverandørtransportene), leverandørmetoder (`createPaymentIntent`, `capturePayment`, `listTransactions`, ...) på ikke-`this`-mottaker,
  *   - `fetch(`/`financeFetch(`, og `this.gateway(`/`this.refresh*`/`this.sync*`/`this.submit*`/... (egne tjenestemetoder som selv gjør leverandør-I/O).
  * Negativ kontroll: syntetiske kilder med bruddene MÅ fanges (og de lovlige formene MÅ ikke), så vakten ikke kan bli stille tom.
+ *
+ * KJENT BEGRENSNING (fiks-runde 1, FIX-10; `FINANCE_D_CHAIN.md` §11.1): vakten er NAVNEBASERT/leksikalsk. Den fanger kallene over når de står i klartekst inne i en transaksjonsblokk, men kan omgås: leverandør-I/O via en
+ * HJELPEMETODE (`this.minHjelper()` som selv kaller `getCredentials`/`fetch`), `getCredentials` via destrukturering/`['getCredentials']`, `fetch` via `await import()`, egne tjenestemetoder som ikke står i `IO_SERVICE_METHODS`,
+ * en leverandørmetode med et navn som ikke står i `PROVIDER_METHODS`, og en manuell `pool.connect()` + `BEGIN` uten `withMemoryTransaction` (reviewer A: 9 av 14 omgåelser slapp gjennom). Det som låser disse er KJØRETIDSPROBENE mot ekte
+ * Postgres (`fin2-no-lock-card-bank.test.ts`: kort- og banktjenestene; `fin2-vipps-ack-and-locks.test.ts`: Vipps-cancel/capture/refund og Stripe-refusjon - credential-oppslag OG leverandørkall må stå uten åpen tx og uten radlås),
+ * som feiler uansett hvordan I/O-en er skrevet. Nye leverandørmetoder MÅ legges til i `PROVIDER_METHODS` (sanity-testen under låser at alle metoder på transportene står på listen), og nye tjenester bør få en kjøretidsprobe.
  */
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 const files = (dir: string): string[] => readdirSync(dir).flatMap((n) => {
@@ -28,7 +34,9 @@ const PROVIDER_RECEIVERS = new Set(["transport", "gateway", "gw"]);
 const PROVIDER_METHODS = new Set([
   "createPaymentIntent", "getPaymentIntent", "createRefund", "getRefund", "getBalance", "createPayment", "getPayment", "capturePayment", "cancelPayment", "refundPayment", "checkCredentials",
   "listBanks", "createSession", "getConsentUrl", "listAccounts", "getBalances", "listTransactions", "initiateDomesticPayment", "getPaymentAuthorizeUrl", "createCard", "getCard", "activateCard",
-  "blockCard", "unblockCard", "closeCard", "updateCardLimits", "listAuthorizations", "getAccountBalance", "createGeneralJournalEntry", "listCompanies", "listJournalEntries", "listPostings", "getCredentials"
+  "blockCard", "unblockCard", "closeCard", "updateCardLimits", "listAuthorizations", "getAccountBalance", "createGeneralJournalEntry", "listCompanies", "listJournalEntries", "listPostings", "getCredentials",
+  // fiks-runde 1 (FIX-10): Fiken-lesemetodene sto ikke på listen (reviewer A M56: `this.fikenTransportFactory(...).listContacts()` i en transaksjon slapp gjennom).
+  "listContacts", "listBankAccounts"
 ]);
 /** Egne tjenestemetoder som selv gjør leverandør-I/O (credential-oppslag/nettverkskall) og derfor aldri kan kalles fra en transaksjon. EKSPLISITT liste (en sync*-prefiks ville truffet lokale DB-metoder som `syncIntentFlags`); at hvert navn finnes som metode låses under. */
 export const IO_SERVICE_METHODS: readonly string[] = [
@@ -77,16 +85,27 @@ export function findProviderIoInTransactions(fileName: string, source: string): 
     const receiver = receiverName(callee.expression);
     const onThis = callee.expression.kind === ts.SyntaxKind.ThisKeyword;
     if (method === "getCredentials") return "credential_lookup";
+    if ((method === "fetch" || method === "financeFetch") && !onThis) return "fetch"; // `globalThis.fetch(...)`/`window.fetch(...)` (fiks-runde 1)
     if (receiver !== null && PROVIDER_RECEIVERS.has(receiver) && !onThis) return "provider_call";
     if (!onThis && PROVIDER_METHODS.has(method)) return "provider_method";
     if (onThis && IO_SERVICE_METHOD_SET.has(method)) return "service_method_with_provider_io";
     return null;
   };
+  const isFetchName = (name: string): boolean => name === "fetch" || name === "financeFetch";
+  const report = (n: ts.Node, kind: string): void => {
+    const pos = n.getStart(sf);
+    violations.push({ line: sf.getLineAndCharacterOfPosition(pos).line + 1, kind, text: n.getText(sf).slice(0, 80) });
+  };
   const visit = (n: ts.Node): void => {
     if (ts.isCallExpression(n)) {
-      const pos = n.getStart(sf);
-      const kind = inside(pos, tx) && !inside(pos, exempt) ? classify(n) : null;
-      if (kind !== null) violations.push({ line: sf.getLineAndCharacterOfPosition(pos).line + 1, kind, text: n.getText(sf).slice(0, 80) });
+      const kind = inside(n.getStart(sf), tx) && !inside(n.getStart(sf), exempt) ? classify(n) : null;
+      if (kind !== null) report(n, kind);
+    }
+    // fiks-runde 1 (FIX-10; reviewer A M57): `fetch` som REFERANSE (alias/`globalThis.fetch`/sendt videre som verdi), ikke bare som direkte kall: `const f = globalThis.fetch; await f(url)`.
+    if (inside(n.getStart(sf), tx) && !inside(n.getStart(sf), exempt)) {
+      if (ts.isPropertyAccessExpression(n) && isFetchName(n.name.text) && !(ts.isCallExpression(n.parent) && n.parent.expression === n)) report(n, "fetch_reference");
+      if (ts.isIdentifier(n) && isFetchName(n.text) && !(ts.isCallExpression(n.parent) && n.parent.expression === n) && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)
+        && !(ts.isPropertyAssignment(n.parent) && n.parent.name === n) && !ts.isBindingElement(n.parent) && !ts.isParameter(n.parent)) report(n, "fetch_reference");
     }
     ts.forEachChild(n, visit);
   };
@@ -133,6 +152,17 @@ describe("K1a: negativ kontroll - bruddene fanges, de lovlige formene fanges ikk
     expect(kinds(`class C { async f(){ await withMemoryTransaction(pool, t, [s], async (client) => { const gw = await this.gateway(t); }); } }`)).toEqual(["service_method_with_provider_io"]);
     expect(kinds(`class C { async f(){ await withMemoryTransaction(pool, t, [s], async (client) => { await this.refreshStripePaymentState(t, s, id); }); } }`)).toEqual(["service_method_with_provider_io"]);
     expect(kinds(`async function f(){ await withMemoryTransaction(pool, t, [s], async (client) => { await stripe.createRefund({}); }); }`)).toEqual(["provider_method"]);
+  });
+
+  it("fiken-lesemetodene (reviewer A M56) og `fetch` som referanse/alias (reviewer A M57) inne i en transaksjon fanges; direkte `fetch`-kall gir fortsatt bare ÉN melding", () => {
+    expect(kinds(`class C { async f(){ await withMemoryTransaction(pool, t, [s], async (client) => { const api = this.fikenTransportFactory(c); await api.listContacts(); }); } }`)).toEqual(["provider_method"]);
+    expect(kinds(`class C { async f(){ await withMemoryTransaction(pool, t, [s], async (client) => { await fiken.listBankAccounts(); }); } }`)).toEqual(["provider_method"]);
+    expect(kinds(`async function f(){ await withMemoryTransaction(pool, t, [s], async (client) => { const f = globalThis.fetch; await f("https://x.test"); }); }`)).toEqual(["fetch_reference"]);
+    expect(kinds(`async function f(){ await withMemoryTransaction(pool, t, [s], async (client) => { const g = fetch; await g("https://x.test"); }); }`)).toEqual(["fetch_reference"]);
+    expect(kinds(`async function f(){ await withMemoryTransaction(pool, t, [s], async (client) => { const g = financeFetch; await g("https://x.test"); }); }`)).toEqual(["fetch_reference"]);
+    expect(kinds(`async function f(){ await withMemoryTransaction(pool, t, [s], async (client) => { await fetch("https://x.test"); await globalThis.fetch("https://y.test"); }); }`)).toEqual(["fetch", "fetch"]); // `globalThis.fetch(...)` er et direkte kall (ikke en referanse) og fanges som `fetch`
+    expect(kinds(`async function f(){ const g = globalThis.fetch; await withMemoryTransaction(pool, t, [s], async (client) => { await client.query("SELECT 1"); }); await g("x"); }`)).toEqual([]); // utenfor transaksjon er lovlig
+    expect(kinds(`async function f(){ await withMemoryTransaction(pool, t, [s], async (client) => { const o = { fetch: 1 }; await client.query("SELECT $1", [o.fetch === 1]); }); }`)).toEqual(["fetch_reference"]); // o.fetch (egenskapsoppslag) er leksikalsk lik globalThis.fetch: konservativt avvist
   });
 
   it("mønsteret fra `cancelVippsPayment` på main: credential-oppslag i `prepare` (under radlåsen) fanges; oppslag FØR providerCallOutsideLock fanges ikke", () => {

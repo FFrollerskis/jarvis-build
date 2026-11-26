@@ -7,6 +7,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
+import { firstWaveTools } from "@jarvis/tool-gateway";
 import {
   AmbiguousProviderResponseError,
   CardService,
@@ -337,5 +338,13 @@ describe("K8 runbook: eierens manuelle disposisjon etter ukjent utfall (admin-SQ
     expect(synced.masked_card_number).toBe("…9999");
     expect((await cards.submitCard(TENANT, "business", card.card_id)).provider_card_id).toBe(providerId); // allerede innsendt: ingen nytt leverandørkall
     expect(gw.createCalls).toHaveLength(1);
+  });
+});
+
+describe("K8: verktøymanifestet (fiks-runde 1, FIX-10 / reviewer B M04)", () => {
+  it("`finance_wallester.submit_card` er IKKE `idempotent_external` (Wallester har ingen verifisert Idempotency-Key; en retry kan duplisere kortet) - låst så en tilbakestilling til `true` feiler her", () => {
+    const def = firstWaveTools().find((t) => t.tool_id === "finance_wallester" && t.action === "submit_card");
+    expect(def, "submit_card finnes i manifestet").toBeDefined();
+    expect(def!.idempotent_external).toBe(false);
   });
 });
