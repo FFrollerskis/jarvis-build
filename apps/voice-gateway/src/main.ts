@@ -5,6 +5,7 @@ import { UtteranceJournal } from "./journal.ts";
 import { DEFAULT_VOICE_LIMITS, ProcessSlots } from "./limits.ts";
 import { createVoiceGateway, HttpCoreClient } from "./server.ts";
 import { selectSpeechAdapters } from "./adapter-selection.ts";
+import { withLocalSttReserve, withLocalTtsReserve } from "./failover.ts";
 import { LocalWhisperStt, OpenAiStt, RemoteWhisperStt } from "./stt.ts";
 import { LocalPiperTts, OpenAiTts } from "./tts.ts";
 import { EnergyVad } from "./vad.ts";
@@ -114,8 +115,12 @@ function selectOrExit() {
     process.exit(1);
   }
 }
-const { stt, tts } = selectOrExit();
 const health = new VoiceHealth();
+const selected = selectOrExit();
+// WP-V2 (K4): failover SKY -> LOKAL komponeres ETTER utvelgelsen (`selectSpeechAdapters` er uendret). Kun når den valgte adapteren er
+// EKSTERN og en lokal reserve faktisk er tilgjengelig (binær + modell finnes); aldri lokal -> sky. Se docs/runbooks/WPV2_VOICE_ROBUSTNESS.md.
+const stt = withLocalSttReserve(selected.stt, localWhisperStt, { health });
+const tts = withLocalTtsReserve(selected.tts, localPiperTts, { health });
 
 // WP-V2 (K5, v2.1 §14): ÉN utterance-journal for hele prosessen - delt av alle sesjoner (før: laget per sesjonsstart).
 const journal = new UtteranceJournal();
@@ -135,6 +140,8 @@ server.listen(port, () => {
       port,
       stt: stt.name,
       tts: tts.name,
+      stt_failover_reserve: stt !== selected.stt ? localWhisperStt.name : null,
+      tts_failover_reserve: tts !== selected.tts ? localPiperTts.name : null,
       tts_sample_rate: tts.sampleRate ?? 24_000,
       vad_threshold: vadThreshold,
       vad_hangover_ms: vadHangoverMs,

@@ -1,3 +1,4 @@
+import type { spawn } from "node:child_process";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
@@ -48,4 +49,20 @@ export function probeLocalBinary(binPath: string | undefined, modelPath: string 
     return "model_not_readable";
   }
   return undefined;
+}
+
+/**
+ * Dreper HELE prosessgruppen `proc` leder (krever `detached: true` ved spawn), ALDRI kun selve PID-en: en wrapper-script/binær kan
+ * ha barneprosesser som arver stdout-pipen - å drepe bare toppen lar pipen stå åpen (Node ser aldri `close`) og et kall henger til
+ * barnet gir opp. `ESRCH` (allerede borte) svelges bevisst - det er det forventede, harmløse utfallet.
+ */
+export function killProcessGroup(proc: ReturnType<typeof spawn>, signal: NodeJS.Signals = "SIGTERM"): void {
+  if (proc.exitCode !== null || proc.pid === undefined || (signal === "SIGTERM" && proc.killed)) {
+    return;
+  }
+  try {
+    process.kill(-proc.pid, signal);
+  } catch {
+    // ESRCH: allerede avsluttet.
+  }
 }

@@ -7,7 +7,7 @@ import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
 import { WebSocket as WsClient } from "ws";
 import { maybeDumpAudioForDebug } from "./debug-audio-dump.ts";
 import { deadlineSignal } from "./deadline.ts";
-import { probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
+import { killProcessGroup, probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
 import { ProcessSlots } from "./limits.ts";
 import type { SpeechCallContext } from "./speech-context.ts";
 
@@ -829,8 +829,11 @@ export class LocalWhisperStt implements SttAdapter {
         // fortsatt intakt.
         const tmpOutBase = join(tmpdir(), `jarvis-whisper-${randomUUID()}`);
         // D-390: `-t <tråder>` (+ valgfri `--prompt`) i tillegg - se `cliArgs()`.
+        // WP-V2 (K4): `detached: true` gjør whisper til gruppeleder, så en frist kan drepe HELE prosessgruppen (en wrapper-script med barn
+        // lot ellers pipen stå åpen og kallet henge selv etter SIGKILL av toppen) - samme mønster som piper.
         const proc = spawn(binPath, cliArgs(tmpOutBase), {
-          stdio: ["pipe", "pipe", "pipe"]
+          stdio: ["pipe", "pipe", "pipe"],
+          detached: true
         });
         let stdout = "";
         let stderr = "";
@@ -862,7 +865,7 @@ export class LocalWhisperStt implements SttAdapter {
         let timedOut = false;
         const timer = setTimeout(() => {
           timedOut = true;
-          proc.kill("SIGKILL");
+          killProcessGroup(proc, "SIGKILL");
         }, timeoutMs);
         let code: number | null;
         try {

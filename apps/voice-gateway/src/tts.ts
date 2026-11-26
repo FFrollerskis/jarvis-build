@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
 import { deadlineSignal } from "./deadline.ts";
-import { probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
+import { killProcessGroup, probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
 import { ProcessSlots, VoiceBusyError } from "./limits.ts";
 import type { SpeechCallContext } from "./speech-context.ts";
 
@@ -688,23 +688,5 @@ export class LocalPiperTts implements TtsAdapter {
         releaseSlot?.();
       }
     };
-  }
-}
-
-/**
- * Dreper HELE prosessgruppen `proc` leder (se `detached: true`-kommentaren
- * over), ALDRI kun selve PID-en - `ESRCH` (prosessen/gruppen er allerede
- * borte) svelges bevisst, det er den FORVENTEDE, harmløse utfallsformen når
- * prosessen allerede rakk å avslutte selv (f.eks. lykkes-banen der
- * `finally`-blokken kjører etter en NORMAL EOF, ikke en kansellering).
- */
-function killProcessGroup(proc: ReturnType<typeof spawn>, signal: NodeJS.Signals = "SIGTERM"): void {
-  if (proc.exitCode !== null || proc.pid === undefined || (signal === "SIGTERM" && proc.killed)) {
-    return;
-  }
-  try {
-    process.kill(-proc.pid, signal);
-  } catch {
-    // ESRCH: allerede avsluttet - se filhode.
   }
 }
