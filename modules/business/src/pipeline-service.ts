@@ -70,9 +70,10 @@ export interface PipelineDeleteResult {
   removed: { open_loops: number; scores: number };
 }
 
-const LEAD_STATUSES: readonly LeadStatus[] = ["new", "contacted", "qualified", "disqualified", "converted"];
+// WP-AUTH2a: vokabularet og de terminale statusene er eksportert (uendret innhold) slik at klasse C-adapteren (`class-c-adapter.ts`) bruker de SAMME konstantene som tjenesten - ingen kopi som kan drifte.
+export const LEAD_STATUSES: readonly LeadStatus[] = ["new", "contacted", "qualified", "disqualified", "converted"];
 const OPPORTUNITY_STAGES: readonly OpportunityStage[] = ["new", "qualified", "proposal", "negotiation", "won", "lost"];
-const LEAD_TERMINAL: ReadonlySet<string> = new Set(["disqualified", "converted"]);
+export const LEAD_TERMINAL: ReadonlySet<string> = new Set(["disqualified", "converted"]);
 const OPPORTUNITY_TERMINAL: ReadonlySet<string> = new Set(["won", "lost"]);
 export const LEAD_CLOSE_OUTCOMES = ["converted", "disqualified"] as const;
 export const OPPORTUNITY_CLOSE_OUTCOMES = ["won", "lost"] as const;

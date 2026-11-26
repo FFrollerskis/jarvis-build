@@ -8,6 +8,8 @@ export * from "./churn-types.ts";
 export * from "./churn-rules.ts";
 export * from "./churn-service.ts";
 export * from "./transport.ts";
+// WP-AUTH2a (JARVIS-014): klasse C-adapter for leadstatus (bruker tjenestens egne konstanter og den eksisterende inspect-lesingen).
+export * from "./class-c-adapter.ts";
 export * from "./credential.ts";
 export * from "./open-loop-types.ts";
 export * from "./confidence.ts";
