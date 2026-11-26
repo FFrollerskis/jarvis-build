@@ -23,7 +23,7 @@ import { SERVICE_ENV } from "../../../infra/local/service-env.mjs";
  *  C. vakt: variabelen står i `SERVICE_ENV` for ALLE tjenestene som lager en pool (api, worker, migrate), i compose og i `.env.example`; hver produksjonsfil som kaller `createPool` er med i tjenestekartet (en ny uten kart feller testen).
  */
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const SENTINEL_PASSWORD = "pw-sentinel-9f3c1d7a";
+const SENTINEL_PASSWORD = "sentinel-not-a-secret"; // en oppdiktet, distinkt streng som aldri skal dukke opp i en feilmelding (ikke en ekte hemmelighet)
 const SENTINEL_USER = "jarvis_wpg2c_sentinel_user";
 
 let stopPg: (() => Promise<void>) | undefined;
