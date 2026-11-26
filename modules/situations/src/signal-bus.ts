@@ -249,6 +249,9 @@ export class SituationSignalBus {
    * Ankeret er hendelsen som åpnet episoden og dermed utløste (eller, i stille timer, holdt) varselet; en undertrykt duplikat flytter det aldri, så vinduet «sklir» med siste VARSEL, ikke med siste hendelse, og ikke med en klokkebøtte.
    * Tilstanden ligger i databasen (situasjonens nøkkel), ikke i minnet: omstart endrer ingenting. Alle statuser teller (en løst episode åpnes på nytt av motoren, som før). Eldre bøttenøkler (kort suffiks) tolkes aldri som anker.
    * Tenant og rom er eksplisitte (RLS); søket er et områdesøk på nøkkelens unike indeks.
+   * `starts_with` (byte-sammenligning) er IKKE overflødig i produksjon (fiks-runde 1, FIX-12): `BETWEEN` følger kolonnens KOLLASJON, og under en ICU-kollasjon (`und-x-icu`, `en-US-x-icu`) er `camera.A` og `camera.a` like på første nivå, så
+   * søket ville også truffet nøkler for en ANNEN kamera-id som kun skiller seg på store/små bokstaver. VERIFISERT mot C, POSIX og ICU (`wpg4b-camera-window-icu.test.ts`, som feller fjerning av filteret); IKKE verifisert mot glibc `en_US`
+   * (NAS-ens Postgres-image), men `starts_with` gir riktig resultat uansett kollasjon, så filteret skal stå.
    */
   private async episodeKey(tenantId: string, memorySpace: MemorySpace, episode: EpisodeWindow): Promise<string> {
     const upper = episodeKeyFor(episode.key_prefix, episode.anchor_ms);
