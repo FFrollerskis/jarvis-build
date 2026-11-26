@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { JsonValue } from "@jarvis/contracts";
 import { runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { DOMAIN_WIDE_SCOPE, SituationAutonomyScopeError, pickEffectiveBinding, scopeKeyFor, type EffectivePolicyRow } from "../src/autonomy-scope.ts";
@@ -12,6 +13,7 @@ import { SituationAutonomyBindingChangedError } from "../src/service.ts";
 import { SimulationService, simulationToolInfoFrom } from "../src/simulation.ts";
 import { SituationSignalBus } from "../src/signal-bus.ts";
 import { RULES, RULE_CATEGORY, SCOPE_CATEGORIES } from "../src/signal-types.ts";
+import { SituationsTransport, situationsToolDefinitions } from "../src/transport.ts";
 import { identity, minutesAgo, NOW, OWNER, actorOwner, startG4Db, TENANT_A, TENANT_B, type G4Db } from "./support/wpg4-db.ts";
 
 /**
@@ -227,6 +229,38 @@ describe("B: motoren mot ekte Postgres (ekte buss, gateway og claim-vakt)", () =
     expect(await scopes()).toEqual([]);
     expect(await db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", OWNER)).toBe(false);
     await expect(db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", "person-g4-other", { rule: DOOR })).rejects.toThrow(/unauthorized/);
+  });
+
+  it("FIX-3 (transport-laget): `rule`/`category` går hele veien gateway -> SituationsTransport -> motor ved set; clear MED skop fjerner KUN det skopet, UTEN skop alle (domenebredt tilbakekall); ugyldig skop avvises (aldri en stille bred binding)", async () => {
+    const { gateway } = db.newGateway();
+    // skjemaene med `rule`/`category` finnes kun med hovedbryteren (`autonomyScope`); samme registrering som komposisjonsroten gjør
+    for (const d of situationsToolDefinitions(new SituationsTransport(db.engine, db.domainPauses), { autonomyExpiry: true, autonomyScope: true })) {
+      if (d.action === "set_autonomy_policy" || d.action === "clear_autonomy_policy") gateway.register(d);
+    }
+    const id = identity(TENANT_A, "home");
+    const call = (action: string, parameters: Record<string, JsonValue>, key: string) => gateway.execute({ identity: id, tool_id: "situations", action, parameters, idempotency_key: key });
+    const base = { domain: "home", tool_id: "test_actuator", action: "close", parameters: { situation_id: "{{situation_id}}" } };
+    const scopes = async (): Promise<string[]> => (await db.engine.listAutonomyPolicies(TENANT_A, "home")).map((p) => p.scope_key).sort();
+    expect((await call("set_autonomy_policy", { ...base, rule: DOOR }, "pb10-1")).ok).toBe(true);
+    expect(await scopes()).toEqual([`rule:${DOOR}`]); // en droppet `rule` ville gitt `*` (domenebred)
+    expect((await call("set_autonomy_policy", { ...base, category: "leak" }, "pb10-2")).ok).toBe(true);
+    expect(await scopes()).toEqual(["category:leak", `rule:${DOOR}`]); // en droppet `category` ville erstattet/duplisert en annen rad
+    expect((await call("set_autonomy_policy", { ...base }, "pb10-3")).ok).toBe(true);
+    expect(await scopes()).toEqual(["*", "category:leak", `rule:${DOOR}`]);
+    const cleared = await call("clear_autonomy_policy", { domain: "home", rule: DOOR }, "pb10-4");
+    expect(cleared).toMatchObject({ ok: true, data: { removed: true, removed_scopes: [`rule:${DOOR}`] } });
+    expect(await scopes()).toEqual(["*", "category:leak"]); // et droppet skop ville fjernet ALLE (eller den brede)
+    expect(await call("clear_autonomy_policy", { domain: "home", category: "leak" }, "pb10-5")).toMatchObject({ ok: true, data: { removed: true, removed_scopes: ["category:leak"] } });
+    expect(await scopes()).toEqual(["*"]);
+    expect((await call("set_autonomy_policy", { ...base, rule: DOOR }, "pb10-6")).ok).toBe(true);
+    expect(await call("clear_autonomy_policy", { domain: "home" }, "pb10-7")).toMatchObject({ ok: true, data: { removed: true, removed_scopes: ["*", `rule:${DOOR}`] } }); // FIX-2: uten skop = alle
+    expect(await scopes()).toEqual([]);
+    // ugyldig skop avvises (aldri en stille bred binding), både ved set og ved clear
+    for (const bad of [{ rule: "home_assistant:finnes_ikke" }, { category: "finnes_ikke" }, { rule: DOOR, category: "opening" }, { rule: "vision:motion_detected" }]) {
+      expect((await call("set_autonomy_policy", { ...base, ...bad }, `pb10-bad-${JSON.stringify(bad)}`)).ok, JSON.stringify(bad)).toBe(false);
+      expect((await call("clear_autonomy_policy", { domain: "home", ...bad }, `pb10-badclear-${JSON.stringify(bad)}`)).ok, JSON.stringify(bad)).toBe(false);
+    }
+    expect(await scopes()).toEqual([]);
   });
 
   it("claim-vakten bruker samme avgjørelse: en binding for en ANNEN regel gir aldri claim for denne situasjonen (BindingChanged), og ingen kall", async () => {
