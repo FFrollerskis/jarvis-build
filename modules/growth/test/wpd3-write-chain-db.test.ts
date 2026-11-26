@@ -1410,6 +1410,18 @@ describe("V4: WP-P3 K2 (JARVIS-107) - replay-sikkerhet: ledger-leddet, helingen 
       expect(gMut(), status).toHaveLength(0);
       state.notifierReady = true;
     }
+    // en `requested` rad har ikke «fullført» noe: kommandoen hører til en journalrad som ikke engang er `outcome_unknown`, så den leges IKKE (verken `execution_unknown` eller `executed`)
+    const commandId = uniq("cmd-p3-a1");
+    await seedCommand(commandId, 50_000, 40_000);
+    const withCommand = inputFor(uniq("p3-a1-cmd"), commandId);
+    const crashing = { get: gateway.get.bind(gateway), execute: async () => { throw new Error("simulated_crash_before_gateway"); } };
+    await expect(executeGrowthWrite({ ...exec, gateway: crashing as never }, owner, withCommand)).rejects.toThrow("simulated_crash_before_gateway");
+    await insertLedger(withCommand.idempotency_key, "unverified");
+    state.notifierReady = false;
+    const healedNot = await executeGrowthWrite(exec, owner, withCommand);
+    expect(healedNot).toMatchObject({ outcome: "UNKNOWN", reason: "class_d_notifier_not_ready", command_status: null });
+    expect(await commandStatus(commandId)).toEqual({ status: "pending_execution", execution_write_id: null });
+    state.notifierReady = true;
     // kontroll: en `failed` ledger-rad beviser at leverandøren IKKE utførte - en port-avvisning låser raden som terminal FAILED (uendret atferd)
     const { input, row } = await requestedRow(uniq("p3-a1-failed"));
     await insertLedger(input.idempotency_key, "failed");
