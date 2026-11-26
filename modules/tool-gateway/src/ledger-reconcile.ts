@@ -30,6 +30,8 @@ export const LEDGER_UNVERIFIED_TTL_MAX_HOURS = 2_160;
 /** Gulvet i databasen (trigger `tool_executions_guard`) for når en `reserved`-rad kan avstemmes/avgjøres: kortere enn dette kan et kall fortsatt være under utførelse. */
 export const LEDGER_RESERVED_FLOOR_MINUTES = 10;
 export const LEDGER_SWEEP_BATCH = 500;
+/** Maks antall batcher per status og tenant i ÉN kjøring (taket er `LEDGER_SWEEP_BATCH` x dette = 10 000 rader); resten tas av neste kjøring (idempotent). */
+export const LEDGER_SWEEP_MAX_BATCHES = 20;
 
 export interface LedgerReconcileConfig {
   enabled: boolean;
@@ -75,10 +77,15 @@ const sweepIdentity = (tenantId: string) => ({ tenant_id: tenantId, person_id: "
 
 interface MovedRow { idempotency_key: string; tool_id: string; action: string; age_minutes: number | string }
 
-/** Utløpssveipet for ÉN tenant. Idempotent og tenant-skopet; flytter kun status og skriver revisjon. Kaster ved databasefeil (kalleren isolerer per tenant). */
-export async function sweepLedgerTenant(pool: pg.Pool, tenantId: string, config: Pick<LedgerReconcileConfig, "reservedTtlMinutes" | "unverifiedTtlHours">, batch = LEDGER_SWEEP_BATCH): Promise<LedgerSweepResult> {
+/**
+ * Utløpssveipet for ÉN tenant. Idempotent og tenant-skopet; flytter kun status og skriver revisjon. Kaster ved databasefeil (kalleren isolerer per tenant). Tar `batch` rader om gangen (eldst først) og gjentar til en batch er
+ * delvis eller `maxBatches` er nådd, slik at en etterslep (for eksempel første kjøring etter at flagget er slått på) tas i én kjøring uten én enorm setning.
+ */
+export async function sweepLedgerTenant(
+  pool: pg.Pool, tenantId: string, config: Pick<LedgerReconcileConfig, "reservedTtlMinutes" | "unverifiedTtlHours">, batch = LEDGER_SWEEP_BATCH, maxBatches = LEDGER_SWEEP_MAX_BATCHES
+): Promise<LedgerSweepResult> {
   return withTenantTransaction(pool, tenantId, async (client): Promise<LedgerSweepResult> => {
-    const move = async (from: "reserved" | "unverified", to: "unknown_outcome" | "needs_resolution", basis: string, olderThanSql: string, olderThanParam: number): Promise<number> => {
+    const moveBatch = async (from: "reserved" | "unverified", to: "unknown_outcome" | "needs_resolution", basis: string, olderThanSql: string, olderThanParam: number): Promise<number> => {
       const moved = await client.query<MovedRow>(
         `WITH due AS (
            SELECT idempotency_key FROM tool_executions
@@ -99,6 +106,15 @@ export async function sweepLedgerTenant(pool: pg.Pool, tenantId: string, config:
         });
       }
       return moved.rowCount ?? moved.rows.length;
+    };
+    const move = async (from: "reserved" | "unverified", to: "unknown_outcome" | "needs_resolution", basis: string, olderThanSql: string, olderThanParam: number): Promise<number> => {
+      let total = 0;
+      for (let i = 0; i < maxBatches; i += 1) {
+        const moved = await moveBatch(from, to, basis, olderThanSql, olderThanParam);
+        total += moved;
+        if (moved < batch) break;
+      }
+      return total;
     };
     const reserved = await move("reserved", "unknown_outcome", "reserved_ttl_exceeded", "make_interval(mins => $2::int)", config.reservedTtlMinutes);
     const unverified = await move("unverified", "needs_resolution", "unverified_ttl_exceeded", "make_interval(hours => $2::int)", config.unverifiedTtlHours);
@@ -247,7 +263,9 @@ export function sanitizeLedgerNote(note: string | undefined): string | null {
   return points.length > NOTE_MAX ? `${points.slice(0, NOTE_MAX - 1).join("")}\u2026` : flat;
 }
 
-const KEY_PATTERN = /^[\x21-\x7e]{1,300}$/;
+/** Nøkkelen er valgt av kalleren (ikke alltid ASCII uten mellomrom): hvilken som helst tekst på 1-300 kodepunkter uten kontrolltegn og uten ensomme surrogater. Oppslaget er et eksakt, bundet spørringsparameter. */
+// eslint-disable-next-line no-control-regex
+const KEY_PATTERN = /^[^\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cs}]{1,300}$/u;
 const RESOLVABLE = new Set(["reserved", "unverified", "unknown_outcome", "needs_resolution"]);
 
 interface ResolveRow { tool_id: string; action: string; status: string; postcondition_reason: string | null; past_floor: boolean }

@@ -187,18 +187,28 @@ describe("B: utløpssveipet", () => {
     expect((await rowOf(old))?.status).toBe("unknown_outcome");
   });
 
-  it("batch-taket gjelder per kjøring (gjentatte kjøringer tar resten), og to samtidige sveip flytter hver rad nøyaktig én gang", async () => {
+  it("batch-taket gjelder per kjøring og per batch: `maxBatches` begrenser én kjøring, og flere batcher tar hele etterslepet; to samtidige sveip flytter hver rad nøyaktig én gang", async () => {
     const keys = Array.from({ length: 5 }, () => newKey());
     const tenant = "tenant-t1r-batch";
     await admin.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenant}','B','person')`);
     for (const key of keys) await seed(key, "reserved", 700, { tenant });
-    expect((await sweepLedgerTenant(app, tenant, CFG, 2)).reserved_to_unknown).toBe(2);
+    expect((await sweepLedgerTenant(app, tenant, CFG, 2, 1)).reserved_to_unknown).toBe(2); // én batch à 2
+    expect((await sweepLedgerTenant(app, tenant, CFG, 1, 1)).reserved_to_unknown).toBe(1); // én batch à 1
     const [a, b] = await Promise.all([sweepLedgerTenant(app, tenant, CFG, 10), sweepLedgerTenant(app, tenant, CFG, 10)]);
-    expect(a.reserved_to_unknown + b.reserved_to_unknown).toBe(3);
+    expect(a.reserved_to_unknown + b.reserved_to_unknown).toBe(2);
     const statuses = (await admin.query("SELECT status, count(*)::int AS n FROM tool_executions WHERE tenant_id = $1 GROUP BY status", [tenant])).rows;
     expect(statuses).toEqual([{ status: "unknown_outcome", n: 5 }]);
     const audits = (await admin.query("SELECT count(*)::int AS n FROM audit_events WHERE tenant_id = $1 AND type = 'tool.ledger_reconciled'", [tenant])).rows[0] as { n: number };
     expect(audits.n).toBe(5);
+    // Flere batcher i samme kjøring (batch à 2 over 5 rader = 3 batcher) tar hele etterslepet.
+    const more = Array.from({ length: 5 }, () => newKey());
+    for (const key of more) await seed(key, "unverified", 40 * 60, { tenant, reason: "postcondition_unverified:readback_failed" });
+    expect((await sweepLedgerTenant(app, tenant, CFG, 2)).unverified_to_needs_resolution).toBe(5);
+    // Og `maxBatches` stopper en kjøring før hele etterslepet er tatt (resten tas av neste kjøring, idempotent).
+    const rest = Array.from({ length: 5 }, () => newKey());
+    for (const key of rest) await seed(key, "reserved", 700, { tenant });
+    expect((await sweepLedgerTenant(app, tenant, CFG, 2, 2)).reserved_to_unknown).toBe(4);
+    expect((await sweepLedgerTenant(app, tenant, CFG, 2, 2)).reserved_to_unknown).toBe(1);
   });
 
   it("alle tenants: én tenant sin feil velter ikke de andre og samles i feilsamleren (for `failOnSweepFailures`/nytt forsøk); en logglinje med KUN tall", async () => {
@@ -355,12 +365,24 @@ describe("E: eierens avgjørelse (klasse-bevisst)", () => {
     const key = newKey();
     await seed(key, "unverified", 100);
     expect(await resolveLedgerEntry(deps(g), stepped, input(""))).toEqual({ ok: false, reason: "invalid_idempotency_key" });
-    expect(await resolveLedgerEntry(deps(g), stepped, input("a b"))).toEqual({ ok: false, reason: "invalid_idempotency_key" });
-    expect(await resolveLedgerEntry(deps(g), stepped, input("x".repeat(301)))).toEqual({ ok: false, reason: "invalid_idempotency_key" });
+    for (const bad of ["a\nb", "tab\tkey", "x".repeat(301), `lone${String.fromCharCode(0xd800)}surrogate`, String.fromCodePoint(0x2028) + "sep", String.fromCodePoint(0x7f) + "del"]) {
+      expect(await resolveLedgerEntry(deps(g), stepped, input(bad)), JSON.stringify(bad).slice(0, 40)).toEqual({ ok: false, reason: "invalid_idempotency_key" });
+    }
+    // Nøkkelen er valgt av kalleren: mellomrom og ikke-ASCII er lovlig (eksakt, bundet oppslag), og en ukjent nøkkel av den typen er `not_found`.
+    expect(await resolveLedgerEntry(deps(g), stepped, input("n\u00f8kkel med mellomrom"))).toEqual({ ok: false, reason: "not_found" });
     expect(await resolveLedgerEntry(deps(g), stepped, { ...input(key), resolution: "retry" as never })).toEqual({ ok: false, reason: "invalid_resolution" });
     expect(await resolveLedgerEntry(deps(g), stepped, { ...input(key), provider_checked: false })).toEqual({ ok: false, reason: "provider_check_not_confirmed" });
     expect(await resolveLedgerEntry(deps(g), stepped, { ...input(key), provider_checked: "true" as never })).toEqual({ ok: false, reason: "provider_check_not_confirmed" });
     expect((await rowOf(key))?.status).toBe("unverified");
+  });
+
+  it("en nøkkel med mellomrom og ikke-ASCII (valgt av kalleren) kan avgjøres: oppslaget er eksakt, og revisjonen bærer kun avtrykket", async () => {
+    const { g } = classC();
+    const key = `n\u00f8kkel med mellomrom ${randomUUID()}`;
+    await seed(key, "unverified", 100);
+    expect(await resolveLedgerEntry(deps(g), stepped, input(key))).toMatchObject({ ok: true, idempotency_key: key, to_status: "failed" });
+    expect((await rowOf(key))?.status).toBe("failed");
+    expect(JSON.stringify(await audit("tool.ledger_resolved", key))).not.toContain("mellomrom");
   });
 
   it("KLASSE C/D og ukjent verktøy krever step-up (enhetssignert eier-økt); klasse B holder med eierporten", async () => {

@@ -214,7 +214,8 @@ describe("/tool-ledger/resolve", () => {
       [{ ...resolveBody(k), provider_checked: undefined }, "provider_checked"],
       [{ ...resolveBody(k), note: 42 }, "note"],
       [{ ...resolveBody(k), note: "x".repeat(2_001) }, "note"],
-      [{ ...resolveBody(k), idempotency_key: "has space" }, "invalid_idempotency_key"],
+      [{ ...resolveBody(k), idempotency_key: "has\nnewline" }, "invalid_idempotency_key"],
+      [{ ...resolveBody(k), idempotency_key: "x".repeat(301) }, "invalid_idempotency_key"],
       [{ ...resolveBody(k), idempotency_key: "" }, "invalid_idempotency_key"],
       [{ ...resolveBody(k), resolution: "retry" }, "invalid_resolution"],
       [{ ...resolveBody(k), provider_checked: false }, "provider_check_not_confirmed"]
