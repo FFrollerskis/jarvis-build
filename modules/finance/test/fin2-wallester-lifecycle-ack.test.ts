@@ -7,13 +7,14 @@ import pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import { CardService, ProviderResponseInvalidError, WallesterTransport, createRsaJwtSigner, type WallesterCredentials } from "../src/index.ts";
+import { CardService, ProviderResponseInvalidError, WallesterTransport, createRsaJwtSigner, runWallesterSweepForAllTenants, type WallesterCredentials } from "../src/index.ts";
 
 /**
  * WP-FIN2 fiks-runde 1 (FIX-1): Wallester livssyklusverb (activate/block/unblock/close) mot ekte Postgres og den EKTE transporten (stubbet `fetch`). K7 krevde `id` og `status` i PATCH-svaret, men
  * tjenesten bruker kun `status` (id står i URL-en) og transporten sier selv at PATCH-svar kan være tomme: en tom 2xx ga `outcome_unknown` MENS Wallester hadde utført verbet - og NØDBREMSEN
  * (`freeze_card`) ble aldri registrert lokalt (kortet sto `active`). Nå: måltilstanden anvendes alltid ved en gyldig 2xx, `provider_state = 'unconfirmed'` når svaret ikke bærer en status, hendelsen
  * merkes `confirmed: false`, og `sync_card_state` bekrefter etterpå. Et felt som er til stede men ugyldig (eller en kropp som ikke er JSON) er fortsatt `outcome_unknown` og lokal tilstand røres ikke.
+ * Fiks-runde 2 (FIX-C, nederst): bekreftelsen kommer IKKE like for alle verb - nattsveipet henter ikke lukkede kort, så en `close` med tom 2xx må bekreftes manuelt med `sync_card_state` (kjent begrensning, pinnet her).
  */
 let stop: (() => Promise<void>) | undefined;
 let adminPool: pg.Pool;
@@ -45,7 +46,7 @@ afterAll(async () => {
 }, 120_000);
 afterEach(() => vi.unstubAllGlobals());
 
-const service = (): CardService => new CardService(appPool, { getCredentials: async () => creds }, (c) => new WallesterTransport(c.baseUrl, c.apiKey, c.sign, c.accountId), () => null, () => TENANT);
+const service = (configuredTenant: string = TENANT): CardService => new CardService(appPool, { getCredentials: async () => creds }, (c) => new WallesterTransport(c.baseUrl, c.apiKey, c.sign, c.accountId), () => null, () => configuredTenant);
 type Verb = "freeze" | "unfreeze" | "activate" | "close";
 const VERBS: ReadonlyArray<{ verb: Verb; initial: string; target: string; event: string; path: string }> = [
   { verb: "freeze", initial: "active", target: "frozen", event: "frozen", path: "/block" },
@@ -56,8 +57,8 @@ const VERBS: ReadonlyArray<{ verb: Verb; initial: string; target: string; event:
 const run = (svc: CardService, verb: Verb, cardId: string) =>
   verb === "freeze" ? svc.freezeCard(TENANT, "business", cardId) : verb === "unfreeze" ? svc.unfreezeCard(TENANT, "business", cardId) : verb === "activate" ? svc.activateCard(TENANT, "business", cardId) : svc.closeCard(TENANT, "business", cardId);
 
-async function cardIn(svc: CardService, state: string): Promise<{ cardId: string; providerCardId: string }> {
-  const card = await svc.createCard(TENANT, "business", { idempotency_key: `card-${randomUUID()}`, name: "K", purpose: "P", card_type: "virtual", currency: "EUR" });
+async function cardIn(svc: CardService, state: string, tenant: string = TENANT): Promise<{ cardId: string; providerCardId: string }> {
+  const card = await svc.createCard(tenant, "business", { idempotency_key: `card-${randomUUID()}`, name: "K", purpose: "P", card_type: "virtual", currency: "EUR" });
   const providerCardId = `wc-${randomUUID().slice(0, 8)}`;
   await adminPool.query("UPDATE provider_cards SET provider_card_id = $2, state = $3, provider_state = 'Active', submitted_at = now() WHERE card_id = $1", [card.card_id, providerCardId, state]);
   return { cardId: card.card_id, providerCardId };
@@ -156,4 +157,68 @@ describe("FIX-1: til stede-men-ugyldig er fortsatt `outcome_unknown` og lokal ti
       expect((await events(cardId)).map((e) => e.event_type)).toEqual(["requested"]);
     });
   }
+});
+
+// === Fiks-runde 2 / FIX-C: `close` med tom 2xx bekreftes IKKE av nattsveipet ================================================================
+describe("FIX-C (fiks-runde 2): et lokalt lukket kort (close med tom 2xx) hentes ikke av nattsveipet - manuell sync_card_state er bekreftelsen", () => {
+  const SWEEP_TENANT = "tenant-fin2-lifecycle-sweep"; // egen tenant: sveipet går over ALLE kort i tenanten, så kortene fra de andre testene ville støyet
+  const sweepPool = { query: async () => ({ rows: [{ tenant_id: SWEEP_TENANT }] }) } as unknown as pg.Pool; // `listBusinessTenantIds` (som i sveiptestene i apps/api)
+  const idIn = (url: string): string => /\/v1\/cards\/([^/?]+)/.exec(url)?.[1] ?? "";
+  const respondCard = (status: string) => (url: string): Response =>
+    /\/authorizations/.test(url) ? new Response(JSON.stringify({ authorizations: [] }), { status: 200 })
+    : /\/transactions/.test(url) ? new Response(JSON.stringify({ transactions: [] }), { status: 200 })
+    : new Response(JSON.stringify({ id: idIn(url), status }), { status: 200 });
+
+  beforeAll(async () => {
+    await adminPool.query("INSERT INTO tenants (tenant_id, name, kind) VALUES ($1, 'FIN2 lifecycle sweep', 'business')", [SWEEP_TENANT]);
+  });
+
+  /** Et aktivt kort lukkes med TOM 2xx: lokalt `closed` (terminal) + `provider_state = 'unconfirmed'`, ingen flagg. */
+  async function closedUnconfirmed(svc: CardService): Promise<{ cardId: string; providerCardId: string }> {
+    const card = await cardIn(svc, "active", SWEEP_TENANT);
+    stubWallester(() => new Response("", { status: 200 }));
+    expect((await svc.closeCard(SWEEP_TENANT, "business", card.cardId)).state).toBe("closed");
+    expect(await row(card.cardId)).toEqual({ state: "closed", provider_state: "unconfirmed", anomaly_flags: [] }); // forutsetningen for testene under
+    return card;
+  }
+
+  it("nattsveipet spør IKKE Wallester om det lukkede kortet og setter ingen flagg (selv om Wallester sier Active), mens et aktivt kort i samme tenant synkes (kontroll)", async () => {
+    const svc = service(SWEEP_TENANT);
+    const closed = await closedUnconfirmed(svc);
+    const control = await cardIn(svc, "active", SWEEP_TENANT);
+    const calls = stubWallester((url) => respondCard("Active")(url));
+    const result = await runWallesterSweepForAllTenants(sweepPool, svc);
+    expect(calls.some((c) => c.includes(control.providerCardId))).toBe(true); // kontroll: sveipet kjørte og hentet det aktive kortet
+    expect(calls.filter((c) => c.includes(closed.providerCardId))).toEqual([]); // ...men aldri det lukkede
+    expect(result[SWEEP_TENANT]?.cards_state_synced).toBe(1);
+    expect(await row(closed.cardId)).toEqual({ state: "closed", provider_state: "unconfirmed", anomaly_flags: [] }); // KJENT BEGRENSNING (FINANCE_D_CHAIN §11.1/§11.6): ingen flagg før noen kjører sync_card_state
+  });
+
+  it("manuell sync_card_state på det lokalt lukkede kortet: Wallester sier Active -> CARD_PROVIDER_STATE_CONFLICT + hendelsen provider_state_conflict; kortet gjenopplives ALDRI", async () => {
+    const svc = service(SWEEP_TENANT);
+    const { cardId } = await closedUnconfirmed(svc);
+    stubWallester((url) => respondCard("Active")(url));
+    const synced = await svc.syncCardState(SWEEP_TENANT, "business", cardId);
+    expect(synced.state).toBe("closed");
+    expect(await row(cardId)).toEqual({ state: "closed", provider_state: "Active", anomaly_flags: ["CARD_PROVIDER_STATE_CONFLICT"] });
+    const conflict = (await events(cardId)).find((e) => e.event_type === "provider_state_conflict");
+    expect(conflict?.detail).toMatchObject({ canonical_state: "closed", provider_state: "Active" });
+  });
+
+  it("manuell sync_card_state: Wallester sier Closed -> bekreftet (provider_state = Closed), ingen flagg og ingen konflikthendelse", async () => {
+    const svc = service(SWEEP_TENANT);
+    const { cardId } = await closedUnconfirmed(svc);
+    stubWallester((url) => respondCard("Closed")(url));
+    expect((await svc.syncCardState(SWEEP_TENANT, "business", cardId)).state).toBe("closed");
+    expect(await row(cardId)).toEqual({ state: "closed", provider_state: "Closed", anomaly_flags: [] });
+    expect((await events(cardId)).map((e) => e.event_type)).not.toContain("provider_state_conflict");
+  });
+
+  it("hvorfor sveip-utvidelsen er DEFERRED: Closing (verifisert mellomtilstand) avbildes til frozen, så en manuell sync på et lokalt lukket kort gir også en konflikt-flagg; leverandørfakta er unverified", async () => {
+    const svc = service(SWEEP_TENANT);
+    const { cardId } = await closedUnconfirmed(svc);
+    stubWallester((url) => respondCard("Closing")(url));
+    await svc.syncCardState(SWEEP_TENANT, "business", cardId);
+    expect(await row(cardId)).toEqual({ state: "closed", provider_state: "Closing", anomaly_flags: ["CARD_PROVIDER_STATE_CONFLICT"] });
+  });
 });

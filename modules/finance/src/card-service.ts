@@ -404,8 +404,13 @@ export class CardService {
 
     // Fiks-runde 1 (FIX-1): en 2xx fra Wallester betyr at verbet ER utført, også når svaret ikke bærer en status (PATCH-svar kan være tomme; transporten gir da `unknown`). Måltilstanden anvendes
     // alltid lokalt (nødbremsen `freeze_card` skal aldri la kortet stå `active` mens Wallester har blokkert det), men `provider_state` settes til `unconfirmed` i stedet for en oppdiktet leverandørstatus,
-    // og hendelsen merkes `confirmed: false`. Ingen flagg: en tom bekreftelse er en mulig, forventet svarform (`unverified`), og `sync_card_state`/Wallester-sveipet (`wallester-sweep.ts`) henter den
-    // faktiske statusen og flagger avvik (`CARD_PROVIDER_STATE_CONFLICT`).
+    // og hendelsen merkes `confirmed: false`. Ingen flagg: en tom bekreftelse er en mulig, forventet svarform (`unverified`).
+    // Fiks-runde 2 (FIX-C): bekreftelsen etterpå er IKKE lik for alle verb.
+    //  - activate/block/unblock: kortet er ikke `closed`, så nattsveipet (`wallester-sweep.ts`) kjører `syncCardState` og leverandørens faktiske status vinner (en gyldig overgang snur tilstanden stille, uten flagg).
+    //  - close: kortet er nå `closed` (terminal), og nattsveipet HOPPER OVER lukkede kort (`listCards(..., includeClosed = false)`). En `close` med tom 2xx som Wallester ikke utførte blir derfor stående
+    //    `closed` + `unconfirmed` UTEN flagg til noen kjører `sync_card_state` manuelt (som flagger avviket `CARD_PROVIDER_STATE_CONFLICT`, aldri en stille gjenoppliving). Samme som `main`.
+    //    Å la sveipet hente `closed` + `unconfirmed` er DEFERRED: det forutsetter at Wallester serverer lukkede kort og at `Closing` (mellomtilstand, avbildes til `frozen`) ikke er en falsk konflikt for et
+    //    lokalt lukket kort - begge `unverified` (D-41). Se FINANCE_D_CHAIN §11.7.
     const confirmed = providerResult.status !== "unknown";
     const providerState = confirmed ? providerResult.status : "unconfirmed";
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
