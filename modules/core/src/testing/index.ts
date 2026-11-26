@@ -9,3 +9,5 @@
 export * from "./ephemeral-range.ts";
 export * from "./port-lease.ts";
 export * from "./embedded-postgres.ts";
+// WP-MC8a (HF3 MC-8 del a): schemaklassifisering, migrasjonslint og negativ org-A/B-fixture (kun verktøy/test; ingen runtime-kode).
+export * from "./schema-classes/index.ts";

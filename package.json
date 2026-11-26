@@ -13,6 +13,7 @@
     "lint": "eslint .",
     "typecheck": "pnpm -r run typecheck",
     "check:containment": "node ops/security/check-containment.mjs",
+    "check:schema-classes": "node --experimental-transform-types modules/core/scripts/check-schema-classes.ts",
     "test": "vitest run"
   },
   "devDependencies": {
