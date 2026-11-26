@@ -3,7 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
-import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { financeWithheldMarker, isKnownNonFinanceConnectorId, withholdFinanceFromCurrentModel, type ToolDefinition, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 
 /**
  * D-421 (UA0-RUNRATE): run-rate - hva Jarvis faktisk koster (modell per leverandør/formål/dag, prognose for måneden) og hva connectorene koster i
@@ -115,6 +115,32 @@ export class RunRateService {
     return { ...report, summary_no: renderRunRateNo(report) };
   }
 
+  /**
+   * WP-N1b fiks-runde 1 (FIX-5) + fiks-runde 2 (FIX-A): vedlikeholdsloggen for en SKY-/ukjent modell - UTEN finanskoblinger, og uten å lese kostnadsdata i det hele tatt. Finanskoblingene filtreres i SQL FØR `LIMIT`. `connector_id` er FRI TEKST
+   * (eieren skriver den: `record_connector_maintenance`), så filteret er en ekte TILLATELSESLISTE (`isKnownNonFinanceConnectorId`: kun id-er som EKSAKT er en kjent ikke-finanskobling i connector-registeret slipper gjennom; alt annet - også `bankid`,
+   * `regnskap`, `sparebank1`, `paypal` og ukjente navn uten finanspreg - er finansavledet, strengeste regel, og utelates; en svarteliste over stammer ville aldri fanget dem): ellers ville nye finansrader stjålet plassene i `recent` (LIMIT 5)
+   * og tømt skyens liste mens summen var uendret - et orakel for at finansvedlikehold finnes. Summen (`minutes_30d`) regnes på de SAMME radene som `by_connector`. Fritekst-begrunnelsen (`reason`) holdes tilbake (`null`): eieren har skrevet
+   * den, og ukjent innhold regnes som finans (samme regel som `owner_control`). Alt i ÉN transaksjon (RLS, én øyeblikkstilstand).
+   */
+  async maintenanceWithoutFinance(tenantId: string): Promise<{ minutes_30d: number; by_connector: Array<{ connector_id: string; events: number; minutes: number }>; recent: Array<{ connector_id: string; event_kind: string; minutes: number; reason: null; occurred_at: string }> }> {
+    return withTenantTransaction(this.pool as pg.Pool, tenantId, async (client) => {
+      const known = (await client.query("SELECT DISTINCT connector_id FROM connector_maintenance_log")).rows as Array<{ connector_id: string }>;
+      const allowed = known.map((r) => r.connector_id).filter((id) => isKnownNonFinanceConnectorId(id));
+      const by_connector = (await client.query(
+        `SELECT connector_id, count(*)::int AS events, coalesce(sum(minutes), 0)::int AS minutes
+           FROM connector_maintenance_log WHERE occurred_at >= now() - interval '30 days' AND connector_id = ANY($1::text[]) GROUP BY connector_id ORDER BY minutes DESC, connector_id LIMIT 30`, [allowed]
+      )).rows as Array<{ connector_id: string; events: number; minutes: number }>;
+      const recent = (await client.query(
+        `SELECT connector_id, event_kind, minutes, occurred_at FROM connector_maintenance_log WHERE connector_id = ANY($1::text[]) ORDER BY occurred_at DESC, log_id DESC LIMIT 5`, [allowed]
+      )).rows as Array<{ connector_id: string; event_kind: string; minutes: number; occurred_at: Date | string }>;
+      return {
+        minutes_30d: by_connector.reduce((a, m) => a + m.minutes, 0),
+        by_connector,
+        recent: recent.map((r) => ({ connector_id: r.connector_id, event_kind: r.event_kind, minutes: r.minutes, reason: null, occurred_at: r.occurred_at instanceof Date ? r.occurred_at.toISOString() : new Date(r.occurred_at).toISOString() }))
+      };
+    });
+  }
+
   async recordMaintenance(tenantId: string, recordedBy: string, input: { connector_id: string; event_kind: (typeof MAINTENANCE_KINDS)[number]; minutes: number; reason: string; occurred_at?: string }): Promise<{ log_id: string }> {
     const reason = scanForSecrets(input.reason).text.trim();
     const rows = await this.q<{ log_id: string }>(
@@ -153,8 +179,14 @@ export class RunRateTransport implements ToolTransport {
     if (!identity) throw new Error("run_rate_missing_invocation_context");
     switch (action) {
       case "get_cost_overview":
+        // WP-N1b (JARVIS-116 a, K2, strengeste regel til Q-64 pkt 1 er besvart): hele rapporten er modellkost i øre (i dag/7/30 døgn, prognose, per leverandør og formål) - holdt tilbake fra sky/ukjent VED UTFØRELSE (sentral lesning).
+        // Lokal modell og eierens ruter får den som før; flagg AV er uendret.
+        if (withholdFinanceFromCurrentModel()) return { data: { ...financeWithheldMarker() } as unknown as JsonValue };
         return { data: (await this.service.report(identity.tenant_id)) as unknown as JsonValue };
       case "list_connector_maintenance": {
+        // WP-N1b (K2 + FIX-5): vedlikeholdstid per finanskobling (og begrunnelsene, fritekst) er finansavledet: for sky/ukjent filtreres finanskoblingene i SQL FØR LIMIT (ingen plassmangel, ingen orakel), summen regnes på resten,
+        // og kostnadsrapporten leses ikke i det hele tatt. Svaret har alltid det nøytrale merket. Lokal modell og eier: som før.
+        if (withholdFinanceFromCurrentModel()) return { data: { ...(await this.service.maintenanceWithoutFinance(identity.tenant_id)), ...financeWithheldMarker() } as unknown as JsonValue };
         const r = await this.service.report(identity.tenant_id);
         return { data: r.maintenance as unknown as JsonValue };
       }

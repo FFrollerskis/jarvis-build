@@ -25,18 +25,19 @@ describe("deriveTimeContext: tid på døgnet og ukedag i tidssonen", () => {
 
 const ev = (event_id: string, starts_at: string, ends_at: string, extra: Partial<CalendarEventLike> = {}): CalendarEventLike => ({ event_id, title: "Møte", starts_at, ends_at, ...extra });
 const HOME = { homeLocations: ["Oslo", "Hjemme"] };
+// WP-G2c (D-483): `trip_id` er en INTERN hash (`trip-` + 24 hex), pinnet med fasitverdier under: endres formelen, får alt som allerede er lagret en ny id (duplikater). Se `wpg2c-derive-hardening.test.ts` for resten.
 
 describe("detectTrips: reiser fra kalenderens stedsfelt (deterministisk) og reiseord (gjetning)", () => {
   it("et langt arrangement med sted borte fra hjemmet er en deterministisk reise med reisemål; hjemmested, korte hendelser og ugyldige tider er det ikke", () => {
     const trips = detectTrips([
       ev("e-1", "2026-12-01T08:00:00Z", "2026-12-03T17:00:00Z", { location: " Bergen " }),
-      ev("e-2", "2026-12-01T08:00:00Z", "2026-12-03T17:00:00Z", { location: "Oslo S" }), // hjemmested
+      ev("e-2", "2026-12-01T08:00:00Z", "2026-12-03T17:00:00Z", { location: "  OSLO " }), // hjemmested (EKSAKT etter normalisering: store/små bokstaver og mellomrom spiller ingen rolle)
       ev("e-3", "2026-12-05T08:00:00Z", "2026-12-05T09:00:00Z", { location: "Bergen" }), // for kort
       ev("e-4", "ikke en dato", "2026-12-06T09:00:00Z", { location: "Tromsø" }),
       ev("e-5", "2026-12-07T10:00:00Z", "2026-12-06T10:00:00Z", { location: "Tromsø" }) // slutt før start
     ], HOME);
     expect(trips).toEqual([{
-      trip_id: "trip-e-1-2026-12-01", starts_at: "2026-12-01T08:00:00.000Z", ends_at: "2026-12-03T17:00:00.000Z", destination: "Bergen", event_ids: ["e-1"], basis: "deterministic", email_signal_ids: []
+      trip_id: "trip-2b3276b5c1ef24f3a375aa2e", starts_at: "2026-12-01T08:00:00.000Z", ends_at: "2026-12-03T17:00:00.000Z", destination: "Bergen", event_ids: ["e-1"], basis: "deterministic", email_signal_ids: []
     }]);
   });
 
@@ -47,7 +48,7 @@ describe("detectTrips: reiser fra kalenderens stedsfelt (deterministisk) og reis
       ev("e-c", "2026-12-20T09:00:00Z", "2026-12-20T18:00:00Z", { location: "Paris" })
     ];
     const trips = detectTrips(events, HOME);
-    expect(trips.map((t) => [t.trip_id, t.event_ids, t.destination])).toEqual([["trip-e-a-2026-12-01", ["e-a", "e-b"], "Berlin"], ["trip-e-c-2026-12-20", ["e-c"], "Paris"]]);
+    expect(trips.map((t) => [t.trip_id, t.event_ids, t.destination])).toEqual([["trip-91f9cd4ca17349e43a97e4bb", ["e-a", "e-b"], "Berlin"], ["trip-73cd2c271cd7c7042cb70b4a", ["e-c"], "Paris"]]);
     expect(detectTrips([...events].reverse(), HOME)).toEqual(trips);
   });
 

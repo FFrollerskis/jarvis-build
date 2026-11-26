@@ -4,7 +4,7 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import { canonicalStringify } from "@jarvis/contracts";
 import type { AttentionQueueEntry, BusinessOpenLoop, LoopResolutionOutcome, OpenLoopPriority, OpenLoopType, SweepResult } from "./open-loop-types.ts";
-import { MANUAL_RESOLUTION_OUTCOMES, classifyAttentionBucket, deterministicLoopConfidence } from "./open-loop-types.ts";
+import { MANUAL_RESOLUTION_OUTCOMES, classifyAttentionBucket, deterministicLoopConfidence, isFinanceDerivedLoopType } from "./open-loop-types.ts";
 import { churnDetectionKey, churnNextAction, describeChurnRisk } from "./churn-rules.ts";
 import { ChurnService } from "./churn-service.ts";
 import {
@@ -1118,7 +1118,7 @@ export class OpenLoopService {
    * WP-D2 (JARVIS-045): kalibreringsrapport - forutsagt confidence mot faktisk utfall, samlet og per loop-type (treffrate, gap, Brier, pålitelighetsbøtter). Ren lesing. Kun loops
    * åpnet de siste `sinceDays` dagene (standard 365). Umerkede utfall (`condition_cleared`, lukket uten utfall) og åpne loops telles separat - aldri som treff eller bom.
    */
-  async calibrationReport(tenantId: string, memorySpace: MemorySpace, options: { sinceDays?: number } = {}): Promise<CalibrationReport> {
+  async calibrationReport(tenantId: string, memorySpace: MemorySpace, options: { sinceDays?: number; /** WP-N1b: utelat finansavledede løkketyper (tall per type og samlet bygges på resten). Uten valget: som før. */ excludeFinanceDerived?: boolean } = {}): Promise<CalibrationReport> {
     const sinceDays = Math.min(Math.max(Math.trunc(options.sinceDays ?? 365), 7), 1095);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       // Levende rader (åpnet i vinduet) + tidligere MERKEDE lukkinger av loops som siden er gjenåpnet (closure_history, vindu på lukketidspunktet): uten det ville «avvist, men vilkåret
@@ -1132,11 +1132,14 @@ export class OpenLoopService {
           WHERE l.tenant_id = $1 AND (h.e->>'closed_at')::timestamptz > now() - make_interval(days => $2)`,
         [tenantId, sinceDays]
       );
-      const observations = (rows as Array<{ loop_type: string; confidence: number | null; status: string; resolution_outcome: LoopResolutionOutcome | null }>).map((r): CalibrationObservation => ({
-        loop_type: r.loop_type,
-        confidence: r.confidence,
-        outcome: (r.status === "open" ? "open" : r.resolution_outcome ?? "unlabelled") as LoopOutcome
-      }));
+      const observations = (rows as Array<{ loop_type: string; confidence: number | null; status: string; resolution_outcome: LoopResolutionOutcome | null }>)
+        // WP-N1b: finansavledede løkketyper utelates FØR rapporten bygges, så samlet tall, per-type-rader og notater ikke bærer dem (en skymodell skal aldri se antall eller utfall for finansløkker).
+        .filter((r) => options.excludeFinanceDerived !== true || !isFinanceDerivedLoopType(r.loop_type))
+        .map((r): CalibrationObservation => ({
+          loop_type: r.loop_type,
+          confidence: r.confidence,
+          outcome: (r.status === "open" ? "open" : r.resolution_outcome ?? "unlabelled") as LoopOutcome
+        }));
       return buildCalibrationReport(observations);
     });
   }

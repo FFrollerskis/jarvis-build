@@ -1,0 +1,326 @@
+import type pg from "pg";
+import type { IdentityContext } from "@jarvis/contracts";
+import {
+  BusinessService, BusinessTransport, OpenLoopService
+} from "@jarvis/business";
+import { PgApprovalStore } from "@jarvis/core";
+import { ConversationGraphService, ConversationGraphTransport } from "@jarvis/conversation-graph";
+import {
+  ExecutiveService, ExecutiveTransport, VALUE_METRIC_CATALOG, composeSloReport, executiveToolDefinitions,
+  type ControlCenterRegistry, type ExecutiveServiceOptions, type InfraIncidentItem, type ObservationReader, type ValueMeasurement, type ValueRuntimeFacts
+} from "@jarvis/executive";
+import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
+import { ToolGateway, firstWaveTools, type FinanceExecutionLock, type ToolDefinition, type ToolGatewayOptions, type ToolTransport } from "@jarvis/tool-gateway";
+import { z } from "zod";
+import { createControlCenterRegistry, registerControlCenters } from "../../src/control-center/register.ts";
+import { FINANCE_EXECUTION_LOCK, financeLockServedLocally } from "../../src/restricted-context-guard.ts";
+import { RunRateService, RunRateTransport, runRateToolDefinitions } from "../../src/run-rate.ts";
+import { R22_EXTRA_FINANCE_IDS, UNKNOWN_FROZEN_SEED, UNKNOWN_REVOKED_SEED } from "./n1b-unknown-ids.ts";
+
+export { R22_EXTRA_FINANCE_IDS, UNKNOWN_FINANCE_LOOKING_IDS, UNKNOWN_FINANCE_LOOKING_REFS, UNKNOWN_FROZEN_SEED, UNKNOWN_REVOKED_SEED } from "./n1b-unknown-ids.ts";
+
+/**
+ * WP-N1b (K2/K4c): ÉN felles testverden for kartleggingen av avledet finansmetadata utenfor `finance*`-låsen. Ekte Postgres (app-rolle, RLS), ekte `ToolGateway` + `PolicyGateway`, ekte `BusinessTransport`/`OpenLoopService`,
+ * ekte `ExecutiveService`/`ExecutiveTransport`, ekte `RunRateService` - kun de NØSTEDE kildene (`situations.*`, `owner_controls.get_control_state`) og de injiserte rapportkildene (SLO, AI Mesh, evolusjon, selvmodell, verdi)
+ * er enkle leverandører som gir realistiske data med UNIKE MARKØRSTRENGER i finansdelen, slik at «holdt tilbake» kan bevises som at markørene ikke finnes i svaret til en skymodell (og finnes for lokal modell og eieren).
+ */
+export const TENANT = "tenant-n1b-table";
+export const OWNER = "person-n1b-owner";
+export const identity: IdentityContext = { person_id: OWNER, tenant_id: TENANT, memory_space_id: "business", session_id: "sess-n1b", device_id: "dev-n1b", channel: "web", auth_strength: "signed" };
+
+export const CLOUD = { provider: "anthropic", model: "claude-sonnet-5-5" } as const;
+export const UNKNOWN_MODEL = { provider: "ukjent-leverandor", model: "x" } as const;
+export const BLANK_MODEL = { provider: "", model: "x" } as const;
+export const LOCAL = { provider: "gemma_local", model: "gemma3:4b" } as const;
+export type ModelArg = { provider: string; model: string } | undefined;
+
+/** Markørstrenger: finansavledet innhold (skal IKKE nå en sky-/ukjent modell) og vanlig innhold (skal bli stående). */
+export const FIN = {
+  spendCategory: "N1B-KATEGORI-SPEND", spendId: "N1B-SPENDID-1", purpose: "N1B-FORMAL-LEIE", vendor: "N1B-LEVERANDOR-ALFA", amount: "98 765,00",
+  bankConsent: "N1B-BANK-SAMTYKKE", campaign: "N1B-KAMPANJE-X", killReason: "N1B-KILLSWITCH-BEGRUNNELSE-KORT", frozenReason: "N1B-FRYS-BEGRUNNELSE-VIPPS",
+  jobFailure: "N1B-STRIPE-JOBB-FEIL", costOre: "13579", driftCost: "N1B-KOSTNAD-PER-KALL", meshCost: "24680", evolutionCost: "N1B-EV16-KOSTMODELL", policyParam: "N1B-POLICY-PARAM",
+  /** Hendelsestitler slik produsentene lager dem (`providerProducer`/`schedulerProducer`): tilkoblingsnavn og jobbnavn i finansdomenet. */
+  infraTitle: "N1B-INFRA-TITTEL-STRIPE", infraJob: "stripe-payment-sync"
+} as const;
+export const KEEP = { followup: "N1B-KUNDE-BETA", ticket: "N1B-SAK-7", github: "N1B-GITHUB-FRYS", reasonOk: "N1B-GITHUB-BEGRUNNELSE", infra: "N1B-INFRA-GITHUB" } as const;
+
+export const LOOP_IDS = { fin1: "loop-fin-1", fin2: "loop-fin-2", fin3: "loop-fin-3", fin4: "loop-fin-4", ok1: "loop-ok-1", ok2: "loop-ok-2" } as const;
+
+/**
+ * Sår de ekstra finans-vedlikeholdsradene (`R22_EXTRA_FINANCE_IDS`) for en tenant. ELDRE enn de tre basisradene (`recent` har fem plasser: lokal modell og eier skal fortsatt se basisradene der); admin-pool omgår RLS - kun testdata.
+ */
+export async function seedExtraFinanceMaintenance(admin: pg.Pool, tenant: string): Promise<void> {
+  for (const [i, id] of R22_EXTRA_FINANCE_IDS.entries()) {
+    await admin.query(
+      "INSERT INTO connector_maintenance_log (tenant_id, connector_id, event_kind, minutes, reason, recorded_by, occurred_at) VALUES ($1, $2, 'manual_fix', $3, $4, 'test', now() - make_interval(days => 2, hours => $5::int))",
+      [tenant, id, 5 + i, `N1B-VEDLIKEHOLD-EKSTRA-${i}`, i]
+    );
+  }
+}
+
+/** Sår finans- og ikke-finans-løkker (åpne) i `business_open_loops` (admin-pool omgår RLS - kun til testdata). */
+export async function seedOpenLoops(admin: pg.Pool): Promise<void> {
+  const rows: Array<[string, string, string, string, string]> = [
+    [LOOP_IDS.fin1, "finance_spend_unexpected", `Utgift på ${FIN.amount} NOK (${FIN.spendCategory}) skjedde etter at en tilknyttet forpliktelse ble satt på pause`, `Gjennomgå uventet utgift ${FIN.spendId}`, "high"],
+    [LOOP_IDS.fin2, "payment_intent_anomaly", `Betalingsintensjon "${FIN.purpose}" (${FIN.amount} NOK til ${FIN.vendor}) har uløste avvik: MISSING_REF`, "Løs avvik før innsending", "normal"],
+    [LOOP_IDS.fin3, "bank_consent_attention", `Banksamtykket ${FIN.bankConsent} utløper snart`, "Forny samtykket", "normal"],
+    [LOOP_IDS.fin4, "marketing_spend_anomaly", `Kampanje "${FIN.campaign}" sin utgift (1 234,00 NOK) er vesentlig over snittet`, "Gjennomgå utgiftsavvik", "normal"],
+    [LOOP_IDS.ok1, "overdue_followup", `Følg opp ${KEEP.followup} før fredag`, "Ring kunden", "normal"],
+    [LOOP_IDS.ok2, "support_ticket_overdue", `Sak ${KEEP.ticket} mangler svar`, "Svar kunden", "high"]
+  ];
+  for (const [id, type, reason, next, priority] of rows) {
+    await admin.query(
+      `INSERT INTO business_open_loops (open_loop_id, tenant_id, memory_space_id, loop_type, detection_key, reason, next_action, priority, status, opened_at)
+       VALUES ($1, $2, 'business', $3, $4, $5, $6, $7, 'open', now() - interval '2 days')`,
+      [id, TENANT, type, `${type}:${id}`, reason, next, priority]
+    );
+  }
+  // en LØST finanssløkke i uken som gikk (ukebriefens by_type/still_open skal ikke bære den for sky)
+  await admin.query(
+    `INSERT INTO business_open_loops (open_loop_id, tenant_id, memory_space_id, loop_type, detection_key, reason, next_action, priority, status, opened_at, resolved_at, resolution_outcome)
+     VALUES ('loop-fin-resolved', $1, 'business', 'payment_intent_reconciliation_mismatch', 'payment_intent_reconciliation_mismatch:loop-fin-resolved', $2, NULL, 'high', 'resolved', now() - interval '3 days', now() - interval '1 day', 'acted')`,
+    [TENANT, `Betaling til ${FIN.vendor} avstemt som IKKE samsvarende`]
+  );
+}
+
+export const CONTACT_ID = "contact-n1b-1";
+export const IDENTITY_ID = "ident-n1b-1";
+
+/**
+ * Samtalegrafen (R21): en kontakt med en aktiv identitet og en e-postkanal, og tre av de seede løkkene (to finans, en vanlig) knyttet til kontakten - slik at identitetsvisningen (`read_cross_channel_commitment_view`) og den
+ * tenant-brede køen (`read_cross_channel_attention`) begge har finansavledede og vanlige forpliktelser å skille mellom. Kjøres ETTER `seedOpenLoops` (admin-pool omgår RLS - kun testdata).
+ */
+export async function seedConversationGraph(admin: pg.Pool): Promise<void> {
+  await admin.query("INSERT INTO business_contacts (contact_id, tenant_id, memory_space_id, name, email) VALUES ($1, $2, 'business', 'Kari Kunde', 'kari@example.test')", [CONTACT_ID, TENANT]);
+  await admin.query("INSERT INTO conversation_identities (identity_id, tenant_id, memory_space_id, display_name, linked_business_contact_id, status) VALUES ($1, $2, 'business', 'Kari Kunde', $3, 'active')", [IDENTITY_ID, TENANT, CONTACT_ID]);
+  await admin.query("INSERT INTO conversation_channel_links (link_id, tenant_id, memory_space_id, identity_id, channel, channel_identifier, confidence, match_method, status) VALUES ('link-n1b-1', $1, 'business', $2, 'email', 'kari@example.test', 1, 'exact_email', 'active')", [TENANT, IDENTITY_ID]);
+  await admin.query("UPDATE business_open_loops SET contact_id = $1 WHERE tenant_id = $2 AND open_loop_id = ANY($3::text[])", [CONTACT_ID, TENANT, [LOOP_IDS.fin1, LOOP_IDS.fin2, LOOP_IDS.ok1]]);
+}
+
+export function fakeDef(tool_id: string, action: string, data: unknown): ToolDefinition {
+  return {
+    tool_id, action, description: "fake", input_schema: z.record(z.any()) as never, capability_class: "A", scopes: [], reversible: true, rollback_procedure: "ingen", idempotent_external: true,
+    timeout_ms: 8000, rate_limit_per_minute: 100000, credential_ref: "", output_trust: "trusted", transport: { async invoke() { return { data: data as never }; } }
+  };
+}
+
+/** Realistiske `Situation`-rader (formen `situations.get_queue` leverer): to `spend` (finansavledet, begrunnelsen fra løkken) og to andre. */
+function allSituationRows(): unknown[] {
+  const base = { tenant_id: TENANT, memory_space_id: "business", owner_person_id: null, stage: "inform", confidence: 0.9, status: "open", last_notified_at: null, act_tool_id: null, act_action: null, act_result: null, act_idempotency_key: null, act_claimed_at: null, act_operation_fingerprint: null, act_notify_message: null, inform_delivered_at: null, opened_at: "2026-11-20T10:00:00.000Z", resolved_at: null, created_at: "2026-11-20T10:00:00.000Z", updated_at: "2026-11-20T10:00:00.000Z" };
+  return [
+    { ...base, situation_id: "sit-spend-1", domain: "spend", source_open_loop_id: LOOP_IDS.fin1, detection_key: `open_loop:finance_spend_unexpected:${LOOP_IDS.fin1}`, priority: "high", reason: `Utgift på ${FIN.amount} NOK (${FIN.spendCategory}) skjedde etter at en tilknyttet forpliktelse ble satt på pause Anbefalt neste handling: Gjennomgå uventet utgift ${FIN.spendId}`, inform_message: `Uventet utgift ${FIN.vendor}` },
+    { ...base, situation_id: "sit-spend-2", domain: "spend", source_open_loop_id: null, detection_key: "spend_anomaly:ai_cost:2026-11-24", priority: "normal", reason: `Kostnaden for AI-bruken 2026-11-24 var ca. 4,2 ganger høyere enn din vanlige dag ${FIN.driftCost}`, inform_message: null },
+    { ...base, situation_id: "sit-pipe-1", domain: "pipeline", source_open_loop_id: LOOP_IDS.ok1, detection_key: `open_loop:overdue_followup:${LOOP_IDS.ok1}`, priority: "normal", reason: `Følg opp ${KEEP.followup} før fredag`, inform_message: null },
+    { ...base, situation_id: "sit-sup-1", domain: "support", source_open_loop_id: LOOP_IDS.ok2, detection_key: `open_loop:support_ticket_overdue:${LOOP_IDS.ok2}`, priority: "high", reason: `Sak ${KEEP.ticket} mangler svar`, inform_message: null },
+    // infra-domenet (`mapIncidentToCandidate`: reason = hendelsestittel + status): titlene fra produsentene navngir finanskoblinger/-jobber (`providerProducer`/`schedulerProducer`) og kan ikke bevises ufarlige strukturelt
+    { ...base, situation_id: "sit-infra-1", domain: "infra", source_open_loop_id: null, detection_key: "infra_incident:inc-n1b-1", priority: "normal", reason: `Tilkobling svikter: Stripe ${FIN.infraTitle} (status: open, alvorlighetsgrad: normal)`, inform_message: null },
+    { ...base, situation_id: "sit-infra-2", domain: "infra", source_open_loop_id: null, detection_key: "infra_incident:inc-n1b-2", priority: "normal", reason: `Tilkobling svikter: GitHub ${KEEP.infra} (status: open, alvorlighetsgrad: normal)`, inform_message: null }
+  ];
+}
+
+
+/** Situasjonsrader; uten `financeData` (orakel-sammenligningen) er alt finansavledet (`spend` og finans-infra) borte, men det vanlige og den ikke-finansielle infra-posten er der. */
+export function situationRows(financeData = true): unknown[] {
+  const rows = allSituationRows() as Array<{ situation_id: string }>;
+  return financeData ? rows : rows.filter((r) => !["sit-spend-1", "sit-spend-2", "sit-infra-1"].includes(r.situation_id));
+}
+
+export const OWNER_CONTROL_STATE = {
+  kill_switch: { active: true, reason: FIN.killReason, actor_person_id: OWNER, changed_at: "2026-11-21T08:00:00.000Z" },
+  frozen_connectors: [
+    { connector_id: "github", reason: KEEP.reasonOk, actor_person_id: OWNER, changed_at: "2026-11-21T08:10:00.000Z" },
+    { connector_id: "stripe", reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T08:20:00.000Z" },
+    { connector_id: "finance_vipps", reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T08:30:00.000Z" },
+    // fiks-runde 2 (FIX-A): ukjente fritekst-id-er uten ordstamme (se `UNKNOWN_FINANCE_LOOKING_IDS`)
+    ...UNKNOWN_FROZEN_SEED.map((connector_id) => ({ connector_id, reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T08:40:00.000Z" }))
+  ],
+  revoked_credentials: [
+    { credential_ref: "JARVIS_GITHUB_TOKEN", reason: KEEP.reasonOk, actor_person_id: OWNER, changed_at: "2026-11-21T09:00:00.000Z" },
+    { credential_ref: "JARVIS_VIPPS_CLIENT_SECRET", reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T09:10:00.000Z" },
+    ...UNKNOWN_REVOKED_SEED.map((credential_ref) => ({ credential_ref, reason: FIN.frozenReason, actor_person_id: OWNER, changed_at: "2026-11-21T09:20:00.000Z" }))
+  ]
+};
+
+export const AUTONOMY_POLICIES = [
+  { domain: "pipeline", tool_id: "business", action: "create_followup", enabled: true, parameters: {}, memory_space_id: "business", actor_person_id: OWNER, updated_at: "2026-11-01T00:00:00.000Z" },
+  { domain: "spend", tool_id: "finance_spend", action: "pause_recurring_commitment", enabled: true, parameters: { note: FIN.policyParam }, memory_space_id: "business", actor_person_id: OWNER, updated_at: "2026-11-01T00:00:00.000Z" }
+];
+
+/** Eierens kontrolltilstand uten finansdelen (orakel-sammenligningen): kun den ikke-finansielle koblingen og credentialen og den globale nødbryteren. */
+export function ownerControlState(financeData = true): typeof OWNER_CONTROL_STATE {
+  if (financeData) return OWNER_CONTROL_STATE;
+  return {
+    kill_switch: OWNER_CONTROL_STATE.kill_switch,
+    frozen_connectors: OWNER_CONTROL_STATE.frozen_connectors.filter((f) => f.connector_id === "github"),
+    revoked_credentials: OWNER_CONTROL_STATE.revoked_credentials.filter((r) => r.credential_ref === "JARVIS_GITHUB_TOKEN")
+  };
+}
+export function autonomyPolicies(financeData = true): typeof AUTONOMY_POLICIES {
+  return financeData ? AUTONOMY_POLICIES : AUTONOMY_POLICIES.filter((p) => p.domain !== "spend");
+}
+
+const WINDOWS = { d7: { from: "2026-11-18T00:00:00.000Z", to: "2026-11-25T00:00:00.000Z" }, d30: { from: "2026-10-26T00:00:00.000Z", to: "2026-11-25T00:00:00.000Z" } };
+const VALUE_FACTS: ValueRuntimeFacts = {
+  v1_delivery_configured: true, v2_push: { enabled: false, channel_configured: true, max_per_day: 3, quiet_hours: "22-07" }, v5_proposals_enabled: false,
+  ev0: { constitution_verified: true, ledger_ok: true }, kill_switch_active: false, declared_gates: []
+};
+const MEASURED: ValueMeasurement[] = VALUE_METRIC_CATALOG
+  .filter((m) => m.never_measurable_reason_no === undefined && m.derive === undefined)
+  .map((m) => (m.unit === "ore"
+    ? ({ id: m.id, state: "measured", last_7d: Number(FIN.costOre), last_30d: Number(FIN.costOre) * 2 } as ValueMeasurement)
+    : m.shape === "snapshot" ? ({ id: m.id, state: "measured", now: 2 } as ValueMeasurement) : ({ id: m.id, state: "measured", last_7d: 5, last_30d: 20 } as ValueMeasurement)));
+
+const SLO_REPORT = (financeData = true) => composeSloReport({
+  as_of: "2026-11-25T10:00:00.000Z",
+  slos: [{ id: "chat_ttft", label: "Chat: første token", status: "OK", value: 900, target: 3000, metric: "ttft_p95_ms", samples: 40, window_hours: 24, source: "cost_events (CHAT)", observed_at: "2026-11-25T10:00:00.000Z", detail: "p95 900 ms (mål 3000 ms)" }] as never,
+  drift: {
+    window_recent_hours: 24, window_baseline_hours: 168, insufficient: [],
+    findings: [
+      ...(financeData ? [{ series: "chat", metric: "cost_per_call_ore", baseline: 3, recent: 6.7, change: 1.22, detail: `Kostnad per kall økte fra 3 til 6.7 øre (+122 %) ${FIN.driftCost}` }] : []),
+      { series: "chat", metric: "p95_ms", baseline: 800, recent: 1500, change: 0.9, detail: "p95-latens økte fra 800 til 1500 ms" }
+    ]
+  } as never,
+  data_quality: null
+});
+
+/** Åpne hendelser slik `createInfraStatusSource` gir dem (tittel fra produsentene): to finansrelaterte (tilkobling og jobb) og én vanlig (GitHub). */
+export function infraIncidents(financeData = true): InfraIncidentItem[] {
+  const item = (i: number, title: string, source_kind: string): InfraIncidentItem => ({
+    incident_id: `inc-n1b-${i}`, title, severity: "normal", source_kind, phase: "open", phase_no: "Åpen", opened_at: "2026-11-25T08:00:00.000Z", last_seen_at: "2026-11-25T09:00:00.000Z", occurrence_count: 2, last_change: null, evidence: { verified: 0, observed: 1, claimed: 0 }
+  });
+  return [
+    ...(financeData ? [item(1, `Tilkobling svikter: Stripe ${FIN.infraTitle}`, "provider"), item(3, `Bakgrunnsjobben ${FIN.infraJob} ga opp`, "scheduler")] : []),
+    item(2, `Tilkobling svikter: GitHub ${KEEP.infra}`, "provider")
+  ];
+}
+
+export interface World {
+  gateway: ToolGateway;
+  /** Antall kall til finance-transporten (nøstet). */
+  financeCalls: () => number;
+  service: ExecutiveService;
+  /** Kun med `realCenters`: eier-kontrollene og kill switch sentrene leser (til å så frosne koblinger og tilbakekalte credentials i testdatabasen). */
+  ownerControls?: OwnerControls;
+  killSwitch?: KillSwitch;
+  /** Antall kall inn i de injiserte rapportkildene (spion: et tilbakehold skal skje FØR kilden leses). */
+  reads: ReadCounters;
+}
+
+/** Teller hvor mange ganger hver injisert rapportkilde er lest (verdi-, SLO-, AI Mesh-, evolusjons-, selvdiagnose- og infrastatuskilden). */
+export interface ReadCounters { value: number; slo: number; aiMesh: number; evolution: number; selfModel: number; infra: number; runRateReport: number; runRateMaintenance: number }
+
+export interface WorldOptions {
+  pool: pg.Pool;
+  /** Begrenset-vakten (utførelseslås + central kontekst) PÅ. */
+  guard: boolean;
+  /** `false`: samme verden uten ALT finansavledet innhold (orakel-sammenligningen: skysvar med og uten finansdata skal være IDENTISKE). Standard `true`. */
+  financeData?: boolean;
+  /** Tenanten og eieren verdenen er bygget for (eier-porten til sentrene og policy). Standard `TENANT`/`OWNER`; orakel-testen bygger en andre verden for en andre tenant. */
+  tenantId?: string;
+  ownerId?: string;
+  controlCenters?: ControlCenterRegistry;
+  executiveOptions?: Partial<ExecutiveServiceOptions>;
+  /** Registrer de EKTE sentrene Autoritet, Integrasjoner og AI (via `registerControlCenters`, som main.ts) mot samme gateway og pool. */
+  realCenters?: boolean;
+  /** Miljøflaggene sentrene leses fra (kun med `realCenters`), f.eks. `{ JARVIS_CONTROL_CENTER_SECURITY: "on" }`. Utelatt = `{}`: kun Autoritet, Integrasjoner og AI er koblet inn. */
+  centerFlags?: Record<string, string>;
+  /** Hvilke kontrollsentre som har lese-verktøy (som `controlCentersWithTools` i main.ts). */
+  centerTools?: Array<"finance" | "memory" | "agent" | "operations" | "value" | "privacy" | "security" | "evolution">;
+  /** Ekstra verktøy registrert i gatewayen (f.eks. conversation_graph). */
+  extraTools?: ToolDefinition[];
+  /** Leverandørtransporter (nøkkel = verktøy-id) som erstatter «ikke konfigurert»-transporten i `firstWaveTools` (f.eks. en spion for `telnyx`). */
+  transports?: Record<string, ToolTransport>;
+}
+
+/** Bygger en gateway SOM main.ts gjør det: lås + vakt fra SAMME flagg (`guard`). */
+export function buildWorld(options: WorldOptions): World {
+  const { pool, guard } = options;
+  const fin = options.financeData !== false;
+  const tenantId = options.tenantId ?? TENANT;
+  const ownerId = options.ownerId ?? OWNER;
+  const reads: ReadCounters = { value: 0, slo: 0, aiMesh: 0, evolution: 0, selfModel: 0, infra: 0, runRateReport: 0, runRateMaintenance: 0 };
+  let financeCalls = 0;
+  const policy = new PolicyGateway({
+    devices: new InMemoryDeviceRegistry(), nonces: new PgApprovalStore(pool), killSwitch: new KillSwitch(),
+    authority: { owner_person_id: ownerId, owner_tenants: [tenantId] }
+  });
+  const lock: FinanceExecutionLock = FINANCE_EXECUTION_LOCK;
+  const gatewayOptions: ToolGatewayOptions = guard ? { financeExecutionLock: lock } : {};
+  const gateway = new ToolGateway(pool, policy, { name: "test", async get() { return "secret"; } }, undefined, undefined, gatewayOptions);
+
+  const openLoops = new OpenLoopService(pool);
+  const businessTransport = new BusinessTransport(new BusinessService(pool), openLoops, pool, gateway);
+  // `conversation_graph` (R21): den EKTE transporten mot den samme poolen (tverr-kanal-lesningene leser `business_open_loops`)
+  for (const tool of firstWaveTools({ business: businessTransport, conversation_graph: new ConversationGraphTransport(new ConversationGraphService(pool)), ...(options.transports ?? {}) })) gateway.register(tool);
+  // finance.get_kill_switch er den NØSTEDE avlesningen executive gjør (ToolGateway-låsen/den sentrale lesningen skal holde den tilbake for sky)
+  gateway.register({ ...fakeDef("finance", "get_kill_switch", null), transport: { async invoke() { financeCalls += 1; return { data: { tenant_id: TENANT, enabled: true, enabled_by_person_id: OWNER, reason: FIN.killReason, enabled_at: "2026-11-01T00:00:00Z", disabled_at: null, updated_at: "2026-11-01T00:00:00Z" } as never }; } } });
+  gateway.register(fakeDef("owner_controls", "get_control_state", ownerControlState(fin)));
+  gateway.register(fakeDef("situations", "get_pause_state", { paused: fin ? ["spend", "pipeline"] : ["pipeline"] }));
+  gateway.register(fakeDef("situations", "get_queue", situationRows(fin)));
+  gateway.register(fakeDef("situations", "list_autonomy_policies", autonomyPolicies(fin)));
+  gateway.register(fakeDef("situations", "get_notification_policy", null));
+  // run_rate: samme tjeneste som i main.ts, men med tellere på lesemetodene (spion: et tilbakehold skal skje FØR kostnadsdata leses)
+  const runRate = new RunRateService(pool);
+  const reportRead = runRate.report.bind(runRate);
+  const maintenanceRead = runRate.maintenanceWithoutFinance.bind(runRate);
+  runRate.report = async (tenant) => { reads.runRateReport += 1; return reportRead(tenant); };
+  runRate.maintenanceWithoutFinance = async (tenant) => { reads.runRateMaintenance += 1; return maintenanceRead(tenant); };
+  for (const tool of runRateToolDefinitions(new RunRateTransport(runRate))) gateway.register(tool);
+
+  // De EKTE kontrollsentrene - SAMME fabrikk og registrering som main.ts - mot den samme gatewayen og poolen. Uten `centerFlags` er kun Autoritet, Integrasjoner og AI koblet inn; flaggene (`JARVIS_CONTROL_CENTER_*`) kobler de øvrige.
+  // Vakten PÅ gir sentrene `financeGuard` (som main.ts: kun `...(restrictedContextGuard.enabled ? { financeGuard: true } : {})`); AV gir nøyaktig H2-oppførselen.
+  let controlCenters = options.controlCenters;
+  let ownerControls: OwnerControls | undefined;
+  let killSwitch: KillSwitch | undefined;
+  const serviceRef: { current?: ExecutiveService } = {};
+  if (options.realCenters === true) {
+    const authority = { owner_person_id: ownerId, owner_tenants: [tenantId] };
+    if (fin) {
+      killSwitch = new KillSwitch(pool, { owner_person_id: ownerId });
+      ownerControls = new OwnerControls(killSwitch, pool, { owner_person_id: ownerId });
+    } else {
+      // uten finansdata: `owner_control_state` er GLOBAL (ikke per tenant), så denne verdenen får en minnebasert kontroll med kun den vanlige koblingen/credentialen
+      killSwitch = new KillSwitch();
+      ownerControls = new OwnerControls(killSwitch);
+      ownerControls.freezeConnector("github");
+      ownerControls.revokeCredential("JARVIS_GITHUB_TOKEN");
+    }
+    controlCenters = createControlCenterRegistry({ authority });
+    registerControlCenters(controlCenters, {
+      pool, env: options.centerFlags ?? {}, toolGateway: gateway, ownerControls, killSwitch, authority,
+      modelGateway: { providerOverview: () => [], meshStatus: () => ({ router: "HEALTHY", fallback: "READY" }), routingAdvisorMode: "shadow" } as never,
+      runRate: new RunRateService(pool),
+      valueReport: (tenantId) => (serviceRef.current as ExecutiveService).getValueReport(tenantId),
+      infraStatus: (tenantId) => (serviceRef.current as ExecutiveService).getInfraStatus(tenantId),
+      ...(guard ? { financeGuard: true as const } : {})
+    });
+  }
+
+  const readers: Record<string, ObservationReader> = {
+    database: async () => { reads.selfModel += 1; return { status: "OK", source: "db", observed_at: "2026-11-25T10:00:00.000Z", detail: "Databasen svarer" }; },
+    connectors: async () => { reads.selfModel += 1; return { status: "DEGRADED", source: "connector-health", observed_at: "2026-11-25T10:00:00.000Z", detail: `Stripe er nede: ${FIN.jobFailure}` }; },
+    drift: async () => { reads.selfModel += 1; return { status: "DEGRADED", source: "cost_events", observed_at: "2026-11-25T10:00:00.000Z", detail: `Gradvis forverring: chat: Kostnad per kall økte fra 3 til 6.7 øre ${FIN.driftCost}` }; }
+  };
+  const service = new ExecutiveService(gateway, {
+    servedLocally: financeLockServedLocally,
+    ...(guard ? { withholdFinanceFromCloud: true } : {}),
+    selfModel: { readers, limitations: { forbiddenModelToolIds: [], connectors: [], modelProfiles: [], allModelCapabilities: [] } },
+    slo: { report: async () => { reads.slo += 1; return SLO_REPORT(fin); } },
+    infra: { source: { measure: async () => { reads.infra += 1; return { incidents: { active: infraIncidents(fin), active_total: infraIncidents(fin).length, by_phase: { open: infraIncidents(fin).length }, resolved_last_7d: 0 }, last_changes: {}, producer_runs: [], errors: [] } as never; } }, producers_enabled: true, producer_names: ["provider", "scheduler"], producers_interval_ms: 300_000 },
+    // AI Mesh og evolusjonsrapporten er enkle, realistiske rapportobjekter (transporten gir dem videre uendret); kun finansdelen (kostnad i øre) har markørstrenger
+    aiMesh: { report: async () => { reads.aiMesh += 1; return ({ as_of: "2026-11-25T10:00:00.000Z", router: "UP", providers: [{ provider: "anthropic", model: "claude", state: "LIVE", healthy: true, usage_7d: { calls: 11, failed_calls: 0, cost_ore: Number(FIN.meshCost) } }], summary_no: `AI Mesh: Anthropic LIVE, 7 døgn: 11 kall, ${FIN.meshCost} øre` }) as never; } },
+    evolution: { report: async () => { reads.evolution += 1; return ({ as_of: "2026-11-25T10:00:00.000Z", acts: false, sections: [{ ev: "EV-16", title_no: `Ressurs og kost ${FIN.evolutionCost}`, status: "OK", summary_no: `Månedsforbruk ${FIN.costOre} øre` }, { ev: "EV-5", title_no: "Utrulling", status: "OK", summary_no: "Ingen endringer" }], summary_no: `Evolusjon: ${FIN.evolutionCost}` }) as never; } },
+    value: { source: { measure: async () => { reads.value += 1; return { windows: WINDOWS, measurements: MEASURED }; } }, facts: () => VALUE_FACTS },
+    ...(controlCenters ? { controlCenters } : {}),
+    ...(options.executiveOptions ?? {})
+  } as ExecutiveServiceOptions);
+  for (const tool of executiveToolDefinitions(new ExecutiveTransport(service), { controlCenters: options.centerTools ?? [] })) gateway.register(tool);
+  for (const tool of options.extraTools ?? []) gateway.register(tool);
+  serviceRef.current = service;
+  return { gateway, financeCalls: () => financeCalls, service, reads, ...(ownerControls ? { ownerControls } : {}), ...(killSwitch ? { killSwitch } : {}) };
+}
+
+export const run = async (gateway: ToolGateway, tool_id: string, action: string, parameters: Record<string, unknown>, servingModel?: ModelArg, as: IdentityContext = identity): Promise<{ ok: boolean; reason?: string; data?: unknown; external_id?: string }> => {
+  const r = await gateway.execute({ identity: as, tool_id, action, parameters: parameters as never, ...(servingModel !== undefined ? { servingModel } : {}), idempotency_key: `k-${Math.random().toString(36).slice(2)}` });
+  return r.ok ? { ok: true, data: (r as { data?: unknown }).data, ...((r as { external_id?: string }).external_id !== undefined ? { external_id: (r as { external_id?: string }).external_id as string } : {}) } : { ok: false, reason: r.reason };
+};

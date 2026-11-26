@@ -34,6 +34,17 @@ export interface HomeCriticalTransportDeps {
 
 const OPS = new Map(HOME_CRITICAL_OPS.map((op) => [op.action, op] as const));
 
+/**
+ * Klokkeskjevhet HA - Jarvis i ms (positivt = HA ligger FREM) fra HTTP-`Date` i HA-svaret, nøyaktig til ca. ett sekund (headeren har sekundoppløsning). `null` = ingen brukbar `Date` (mangler/uleselig). Brukes KUN av avstemmingen (WP-G2c fiks-runde 1, LOW-1) som
+ * grunnlag for å nekte `failed` når klokkene avviker: `last_changed` er HAs egen klokke, og `requested_at` er Jarvis'. Kun et tall - aldri svarteksten. Begrensning: `Date` er klokken til nærmeste HTTP-ledd; en omvendt proxy på en annen maskin enn HA setter sin egen.
+ */
+function clockSkewMs(response: Pick<Response, "headers">, nowMs: number = Date.now()): number | null {
+  const header = response.headers.get("date");
+  if (header === null) return null;
+  const at = Date.parse(header);
+  return Number.isFinite(at) ? Math.round(at - nowMs) : null;
+}
+
 export class HomeAssistantCriticalTransport implements ToolTransport {
   constructor(private readonly deps: HomeCriticalTransportDeps) {}
 
@@ -48,7 +59,7 @@ export class HomeAssistantCriticalTransport implements ToolTransport {
   }
 
   /** `null` = målet finnes ikke (404). Alt annet enn 2xx kaster (en lesing har ingen bivirkning). Svaret normaliseres: kun enumererte tilstandsord, tall og tidsstempler - aldri `friendly_name` eller andre fritekst-attributter. */
-  private async readEntity(entityId: string, credential: string): Promise<Params | null> {
+  private async readEntity(entityId: string, credential: string, measureClock = false): Promise<Params | null> {
     const response = await guardedFetch(`${await this.root()}/api/states/${encodePathSegment(entityId, "entity")}`, { headers: { authorization: `Bearer ${credential}`, accept: "application/json" } });
     if (response.status === 404) {
       await response.body?.cancel().catch(() => undefined);
@@ -58,10 +69,12 @@ export class HomeAssistantCriticalTransport implements ToolTransport {
       await response.body?.cancel().catch(() => undefined);
       throw new Error(`home_assistant_error_${response.status}`);
     }
-    const json = (await response.json()) as { entity_id?: unknown; state?: unknown; attributes?: unknown } | null;
+    const json = (await response.json()) as { entity_id?: unknown; state?: unknown; attributes?: unknown; last_changed?: unknown } | null;
     if (json === null || typeof json !== "object" || json.entity_id !== entityId || typeof json.state !== "string") throw new Error("home_assistant_state_malformed");
     const attributes = typeof json.attributes === "object" && json.attributes !== null && !Array.isArray(json.attributes) ? (json.attributes as Record<string, unknown>) : undefined;
-    return normalizeHomeCriticalState({ entity_id: json.entity_id, state: json.state, attributes });
+    const normalized = normalizeHomeCriticalState({ entity_id: json.entity_id, state: json.state, attributes, last_changed: json.last_changed });
+    // Kun lese-handlingen (som avstemmingen bruker) bærer målt klokkeskjevhet; lesingene inne i en mutasjon (før-tilstand, ventesløyfe) er uendret.
+    return measureClock ? { ...normalized, clock_skew_ms: clockSkewMs(response) } : normalized;
   }
 
   /** Sender tjenestekallet. FØR sending: vanlig feil. Etter at forespørselen kan ha nådd HA: `outcome_unknown` (5xx, nullstilt/tidsavbrutt, redirect). 4xx = entydig avvist. */
@@ -86,7 +99,7 @@ export class HomeAssistantCriticalTransport implements ToolTransport {
   private async dispatch(action: string, p: Params, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
     const entity = p["entity"];
     if (!isHomeCriticalEntityId(entity)) throw new Error("home_invalid_entity_id");
-    if (action === HOME_CRITICAL_READ_ACTION) return { data: await this.readEntity(entity, credential) };
+    if (action === HOME_CRITICAL_READ_ACTION) return { data: await this.readEntity(entity, credential, true) };
     const op = OPS.get(action);
     const call = homeServiceCall(action, p);
     if (!op || call === null) throw new Error(`home_critical_unsupported_action:${action.slice(0, 40).replace(/[^A-Za-z0-9_]/g, "_")}`);

@@ -89,6 +89,33 @@ describe("B: Slack", () => {
     expect(result).toEqual({ provider_message_id: "1731850000.000200", thread_ref: "1731840000.000100" });
   });
 
+  it("WP-G1c g3: {ok:false} med fatal_error/internal_error på en MUTASJON er UKJENT utfall (kan delvis ha lyktes) - aldri et sikkert avslag; alle fem mutasjoner; kun koden i feilen", async () => {
+    const slack = new SlackAdapter();
+    const target = { account_ref: "T0AAAAAAAA", recipient: "C0AAAAAAAA", target_message_id: "1.2" };
+    for (const code of ["fatal_error", "internal_error"]) {
+      stub(() => jsonRes({ ok: false, error: code, detail: "xoxb-aldri-i-feilen" }));
+      await expectUnknown(slack.send(send(), "t"), `comms_slack_${code}`);
+      await expectUnknown(slack.edit({ ...target, text: "rettet" }, "t"), `comms_slack_${code}`);
+      await expectUnknown(slack.delete(target, "t"), `comms_slack_${code}`);
+      await expectUnknown(slack.react({ ...target, reaction: "thumbsup" }, "t"), `comms_slack_${code}`);
+      const err = await slack.send(send(), "t").catch((e: Error) => e);
+      expect((err as Error).message).toBe(`outcome_unknown:comms_slack_${code}`);
+      expect((err as Error).message).not.toContain("xoxb");
+    }
+  });
+
+  it("WP-G1c g3: andre {ok:false}-koder er fortsatt entydige avslag (INGEN generell omklassifisering), og en LESING med fatal_error er en vanlig avvisning (ingen effekt å være usikker på)", async () => {
+    const slack = new SlackAdapter();
+    for (const code of ["channel_not_found", "not_in_channel", "ratelimited", "invalid_auth", "msg_too_long", "is_archived"]) {
+      stub(() => jsonRes({ ok: false, error: code }));
+      await expect(slack.send(send(), "t"), code).rejects.toThrow(`comms_provider_rejected:slack:${code}`);
+    }
+    stub(() => jsonRes({ ok: false, error: "fatal_error" }));
+    const read = await slack.messageExists({ account_ref: "T0AAAAAAAA", recipient: "C0AAAAAAAA", target_message_id: "1.2" }, "t").catch((e: Error) => e);
+    expect((read as Error).message).toBe("comms_provider_rejected:slack:fatal_error");
+    expect((read as Error).message.startsWith("outcome_unknown:")).toBe(false);
+  });
+
   it("{ok:false} er et avslag med leverandørkoden; manglende ts og tom kropp er UKJENT", async () => {
     stub(() => jsonRes({ ok: false, error: "channel_not_found" }));
     await expect(new SlackAdapter().send(send(), "t")).rejects.toThrow("comms_provider_rejected:slack:channel_not_found");

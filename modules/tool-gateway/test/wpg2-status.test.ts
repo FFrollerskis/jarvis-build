@@ -23,12 +23,25 @@ describe("PERSONAL_CAPABILITY_STATUS", () => {
     expect([...runbookIds].sort()).toEqual(PERSONAL_CAPABILITY_STATUS.map((s) => s.id).sort());
   });
 
-  it("`outcome_unknown` avstemmes ikke og er IKKE stille utelatt (CLAUDE.md regel 11): `p1a_outcome_reconcile` står som DEFERRED med et konkret neste steg - sletter noen posten, feller denne testen", () => {
+  it("`p1a_outcome_reconcile` er BYGGET (WP-G2c, D-483, Q-73 pkt 10): `DORMANT` + `PARTIAL` (ikke lenger `DEFERRED`), med et konkret neste steg som sier hva som gjenstår (bil kan ikke bli `failed`), og id-en står i runbook-tabellen - sletter noen posten, eller setter den tilbake til DEFERRED, feller denne testen", () => {
     const entry = PERSONAL_CAPABILITY_STATUS.find((s) => s.id === "p1a_outcome_reconcile");
     expect(entry).toBeDefined();
-    expect(entry?.status).toEqual(["DEFERRED"]);
-    expect(entry?.next_step ?? "").toMatch(/reconcile/);
+    expect(entry?.status).toEqual(["DORMANT", "PARTIAL"]);
+    expect(entry?.status as readonly string[]).not.toContain("DEFERRED");
+    expect(entry?.next_step ?? "").toMatch(/bil/);
+    expect(entry?.next_step ?? "").toMatch(/failed/);
+    expect(entry?.note ?? "").toMatch(/\/personal\/actions\/reconcile/);
+    expect(entry?.note ?? "").toMatch(/aldri en automatisk retry/i);
     expect(RUNBOOK).toContain("`p1a_outcome_reconcile`");
+    // runbook-raden sier det samme som koden: bygget (DORMANT/PARTIAL), ikke utsatt
+    const row = RUNBOOK.split("\n").find((l) => l.startsWith("| `p1a_outcome_reconcile` |")) ?? "";
+    expect(row).toMatch(/DORMANT/);
+    expect(row).toMatch(/PARTIAL/);
+    expect(row).not.toMatch(/\| `DEFERRED`/);
+    // og ruten og migrasjonen finnes faktisk (ingen status uten kode)
+    const root = fileURLToPath(new URL("../../..", import.meta.url));
+    expect(readFileSync(join(root, "apps/api/src/personal-routes.ts"), "utf8")).toContain('"/personal/actions/reconcile"');
+    expect(readFileSync(join(root, "modules/core/src/db/migrations/144_personal_action_reconcile.sql"), "utf8")).toContain("reconcile_attempts");
   });
 
   it("hvert JARVIS_PERSONAL_*-flagg har en status (ingen flagg uten synlig status), og alle flaggene står i runbookens flaggtabell", () => {

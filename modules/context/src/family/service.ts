@@ -247,6 +247,16 @@ export class FamilyService {
     return invitation(rows[0] as Record<string, unknown>);
   }
 
+  /**
+   * Invitasjonen slik den INVITERTE ser den: KUN en rad adressert til `personId` (WP-G2c, D-483, JARVIS-113 e/8). En annens invitasjon og en id som ikke finnes gir NØYAKTIG samme svar (`not_found`) fra ÉTT oppslag (samme tidsklasse, ingen
+   * radlås på en annens rad): før svarte «ikke din» med `not_the_invitee` og «finnes ikke» med `not_found`, så et medlem kunne prøve id-er og se hvilke invitasjoner som finnes (og en radlås på en annens rad kunne i tillegg ventet på den).
+   */
+  private async loadInvitationFor(client: Client, tenantId: string, id: string, personId: string): Promise<FamilyInvitation> {
+    const { rows } = await client.query(`SELECT * FROM family_invitations WHERE tenant_id = $1 AND invitation_id = $2 AND invitee_person_id = $3 FOR UPDATE`, [tenantId, id, personId]);
+    if (!rows[0]) throw new FamilyError("not_found");
+    return invitation(rows[0] as Record<string, unknown>);
+  }
+
   async revokeInvitation(actor: FamilyActor, invitationId: string): Promise<FamilyInvitation> {
     return this.tx(actor, async (client) => {
       const me = await this.requireMember(client, actor);
@@ -263,8 +273,7 @@ export class FamilyService {
   async acceptInvitation(actor: FamilyActor, invitationId: string, options: { data_tenant_id?: string } = {}): Promise<FamilyMember> {
     const dataTenant = await this.verifiedDataTenant(actor, options.data_tenant_id);
     return this.txDenying<FamilyMember>(actor, async (client) => {
-      const inv = await this.loadInvitation(client, actor.tenant_id, invitationId);
-      if (inv.invitee_person_id !== actor.person_id) throw new FamilyError("not_the_invitee");
+      const inv = await this.loadInvitationFor(client, actor.tenant_id, invitationId, actor.person_id);
       if (inv.status !== "pending") throw new FamilyError("invitation_not_pending");
       const now = this.now();
       if (Date.parse(inv.expires_at) <= now.getTime()) {
@@ -298,8 +307,7 @@ export class FamilyService {
 
   async declineInvitation(actor: FamilyActor, invitationId: string): Promise<FamilyInvitation> {
     return this.tx(actor, async (client) => {
-      const inv = await this.loadInvitation(client, actor.tenant_id, invitationId);
-      if (inv.invitee_person_id !== actor.person_id) throw new FamilyError("not_the_invitee");
+      const inv = await this.loadInvitationFor(client, actor.tenant_id, invitationId, actor.person_id);
       if (inv.status !== "pending") throw new FamilyError("invitation_not_pending");
       const { rows } = await client.query(`UPDATE family_invitations SET status = 'declined', decided_at = $3, decided_by_person_id = $4 WHERE tenant_id = $1 AND invitation_id = $2 RETURNING *`, [actor.tenant_id, invitationId, this.now().toISOString(), actor.person_id]);
       await this.audit(client, actor, "family.invitation_declined", { invitation_id: invitationId });

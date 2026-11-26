@@ -1,15 +1,15 @@
 import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
-import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { PolicyDeniedError, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, isValidAccountRef, normalizeRecipient, optOutHash, recipientHint, type CommsProvider } from "./channels.ts";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import {
-  CONTACTS_LINK_SOURCE, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema, type ContactView, type GoogleContacts
+  CONTACTS_LINK_SOURCE, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema, DecideContactConflictSchema, ListContactConflictsSchema, type ContactView, type GoogleContacts
 } from "./contacts.ts";
 import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
 import { MEETING_TEXT_MAX_CHARS, type MeetingService } from "./meetings.ts";
 import type { VendorReads } from "./reads.ts";
-import type { CommsStore } from "./store.ts";
+import { validateLiftReason, type CommsStore } from "./store.ts";
 
 /**
  * WP-G1 (D-463): `comms.*`-transporten - tynn limer mellom ToolGateway og `OutboundFunnel`/`CommsStore`. Ingen policy her (den bor i funnelen); transporten bygger KUN den tiltrodde konteksten av `context.identity`
@@ -31,6 +31,12 @@ const Revoke = z.object({ account_id: z.string().min(8).max(80) }).strict();
 export const RecordOptOutSchema = z.object({
   channel: z.enum(COMMS_CHANNELS), account_ref: z.string().min(1).max(200).optional(), recipient: z.string().min(1).max(300), source: z.enum(["owner_recorded", "recipient_request"]).optional()
 }).strict();
+
+/**
+ * K5 (JARVIS-112 f2): eierens angre av en FEILREGISTRERT STOP. `reason` er obligatorisk (3-200 tegn, én linje, uten hemmeligheter - `validateLiftReason`). Samme strenge skjema brukes av preflight/readback (`check_opt_out_target`):
+ * gatewayen kaller den med handlingens egne parametre.
+ */
+export const LiftOwnerOptOutSchema = z.object({ opt_out_id: z.string().min(8).max(80), reason: z.string().min(3).max(200) }).strict();
 
 /** Leverandør-lesing (P1c): strenge, eksakte former - id-er valideres mot leverandørens format FØR noe kall (ingen sti-/spørringsinjeksjon). */
 const AccountRef = z.string().min(1).max(200);
@@ -60,7 +66,8 @@ export class CommsTransport implements ToolTransport {
   /** Leverandør-lesing går KUN mot en konto eieren har autorisert, og kun når kontoens leverandør faktisk er den handlingen gjelder (aldri en Telnyx-nøkkel mot Twilio-API-et). */
   private async requireAccount(ctx: FunnelContext, channel: "slack" | "discord" | "whatsapp" | "sms", accountRef: string, provider: CommsProvider): Promise<void> {
     const account = await this.deps.store.findActiveAccount(ctx.tenantId, ctx.space, channel, accountRef);
-    if (account === null) throw new Error("comms_account_not_authorized");
+    // WP-G1c (g4): allowlist-avslag er Jarvis' egen beslutning (ikke en leverandørfeil; teksten inneholder «auth» og ble tidligere regexet som `auth_failed`).
+    if (account === null) throw new PolicyDeniedError("comms_account_not_authorized");
     if (account.provider !== provider) throw new Error("comms_read_not_supported_by_provider");
   }
 
@@ -79,16 +86,24 @@ export class CommsTransport implements ToolTransport {
    * FIKS B-H1 rest (delta-review B): oppløsning, eierkontroll og skriving skjer ATOMISK i grafen (`linkExclusiveIdentifiers`: én transaksjon bak en advisory-lås per tenant og rom). Før lå de utenfor skrivingen og uten lås: to
    * samtidige `contacts_sync` (to sider, en delt telefon) kryss-lenket i 7 av 8 forsøk. Returnerer antall lenkede identifikatorer.
    */
-  private async linkContact(ctx: FunnelContext, view: ContactView): Promise<{ linked: number; conflict_with: string[] | null }> {
+  private identifiersOf(view: ContactView): Array<{ channel: "phone" | "email"; identifier: string }> {
+    return [...view.phones.map((identifier) => ({ channel: "phone" as const, identifier })), ...view.emails.map((identifier) => ({ channel: "email" as const, identifier }))];
+  }
+
+  /**
+   * WP-G1c K4 (JARVIS-112 f1): en konflikt LAGRES nå som et forslag eieren kan godta/avvise (`list_contact_conflicts`/`decide_contact_conflict`) i stedet for kun å rapporteres. Kontakter eieren har GODTATT å dele identitet med (i begge retninger) er ikke lenger en
+   * konflikt for lenkingen (`allow_shared_with`); enhver ANNEN eier er det fortsatt, og identifikatorer på ulike identiteter er alltid en konflikt (en sammenslåing er en egen, reversibel handling). Lenkene beholder `contact_sync` (kald-regelen er uendret).
+   */
+  private async linkContact(ctx: FunnelContext, view: ContactView): Promise<{ linked: number; conflict_with: string[] | null; proposal: { conflict_id: string; status: string } | null }> {
     const { graph } = this.contacts();
-    const identifiers: Array<{ channel: "phone" | "email"; identifier: string }> = [
-      ...view.phones.map((identifier) => ({ channel: "phone" as const, identifier })), ...view.emails.map((identifier) => ({ channel: "email" as const, identifier }))
-    ];
+    const allowShared = await this.deps.store.acceptedConflictPartners(ctx.tenantId, ctx.space, view.resource_name);
     const result = await graph.linkExclusiveIdentifiers(ctx.tenantId, ctx.space, {
-      identifiers, source: { source_type: CONTACTS_LINK_SOURCE, external_id: view.resource_name }, confidence: 0.9, match_method: "contact_sync", created_by_person_id: ctx.actor.person_id,
-      ...(view.display_name !== null ? { display_name: view.display_name } : {})
+      identifiers: this.identifiersOf(view), source: { source_type: CONTACTS_LINK_SOURCE, external_id: view.resource_name }, confidence: 0.9, match_method: "contact_sync", created_by_person_id: ctx.actor.person_id,
+      ...(view.display_name !== null ? { display_name: view.display_name } : {}), ...(allowShared.length > 0 ? { allow_shared_with: allowShared } : {})
     });
-    return result.status === "linked" ? { linked: result.linked, conflict_with: null } : { linked: 0, conflict_with: result.with };
+    if (result.status === "linked") return { linked: result.linked, conflict_with: null, proposal: null };
+    const stored = await this.deps.store.recordContactConflict(ctx.tenantId, ctx.space, { resource_name: view.resource_name, kind: result.with.length > 0 ? "shared_identity" : "split_identities", conflicting_resources: result.with }, ctx.actor);
+    return { linked: 0, conflict_with: result.with, proposal: { conflict_id: stored.conflict_id, status: stored.status } };
   }
 
   private meetings(): MeetingService {
@@ -105,7 +120,7 @@ export class CommsTransport implements ToolTransport {
     const identity = context?.identity;
     if (!identity) throw new Error("comms_missing_invocation_context");
     const space = identity.memory_space_id as MemorySpace;
-    if (!ALLOWED_SPACES.includes(space)) throw new Error("comms_space_not_allowed");
+    if (!ALLOWED_SPACES.includes(space)) throw new PolicyDeniedError("comms_space_not_allowed");
     return {
       tenantId: identity.tenant_id, space,
       actor: { person_id: identity.person_id, session_id: identity.session_id, ...(context.task_id !== undefined ? { task_id: context.task_id } : {}) },
@@ -218,7 +233,7 @@ export class CommsTransport implements ToolTransport {
         let linked = 0;
         let withoutIdentifier = 0;
         let failed = 0;
-        const conflicts: Array<{ resource_name: string; with: string[] }> = [];
+        const conflicts: Array<{ resource_name: string; with: string[]; conflict_id: string | null; status: string | null }> = [];
         let conflictCount = 0;
         for (const view of page.contacts) {
           if (view.phones.length === 0 && view.emails.length === 0) { withoutIdentifier += 1; continue; }
@@ -226,7 +241,7 @@ export class CommsTransport implements ToolTransport {
             const outcome = await this.linkContact(ctx, view);
             if (outcome.conflict_with !== null) {
               conflictCount += 1;
-              if (conflicts.length < 20) conflicts.push({ resource_name: view.resource_name, with: outcome.conflict_with.slice(0, 5) });
+              if (conflicts.length < 20) conflicts.push({ resource_name: view.resource_name, with: [...outcome.conflict_with].sort().slice(0, 5), conflict_id: outcome.proposal?.conflict_id ?? null, status: outcome.proposal?.status ?? null });
               continue;
             }
             linked += outcome.linked;
@@ -234,10 +249,37 @@ export class CommsTransport implements ToolTransport {
             failed += 1; // aldri feilteksten (kan sitere identifikatoren)
           }
         }
-        // Konflikter rapporteres med ressursnavn (ugjennomsiktige id-er, aldri telefon/e-post): eieren løser dem eksplisitt. UTEN lagret forslag (DEFERRED): neste synk finner dem på nytt.
+        // Konflikter rapporteres med ressursnavn (ugjennomsiktige id-er, aldri telefon/e-post) og er LAGRET som forslag (`conflict_id`, `status`): eieren avgjør dem med `decide_contact_conflict`. En avvist konflikt forblir `dismissed` (ikke foreslått på nytt).
         return {
           data: { scanned: page.contacts.length, linked_identifiers: linked, contacts_without_identifier: withoutIdentifier, contacts_failed: failed, contacts_conflict: conflictCount, conflicts, next_page_token: page.next_page_token }
         };
+      }
+      // K4 (JARVIS-112 f1): lagrede konfliktforslag. Lesing (klasse A) og eierens avgjørelse (klasse C: godta = eksplisitt lenking til den delte identiteten, avvis = husket).
+      case "list_contact_conflicts": {
+        const p = ListContactConflictsSchema.parse(parameters);
+        return { data: (await this.deps.store.listContactConflicts(ctx.tenantId, ctx.space, { ...(p.status !== undefined ? { status: p.status } : {}), ...(p.limit !== undefined ? { limit: p.limit } : {}) })) as unknown as JsonValue };
+      }
+      case "decide_contact_conflict": {
+        const p = DecideContactConflictSchema.parse(parameters);
+        const { store } = this.deps;
+        const conflict = await store.getContactConflict(ctx.tenantId, ctx.space, p.conflict_id);
+        if (conflict === null) throw new Error("comms_contact_conflict_not_found");
+        if (p.decision === "dismiss") {
+          const row = await store.decideContactConflict(ctx.tenantId, ctx.space, p.conflict_id, "dismissed", ctx.actor);
+          return { external_id: p.conflict_id, data: { conflict: row, linked: 0 } as unknown as JsonValue };
+        }
+        // godta: kun en konflikt der kontaktens identifikatorer eies av ANDRE kontakter (aldri en sammenslåing av ulike identiteter). Den ferske kontakten leses på nytt (ingen identifikatorer er lagret hos oss), og lenkingen er den samme
+        // atomiske `linkExclusiveIdentifiers` - kun med de uttrykkelig godtatte kildene unntatt. Har konfliktsettet endret seg siden forslaget, avbrytes uten skriving (neste synk lager et nytt forslag).
+        if (conflict.kind !== "shared_identity") throw new Error("comms_contact_conflict_not_acceptable:split_identities");
+        const view = await this.contacts().api.get(credential, conflict.resource_name);
+        if (view === null) throw new Error("comms_contact_not_found");
+        const linked = await this.contacts().graph.linkExclusiveIdentifiers(ctx.tenantId, ctx.space, {
+          identifiers: this.identifiersOf(view), source: { source_type: CONTACTS_LINK_SOURCE, external_id: conflict.resource_name }, confidence: 0.9, match_method: "contact_sync", created_by_person_id: ctx.actor.person_id,
+          ...(view.display_name !== null ? { display_name: view.display_name } : {}), allow_shared_with: conflict.conflicting_resources
+        });
+        if (linked.status !== "linked") throw new Error("comms_contact_conflict_changed");
+        const row = await store.decideContactConflict(ctx.tenantId, ctx.space, p.conflict_id, "accepted", ctx.actor);
+        return { external_id: p.conflict_id, data: { conflict: row, linked: linked.linked } as unknown as JsonValue };
       }
       // B-H1: reversibel unlink (tilbakekall) av lenkene en kontakt har satt, og angre (`restore`). Sletter aldri en rad/identitet; rører ingenting hos Google.
       case "contacts_unlink": {
@@ -314,6 +356,18 @@ export class CommsTransport implements ToolTransport {
           source: p.source ?? "owner_recorded", recorded_by: ctx.actor.person_id, session_id: ctx.actor.session_id, ...(ctx.actor.task_id !== undefined ? { task_id: ctx.actor.task_id } : {})
         });
         return { external_id: r.opt_out_id, data: { opt_out_id: r.opt_out_id, created: r.created, scope: "tenant" } };
+      }
+      // K5: fersk, MINIMAL lesing av en AKTIV avmelding (preflight og readback for `lift_owner_opt_out`). `data: null` = finnes ikke eller er allerede opphevet (etterbetingelsen).
+      case "check_opt_out_target": {
+        const p = LiftOwnerOptOutSchema.parse(parameters);
+        if (validateLiftReason(p.reason) === null) throw new Error("comms_invalid_parameters:lift_reason_invalid");
+        return { data: (await store.findOptOutTarget(ctx.tenantId, p.opt_out_id)) as unknown as JsonValue };
+      }
+      // K5: eierens angre. Kun en `owner_recorded`-rad (store + databasetrigger); begrunnelse og hvem/sesjon lagres på raden; opphever kun DEN raden (mottakeren kan fortsatt være avmeldt via en annen aktiv rad).
+      case "lift_owner_opt_out": {
+        const p = LiftOwnerOptOutSchema.parse(parameters);
+        const r = await store.liftOwnerOptOut(ctx.tenantId, p, ctx.actor);
+        return { external_id: p.opt_out_id, data: { opt_out_id: p.opt_out_id, lifted: r.lifted, channel: r.channel, recipient_hint: r.recipient_hint, still_opted_out: r.still_opted_out } };
       }
       default:
         throw new Error(`comms_action_not_implemented:${action}`);
