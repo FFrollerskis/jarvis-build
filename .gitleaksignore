@@ -177,3 +177,12 @@ e8c23d4aaf5fefed111a0fa7e05145196e608b57:modules/comms/test/policy.test.ts:disco
 # fingerprint printed by `gitleaks detect --log-opts="origin/main..HEAD"` next to
 # this one.
 e498cdf5790872e61e91b658b30b31e45a5f42d8:apps/api/test/wpn1-job-status.test.ts:generic-api-key:38
+
+# WP-V2 (D-488): gitleaks' generic-api-key rule flagged a test constant in
+# apps/voice-gateway/test/wpv2-k1-crash-protection.test.ts (commit 97b8b758, line 118):
+# the sample Sec-WebSocket-Key nonce from RFC 6455 section 1.3 (it base64-decodes to
+# the ASCII text 'the sample nonce'), used by a raw-socket test to send a hand-built
+# HTTP upgrade request. It is a public protocol example value, not a credential, key,
+# token or password. Verified manually by the independent reviewer and by lead.
+# NB: the commit hash is stable (the V2 branch is merged, never rebased).
+97b8b75803c19aa1bc37932ede5fbbfa5ba40f01:apps/voice-gateway/test/wpv2-k1-crash-protection.test.ts:generic-api-key:118
