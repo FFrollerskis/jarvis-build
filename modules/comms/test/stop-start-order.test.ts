@@ -262,6 +262,17 @@ describe("K1: databasetriggeren håndhever HVEM som kan løfte HVA (som app-roll
     await expect(asApp((c) => c.query("UPDATE comms_recipient_opt_outs SET stop_seq = $3 WHERE tenant_id = $1 AND opt_out_id = $2", [TENANT_A, id, cur + 5]))).resolves.toBeDefined();
   });
 
+  it("registreringstiden (`stop_db_at`, FIX-3) kan kun økes: en nedsettelse eller NULL ville latt en START rett etter en STOP løfte den (tie-marginen omgått)", async () => {
+    const { id } = await seedRow("inbound_stop_keyword");
+    const cur = ((await chain.db.admin.query("SELECT stop_db_at FROM comms_recipient_opt_outs WHERE opt_out_id = $1", [id])).rows[0] as { stop_db_at: Date | null });
+    expect(cur.stop_db_at, "en STOP registrert av koden har databasetid").toBeInstanceOf(Date);
+    const earlier = new Date((cur.stop_db_at as Date).getTime() - 60_000);
+    const later = new Date((cur.stop_db_at as Date).getTime() + 60_000);
+    await expect(asApp((c) => c.query("UPDATE comms_recipient_opt_outs SET stop_db_at = $3 WHERE tenant_id = $1 AND opt_out_id = $2", [TENANT_A, id, earlier]))).rejects.toThrow(/stop_db_at kan kun øke/);
+    await expect(asApp((c) => c.query("UPDATE comms_recipient_opt_outs SET stop_db_at = NULL WHERE tenant_id = $1 AND opt_out_id = $2", [TENANT_A, id]))).rejects.toThrow(/stop_db_at kan kun øke/);
+    await expect(asApp((c) => c.query("UPDATE comms_recipient_opt_outs SET stop_db_at = $3 WHERE tenant_id = $1 AND opt_out_id = $2", [TENANT_A, id, later]))).resolves.toBeDefined();
+  });
+
   it("en gammel rad uten registreringssekvens (NULL, fra før migrasjon 141) regnes som eldre enn enhver START og løftes som før", async () => {
     const n = chain.phone();
     await chain.db.admin.query(

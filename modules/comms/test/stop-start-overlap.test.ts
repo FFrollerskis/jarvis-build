@@ -157,6 +157,26 @@ describe("FIX-3: STOP vinner innenfor tie-marginen (millisekund-overlapp, samtid
     expect(await opted(TENANT_A, n), "innenfor marginen vinner STOP").toBe(true);
   }, 60_000);
 
+  it("en senere STOP som absorberes i en GAMMEL rad flytter registreringstiden fram (siste STOP teller): en START rett etter løfter ingenting", async () => {
+    const n = chain.phone();
+    expect((await svc.handle("twilio", smsFrom(n, "STOP"))).status).toBe(200);
+    // raden gjøres «gammel» (registrert for 30 s siden) med replica-rolle (kun superbruker kan omgå triggeren som ellers hindrer at tiden går bakover)
+    const admin = await chain.db.admin.connect();
+    try {
+      await admin.query("BEGIN");
+      await admin.query("SET LOCAL session_replication_role = replica");
+      await admin.query("UPDATE comms_recipient_opt_outs SET stop_db_at = clock_timestamp() - interval '30 seconds' WHERE tenant_id = $1 AND recipient_hash = $2", [TENANT_A, hashOf(TENANT_A, n)]);
+      await admin.query("COMMIT");
+    } finally { admin.release(); }
+    const old = ((await chain.db.admin.query("SELECT stop_db_at FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2", [TENANT_A, hashOf(TENANT_A, n)])).rows[0] as { stop_db_at: Date }).stop_db_at;
+    expect(Date.now() - old.getTime(), "kontroll: raden er gjort 30 s gammel").toBeGreaterThan(25_000);
+    expect((await svc.handle("twilio", smsFrom(n, "STOP"))).body, "andre STOP absorberes i samme rad").toMatchObject({ events: { opt_outs: 1 } });
+    const bumped = ((await chain.db.admin.query("SELECT stop_db_at FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2", [TENANT_A, hashOf(TENANT_A, n)])).rows[0] as { stop_db_at: Date }).stop_db_at;
+    expect(Date.now() - bumped.getTime(), "registreringstiden er flyttet fram til NÅ").toBeLessThan(10_000);
+    await svc.handle("twilio", smsFrom(n, "START"));
+    expect(await opted(TENANT_A, n), "START innenfor marginen etter den siste STOP-en løfter ingenting").toBe(true);
+  });
+
   for (const order of ["start_first", "stop_first"] as const) {
     it(`matrise (${order}): gap ${GAPS_MS.join("/")} ms, ${MATRIX_ROUNDS} runder hver, ekte samtidige tilkoblinger: 0 frie mottakere`, async () => {
       const free: Record<string, number> = {};
