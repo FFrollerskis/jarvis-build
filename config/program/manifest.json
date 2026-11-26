@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0.0",
+  "guard": {
+    "mode": "report"
+  },
+  "plans": [
+    { "plan": "HF1", "domain": "autonomy", "version": "v4.0", "status": "ACKNOWLEDGED_NOT_ADOPTED", "decision_ref": "docs/remediation/ADR-001-dokumenthierarki.md" },
+    { "plan": "HF2", "domain": "evolution", "version": "v1.2", "status": "NOT_ADOPTED", "decision_ref": null },
+    { "plan": "HF3", "domain": "multi-tenant-trust", "version": "v1.3", "status": "NOT_ADOPTED", "decision_ref": null },
+    { "plan": "HF4", "domain": "expertise", "version": "v1.2", "status": "NOT_ADOPTED", "decision_ref": null },
+    { "plan": "HF5", "domain": "continuity", "version": "v1.1", "status": "NOT_ADOPTED", "decision_ref": null },
+    { "plan": "HF6", "domain": "continuous-intelligence", "version": "v1.2", "status": "NOT_ADOPTED", "decision_ref": null }
+  ],
+  "coverage": {
+    "workspace_roots": ["apps", "modules", "packages"],
+    "migrations_dir": "modules/core/src/db/migrations",
+    "compose_file": "infra/local/docker-compose.yml",
+    "contract_roots": ["packages/contracts/src"]
+  },
+  "exclusive_names": [
+    {
+      "id": "single-capability-registry",
+      "pattern": "(^|_)(skill|capability)_registry($|_)",
+      "allowed_owner_patterns": ["^ev\\.capability-registry$"],
+      "reason": "Det finnes ett register for lærte evner (EV-18); ingen andre tabeller eller kolonner skal bære et konkurrerende skill-/capability-register."
+    },
+    {
+      "id": "jx-truth-stores",
+      "pattern": "^(commitment|impact|knowledge_gap|workspace)_",
+      "allowed_owner_patterns": ["^jx\\."],
+      "reason": "Forpliktelser, effekt, kunnskapshull og arbeidsområder har JX som eneste sannhetskilde; andre komponenter kan projisere, ikke duplisere."
+    }
+  ],
+  "reserved_prefixes": [
+    { "prefix": "ci_", "owner_patterns": ["^ci\\."], "reason": "Læringsevidens eies av læringskomponentene." },
+    { "prefix": "program_", "owner_patterns": ["^program\\."], "reason": "Programindeks-speilet eies av program-komponentene." },
+    { "prefix": "diagnostic_", "owner_patterns": ["^dx\\."], "reason": "Diagnoseindeksen eies av diagnostikk-komponentene." },
+    { "prefix": "fault_", "owner_patterns": ["^dx\\."], "reason": "Feilfingeravtrykk eies av diagnostikk-komponentene." },
+    { "prefix": "known_fault", "owner_patterns": ["^dx\\."], "reason": "Kjente feil eies av diagnostikk-komponentene." },
+    { "prefix": "runtime_baseline", "owner_patterns": ["^dx\\."], "reason": "Siste-kjente-gode-baselinen eies av diagnostikk-komponentene." },
+    { "prefix": "incident_edge", "owner_patterns": ["^dx\\."], "reason": "Hendelsesgrafen eies av diagnostikk-komponentene." }
+  ],
+  "no_active_state": {
+    "table_prefix": "ci_",
+    "forbidden_literal_pattern": "active",
+    "forbidden_column_pattern": "^(active|is_active|activated|activated_at|activation[a-z_]*)$",
+    "reason": "Læringstabeller kan aldri bære en ACTIVE-tilstand: aktivering avgjøres av kapabilitetsregisteret og autoriteten, ikke av læringsdata."
+  }
+}
