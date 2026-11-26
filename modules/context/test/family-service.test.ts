@@ -202,6 +202,68 @@ describe("C: sirkel, eier og invitasjoner", () => {
     expect((await svc.acceptInvitation(act(c, c.guest), third.invitation_id)).role).toBe("guest");
   });
 
+  /** Venter (avgrenset) til en backend står i kø på en radlås med en spørring som matcher; `false` = ingen gjorde det innen fristen. */
+  async function waitUntilLockWaiting(pattern: RegExp, timeoutMs = 10_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const { rows } = await admin.query(`SELECT query FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`);
+      if ((rows as Array<{ query: string }>).some((r) => pattern.test(r.query))) return true;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return false;
+  }
+
+  it("invitasjonens radlås (fiks-runde 1, M30): en aksept STÅR I KØ bak en samtidig tilbakekalling som holder raden og ser etterpå `revoked` (invitation_not_pending) - aldri et medlemskap fra en tilbakekalt invitasjon", async () => {
+    const c = await mkCircle();
+    await svc.bootstrapOwner(act(c, c.owner), c.owner);
+    const inv = await svc.invite(act(c, c.owner), { invitee_person_id: c.guest, role: "guest" });
+    const holder = await admin.connect(); // en tilbakekalling («eierens transaksjon») som har tatt radlåsen men ikke committet
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT 1 FROM family_invitations WHERE invitation_id = $1 FOR UPDATE`, [inv.invitation_id]);
+      const accepting = code(svc.acceptInvitation(act(c, c.guest), inv.invitation_id));
+      expect(await waitUntilLockWaiting(/FROM family_invitations[\s\S]*invitee_person_id[\s\S]*FOR UPDATE/), "aksepten leser invitasjonen med FOR UPDATE og står i kø bak holderen").toBe(true);
+      await holder.query(`UPDATE family_invitations SET status = 'revoked', decided_at = $2, decided_by_person_id = $3 WHERE invitation_id = $1`, [inv.invitation_id, clock.toISOString(), c.owner]);
+      await holder.query("COMMIT");
+      expect(await accepting).toBe("invitation_not_pending");
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+    const members = await admin.query(`SELECT 1 FROM family_members WHERE tenant_id = $1 AND person_id = $2`, [c.tenant, c.guest]);
+    expect(members.rows).toHaveLength(0);
+    expect((await admin.query(`SELECT status FROM family_invitations WHERE invitation_id = $1`, [inv.invitation_id])).rows[0]).toMatchObject({ status: "revoked" });
+  });
+
+  it("samme radlås for avslag: en avslag-avgjørelse venter på holderen og ser en allerede AKSEPTERT invitasjon (invitation_not_pending), aldri en overskriving av et utfall", async () => {
+    const c = await mkCircle();
+    await svc.bootstrapOwner(act(c, c.owner), c.owner);
+    const inv = await svc.invite(act(c, c.owner), { invitee_person_id: c.guest, role: "guest" });
+    const holder = await admin.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT 1 FROM family_invitations WHERE invitation_id = $1 FOR UPDATE`, [inv.invitation_id]);
+      const declining = code(svc.declineInvitation(act(c, c.guest), inv.invitation_id));
+      expect(await waitUntilLockWaiting(/FROM family_invitations[\s\S]*invitee_person_id[\s\S]*FOR UPDATE/)).toBe(true);
+      await holder.query(`UPDATE family_invitations SET status = 'accepted', decided_at = $2, decided_by_person_id = $3 WHERE invitation_id = $1`, [inv.invitation_id, clock.toISOString(), c.guest]);
+      await holder.query("COMMIT");
+      expect(await declining).toBe("invitation_not_pending");
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+    expect((await admin.query(`SELECT status FROM family_invitations WHERE invitation_id = $1`, [inv.invitation_id])).rows[0]).toMatchObject({ status: "accepted" });
+  });
+
+  it("to samtidige aksepter av SAMME invitasjon (dobbeltklikk/retry): nøyaktig én lykkes, den andre får `invitation_not_pending` - aldri en rå databasefeil, og kun ett medlemskap", async () => {
+    const c = await mkCircle();
+    await svc.bootstrapOwner(act(c, c.owner), c.owner);
+    const inv = await svc.invite(act(c, c.owner), { invitee_person_id: c.guest, role: "guest" });
+    const outcomes = (await Promise.all([code(svc.acceptInvitation(act(c, c.guest), inv.invitation_id)), code(svc.acceptInvitation(act(c, c.guest), inv.invitation_id))])).sort();
+    expect(outcomes).toEqual(["invitation_not_pending", "ok"]);
+    expect((await admin.query(`SELECT 1 FROM family_members WHERE tenant_id = $1 AND person_id = $2`, [c.tenant, c.guest])).rows).toHaveLength(1);
+  });
+
   it("utløpt invitasjon: aksept gir invitation_expired og MARKERES utløpt (committet); en utløpt «pending» blokkerer ikke en ny", async () => {
     const c = await mkCircle();
     await svc.bootstrapOwner(act(c, c.owner), c.owner);
