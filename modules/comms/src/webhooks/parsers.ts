@@ -41,7 +41,7 @@ export interface ParseOutcome {
  * K3 (JARVIS-112 d): høyeste antall hendelser en enkelt signert forespørsel BEHANDLES med (`CommsWebhookService`, ikke parseren - parserne returnerer ALLE hendelser og forkaster ingen på antall). Tallet er Metas DOKUMENTERTE
  * batch-størrelse: «batches of at most 1000 updates» (WhatsApp Business Platform, webhooks / create-webhook-endpoint). UVERIFISERT mot primærkilden i denne økten (`developers.facebook.com` var utenfor nettverkstillatelsen; kun
  * søkeutdrag - de samme utdragene oppgir inntil 3 MB per forespørsel og at batching ikke er garantert). Før var tallet 100 og resten ble DROPPET STILLE (en STOP som nr. 120 gikk tapt, HTTP 200). Over taket svarer tjenesten nå med en
- * feilstatus (leverandøren prøver på nytt), aldri 200 med droppede hendelser. Vår egen byte-grense (256 KB, før signaturen) er en egen, uendret avgrensning (se runbook §5).
+ * feilstatus (leverandøren prøver på nytt), aldri 200 med droppede hendelser. Byte-grensen før signaturen er per leverandør (`WEBHOOK_MAX_BYTES_BY_PROVIDER`: Meta 4 MiB, de andre 256 KB; FIX-1, se runbook §5).
  */
 export const MAX_EVENTS_PER_REQUEST = 1000;
 const SAFE_KEY = /^[A-Za-z0-9._:@=+/-]{1,300}$/;
@@ -63,7 +63,7 @@ const arr = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const str = (value: unknown, max = 500): string | null => (typeof value === "string" && value.length > 0 && value.length <= max ? value : null);
 /**
  * K3: en leverandørs hendelses-/meldings-id godtas uansett lengde (aldri forkastet, aldri avkortet) - bare dedupe-NØKKELEN lagres (`eventKey`: ren når den er kort og trygg, ellers en SHA-256 av hele id-en). Før ble en meldings-id over 1000 tegn,
- * en Twilio-SID over 64 og en Slack `event_id` over 100 forkastet, og en STOP med slik id gikk tapt. Kroppen er uansett begrenset (256 KB før signaturen), så id-en kan ikke bli ubegrenset stor.
+ * en Twilio-SID over 64 og en Slack `event_id` over 100 forkastet, og en STOP med slik id gikk tapt. Kroppen er uansett begrenset (før signaturen, per leverandør), så id-en kan ikke bli ubegrenset stor.
  */
 const idStr = (value: unknown): string | null => (typeof value === "string" && value.length > 0 ? value : null);
 const num = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : typeof value === "string" && /^\d{1,16}(\.\d{1,6})?$/.test(value) ? Number(value) : null);

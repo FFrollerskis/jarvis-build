@@ -57,8 +57,16 @@ export const WEBHOOK_SECRET_REFS = {
   telnyx: "JARVIS_TELNYX_WEBHOOK_PUBLIC_KEY"
 } as const;
 
-/** Maks størrelse på en webhook-kropp (ruten håndhever den FØR signaturen vurderes). */
+/** Maks størrelse på en webhook-kropp for leverandører uten egen grense (ruten håndhever den FØR signaturen vurderes). */
 export const WEBHOOK_MAX_BYTES = 256 * 1024;
+/**
+ * FIX-1 (WP-G1c fiks-runde 1): byte-grensen per leverandør, håndhevet av ruten FØR signaturen vurderes (413). Meta sender batcher på inntil 1000 meldinger (266-439 B per melding, dvs. 270-440 KB per batch) og oppgir selv inntil 3 MB per forespørsel
+ * (UVERIFISERT mot primærkilden: `developers.facebook.com` var ikke nåbar; kun søkeutdrag), så Meta får 4 MiB; en felles 256 KB-grense ga 413 på en GYLDIG, korrekt signert batch, og en STOP i den ble aldri registrert. HMAC-SHA256 over 4 MiB koster millisekunder.
+ * De andre leverandørene sender én hendelse per forespørsel og beholder 256 KB. Signatur-før-parsing og den strenge per-IP-grensen (30/min) er uendret.
+ */
+export const WEBHOOK_MAX_BYTES_BY_PROVIDER: Readonly<Record<CommsWebhookProvider, number>> = {
+  slack: WEBHOOK_MAX_BYTES, meta: 4 * 1024 * 1024, twilio: WEBHOOK_MAX_BYTES, telnyx: WEBHOOK_MAX_BYTES
+};
 /** Avmeldings-/gjenopptakshendelser beholdes lenge (kun pseudonym, ingen tekst): en gjenspilt gammel START skal ikke kunne oppheve en nyere avmelding. */
 const OPT_EVENT_RETENTION_DAYS = 1825;
 const EXCERPT_MAX = 2000;
@@ -206,6 +214,14 @@ export class CommsWebhookService {
     const challenge = req.query.get("hub.challenge");
     if (mode !== "subscribe" || token === null || challenge === null || !secretsEqual(token, expected) || !/^[A-Za-z0-9_-]{1,200}$/.test(challenge)) return this.reject(403, "forbidden");
     return { status: 200, body: challenge };
+  }
+
+  /**
+   * FIX-1: ruten avviste en forespørsel FØR signaturen ble vurdert (kroppen over leverandørens byte-grense, 413). Loggføres med leverandør og årsakskode - aldri kropp, hode eller avsender. Uten dette var en gyldig, stor batch som
+   * ble avvist usynlig for driften.
+   */
+  noteRejectedBeforeSignature(provider: CommsWebhookProvider, reason: "payload_too_large"): void {
+    this.deps.warn?.({ msg: "comms_webhook_rejected", provider, reason });
   }
 
   private invalid(provider: CommsWebhookProvider, reason: string): WebhookResponse {

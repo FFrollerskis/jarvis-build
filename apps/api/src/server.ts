@@ -28,7 +28,7 @@ import { ProductUsageError, UsageImportError, USAGE_LIMITS, USAGE_WEBHOOK_SIGNAT
 import { CONTROL_CENTER_READ_TOOLS, isControlCenterId, isExtensionControlCenterId } from "@jarvis/executive";
 import { GROWTH_EXPERIMENT_TOOL_ACTIONS, executeGrowthWrite, type GrowthWriteExecutorDeps, type GrowthWriteStatusFilter } from "@jarvis/growth";
 import {
-  COMMS_CONTACT_READ_ACTIONS, COMMS_KNOWN_ACTIONS, COMMS_MEETING_READ_ACTIONS, COMMS_READ_ACTIONS, COMMS_VENDOR_READ_ACTIONS, WEBHOOK_MAX_BYTES as COMMS_WEBHOOK_MAX_BYTES, executeCommsOwnerAction, previewCommsSend,
+  COMMS_CONTACT_READ_ACTIONS, COMMS_KNOWN_ACTIONS, COMMS_MEETING_READ_ACTIONS, COMMS_READ_ACTIONS, COMMS_VENDOR_READ_ACTIONS, WEBHOOK_MAX_BYTES_BY_PROVIDER as COMMS_WEBHOOK_MAX_BYTES_BY_PROVIDER, executeCommsOwnerAction, previewCommsSend,
   type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel
 } from "@jarvis/comms";
 import type { ConversationEngine } from "./conversation.ts";
@@ -1890,7 +1890,16 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   const commsWebhookProvider = deps.comms?.webhooks !== undefined ? COMMS_WEBHOOK_ROUTES.get(url.pathname) : undefined;
   if (commsWebhookProvider !== undefined && deps.comms?.webhooks?.providers.has(commsWebhookProvider) === true) {
     if (req.method !== "POST") req.resume();
-    const rawBody = req.method === "POST" ? await readRawBodyLimited(req, COMMS_WEBHOOK_MAX_BYTES) : Buffer.alloc(0);
+    // FIX-1: byte-grensen er per leverandør (Meta 4 MiB, øvrige 256 KB) og håndheves FØR signaturen. Et avslag (413) logges med leverandør og årsakskode - aldri innhold - så en gyldig, stor batch som avvises ikke er usynlig for driften.
+    let rawBody: Buffer = Buffer.alloc(0);
+    if (req.method === "POST") {
+      try {
+        rawBody = await readRawBodyLimited(req, COMMS_WEBHOOK_MAX_BYTES_BY_PROVIDER[commsWebhookProvider]);
+      } catch (err) {
+        if (err instanceof HttpError && err.status === 413) deps.comms.webhooks.service.noteRejectedBeforeSignature(commsWebhookProvider, "payload_too_large");
+        throw err;
+      }
+    }
     const headers: Record<string, string | undefined> = {};
     for (const [name, value] of Object.entries(req.headers)) headers[name.toLowerCase()] = typeof value === "string" ? value : undefined;
     const out = await deps.comms.webhooks.service.handle(commsWebhookProvider, {
