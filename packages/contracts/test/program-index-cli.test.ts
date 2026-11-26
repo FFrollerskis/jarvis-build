@@ -123,6 +123,7 @@ describe("fingerprint", () => {
     const noChange = cli(["fingerprint", "core.alpha", "--root", root, "--write", "--bump", "minor"]);
     expect(noChange.code).toBe(1);
     expect(noChange.out.join("\n")).toContain("ingen kontraktendring");
+    expect(noChange.out.join("\n")).not.toContain("->");
     put(root, "contracts/a.ts", "export const a = 2;\n");
     const bumped = cli(["fingerprint", "core.alpha", "--root", root, "--write", "--bump", "minor"]);
     expect(bumped.code).toBe(0);

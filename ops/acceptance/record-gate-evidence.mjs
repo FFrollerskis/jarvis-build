@@ -11,6 +11,7 @@
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { redact, sanitize } from "./record-evidence.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
@@ -29,10 +30,31 @@ export function gateArgs(argv) {
   return ["gate", gate, status, ...rest];
 }
 
+/**
+ * Begrunnelsen havner i en committet datafil (porthistorikken) i et offentlig repo: den må aldri bære en hemmelighet eller kontrolltegn. Samme redigering som evidens-opptakeren (`redact`/`sanitize`):
+ * treffer den noe, nektes registreringen (aldri en stille redigering som ville gjemt at noen limte inn en hemmelighet). Meldingen nevner kun regelnavn, aldri verdien.
+ */
+export function reasonProblem(args) {
+  const i = args.indexOf("--reason");
+  if (i === -1 || i + 1 >= args.length) return null; // manglende begrunnelse meldes av kommandolinjen
+  const raw = args[i + 1];
+  const clean = sanitize(raw);
+  const { counts } = redact(clean);
+  const rules = Object.keys(counts);
+  if (rules.length > 0) return `begrunnelsen ligner en hemmelighet (regel: ${rules.join(", ")}): skriv den uten hemmeligheter`;
+  if (clean !== raw) return "begrunnelsen inneholder kontrolltegn eller skjulte tegn";
+  return null;
+}
+
 export function run(argv) {
   const args = gateArgs(argv);
   if (args === null) {
     process.stderr.write(`${USAGE}\n`);
+    return 2;
+  }
+  const problem = reasonProblem(args);
+  if (problem !== null) {
+    process.stderr.write(`NEKTET (reason_secret): ${problem}\n`);
     return 2;
   }
   // Ingen skall: argumentene sendes som en liste, så anførselstegn/semikolon i begrunnelsen blir bokstavelig tekst.

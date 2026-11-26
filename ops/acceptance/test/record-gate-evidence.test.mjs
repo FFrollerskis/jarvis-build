@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { gateArgs } from "../record-gate-evidence.mjs";
+import { gateArgs, reasonProblem } from "../record-gate-evidence.mjs";
 import { miniRepo, put } from "../../../packages/contracts/test/program-index-minirepo.ts";
 
 // WP-PGA / PG3: inngangen `record-gate-evidence.mjs` (porteregistrering). Kjører selve skriptet som en egen prosess mot et midlertidig mini-repo.
@@ -27,7 +27,37 @@ describe("gateArgs (kun `gate` slippes igjennom)", () => {
   });
 });
 
+// Hemmelighetsformede verdier bygges ved kjøring (aldri som bokstaver i kilden): ellers ville vi selv sluppet en hemmelighetsform inn i repoet.
+const fakeToken = () => ["gh", "p_"].join("") + "A1b2C3d4".repeat(5);
+const fakeKv = () => ["pass", "word"].join("") + "=" + ["x7Kq", "9mZp", "42Lw"].join("");
+
+describe("reasonProblem (begrunnelsen havner i en offentlig, committet fil)", () => {
+  it("avviser hemmelighetsformer (kun regelnavn i meldingen, aldri verdien) og kontrolltegn; godtar vanlig tekst", () => {
+    for (const secret of [fakeToken(), fakeKv(), `bevist med ${fakeToken()} i kjøringen`]) {
+      const msg = reasonProblem(["gate", "G01", "PASS", "--reason", secret]);
+      expect(msg, secret.slice(0, 6)).not.toBeNull();
+      expect(msg).not.toContain(secret);
+      expect(msg).not.toContain("A1b2C3d4");
+    }
+    expect(reasonProblem(["gate", "G01", "PASS", "--reason", "bevist \u200bmed kontrolltegn"])).toContain("kontrolltegn");
+    expect(reasonProblem(["gate", "G01", "PASS", "--reason", "foreldet etter kontraktendring i policy-modulen"])).toBeNull();
+    expect(reasonProblem(["gate", "G01", "PASS"])).toBeNull();
+    expect(reasonProblem(["gate", "G01", "PASS", "--reason"])).toBeNull();
+  });
+});
+
 describe("record-gate-evidence.mjs (egen prosess)", () => {
+  it("en begrunnelse med hemmelighetsform nektes (exit 2) og noe skrives aldri", () => {
+    const { root } = miniRepo();
+    evidence(root);
+    const secret = fakeToken();
+    const r = runScript(["G01", "PASS", "--root", root, "--reason", secret, "--by", "owner", "--evidence", "docs/evidence/e1.md", "--write"]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("reason_secret");
+    expect(r.err).not.toContain(secret);
+    expect(gateFile(root, "G01").history).toEqual([]);
+  });
+
   it("uten argumenter eller med feil argumenter: exit 2 og bruksteksten", () => {
     for (const args of [[], ["G01"], ["G01", "BOGUS"], ["fingerprint", "--write"]]) {
       const r = runScript(args);

@@ -7,6 +7,7 @@
 //                                          Vis (eller med --write: oppdater) kontraktfingeravtrykk og changed_at i komponentskjervene.
 //   gate <G01..G17|ORL0..ORL5> <PASS|FAIL|OPEN> --reason <tekst> --by <owner|platform_operator> [--evidence docs/evidence/<fil>.md] [--verified-at <ISO>] [--write]
 //                                          Registrer en porteovergang (OperationalGateChanged). Uten --write er det en tørrkjøring.
+//                                          Bruk ops/acceptance/record-gate-evidence.mjs: den screener --reason for hemmelighetsformer (denne kommandoen gjør det ikke).
 //   Felles: --root <mappe> (standard: repo-roten).
 //
 // Exit: 0 = ok, 1 = rød dom eller registrering/oppdatering nektet, 2 = bruksfeil. Ren lesing med unntak av `fingerprint --write` og `gate --write` (én fil per endring, atomisk).

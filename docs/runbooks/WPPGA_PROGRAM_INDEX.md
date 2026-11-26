@@ -40,6 +40,8 @@ node ops/acceptance/record-gate-evidence.mjs <G01..G17|ORL0..ORL5> <PASS|FAIL|OP
 
 `report` gir exit 1 ved rød dom. `fingerprint` er en tørrkjøring uten `--write` (exit 1 ved avvik). `gate` er en tørrkjøring uten `--write`. Felles valg: `--root <mappe>`.
 
+**Porteregistrering skal gå via `ops/acceptance/record-gate-evidence.mjs`**: den slipper kun `gate` igjennom, kjører uten skall og nekter en `--reason` som ligner en hemmelighet eller har skjulte tegn (samme redigering som `record-evidence.mjs`; begrunnelsen havner i en committet fil i et offentlig repo). `program-index.ts gate` direkte har ikke den sjekken.
+
 ## 4. Slik legger du til eller endrer en komponent
 
 1. Lag/rediger `config/program/components/<komponent-id>.json` (id på formen `familie.navn`, filnavnet må være `<id>.json`). Bruk en eksisterende skjerv som mal.
@@ -103,6 +105,7 @@ Funn-id er `<regel>:<emne>`.
 - Eksklusive navn og reserverte prefikser er **navnebaserte** (prefiks + understrek), ikke semantiske. Tre eksisterende tabeller har ordet «commitment» i navnet (`commitments`, `comms_meeting_commitments`,
   `finance_recurring_commitments`) og flagges ikke; forholdet til den planlagte forpliktelseskomponenten må avklares med en navngitt beslutning før den bygges (notat på `jx.commitments`).
 - Kolonnenavn sjekkes ikke mot eksklusive navn: et `*_id`-felt er normalt en referanse til sannhetskilden.
+- Hemmelighetssjekken av `--reason` er et mønsterfilter (som evidens-opptakeren): en hemmelighet uten kjent form og uten nøkkelord fanges ikke. Les begrunnelsen før den committes.
 - Kontraktfingeravtrykk dekker bare filene som er listet i `contract.files`. Endringer andre steder (f.eks. en delt hjelper) fanges ikke.
 - Pakker under bygging (S1, T1, MC8a, SEC2, OPS2a) er ført som `planned`/`pending_work` uten antatte detaljer; indeksen oppdateres når de er flettet.
 
