@@ -233,13 +233,18 @@ export class ExecutiveService {
   }
 
   /**
-   * WP-H2: tilbakekall av eierens autonomi-binding (D-160, `situation_autonomy_policies`) for ÉTT domene. Slettingen er et gjennomslag til `situations.clear_autonomy_policy` med den UENDREDE identiteten (D-68): motoren
+   * WP-H2: tilbakekall av eierens autonomi-bindinger (D-160, `situation_autonomy_policies`) for ÉTT domene. Slettingen er et gjennomslag til `situations.clear_autonomy_policy` med den UENDREDE identiteten (D-68): motoren
    * velger rommet fra identiteten (kun kallerens eget minnerom), og dens EGEN sovereign-eier-port (`assertAutonomyAuthority`) gjelder i tillegg til policyen. Ingen egen slettelogikk her.
    *
-   * Gjennomgang L1: SLETTINGEN KAN IKKE ANGRES (parametrene til bindingen lagres ellers ingen steder), så FØR DELETE leses bindingen (`situations.list_autonomy_policies`, kallerens eget rom) og en
+   * WP-G4b fiks-runde 1 (FIX-2/2b, Q-G4-15): dette er et DOMENEBREDT tilbakekall: `clear_autonomy_policy` uten skop fjerner ALLE bindingsrader i (tenant, rom, domene) - den domenebrede OG alle regel-/kategoribindinger - i
+   * samme transaksjon under domenelåsen. Etterpå kan ingen binding i domenet utføre noe før eieren eksplisitt har gitt en ny. FØR-BILDET omfatter derfor ALLE radene i domenet: den domenebrede som `before` (uendret form) og hver
+   * regel-/kategoribinding som et element i `before_scoped` (med `scope_key`).
+   *
+   * Gjennomgang L1: SLETTINGEN KAN IKKE ANGRES (parametrene til bindingene lagres ellers ingen steder), så FØR DELETE leses bindingene (`situations.list_autonomy_policies`, kallerens eget rom) og en
    * revisjonsrad med FØR-BILDET (domene, verktøy, handling, aktiv/av, parametre, hvem som satte den) skrives og COMMITTES (`autonomyAudit`, injisert fra apps/api: `writeAudit` i egen transaksjon). FAIL-CLOSED i alle
-   * tre ledd: kan bindingen ikke leses, kan revisjonsraden ikke skrives, eller mangler `autonomyAudit`, utføres INGEN sletting. Mangler bindingen (`existed: false`) skrives raden likevel (forsøket er revisjonsverdig) og
-   * slettingen er idempotent (`removed: false`).
+   * tre ledd: kan bindingene ikke leses, kan revisjonsraden ikke skrives, eller mangler `autonomyAudit`, utføres INGEN sletting. Mangler bindinger (`existed: false`) skrives raden likevel (forsøket er revisjonsverdig) og
+   * slettingen er idempotent (`removed: false`). Kjent begrensning: legger eieren selv til en NY smal binding i millisekundene mellom lesingen og slettingen, fjernes den også (trygg retning) men står ikke i før-bildet;
+   * svarets `removed_scopes` (fra motoren) viser nøyaktig hva som ble fjernet.
    */
   async revokeAutonomyBinding(identity: IdentityContext, domain: string): Promise<ToolResult> {
     const audit = this.options.autonomyAudit;
@@ -247,21 +252,25 @@ export class ExecutiveService {
     const listed = await this.gateway.execute({ identity, tool_id: "situations", action: "list_autonomy_policies", parameters: {} });
     if (!listed.ok) return { ok: false, reason: `before_image_unreadable:${listed.reason.slice(0, 60)}` };
     if (!Array.isArray(listed.data)) return { ok: false, reason: "before_image_unreadable:unexpected_shape" };
-    // WP-G4b K2: `clear_autonomy_policy` uten skop fjerner KUN den domenebrede bindingen (`scope_key = '*'`); før-bildet er derfor den raden (regel-/kategoribindinger i samme domene røres ikke og gjenopprettes ikke her). Eldre svar uten `scope_key` er domenebrede.
-    const row = (listed.data as unknown[]).find((r) => typeof r === "object" && r !== null && (r as { domain?: unknown }).domain === domain && ((r as { scope_key?: unknown }).scope_key ?? "*") === "*") as Record<string, unknown> | undefined;
-    const before = row === undefined
-      ? null
-      : {
-        domain, tool_id: String(row["tool_id"] ?? ""), action: String(row["action"] ?? ""), enabled: row["enabled"] === true,
-        parameters: (row["parameters"] ?? null) as JsonValue, actor_person_id: row["actor_person_id"] === undefined || row["actor_person_id"] === null ? null : String(row["actor_person_id"]),
-        updated_at: row["updated_at"] === undefined || row["updated_at"] === null ? null : String(row["updated_at"])
-      };
+    // Alle radene i domenet (kallerens eget rom: `list_autonomy_policies` leser kun der). Eldre svar uten `scope_key` er domenebrede.
+    const domainRows = (listed.data as unknown[]).filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null && (r as { domain?: unknown }).domain === domain);
+    const image = (r: Record<string, unknown>) => ({
+      domain, tool_id: String(r["tool_id"] ?? ""), action: String(r["action"] ?? ""), enabled: r["enabled"] === true,
+      parameters: (r["parameters"] ?? null) as JsonValue, actor_person_id: r["actor_person_id"] === undefined || r["actor_person_id"] === null ? null : String(r["actor_person_id"]),
+      updated_at: r["updated_at"] === undefined || r["updated_at"] === null ? null : String(r["updated_at"])
+    });
+    const scopeOf = (r: Record<string, unknown>): string => (typeof r["scope_key"] === "string" ? r["scope_key"] : "*");
+    const broad = domainRows.find((r) => scopeOf(r) === "*");
+    const before = broad === undefined ? null : image(broad);
+    const beforeScoped = domainRows.filter((r) => scopeOf(r) !== "*").sort((a, b) => scopeOf(a).localeCompare(scopeOf(b), "en")).map((r) => ({ scope_key: scopeOf(r), ...image(r) }));
     try {
       await audit(identity, {
         type: "autonomy_binding.revoke_requested", tool_id: "executive", action: "revoke_autonomy_binding",
         payload: {
-          domain, memory_space: identity.memory_space_id, existed: before !== null, before,
-          recovery: before === null ? "ingen binding å gjenopprette" : "set_autonomy_policy med verdiene i `before` (domene, tool_id, action, enabled, parameters)"
+          domain, memory_space: identity.memory_space_id, existed: before !== null || beforeScoped.length > 0, before, before_scoped: beforeScoped,
+          recovery: before === null && beforeScoped.length === 0
+            ? "ingen binding å gjenopprette"
+            : "set_autonomy_policy med verdiene i `before` (domenebredt: domene, tool_id, action, enabled, parameters) og for hvert element i `before_scoped` de samme verdiene med `rule` (scope_key `rule:<regel>`) eller `category` (scope_key `category:<kategori>`)"
         }
       });
     } catch {

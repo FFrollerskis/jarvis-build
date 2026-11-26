@@ -169,7 +169,12 @@ export class ExecutiveTransport implements ToolTransport {
         const result = await this.service.revokeAutonomyBinding(identity, domain);
         if (!result.ok) throw new Error(result.reason ?? "situations_call_denied");
         const removed = (result.data as { removed?: unknown } | undefined)?.removed === true;
-        return { external_id: `${identity.tenant_id}:${identity.memory_space_id}:${domain}`, data: { removed, domain, memory_space: identity.memory_space_id } as unknown as JsonValue };
+        // WP-G4b fiks-runde 1 (FIX-2): domenebredt tilbakekall - motoren oppgir nøyaktig hvilke skopnøkler (`*`, `rule:…`, `category:…`) som ble fjernet; videreføres additivt (aldri innhold).
+        const removedScopes = (result.data as { removed_scopes?: unknown } | undefined)?.removed_scopes;
+        return {
+          external_id: `${identity.tenant_id}:${identity.memory_space_id}:${domain}`,
+          data: { removed, domain, memory_space: identity.memory_space_id, ...(Array.isArray(removedScopes) ? { removed_scopes: removedScopes.filter((x): x is string => typeof x === "string") } : {}) } as unknown as JsonValue
+        };
       }
       case "record_evolution_decision": {
         // WP-B3 (D-475, EV-23): REGISTRER eierens avgjørelse om ett endringsforslag i revisjonssporet - uten virkning (selvendring er frosset, D-397). Eier + signert enhetsøkt + step-up håndheves FØR dette kalles
@@ -437,7 +442,7 @@ export function executiveToolDefinitions(transport: ExecutiveTransport, options:
     // parametrene til den slettede bindingen lagres i revisjonsraden `autonomy_binding.revoke_requested` (før-bildet, skrevet og committet FØR slettingen; se `ExecutiveService.revokeAutonomyBinding`). Registreres kun med JARVIS_CONTROL_AUTONOMY_REVOKE=on.
     ...(options.autonomyRevoke === true
       ? [{
-        ...control("revoke_autonomy_binding", "Tilbakekall eierens autonomi-binding (auto-ACT) for ÉTT situasjonsdomene i kallerens eget minnerom (gjennomslag til situations.clear_autonomy_policy); domenet går tilbake til ingen auto-ACT", { domain: z.string().min(1).max(100) }, "set_autonomy_policy med verdiene i før-bildet i revisjonsraden `autonomy_binding.revoke_requested` (domene, tool_id, action, enabled, parameters)"),
+        ...control("revoke_autonomy_binding", "Tilbakekall eierens autonomi-binding(er) (auto-ACT) for ÉTT situasjonsdomene i kallerens eget minnerom (gjennomslag til situations.clear_autonomy_policy): fjerner ALLE bindinger i domenet (den domenebrede og alle regel-/kategoribindinger); domenet går tilbake til ingen auto-ACT", { domain: z.string().min(1).max(100) }, "set_autonomy_policy med verdiene i før-bildet i revisjonsraden `autonomy_binding.revoke_requested` (`before` = den domenebrede; `before_scoped` = regel-/kategoribindingene med `scope_key`; domene, tool_id, action, enabled, parameters)"),
         reversible: false,
         // Gjennomgang L1: uopprettelig sletting = step-up på GATEWAY-nivå (signert enhetsøkt fra en eier-kanal, WP-F1-mekanismen), ikke bare i ruten - hver vei til verktøyet krever den (avslag: `step_up_required:<årsak>`).
         step_up_required: true,

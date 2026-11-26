@@ -183,28 +183,35 @@ describe("seksjonene og eier-/delegert autoritet", () => {
     expect(scoped.facts).not.toHaveProperty("not_bindable");
   });
 
-  it("WP-G4b K2 (verifikasjon): «Tilbakekall autonomi» fjerner KUN den domenebrede bindingen; står det aktiverte regel-/kategoribindinger igjen i domenet, SIER knappen det (løftet «ingenting utføres selv» gis kun når ingenting står igjen), og et smalt skop tilbys aldri tilbakekall herfra", async () => {
+  it("WP-G4b fiks-runde 1 (FIX-2/2b): «Tilbakekall autonomi» er DOMENEBREDT: ÉN knapp per (rom, domene) som sier at ALLE bindinger i domenet fjernes (også regel-/kategoribindinger og rene smale rader); kun økta sitt eget rom tilbys", async () => {
     const policies = [
       { memory_space_id: "personal", domain: "home", scope_key: "*", tool_id: "telegram", action: "notify", enabled: true, updated_at: ago(30 * H) },
       { memory_space_id: "personal", domain: "home", scope_key: "rule:home_assistant:water_leak", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) },
       { memory_space_id: "personal", domain: "home", scope_key: "category:opening", tool_id: "business", action: "create_followup", enabled: false, updated_at: ago(30 * H) },
       { memory_space_id: "personal", domain: "finance", scope_key: "*", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) },
-      { memory_space_id: "personal", domain: "vision", scope_key: "rule:vision:motion_detected", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) }
+      { memory_space_id: "personal", domain: "vision", scope_key: "rule:vision:motion_detected", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "business", domain: "home", scope_key: "*", tool_id: "telegram", action: "notify", enabled: true, updated_at: ago(30 * H) }
     ];
     const r = await build({ autonomyRevoke: true, policies }).run();
+    // én knapp per (rom, domene) i økta sitt eget rom (`personal`); `business`-raden får ingen
+    expect(r.actions.map((a) => a.id).filter((id) => id.startsWith("authority.revoke_autonomy:")).sort()).toEqual(["authority.revoke_autonomy:personal:finance", "authority.revoke_autonomy:personal:home", "authority.revoke_autonomy:personal:vision"]);
     const home = r.actions.find((a) => a.id === "authority.revoke_autonomy:personal:home")!;
-    expect(home.description_no).toContain("OBS: 1 aktivert regel-/kategoribinding i samme domene (rule:home_assistant:water_leak) berøres IKKE og utfører fortsatt selv");
-    expect(home.description_no).toContain("situations.clear_autonomy_policy (rule/category)");
-    expect(home.description_no).not.toContain("category:opening"); // en avslått rad virker ikke og telles ikke
-    expect(home.description_no).not.toContain("Uten binding utfører Jarvis ingenting selv"); // løftet er falskt når en smal binding står igjen
-    expect(item(r, "autonomy", "personal:home").facts).toMatchObject({ scoped_bindings_active: 1 });
-    // et domene uten smale bindinger beholder det opprinnelige løftet og ingen merknad; en annen domenes smale binding påvirker det ikke
+    expect(home).toMatchObject({ endpoint: "/executive/mutate", body: { action: "revoke_autonomy_binding", parameters: { domain: "home" } }, reversible: false, section_id: "autonomy", item_id: "personal:home" });
+    expect(home.description_no).toContain("ALLE 3 bindingene i domenet «home»");
+    expect(home.description_no).toContain("etterpå utfører Jarvis ingenting selv i domenet (fail-closed)");
+    for (const listed of ["hele domenet", "rule:home_assistant:water_leak", "category:opening"]) expect(home.description_no, listed).toContain(listed); // også den avslåtte raden fjernes
+    expect(home.description_no).not.toContain("berøres IKKE"); // den gamle merknaden (Q-G4-15) er løst
+    expect(home.rollback_no).toContain("autonomy_binding.revoke_requested");
+    expect(item(r, "autonomy", "personal:home").facts).toMatchObject({ bindings_in_domain: 3 });
+    // et domene med kun den brede raden: kort tekst uten «ALLE»
     const finance = r.actions.find((a) => a.id === "authority.revoke_autonomy:personal:finance")!;
-    expect(finance.description_no).toContain("Uten binding utfører Jarvis ingenting selv i domenet (fail-closed)");
-    expect(finance.description_no).not.toContain("OBS");
-    expect(item(r, "autonomy", "personal:finance").facts).not.toHaveProperty("scoped_bindings_active");
-    // en regel-/kategoribinding uten domenebred rad har ingen revoke-knapp (fjernes med clear_autonomy_policy + skop)
-    expect(r.actions.map((a) => a.id).filter((id) => id.startsWith("authority.revoke_autonomy:")).sort()).toEqual(["authority.revoke_autonomy:personal:finance", "authority.revoke_autonomy:personal:home"]);
+    expect(finance.description_no).toContain("Fjerner bindingen i domenet «finance»");
+    expect(finance.description_no).not.toContain("ALLE");
+    expect(item(r, "autonomy", "personal:finance").facts).not.toHaveProperty("bindings_in_domain");
+    // en RENT smal rad (ingen bred) har nå også en knapp, festet til den smale raden som finnes
+    const vision = r.actions.find((a) => a.id === "authority.revoke_autonomy:personal:vision")!;
+    expect(vision.item_id).toBe("personal:vision:rule:vision:motion_detected");
+    expect(vision.description_no).toContain("rule:vision:motion_detected");
     // uten tilbakekall-flagget finnes ingen knapp (som H0)
     expect((await build({ policies }).run()).actions.some((a) => a.id.startsWith("authority.revoke_autonomy:"))).toBe(false);
   });

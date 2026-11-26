@@ -206,7 +206,7 @@ describe("B: motoren mot ekte Postgres (ekte buss, gateway og claim-vakt)", () =
     expect(await db.engine.listAutonomyPolicies(TENANT_A, "home")).toEqual([]);
   });
 
-  it("clear: uten skop fjernes KUN den domenebrede raden; med skop akkurat den regel-/kategoribindingen; set erstatter per skop", async () => {
+  it("clear: MED skop fjernes akkurat den regel-/kategoribindingen (den brede står); UTEN skop er det et domenebredt tilbakekall som fjerner ALLE (FIX-2); set erstatter per skop", async () => {
     db.newGateway();
     await bind({});
     await bind({ rule: DOOR });
@@ -216,12 +216,16 @@ describe("B: motoren mot ekte Postgres (ekte buss, gateway og claim-vakt)", () =
     expect(await scopes()).toEqual(["*", "category:leak", `rule:${DOOR}`]);
     expect((await db.engine.getAutonomyPolicy(TENANT_A, "home", "home", `rule:${DOOR}`))?.tool_id).toBe("telegram");
     expect((await db.engine.getAutonomyPolicy(TENANT_A, "home", "home"))?.tool_id).toBe("test_actuator");
-    expect(await db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", OWNER)).toBe(true);
-    expect(await scopes()).toEqual(["category:leak", `rule:${DOOR}`]);
-    expect(await db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", OWNER)).toBe(false);
     expect(await db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", OWNER, { rule: DOOR })).toBe(true);
+    expect(await scopes()).toEqual(["*", "category:leak"]);
+    expect(await db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", OWNER, { rule: DOOR })).toBe(false);
     expect(await db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", OWNER, { category: "leak" })).toBe(true);
+    expect(await scopes()).toEqual(["*"]);
+    await bind({ rule: DOOR });
+    await bind({ category: "leak" });
+    expect(await db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", OWNER)).toBe(true); // domenebredt tilbakekall: ALLE rader (detaljer i wpg4b-revoke-all-scopes.test.ts)
     expect(await scopes()).toEqual([]);
+    expect(await db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", OWNER)).toBe(false);
     await expect(db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", "person-g4-other", { rule: DOOR })).rejects.toThrow(/unauthorized/);
   });
 

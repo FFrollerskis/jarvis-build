@@ -1677,17 +1677,28 @@ export class SituationEngine {
     );
   }
 
-  /** Fjerner bindingen for domenet. UTEN `scope` fjernes den DOMENEBREDE raden (som før; regel-/kategoribindinger røres ikke); MED `scope` fjernes akkurat den regel-/kategoribindingen (WP-G4b K2). */
+  /** `true` hvis minst én binding ble fjernet. Se `clearAutonomyPolicyScopes` for hva som fjernes. */
   async clearAutonomyPolicy(tenantId: string, memorySpace: MemorySpace, domain: string, actorPersonId: string | undefined, scope?: AutonomyScopeInput): Promise<boolean> {
+    return (await this.clearAutonomyPolicyScopes(tenantId, memorySpace, domain, actorPersonId, scope)).length > 0;
+  }
+
+  /**
+   * Tilbakekall av eierens binding(er) for domenet; returnerer skopnøklene som faktisk ble fjernet (sortert; tom = ingenting fantes).
+   *  - UTEN `scope` = DOMENEBREDT TILBAKEKALL (WP-G4b fiks-runde 1, FIX-2/2b, Q-G4-15): fjerner ALLE bindingsrader i (tenant, rom, domene) - den brede OG alle regel-/kategoribindinger - i ÉN setning (én transaksjon) under domenelåsen
+   *    som `actOn()` også holder. Dermed kan ingen smal binding utføre noe etterpå før eieren eksplisitt har gitt en NY binding; taket (en avslått/utløpt bred rad) kan ikke «forsvinne» og gjenopplive smale bindinger.
+   *    (Før hadde domenet én rad, så dette er den samme virkningen som på main.)
+   *  - MED `scope` (`rule` eller `category`) fjernes akkurat den ene regel-/kategoribindingen; den brede og de øvrige smale står urørt.
+   */
+  async clearAutonomyPolicyScopes(tenantId: string, memorySpace: MemorySpace, domain: string, actorPersonId: string | undefined, scope?: AutonomyScopeInput): Promise<string[]> {
     this.assertAutonomyAuthority(actorPersonId);
     const scopeKey = scopeKeyFor(domain, scope);
+    const domainWide = scopeKey === DOMAIN_WIDE_SCOPE;
     return withDomainAdvisoryLocks(this.pool, [domain], () =>
       withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-        const { rowCount } = await client.query(
-          `DELETE FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND scope_key = $4`,
-          [tenantId, memorySpace, domain, scopeKey]
-        );
-        return rowCount === 1;
+        const { rows } = domainWide
+          ? await client.query(`DELETE FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 RETURNING scope_key`, [tenantId, memorySpace, domain])
+          : await client.query(`DELETE FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND scope_key = $4 RETURNING scope_key`, [tenantId, memorySpace, domain, scopeKey]);
+        return (rows as Array<{ scope_key: string }>).map((r) => r.scope_key).sort();
       })
     );
   }
