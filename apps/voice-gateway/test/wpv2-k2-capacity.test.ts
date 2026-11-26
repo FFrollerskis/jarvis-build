@@ -535,15 +535,15 @@ describe("FIX-1 (F1): kontrollramme-flom (ping/pong) - ws svarer ikke lenger aut
   }, 20_000);
 
   it("pong som SVAR på serverens egen ping er forespurt og koster ingen token (halvåpen-vernet kan ikke slå seg selv av)", async () => {
-    // Bøtta har plass til ÉN ubedt pong og fylles nesten ikke på. Serveren pinger hvert 20. ms; en frisk klient svarer på hver ping.
-    gateway = await startGateway({ limits: { pingIntervalMs: 20, pingPongBurst: 1, pingPongPerSecond: 0.001, idleTimeoutMs: 10_000 } });
+    // Bøtta har plass til ÉN ubedt pong og fylles nesten ikke på. Serveren pinger hvert 100. ms; en frisk klient svarer på hver ping.
+    gateway = await startGateway({ limits: { pingIntervalMs: 100, pingPongBurst: 1, pingPongPerSecond: 0.001, idleTimeoutMs: 10_000 } });
     const healthy = await new TestClient(gateway.url).connect();
     let serverPings = 0;
     healthy.ws.on("ping", () => {
       serverPings += 1;
     });
-    await sleep(500);
-    expect(serverPings).toBeGreaterThanOrEqual(10); // serveren har pinget mange ganger, og klienten har (auto)svart på alle
+    await sleep(1300);
+    expect(serverPings).toBeGreaterThanOrEqual(8); // serveren har pinget mange ganger (mye mer enn bøtta rommer), og klienten har (auto)svart på alle
     expect(healthy.closeEvent).toBeNull();
     await expectBystanderAlive(healthy);
     healthy.close();

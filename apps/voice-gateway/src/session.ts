@@ -10,7 +10,7 @@ import { EnergyVad, type VadAdapter } from "./vad.ts";
 import { SentenceChunker } from "./chunker.ts";
 import { errorCode, withDeadline } from "./deadline.ts";
 import { UtteranceJournal, journalKey } from "./journal.ts";
-import { VoiceBusyError } from "./limits.ts";
+import { DEFAULT_VOICE_LIMITS, VoiceBusyError } from "./limits.ts";
 import type { SpeechCallContext } from "./speech-context.ts";
 import { sanitizeForSpeech } from "./text-sanitize.ts";
 import type { VoiceHealth } from "./health.ts";
@@ -168,6 +168,13 @@ export interface VoiceSessionOptions {
   ttsStallTimeoutMs?: number;
   /** Maks total syntesetid (ms) per chunk. */
   ttsChunkTimeoutMs?: number;
+  /** FIX-3 (F3): grenser mot ubegrenset minnevekst per sesjon. Standard: `DEFAULT_VOICE_LIMITS` (server.ts gir sesjonen gatewayens `limits`). */
+  /** Maks byte lyd i én tur (turen avsluttes med det som er mottatt, `turn_audio_limit`). */
+  maxTurnBytes?: number;
+  /** Maks ventende turer (kjørende + køede). Over = `voice_busy`. */
+  maxPendingTurns?: number;
+  /** Maks køede TTS-chunker. Over = chunken forkastes (`tts_queue_full`). */
+  maxQueuedTtsChunks?: number;
 }
 
 const DEFAULT_STT_END_TIMEOUT_MS = 60_000;
@@ -240,6 +247,13 @@ export class VoiceSession {
   private activeTurnAbort: AbortController | null = null;
   /** D-390 (JARVIS-079): etter `disconnect()` når ingen tur Core - en STT som fullfører etterpå kjører aldri verktøy for en død socket. */
   private closed = false;
+  /** FIX-3 (F3): byte lyd mottatt i den PÅGÅENDE turen (nullstilles ved `beginTurn`), og grensene (se `VoiceLimits`). */
+  private turnBytes = 0;
+  private pendingTurns = 0;
+  private ttsQueueFullReported = false;
+  private readonly maxTurnBytes: number;
+  private readonly maxPendingTurns: number;
+  private readonly maxQueuedTtsChunks: number;
   /** D-390: ringbuffer med lyd fra FØR turen (se `VoiceSessionOptions.preRollMs`). */
   private preRoll: Buffer[] = [];
   private preRollBytes = 0;
@@ -333,6 +347,9 @@ export class VoiceSession {
     this.sttRouting = evaluateSpeechRouting(sttAdapter.processor, identity.memory_space, memorySpaceAuthority);
     this.ttsRouting = evaluateSpeechRouting(ttsAdapter.processor, identity.memory_space, memorySpaceAuthority);
     this.speechContext = { memorySpace: identity.memory_space, authority: memorySpaceAuthority };
+    this.maxTurnBytes = positiveOr(options.maxTurnBytes, DEFAULT_VOICE_LIMITS.maxTurnBytes);
+    this.maxPendingTurns = positiveOr(options.maxPendingTurns, DEFAULT_VOICE_LIMITS.maxPendingTurns);
+    this.maxQueuedTtsChunks = positiveOr(options.maxQueuedTtsChunks, DEFAULT_VOICE_LIMITS.maxQueuedTtsChunks);
   }
 
   currentState(): VoiceState {
@@ -451,6 +468,16 @@ export class VoiceSession {
     // denne grenen bestemmer kun hvilke rammer som når adapteren mens den
     // pågår.
     if (this.stt && vadEvent !== "end_of_turn") {
+      if (this.turnBytes + frame.length > this.maxTurnBytes) {
+        // FIX-3 (F3): turen har fått mer lyd enn en legitim tur kan (VAD maxTurnMs 30 s = 960 000 byte) - typisk en klient som sender raskere enn
+        // sanntid. Avslutt turen MED det som er mottatt (samme som VAD sin egen tvungne slutt, så ingenting legitimt kastes), forkast denne
+        // rammen, og nullstill VAD så neste tale starter en NY tur. Bufferet (og Buffer.concat/WAV-kopiene i STT-adapteren) er dermed begrenset.
+        this.events.onError("turn_audio_limit");
+        this.vad.reset();
+        this.finishTurn(atMs);
+        return;
+      }
+      this.turnBytes += frame.length;
       this.stt.pushAudio(frame);
     }
     if (vadEvent === "end_of_turn" && this.stt) {
@@ -465,7 +492,30 @@ export class VoiceSession {
       this.events.onError(`utterance_already_completed:${utteranceId}`);
       return;
     }
-    this.turnChain = this.turnChain.then(() => this.runTurn(utteranceId, text, Date.now()));
+    if (!this.enqueueTurnStep(() => this.runTurn(utteranceId, text, Date.now()))) {
+      this.events.onError("voice_busy"); // FIX-3: turkjeden er full; id-en er IKKE claimet og kan sendes på nytt
+    }
+  }
+
+  /**
+   * FIX-3 (F3): legger et steg i den serielle turkjeden, men aldri flere enn `maxPendingTurns` (kjørende + ventende) - før var kjeden ubegrenset,
+   * og hvert ventende steg holder bl.a. en hel lydbuffer. `false` = full (kalleren forkaster turen og sier fra). Kjeden avvises aldri permanent
+   * (`catch`): et steg som kaster skal ikke stoppe alle senere turer i sesjonen.
+   */
+  private enqueueTurnStep(step: () => Promise<void>): boolean {
+    if (this.pendingTurns >= this.maxPendingTurns) {
+      return false;
+    }
+    this.pendingTurns += 1;
+    this.turnChain = this.turnChain
+      .then(step)
+      .catch((err: unknown) => {
+        console.error(JSON.stringify({ msg: "voice_turn_step_error", code: errorCode(err) }));
+      })
+      .finally(() => {
+        this.pendingTurns -= 1;
+      });
+    return true;
   }
 
   private journalKeyFor(utteranceId: string): string {
@@ -479,9 +529,13 @@ export class VoiceSession {
       t_speech_start: atMs
     };
     this.stt = this.sttAdapter.startStream(this.speechContext);
+    this.turnBytes = 0;
     // D-390: lyden rett FØR speech_start (ordets begynnelse) går først inn i turen.
     if (this.preRoll.length > 0) {
-      for (const f of this.preRoll) this.stt.pushAudio(f);
+      for (const f of this.preRoll) {
+        this.stt.pushAudio(f);
+        this.turnBytes += f.length;
+      }
       this.preRoll = [];
       this.preRollBytes = 0;
     }
@@ -502,7 +556,7 @@ export class VoiceSession {
     }
     metrics.t_end_of_turn = atMs;
     metrics.stt_audio_ms = atMs - metrics.t_speech_start;
-    this.turnChain = this.turnChain.then(async () => {
+    const step = async (): Promise<void> => {
       let text: string;
       try {
         // WP-V2 (K4): en STT-adapter som aldri svarer skal ikke kunne blokkere turnChain (og dermed ALLE senere turer i sesjonen).
@@ -543,7 +597,11 @@ export class VoiceSession {
       this.health?.recordSuccess("stt");
       this.events.onFinal(text);
       await this.runTurn(metrics.utterance_id, text, atMs, metrics);
-    });
+    };
+    if (!this.enqueueTurnStep(step)) {
+      // FIX-3: turkjeden er full (Core/STT henger bak mange turer). Turen forkastes - strømmen (og lydbufferet) slippes - og klienten får beskjed.
+      this.events.onError("voice_busy");
+    }
   }
 
   private async runTurn(utteranceId: string, text: string, _atMs: number, metrics?: TurnMetrics): Promise<void> {
@@ -738,6 +796,15 @@ export class VoiceSession {
       this.reportTtsDenial();
       return;
     }
+    // FIX-3 (F3): køen er begrenset (en lang LLM-respons gir legitimt dusinvis av chunker, `voice_sample`-flom gir uendelig mange). Over taket
+    // forkastes den NYE chunken; klienten får beskjed ÉN gang per overløp (nullstilles når køen igjen har plass).
+    if (this.ttsQueue.length >= this.maxQueuedTtsChunks) {
+      if (!this.ttsQueueFullReported) {
+        this.ttsQueueFullReported = true;
+        this.events.onError("tts_queue_full");
+      }
+      return;
+    }
     if (metrics) {
       metrics.tts_chars = (metrics.tts_chars ?? 0) + sanitized.length;
       if (metrics.t_first_tts_request === undefined) {
@@ -752,6 +819,7 @@ export class VoiceSession {
   private clearTtsQueue(): void {
     for (const item of this.ttsQueue) item.primed?.playback.cancel();
     this.ttsQueue = [];
+    this.ttsQueueFullReported = false;
   }
 
   private async speakNext(turnEpoch: number, metrics?: TurnMetrics): Promise<void> {
@@ -762,6 +830,9 @@ export class VoiceSession {
     const item = this.ttsQueue.shift();
     if (item === undefined) {
       return;
+    }
+    if (this.ttsQueue.length < this.maxQueuedTtsChunks) {
+      this.ttsQueueFullReported = false;
     }
     // D-122: svarteksten fra en sensitiv samtale er like avslørende som
     // spørsmålet. Er TTS-behandleren ikke kvalifisert, syntetiseres INGENTING.

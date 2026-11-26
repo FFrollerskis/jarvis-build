@@ -24,6 +24,22 @@ export interface VoiceLimits {
   controlPerSecond: number;
   controlBurst: number;
   /**
+   * FIX-3 (F3): byte-rate-bøtte for DEKODET lyd per tilkobling. Legitim lyd er PCM16 16 kHz mono = 32 000 byte/s i sanntid (nettleser og
+   * satellitt); 64 KiB/s er 2x sanntid, og burst 512 KiB (16 s lyd) dekker innhenting etter en nettverksstans. Før var det kun rammegrensen
+   * (100/s x 16 KiB = 1,6 MB/s, målt +2,2 MB/s per tilkobling) - 50x legitim rate. Brudd = 1008 `audio_rate_exceeded`.
+   */
+  audioBytesPerSecond: number;
+  audioByteBurst: number;
+  /**
+   * FIX-3: maks byte lyd i ÉN tur. Legitim maks er VAD `maxTurnMs` 30 s = 960 000 byte; 2 MiB (65 s) er over det med god margin. Over taket
+   * avsluttes turen med det som er mottatt (`turn_audio_limit`) og resten forkastes - bufferet (og Buffer.concat/WAV-kopiene) er dermed begrenset.
+   */
+  maxTurnBytes: number;
+  /** FIX-3: maks ventende turer per sesjon (kjørende + køede i den serielle turkjeden). Over = `voice_busy`, turen forkastes. */
+  maxPendingTurns: number;
+  /** FIX-3: maks køede TTS-chunker per sesjon (en lang LLM-respons kan legitimt gi dusinvis). Over = chunken forkastes (`tts_queue_full`, én gang per overløp). */
+  maxQueuedTtsChunks: number;
+  /**
    * FIX-1 (F1): token bucket for WebSocket-KONTROLLRAMMER fra klienten - `ping` og UBEDT `pong`. `ws` svarer ellers automatisk på hver ping,
    * uten grense og før applikasjonen ser rammen (målt: 4,6 M pings på 10 s = serverens RSS 105 MB -> 2,1 GB). Legitim bruk er høyst én
    * ping per 20-30 s (satellitt-keepalive); en nettleser kan ikke sende ping i det hele tatt. Et brudd termineres umiddelbart.
@@ -58,6 +74,11 @@ export const DEFAULT_VOICE_LIMITS: Readonly<VoiceLimits> = Object.freeze({
   audioBurst: 200,
   controlPerSecond: 5,
   controlBurst: 20,
+  audioBytesPerSecond: 64 * 1024,
+  audioByteBurst: 512 * 1024,
+  maxTurnBytes: 2 * 1024 * 1024,
+  maxPendingTurns: 8,
+  maxQueuedTtsChunks: 128,
   pingPongPerSecond: 2,
   pingPongBurst: 10,
   idleTimeoutMs: 120_000,

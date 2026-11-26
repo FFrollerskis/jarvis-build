@@ -538,7 +538,13 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         undefined,
         health,
         authority,
-        options.session ?? {}
+        // FIX-3: sesjonens minnegrenser følger gatewayens `limits` (eksplisitte `options.session`-verdier vinner, f.eks. i tester).
+        {
+          maxTurnBytes: limits.maxTurnBytes,
+          maxPendingTurns: limits.maxPendingTurns,
+          maxQueuedTtsChunks: limits.maxQueuedTtsChunks,
+          ...(options.session ?? {})
+        }
       );
       // Tillitsnivået er en del av svaret: en klient skal kunne SE at den kjører
       // ubevist, i stedet for å oppdage det som et uforklarlig `speech_routing_denied`.
@@ -791,6 +797,8 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
     let queue: Promise<void> = Promise.resolve();
     let queued = 0;
     const audioBucket = new TokenBucket(limits.audioFramesPerSecond, limits.audioBurst);
+    // FIX-3 (F3): byte-rate (dekodet PCM) ved ANKOMST, så også køen av ubehandlede meldinger er begrenset i byte, ikke bare i antall.
+    const audioByteBucket = new TokenBucket(limits.audioBytesPerSecond, limits.audioByteBurst);
     const controlBucket = new TokenBucket(limits.controlPerSecond, limits.controlBurst);
     const rejectFlood = (reason: string): void => {
       console.error(JSON.stringify({ msg: "voice_rate_limited", reason }));
@@ -893,6 +901,14 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
       if (!(message["type"] === "audio" ? audioBucket : controlBucket).tryTake()) {
         rejectFlood("rate_limited");
         return;
+      }
+      if (message["type"] === "audio" && typeof message["data"] === "string") {
+        // Anslått dekodet størrelse (base64: 3 byte per 4 tegn). Selve strengheten (tegnsett, partall byte) avgjøres i `decodeAudioFrame`.
+        const approxDecodedBytes = Math.floor((message["data"].length * 3) / 4);
+        if (!audioByteBucket.tryTake(approxDecodedBytes)) {
+          rejectFlood("audio_rate_exceeded");
+          return;
+        }
       }
       if (queued >= limits.maxQueuedMessages) {
         rejectFlood("overloaded");
