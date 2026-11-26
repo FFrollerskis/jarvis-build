@@ -36,8 +36,11 @@ const optRows = async (e164: string) => (await db.admin.query("SELECT status, so
 beforeAll(async () => {
   db = await startCommsDb("g1stp");
   // Marginen 0 = ren sekvensmodell (en START løfter alt med lavere sekvens): denne testen legger inn en STOP og straks en START og forventer at START løfter. Tie-marginen (STOP vinner innenfor 5 s) er bevist i `stop-start-overlap.test.ts`.
-  store = new CommsStore(db.app, clock, { startTieMarginMs: 0 });
-  const graph = new ConversationGraphService(db.app);
+  // FIX-6 (runde 2): HELE filen bruker en pool med `lock_timeout` 5 s (ikke bare X6-testen under). Uten den ga en selv-vranglås (STOP i egen transaksjon: mutant M62) at den ELDSTE testen hang til test-timeouten (30 s), og `afterAll` ventet så ut hook-timeouten
+  // (120 s) fordi den hengende forbindelsen aldri ble frigitt: 159 s totalt og en feilmelding om timeout. Nå feiler den med en rask, tydelig 55P03 (lock_timeout) og pool-en kan lukkes. Testene venter aldri på en lås i normal drift, så ingenting svekkes.
+  const pool = db.appPool({ lockTimeoutMs: 5000 });
+  store = new CommsStore(pool, clock, { startTieMarginMs: 0 });
+  const graph = new ConversationGraphService(pool);
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "whatsapp", JARVIS_COMMS_WEBHOOKS: "meta", JARVIS_COMMS_TENANT_ID: TENANT_A });
   service = new CommsWebhookService({ store, graph, config, secrets: { get: async (ref) => (ref === WEBHOOK_SECRET_REFS.meta ? META_SECRET : null) }, clock });
   await store.authorizeAccount(TENANT_A, "business", { channel: "whatsapp", account_ref: "109876543210", provider: "meta_whatsapp", source: "owner_route" }, { person_id: "person-g1-owner", session_id: "sess-stp" });
