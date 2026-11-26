@@ -23,10 +23,10 @@ Vent på Tobias sin eksplisitte godkjenning av fase 1 før du skriver applikasjo
    [DEPLOYMENT_STRATEGY](docs/DEPLOYMENT_STRATEGY.md)
 3. [docs/input/01_Jarvis_Masterplan_v2.1.md](docs/input/01_Jarvis_Masterplan_v2.1.md) – kildedokument (masterplan v2.1)
 
-De seks masterplanene HF1-HF6 ligger i [docs/input/](docs/input/README.md) (PDF-originaler i `docs/input/pdf/`;
-HF6 §24 = programkonstitusjon). De er mottatt som input 2026-11-26, ikke adoptert: adopsjon som governing plansett
-og eventuell erstatning av ADR-001-regler krever eierens NAVNGITTE D-beslutning (Q-86), ellers gjelder ADR-001 §2.1
-uendret.
+De seks masterplanene HF1-HF6 er mottatt som input 2026-11-26 (HF6 §24 = programkonstitusjon), men ligger IKKE i repoet:
+repoet er offentlig lesbart og planene er merket «Privat», så de oppbevares utenfor repoet (v2.1 og v4.0 ligger som tekst
+i `docs/input/` fra før). De er ikke adoptert: adopsjon som governing plansett og eventuell erstatning av ADR-001-regler
+krever eierens NAVNGITTE D-beslutning (Q-86), ellers gjelder ADR-001 §2.1 uendret.
 
 Beslutningslogg: [docs/DECISIONS_AND_ASSUMPTIONS.md](docs/DECISIONS_AND_ASSUMPTIONS.md) (D-xx = beslutninger, K-xx = kritikkfunn, A-xx = antakelser).
 Åpne spørsmål: [docs/OPEN_QUESTIONS.md](docs/OPEN_QUESTIONS.md) (Q-xx). Nye beslutninger logges alltid der med ID.

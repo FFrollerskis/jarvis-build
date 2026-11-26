@@ -8,7 +8,7 @@
 
 ## 1. HF2 Evolution v1.2 (EV-0 … EV-23)
 
-HF2-PDF-en ligger nå i repoet (`docs/input/pdf/HF2_Jarvis_Evolution_Masterplan_v1.2_FINAL_GOVERNING_EDITION.pdf`, levert av eieren 2026-11-26), men radene ble bygget uten den: de bygger på beslutningsloggen D-406…D-419, D-452 og koden. Navn og nummer EV-0…EV-23 er kontrollert mot PDF-en (lead 2026-11-26; én navnekorreksjon: EV-18, se raden); planens akseptansekriterier er IKKE sjekket mot radene. **Alle `WIRED`-rader er observasjon (`acts: false`): ingenting skrives eller utføres, selvendring er frosset (D-397), og ingenting er `VERIFIED` før det er observert på NAS.**
+HF2-PDF-en er levert av eieren 2026-11-26 (oppbevares utenfor det offentlige repoet), men radene ble bygget uten den: de bygger på beslutningsloggen D-406…D-419, D-452 og koden. Navn og nummer EV-0…EV-23 er kontrollert mot PDF-en (lead 2026-11-26; én navnekorreksjon: EV-18, se raden); planens akseptansekriterier er IKKE sjekket mot radene. **Alle `WIRED`-rader er observasjon (`acts: false`): ingenting skrives eller utføres, selvendring er frosset (D-397), og ingenting er `VERIFIED` før det er observert på NAS.**
 
 | EV | Innhold | Kode | Status | For å verifisere/aktivere |
 |---|---|---|---|---|
@@ -123,7 +123,7 @@ Per audit 2026-10-05: DONE_IN_CODE 2 (Situation Engine, Executive Mode), PARTIAL
 3. Rotere Infisical-nøklene som ble limt i chat (Q-47e); sette `JARVIS_DESTINATION_HOST_ALLOWLIST` (Q-47c); sette eier-env før redeploy (Q-45e).
 4. Levere/bekrefte: GitHub-token og evt. GitHub App (Q-45b), Google Ads developer token, Meta-verifisering, Cloudflare-token, Apple Developer/Mac (D-36), HA-instans + token, bil-provider (Q-13), e-sign-leverandør (Q-28 B).
 5. Fysiske kjøringer: ≥100 norske lydprøver (D-30), off-site backup (observert 2026-10-12) + restore-drill, uptime-overvåking, Xcode/iPhone/Watch.
-6. ~~HF6-filen (Q-43) og HF2-PDF-en i `docs/input/`~~ Levert av eieren 2026-11-26: alle seks planene ligger i `docs/input/` (PDF og tekstuttrekk, `docs/input/README.md`). Gjenstår: adopsjon som styrende plansett er eierens navngitte D-beslutning (Q-86), og planenes akseptansekriterier er ikke ført mot matrisen.
+6. ~~HF6-filen (Q-43) og HF2-PDF-en~~ Levert av eieren 2026-11-26: alle seks planene er mottatt (oppbevares utenfor det offentlige repoet; Q-86 pkt 4). Gjenstår: adopsjon som styrende plansett er eierens navngitte D-beslutning (Q-86), og planenes akseptansekriterier er ikke ført mot matrisen.
 7. Kjøre akseptanseportene (`ops/acceptance/nas-ua0-gate.sh` og `ops/acceptance/nas-hf1-hf2-gate.sh`) og verifiseringspakken (WP-J) sammen med meg.
 
 **Verifiseringspakken (WP-J3):** oppdatering av NAS-en: [runbooks/NAS_UPDATE_HF1_HF2.md](runbooks/NAS_UPDATE_HF1_HF2.md) · manus for den felles økten (blokker, bestått-kriterier, evidens-id-er): [runbooks/VERIFICATION_SESSION_HF1_HF2.md](runbooks/VERIFICATION_SESSION_HF1_HF2.md) · alt som bare du kan gjøre, som sjekkliste: [OWNER_ACTIONS_HF1_HF2.md](OWNER_ACTIONS_HF1_HF2.md). Porten og pakken endrer ingen rad: en rad blir `VERIFIED` først når en evidensfil er lenket.
