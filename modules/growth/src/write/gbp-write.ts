@@ -47,8 +47,15 @@ const locationShape = { location_id: z.string().min(4).max(34) };
 const accountLocationShape = { account_id: zDigits(4, 25), ...locationShape };
 const periodShape = z.object({ open_day: z.enum(DAYS), open_time: z.string().regex(TIME), close_day: z.enum(DAYS), close_time: z.string().regex(TIME) }).strict();
 const postsOf = (s: JsonValue): Array<Record<string, unknown>> => asArr(asObj(s)["posts"]).map(asObj);
-/** Review N6: `list_local_posts` leser ÉN side (20). En full side eller en neste-side-token betyr at listen er KUTTET - fravær beviser da ikke at et identisk innlegg mangler (paginering = DEFERRED). */
+/** Sidestørrelse for `localPosts` (UVERIFISERT; HEVES ikke - leverandørens maksimum er ikke kjent). Review N6: en kuttet liste kan ikke bevise at et identisk innlegg mangler (`truncated`). */
 const POSTS_PAGE_SIZE = 20;
+/**
+ * WP-P3 K6 (JARVIS-108, Q-68 pkt 5; PARTIAL): paginering av lokale innlegg. ALT i denne konstanten er UVERIFISERT mot Googles dokumentasjon (developers.google.com var utilgjengelig, ENOTFOUND, D-41) og samlet her så det kan
+ * rettes mot primærkilden uten å lete: Google-konvensjonen `pageToken` (forespørsel) / `nextPageToken` (svar), og at et FRAVÆRENDE token betyr siste side (en full side uten token er da komplett). Tak: 10 sider = 200 innlegg.
+ * FAIL-LUKKET (`truncated: true`, så `create_local_post` nektes): token igjen ved taket, samme token to ganger, et token som ikke er en ikke-tom streng på høyst `maxTokenChars` tegn (også `null`/tom/tall), over `maxPosts`
+ * innlegg, eller en side som forsvinner (404) midt i listen. Feil (401/403/5xx/nett) midt i listen kastes. Live er NOT VERIFIED (BLOCKED_EXTERNAL: Googles godkjenning av API-tilgangen).
+ */
+const POSTS_PAGINATION_UNVERIFIED = { requestParam: "pageToken", responseField: "nextPageToken", maxPages: 10, maxPosts: 200, maxTokenChars: 2048 } as const;
 
 const toTimeOfDay = (hhmm: string) => ({ hours: Number(hhmm.slice(0, 2)), minutes: Number(hhmm.slice(3, 5)) });
 const fromTimeOfDay = (t: unknown): string => {
@@ -194,11 +201,34 @@ export class GbpWriteTransport extends GoogleOAuthTransport {
         return { location_id: location, reviews };
       }
       case "list_local_posts": {
-        const res = await this.v4.request({ method: "GET", path: this.v4Path(p, "/localPosts"), query: { pageSize: String(POSTS_PAGE_SIZE) }, headers: auth.headers, secrets: auth.secrets, allowNotFound: true });
-        if (res === null) return null;
-        const rawPosts = asArr(asObj(res.json)["localPosts"]);
-        const truncated = str(asObj(res.json)["nextPageToken"]) !== null || rawPosts.length >= POSTS_PAGE_SIZE;
-        const posts = rawPosts.slice(0, POSTS_PAGE_SIZE).map((raw) => {
+        const { requestParam, responseField, maxPages, maxPosts, maxTokenChars } = POSTS_PAGINATION_UNVERIFIED;
+        const rawPosts: unknown[] = [];
+        const seenTokens = new Set<string>();
+        let pageToken: string | null = null;
+        let truncated = false;
+        for (let page = 1; page <= maxPages; page += 1) {
+          const res = await this.v4.request({
+            method: "GET", path: this.v4Path(p, "/localPosts"), query: { pageSize: String(POSTS_PAGE_SIZE), ...(pageToken !== null ? { [requestParam]: pageToken } : {}) },
+            headers: auth.headers, secrets: auth.secrets, allowNotFound: true
+          });
+          if (res === null) {
+            if (page === 1) return null;
+            truncated = true; // en side som forsvinner midt i listen er ikke et rent slutt
+            break;
+          }
+          const body = asObj(res.json);
+          rawPosts.push(...asArr(body["localPosts"]));
+          const next = body[responseField];
+          if (next === undefined) break; // fraværende token = siste side (UVERIFISERT)
+          if (typeof next !== "string" || next.length === 0 || next.length > maxTokenChars || seenTokens.has(next) || page === maxPages) {
+            truncated = true; // ugyldig/gjentatt token, eller token igjen ved taket: kan ikke bevise at listen er komplett
+            break;
+          }
+          seenTokens.add(next);
+          pageToken = next;
+        }
+        if (rawPosts.length > maxPosts) truncated = true;
+        const posts = rawPosts.slice(0, maxPosts).map((raw) => {
           const q = asObj(raw);
           return { post_id: (str(q["name"]) ?? "").split("/").pop() ?? null, summary: cleanText(q["summary"], 1500), state: str(q["state"]), topic_type: str(q["topicType"]) };
         });

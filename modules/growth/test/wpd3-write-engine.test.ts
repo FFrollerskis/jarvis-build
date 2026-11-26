@@ -1164,7 +1164,7 @@ describe("E7: review N6 - avkortede leverandørlister feiler LUKKET også for GB
   const call7 = (t: ToolTransport, action: string, params: Record<string, JsonValue>) => t.invoke(action, params, "fake-refresh-token-for-test", { identity: owner });
   const writes = (v: FakeVendor) => v.requests.filter((r) => r.method !== "GET" && !r.path.endsWith("/searchAnalytics/query"));
 
-  it("Business Profile: en full side (20) ELLER en neste-side-token = KUTTET -> create_local_post nektes (kan ikke bevise at et identisk innlegg mangler); under taket er dedupe og opprettelse som før", async () => {
+  it("Business Profile: en neste-side-token som ikke kan følges til ende = KUTTET -> create_local_post nektes (kan ikke bevise at et identisk innlegg mangler); under taket er dedupe og opprettelse som før. WP-P3 K6 (BEVISST endring av N6): en full side (20) UTEN token er nå komplett (fraværende token = siste side, UVERIFISERT)", async () => {
     const v = new FakeVendor(); await v.start();
     let posts: Array<Record<string, unknown>> = Array.from({ length: 20 }, (_, i) => ({ name: `accounts/1111/locations/123456789/localPosts/${i}`, summary: `Innlegg ${i}`, state: "LIVE", topicType: "STANDARD" }));
     let nextToken: string | undefined;
@@ -1176,9 +1176,8 @@ describe("E7: review N6 - avkortede leverandørlister feiler LUKKET også for GB
     const t = new GbpWriteTransport({ ...killOpen, ...token, spec: specs.google_business_profile, baseUrl: v.baseUrl, v4BaseUrl: v.baseUrl });
     const base = { account_id: "1111", location_id: "123456789" };
     const listed = async () => ((await call7(t, "list_local_posts", base)).data as Record<string, any>);
-    expect((await listed())["truncated"]).toBe(true); // full side uten token
-    await expect(call7(t, "create_local_post", { ...base, summary: "Helt nytt innlegg" })).rejects.toThrow("growth_precondition_failed:local_post_list_truncated");
-    posts = posts.slice(0, 3); nextToken = "mer"; // neste-side-token med få innlegg
+    expect((await listed())["truncated"]).toBe(false); // WP-P3 K6: en full side uten token er komplett (tidligere KUTTET: paginering var DEFERRED)
+    posts = posts.slice(0, 3); nextToken = "mer"; // neste-side-token som gjentas for hver side (kan aldri følges til ende)
     expect((await listed())["truncated"]).toBe(true);
     await expect(call7(t, "create_local_post", { ...base, summary: "Innlegg 1" })).rejects.toThrow("growth_precondition_failed:local_post_list_truncated");
     expect(writes(v)).toHaveLength(0);
@@ -1265,6 +1264,103 @@ describe("E7: review N6 - avkortede leverandørlister feiler LUKKET også for GB
     expect(await run("Helt ny annonse")).toMatchObject({ external_id: "799999" });
     expect(writes(v)).toHaveLength(1);
     await v.stop();
+  });
+
+  describe("WP-P3 K6 (JARVIS-108, Q-68 pkt 5; PARTIAL, UVERIFISERT mot Googles dokumentasjon): paginering av GBP-lokale innlegg", () => {
+    const LOC = "accounts/1111/locations/123456789";
+    const post = (i: number) => ({ name: `${LOC}/localPosts/${i}`, summary: `Innlegg ${i}`, state: "LIVE", topicType: "STANDARD" });
+    const base = { account_id: "1111", location_id: "123456789" };
+    /** Falsk leverandør med sider à 20 (Googles konvensjon: `pageToken` inn, `nextPageToken` ut, fraværende token = siste side); `onPage` kan overstyre svaret per forespørsel. */
+    async function pagedVendor(total: number, onPage?: (token: string | null, n: number) => Record<string, unknown> | { status: number } | undefined) {
+      const v = new FakeVendor(); await v.start();
+      let posts = Array.from({ length: total }, (_, i) => post(i));
+      let pageRequests = 0;
+      v.handler = (r) => {
+        if (r.method === "GET" && r.path.endsWith("/localPosts")) {
+          pageRequests += 1;
+          const token = r.query.get("pageToken");
+          const override = onPage?.(token, pageRequests);
+          if (override !== undefined) return "status" in override ? { status: override.status as number, json: {} } : { json: override };
+          const offset = token === null ? 0 : Number(token.slice(1));
+          const page = posts.slice(offset, offset + 20);
+          return { json: { localPosts: page, ...(offset + 20 < posts.length ? { nextPageToken: `t${offset + 20}` } : {}) } };
+        }
+        if (r.method === "POST" && r.path.endsWith("/localPosts")) { posts = [{ name: `${LOC}/localPosts/999`, summary: r.body["summary"], state: "LIVE", topicType: "STANDARD" }, ...posts]; return { json: { name: `${LOC}/localPosts/999` } }; }
+        return { status: 404, json: {} };
+      };
+      const t = new GbpWriteTransport({ ...killOpen, ...token, spec: specs.google_business_profile, baseUrl: v.baseUrl, v4BaseUrl: v.baseUrl, sleep: async () => undefined });
+      const list = async () => ((await call7(t, "list_local_posts", base)).data as Record<string, any>);
+      const gets = () => v.requests.filter((r) => r.method === "GET" && r.path.endsWith("/localPosts"));
+      return { v, t, list, gets, pageRequests: () => pageRequests };
+    }
+
+    it("45 innlegg på 3 sider: alle leses (pageSize holdes på 20, pageToken følges), truncated=false; dedupe på side 3 gir NOOP uten skriving; et nytt innlegg gir nøyaktig ÉN POST og readback ser alle sider", async () => {
+      const w = await pagedVendor(45);
+      const state = await w.list();
+      expect(state["posts"]).toHaveLength(45);
+      expect(state["truncated"]).toBe(false);
+      expect(w.gets().map((r) => [r.query.get("pageSize"), r.query.get("pageToken")])).toEqual([["20", null], ["20", "t20"], ["20", "t40"]]);
+      expect(await call7(w.t, "create_local_post", { ...base, summary: "Innlegg 44" })).toEqual({ data: { unchanged: true } }); // finnes først på side 3
+      expect(writes(w.v)).toHaveLength(0);
+      expect(await call7(w.t, "create_local_post", { ...base, summary: "Helt nytt innlegg" })).toMatchObject({ external_id: "999" });
+      expect(writes(w.v)).toHaveLength(1);
+      await w.v.stop();
+    });
+
+    it("taket er 10 sider (200 innlegg): nøyaktig 200 innlegg er komplett, 201 er KUTTET (token igjen ved taket) og create_local_post nektes uten skriving", async () => {
+      const exact = await pagedVendor(200);
+      const full = await exact.list();
+      expect(full["posts"]).toHaveLength(200);
+      expect(full["truncated"]).toBe(false);
+      expect(exact.gets()).toHaveLength(10);
+      await exact.v.stop();
+      const over = await pagedVendor(201);
+      const cut = await over.list();
+      expect(cut["truncated"]).toBe(true);
+      expect(cut["posts"]).toHaveLength(200);
+      expect(over.gets()).toHaveLength(10); // leser aldri side 11
+      await expect(call7(over.t, "create_local_post", { ...base, summary: "Helt nytt innlegg" })).rejects.toThrow("growth_precondition_failed:local_post_list_truncated");
+      expect(writes(over.v)).toHaveLength(0);
+      await over.v.stop();
+    });
+
+    it("samme token to ganger (sløyfe) = KUTTET og vi stopper med en gang; et token som ikke er en ikke-tom streng på høyst 2048 tegn (tom, tall, null, for langt) = KUTTET uten flere sider", async () => {
+      const loop = await pagedVendor(0, () => ({ localPosts: [post(1)], nextPageToken: "samme" }));
+      const looped = await loop.list();
+      expect(looped["truncated"]).toBe(true);
+      expect(loop.gets()).toHaveLength(2); // side 1 (token «samme»), side 2 (samme token igjen) - ikke flere
+      await expect(call7(loop.t, "create_local_post", { ...base, summary: "Nytt" })).rejects.toThrow("growth_precondition_failed:local_post_list_truncated");
+      expect(writes(loop.v)).toHaveLength(0);
+      await loop.v.stop();
+      for (const bad of ["", 12345, null, "x".repeat(2049), { a: 1 }]) {
+        const w = await pagedVendor(0, () => ({ localPosts: [post(1)], nextPageToken: bad }));
+        const state = await w.list();
+        expect(state["truncated"], JSON.stringify(bad).slice(0, 20)).toBe(true);
+        expect(w.gets(), JSON.stringify(bad).slice(0, 20)).toHaveLength(1);
+        await w.v.stop();
+      }
+      const edge = await pagedVendor(0, (token) => (token === null ? { localPosts: [post(1)], nextPageToken: "y".repeat(2048) } : { localPosts: [post(2)] }));
+      const ok = await edge.list();
+      expect(ok["truncated"]).toBe(false); // nøyaktig 2048 tegn er gyldig
+      expect(ok["posts"]).toHaveLength(2);
+      await edge.v.stop();
+    });
+
+    it("en leverandør som ignorerer pageSize og gir over 200 innlegg på én side = KUTTET (kuttet til 200); en side som forsvinner (404) midt i listen = KUTTET; en feil (500) midt i listen kastes", async () => {
+      const big = await pagedVendor(0, () => ({ localPosts: Array.from({ length: 250 }, (_, i) => post(i)) }));
+      const bigState = await big.list();
+      expect(bigState["truncated"]).toBe(true);
+      expect(bigState["posts"]).toHaveLength(200);
+      await big.v.stop();
+      const vanish = await pagedVendor(45, (token) => (token === "t20" ? { status: 404 } : undefined));
+      expect((await vanish.list())["truncated"]).toBe(true);
+      await vanish.v.stop();
+      const broken = await pagedVendor(45, (token) => (token === "t20" ? { status: 500 } : undefined));
+      await expect(broken.list()).rejects.toThrow(/google_business_profile_error_500|gbp_error_500|error_500/);
+      await expect(call7(broken.t, "create_local_post", { ...base, summary: "Nytt" })).rejects.toThrow(/error_500/);
+      expect(writes(broken.v)).toHaveLength(0);
+      await broken.v.stop();
+    });
   });
 
   it("GA4: en full side (200) ELLER `nextPageToken` = KUTTET -> create_key_event nektes, delete_key_event av en id som ikke står i den kuttede listen nektes (aldri falsk «uendret»), en id som FINNES fjernes", async () => {
