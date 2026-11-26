@@ -105,8 +105,8 @@ import { ProductService, ProductTransport } from "@jarvis/product";
 import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import { LocationService, runLocationRetentionSweepForAllTenants } from "@jarvis/location";
 import { HealthService, runHealthRetentionSweepForAllTenants } from "@jarvis/health";
-import { VisionService, runVisionRetentionSweepForAllTenants } from "@jarvis/vision";
-import { buildVisionRuntime, verifyVisionEndpoints, visionAdapterFromEnv } from "./vision-runtime.ts";
+import { DEFAULT_RETENTION_DAYS as VISION_DEFAULT_RETENTION_DAYS, DEFAULT_SNAPSHOT_RETENTION_DAYS as VISION_DEFAULT_SNAPSHOT_RETENTION_DAYS, VisionService, runVisionRetentionSweepForAllTenants } from "@jarvis/vision";
+import { buildVisionRuntime, verifyVisionEndpoints, visionAdapterFromEnv, visionFlagsFromEnv, type VisionRuntime } from "./vision-runtime.ts";
 import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
@@ -805,6 +805,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   };
   const goldenSuiteRunner = flagOn(process.env, CONTROL_FEATURE_FLAGS.goldenSuite) ? createGoldenSuiteRunner({ surface: () => modelToolSurface }) : undefined;
   const processStartedAt = new Date(Date.now() - Math.round(process.uptime() * 1000));
+  // WP-G3b (D-485): Syn-kortet i Personvern-senteret leser kjøretidens helsebilde gjennom en LAT funksjon (kjøretiden bygges lenger ned, som ExecutiveService over). Kilden gis KUN med JARVIS_VISION_ENABLED=on;
+  // uten den er senteret byte-identisk med main. Kjøretiden fylles i `visionControlRef` rett etter at den er bygget; før det (eller om den mangler) gir kortet ærlig «utilgjengelig», aldri en kastet feil ut av senteret.
+  const visionControlRef: { runtime: VisionRuntime | null } = { runtime: null };
   registerControlCenters(controlCenters, {
     pool, env: process.env, toolGateway, ownerControls, meshStatus: () => gateway.meshStatus(),
     authority: ownerAuthority, killSwitch, infraGate,
@@ -814,7 +817,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     evolutionReadiness, ev0Status: () => getLastEv0BootStatus(), evolutionTenantId: owner.tenant_id,
     valueReport: (tenantId) => lateExecutive().getValueReport(tenantId), infraStatus: (tenantId) => lateExecutive().getInfraStatus(tenantId),
     ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
-    ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
+    ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {}),
+    ...(visionFlagsFromEnv(process.env).enabled
+      ? {
+          vision: {
+            status: () => {
+              if (visionControlRef.runtime === null) throw new Error("vision_runtime_not_ready");
+              return visionControlRef.runtime.status();
+            },
+            defaults: { retention_days: VISION_DEFAULT_RETENTION_DAYS, snapshot_retention_days: VISION_DEFAULT_SNAPSHOT_RETENTION_DAYS }
+          }
+        }
+      : {})
   });
   // WP-D3 (UA-4 Growth, D-459): skrivehandlinger mot annonse-/analyseplattformene + eksperimentregisteret. ALT er AV som standard: uten `JARVIS_GROWTH_WRITE_PLATFORMS` registreres INGEN skriveverktøy, og uten
   // `JARVIS_GROWTH_EXPERIMENTS=on` ingen eksperimentverktøy - verktøylister, utvalg og rate-grenser er da identiske med main, og `deps.growthWrites` (rutene) finnes ikke (404). Skriving krever dessuten
@@ -1523,6 +1537,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     pool, env: process.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, ownerTenantId: owner.tenant_id, secrets: readSecretProvider,
     ownerControls: { killSwitch, controls: ownerControls }, embeddingBlockedReason: visionEndpoints.embeddingBlockedReason
   });
+  visionControlRef.runtime = visionRuntime; // WP-G3b: fyller den late kilden til Syn-kortet (null uten JARVIS_VISION_ENABLED=on; da er kortet heller ikke koblet inn)
   const deps: ApiDeps = {
     // D-393 (JARVIS-026): `/health` svarer 503 når databasen ikke svarer (tidligere konstant «ok»).
     readiness: makeReadiness({ database: () => pool.query("SELECT 1") }),
