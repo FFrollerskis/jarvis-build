@@ -1903,7 +1903,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
           // 503: be leverandøren prøve igjen om litt, og lukk forbindelsen så resten av den store kroppen ikke leses videre.
           if (err.status === 503) { res.setHeader("retry-after", String(bodyGuard.config.retryAfterSeconds)); res.setHeader("connection", "close"); }
           // En loggfeil skal aldri endre svaret: leverandøren skal fortsatt få 413/503 (ikke 500) selv om logghjelperen kaster.
-          try { deps.comms.webhooks.service.noteRejectedBeforeSignature(commsWebhookProvider, err.code as PreSignatureRejection); } catch { /* bevisst ignorert */ }
+          try { deps.comms.webhooks.service.noteRejectedBeforeSignature(commsWebhookProvider, err.code as PreSignatureRejection); } catch {
+            // bevisst ignorert (linjekommentar, ikke blokkommentar: kildevakten `wpn1-job-delivery` D fjerner kommentarer naivt, og et `*/` etter CSP-linjen `ws://*:3020` gjør at `/*` der leses som en blokkommentar som skjuler `restrictedOrigin: true`)
+          }
         }
         throw err;
       }
