@@ -350,7 +350,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
   const limits = resolveLimits(options.limits);
   // WP-V2 (K5): ÉN journal for hele gatewayen (alle sesjoner), aldri per sesjon.
   const journal = options.journal ?? new UtteranceJournal();
-  const tracker = new ConnectionTracker(limits.maxConnections, limits.maxConnectionsPerPeer);
+  const tracker = new ConnectionTracker(limits.maxConnections, limits.maxConnectionsPerPeer, limits.maxUnprovenPerPeer);
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/health") {
       // D-393 (JARVIS-026): ikke lenger en konstant «ok». Talekjeden er IKKE frisk når STT eller TTS ikke er konfigurert eller er UNAVAILABLE
@@ -446,19 +446,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
       // ws har allerede sendt close-rammen (1007/1002/1009) og avslutter selv socketen ved en mottakerfeil - testet i wpv2-k1 (plassen frigjøres).
     });
 
-    // WP-V2 (K2): kapasitet. Over grensen = definert avvisning (1013 «prøv igjen senere»), aldri et krasj og aldri en påvirkning av andre økter.
     const peer = peerKey(req);
-    const refusal = tracker.tryAcquire(peer);
-    if (refusal !== null) {
-      console.error(JSON.stringify({ msg: "voice_connection_refused", reason: refusal }));
-      try {
-        ws.send(JSON.stringify({ type: "error", error: "voice_busy" }));
-        ws.close(1013, "voice_busy");
-      } catch {
-        ws.terminate();
-      }
-      return;
-    }
     let socketClosed = false;
     let closing = false;
     let session: VoiceSession | null = null;
@@ -513,6 +501,28 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         console.error(JSON.stringify({ msg: "voice_send_failed", code: codeOf(err) }));
       }
     };
+
+    // WP-V2 (K2): kapasitet. Over grensen = definert avvisning (1013 «prøv igjen senere»), aldri et krasj og aldri en påvirkning av andre økter.
+    // FIX-2 (F2): er det fullt, kastes den ELDSTE ikke-beviste tilkoblingen ut (voice_evicted, 1013) så en bevist enhet alltid kommer inn når bare
+    // ubeviste fyller opp; kun når alt er bevist avvises den nye. Se `ConnectionTracker`.
+    const admission = tracker.admit(peer, () => {
+      send({ type: "error", error: "voice_evicted" });
+      closeConnection(1013, "evicted");
+    });
+    if (!admission.ok) {
+      console.error(JSON.stringify({ msg: "voice_connection_refused", reason: admission.reason }));
+      try {
+        ws.send(JSON.stringify({ type: "error", error: "voice_busy" }));
+        ws.close(1013, "voice_busy");
+      } catch {
+        ws.terminate();
+      }
+      return;
+    }
+    const ticket = admission.ticket;
+    /** FIX-2: en tilkobling som ikke har sendt en velformet `start` innen `startTimeoutMs` lukkes (frigjør plassen). Ryddes av første velformede start. */
+    const startTimer = setTimeout(() => closeConnection(1000, "start_timeout"), limits.startTimeoutMs);
+    startTimer.unref();
 
     const startSession = (identity: VoiceIdentity, authority: MemorySpaceAuthority): void => {
       session = new VoiceSession(
@@ -592,6 +602,12 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
       }
       if (proof === undefined && !claimed) {
         send({ type: "error", error: "missing_identity" });
+        return;
+      }
+      clearTimeout(startTimer); // FIX-2: en velformet start er kommet - fristen er oppfylt (selve autorisasjonen har egen frist)
+      // FIX-2: en UBEVIST start er begrenset per peer. Avvises FØR den eksisterende sesjonen røres (en avvist start river aldri ned noe).
+      if (proof === undefined && !tracker.claimUnproven(ticket)) {
+        send({ type: "error", error: "voice_busy" });
         return;
       }
       // WP-V2 (K3, JARVIS-079): en NY `start` på en tilkoblet socket erstatter sesjonen. Den forrige MÅ stoppes først (tur, TTS, aktiv
@@ -687,6 +703,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
       }
 
       grant = result.grant;
+      tracker.markProven(ticket); // FIX-2: nå vernet mot utkasting og ikke lenger regnet som ubevist
       startSession(
         {
           // HVERT identitetsfelt kommer fra grant-en. Klientens påstand er nå
@@ -939,7 +956,8 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
       clearTimeout(idleTimer);
       if (maxDurationTimer !== undefined) clearTimeout(maxDurationTimer);
       clearInterval(pingTimer);
-      tracker.release(peer);
+      clearTimeout(startTimer);
+      tracker.release(ticket);
       session?.disconnect();
     });
   });

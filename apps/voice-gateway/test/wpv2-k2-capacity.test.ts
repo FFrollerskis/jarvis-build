@@ -2,11 +2,11 @@ import { randomBytes } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConnectionTracker, DEFAULT_VOICE_LIMITS, ProcessSlots, TokenBucket, VoiceBusyError, peerKey, resolveLimits } from "../src/limits.ts";
+import { ConnectionTracker, DEFAULT_VOICE_LIMITS, ProcessSlots, TokenBucket, VoiceBusyError, peerKey, resolveLimits, type ConnectionTicket } from "../src/limits.ts";
 import type { TtsAdapter, TtsPlayback } from "../src/tts.ts";
 import { LocalWhisperStt } from "../src/stt.ts";
 import { LocalPiperTts } from "../src/tts.ts";
-import { LOCAL, TestClient, sleep, speechFrame, startGateway, trackUncaught, type RunningGateway } from "./wpv2-harness.ts";
+import { IDENTITY, LOCAL, TestClient, sleep, speechFrame, startGateway, trackUncaught, type RunningGateway } from "./wpv2-harness.ts";
 
 /**
  * WP-V2 K2 (JARVIS-063 voice-delen): kapasitet og rate limit. For HVER grense: overskridelse gir en definert feilkode/lukking
@@ -108,19 +108,94 @@ describe("peerKey (speiler apps/api http-guard clientKey)", () => {
   });
 });
 
-describe("ConnectionTracker", () => {
-  it("global og per-peer-grense; release frigjør; ukjent release røres ikke", () => {
-    const t = new ConnectionTracker(3, 2);
-    expect(t.tryAcquire("a")).toBeNull();
-    expect(t.tryAcquire("a")).toBeNull();
-    expect(t.tryAcquire("a")).toBe("peer_limit");
-    expect(t.tryAcquire("b")).toBeNull();
-    expect(t.tryAcquire("c")).toBe("global_limit");
+describe("ConnectionTracker: grenser, bevist/ubevist og utkasting av eldste ubeviste (FIX-2)", () => {
+  const noop = (): void => undefined;
+  const admitOk = (t: ConnectionTracker, peer: string, evict: () => void = noop): ConnectionTicket => {
+    const result = t.admit(peer, evict);
+    if (!result.ok) throw new Error(`avvist: ${result.reason}`);
+    return result.ticket;
+  };
+
+  it("global og per-peer-grense når alt er BEVIST (ingen å kaste ut); release frigjør; dobbel release røres ikke", () => {
+    const t = new ConnectionTracker(3, 2, 2);
+    const a1 = admitOk(t, "a");
+    const a2 = admitOk(t, "a");
+    t.markProven(a1);
+    t.markProven(a2);
+    expect(t.admit("a", noop)).toEqual({ ok: false, reason: "peer_limit" });
+    const b = admitOk(t, "b");
+    t.markProven(b);
+    expect(t.admit("c", noop)).toEqual({ ok: false, reason: "global_limit" });
     expect(t.active).toBe(3);
-    t.release("a");
-    expect(t.tryAcquire("c")).toBeNull();
-    t.release("zzz");
+    t.release(a1);
+    t.release(a1);
+    expect(t.active).toBe(2);
+    admitOk(t, "c");
     expect(t.active).toBe(3);
+  });
+
+  it("fullt for peeren: den ELDSTE ikke-beviste kastes ut (evict kalles på DEN), en bevist kastes aldri ut, og release av en utkastet er et no-op", () => {
+    const t = new ConnectionTracker(10, 3, 2);
+    const evicted: string[] = [];
+    const a = admitOk(t, "p", () => evicted.push("a"));
+    const b = admitOk(t, "p", () => evicted.push("b"));
+    const c = admitOk(t, "p", () => evicted.push("c"));
+    t.markProven(a); // eldst, men bevist: vernet
+    const d = admitOk(t, "p", () => evicted.push("d")); // peeren er full (3): b (eldste ikke-beviste) kastes ut
+    expect(evicted).toEqual(["b"]);
+    expect(t.activeFor("p")).toBe(3);
+    t.release(b);
+    expect(t.activeFor("p")).toBe(3); // b var allerede borte
+    t.markProven(c);
+    t.markProven(d);
+    expect(t.admit("p", noop)).toEqual({ ok: false, reason: "peer_limit" }); // nå er alle bevist: ingen utkasting
+    expect(evicted).toEqual(["b"]);
+    expect(t.admit("annen", noop).ok).toBe(true); // en annen peer er upåvirket
+  });
+
+  it("fullt globalt: eldste ikke-beviste uansett peer kastes ut; en annen peers BEVISTE er trygge; alt bevist = avvist", () => {
+    const t = new ConnectionTracker(3, 10, 10);
+    const evicted: string[] = [];
+    const x = admitOk(t, "x", () => evicted.push("x"));
+    const y = admitOk(t, "y", () => evicted.push("y"));
+    const z = admitOk(t, "z", () => evicted.push("z"));
+    t.markProven(x);
+    admitOk(t, "w", () => evicted.push("w")); // fullt: y (eldste ikke-beviste, annen peer) kastes ut, ikke den bevistes x
+    expect(evicted).toEqual(["y"]);
+    t.release(y);
+    t.markProven(z);
+    const nw = [...(t as unknown as { tickets: Set<ConnectionTicket> }).tickets].find((tk) => tk.peer === "w") as ConnectionTicket;
+    t.markProven(nw);
+    expect(t.admit("v", noop)).toEqual({ ok: false, reason: "global_limit" });
+  });
+
+  it("utkastelsen er best effort: en evict som kaster stopper aldri innslippet av den nye", () => {
+    const t = new ConnectionTracker(1, 1, 1);
+    admitOk(t, "p", () => {
+      throw new Error("lukking feilet");
+    });
+    expect(t.admit("p", noop).ok).toBe(true);
+    expect(t.active).toBe(1);
+  });
+
+  it("claimUnproven: maks maxUnprovenPerPeer per peer; andre peers upåvirket; bevist teller ikke; release frigjør; en utkastet tilkobling får false", () => {
+    const t = new ConnectionTracker(10, 10, 2);
+    const a = admitOk(t, "p");
+    const b = admitOk(t, "p");
+    const c = admitOk(t, "p");
+    const d = admitOk(t, "p");
+    expect(t.claimUnproven(a)).toBe(true);
+    expect(t.claimUnproven(a)).toBe(true); // idempotent for den som allerede har plassen
+    expect(t.claimUnproven(b)).toBe(true);
+    expect(t.claimUnproven(c)).toBe(false); // tredje ubeviste
+    t.markProven(d);
+    expect(t.unprovenFor("p")).toBe(2); // bevist d telles ikke
+    expect(t.claimUnproven(admitOk(t, "q"))).toBe(true); // annen peer
+    t.release(a);
+    expect(t.claimUnproven(c)).toBe(true); // plass frigjort
+    const evictedTicket = admitOk(t, "r");
+    t.release(evictedTicket);
+    expect(t.claimUnproven(evictedTicket)).toBe(false);
   });
 });
 
@@ -215,12 +290,13 @@ describe("ProcessSlots (semafor for lokale prosesser)", () => {
 });
 
 describe("tilkoblingsgrenser", () => {
+  // BEVISTE tilkoblinger kastes aldri ut (FIX-2: kun ubeviste/ventende kastes ut når det er fullt) - derfor starter disse testene BEVIST.
   it("per-peer-grense: tilkobling nr. N+1 får voice_busy og lukkes med 1013; de andre er upåvirket; plass frigjøres ved lukking", async () => {
     gateway = await startGateway({ limits: { maxConnectionsPerPeer: 2, maxConnections: 10 } });
     const a = await new TestClient(gateway.url).connect();
     const b = await new TestClient(gateway.url).connect();
-    await a.startUnproven();
-    await b.startUnproven();
+    await a.startProven({ ...IDENTITY, device_id: "dev-wpv2-a" });
+    await b.startProven({ ...IDENTITY, device_id: "dev-wpv2-b" });
     const refused = await new TestClient(gateway.url).connect();
     await refused.waitFor((m) => m.type === "error" && m["error"] === "voice_busy");
     expect((await refused.waitClosed()).code).toBe(1013);
@@ -230,7 +306,7 @@ describe("tilkoblingsgrenser", () => {
     await a.waitClosed();
     await sleep(50);
     const next = await new TestClient(gateway.url).connect();
-    await next.startUnproven();
+    await next.startProven({ ...IDENTITY, device_id: "dev-wpv2-c" });
     expect(next.closeEvent).toBeNull();
     b.close();
     next.close();
@@ -240,8 +316,8 @@ describe("tilkoblingsgrenser", () => {
     gateway = await startGateway({ limits: { maxConnections: 2, maxConnectionsPerPeer: 50 } });
     const a = await new TestClient(gateway.url).connect();
     const b = await new TestClient(gateway.url).connect();
-    await a.startUnproven();
-    await b.startUnproven();
+    await a.startProven({ ...IDENTITY, device_id: "dev-wpv2-a" });
+    await b.startProven({ ...IDENTITY, device_id: "dev-wpv2-b" });
     const refused = await new TestClient(gateway.url).connect();
     expect((await refused.waitClosed()).code).toBe(1013);
     await expectBystanderAlive(a);
@@ -547,5 +623,107 @@ describe("FIX-1 (F1): kontrollramme-flom (ping/pong) - ws svarer ikke lenger aut
     expect(healthy.closeEvent).toBeNull();
     await expectBystanderAlive(healthy);
     healthy.close();
+  });
+});
+
+describe("FIX-2 (F2): «peer» kan kollapse bak proxy/bridge - eierens bevisste enheter utarmes ikke av ubeviste", () => {
+  const PEER_LIMITS = { maxConnectionsPerPeer: 4, maxUnprovenPerPeer: 2 };
+
+  it("standardverdiene: høyst 2 ubeviste per peer, start-frist 10 s", () => {
+    expect(DEFAULT_VOICE_LIMITS).toMatchObject({ maxUnprovenPerPeer: 2, startTimeoutMs: 10_000 });
+    expect(DEFAULT_VOICE_LIMITS.maxUnprovenPerPeer).toBeLessThan(DEFAULT_VOICE_LIMITS.maxConnectionsPerPeer); // alltid plass igjen til bevisste enheter
+  });
+
+  it("tredje UBEVISTE start fra samme peer avvises med voice_busy (tilkoblingen og de eksisterende sesjonene lever), og en BEVIST enhet kan likevel starte", async () => {
+    gateway = await startGateway({ limits: PEER_LIMITS });
+    const u1 = await new TestClient(gateway.url).connect();
+    const u2 = await new TestClient(gateway.url).connect();
+    await u1.startUnproven();
+    await u2.startUnproven();
+    const u3 = await new TestClient(gateway.url).connect();
+    u3.send({ type: "start", identity: IDENTITY });
+    await u3.waitFor((m) => m.type === "error" && m["error"] === "voice_busy");
+    expect(u3.messages.some((m) => m.type === "started")).toBe(false);
+    expect(u3.closeEvent).toBeNull();
+    const owner = await new TestClient(gateway.url).connect();
+    await owner.startProven(); // eierens bevisste enhet er ikke blokkert av de ubeviste
+    await expectBystanderAlive(u1);
+    await expectBystanderAlive(u2);
+    u1.close();
+    await u1.waitClosed();
+    await sleep(50);
+    u3.send({ type: "start", identity: IDENTITY }); // plassen er frigjort
+    await u3.waitFor((m) => m.type === "started");
+    for (const c of [u2, u3, owner]) c.close();
+  });
+
+  it("fire hvilende ubeviste (2 startet + 2 ventende) fyller peeren: eierens BEVISTE enhet kommer inn ved at den ELDSTE ubeviste kastes ut (voice_evicted, 1013)", async () => {
+    gateway = await startGateway({ limits: PEER_LIMITS });
+    const u1 = await new TestClient(gateway.url).connect();
+    const u2 = await new TestClient(gateway.url).connect();
+    await u1.startUnproven();
+    await u2.startUnproven();
+    const p1 = await new TestClient(gateway.url).connect(); // åpnet, aldri startet
+    const p2 = await new TestClient(gateway.url).connect();
+    const owner = await new TestClient(gateway.url).connect(); // femte: peeren er full
+    await owner.startProven();
+    expect(await u1.waitClosed()).toEqual({ code: 1013, reason: "evicted" });
+    expect(u1.errors()).toContain("voice_evicted");
+    for (const c of [u2, p1, p2, owner]) expect(c.closeEvent).toBeNull(); // kun den eldste ble kastet ut
+    for (const c of [u2, p1, p2, owner]) c.close();
+  });
+
+  it("fire BEVISTE enheter fyller peeren: en femte avvises (voice_busy, 1013) og INGEN bevist kastes ut", async () => {
+    gateway = await startGateway({ limits: PEER_LIMITS });
+    const proven: TestClient[] = [];
+    for (let i = 0; i < 4; i++) {
+      const c = await new TestClient(gateway.url).connect();
+      await c.startProven({ ...IDENTITY, device_id: `dev-wpv2-${i}` });
+      proven.push(c);
+    }
+    const fifth = await new TestClient(gateway.url).connect();
+    await fifth.waitFor((m) => m.type === "error" && m["error"] === "voice_busy");
+    expect(await fifth.waitClosed()).toEqual({ code: 1013, reason: "voice_busy" });
+    for (const c of proven) {
+      expect(c.closeEvent).toBeNull();
+      await expectBystanderAlive(c);
+      c.close();
+    }
+  });
+
+  it("global grense: en ny tilkobling kaster ut eldste ubeviste uansett peer, men aldri en bevist", async () => {
+    gateway = await startGateway({ limits: { maxConnections: 3, maxConnectionsPerPeer: 10, maxUnprovenPerPeer: 10 } });
+    const owner = await new TestClient(gateway.url).connect();
+    await owner.startProven();
+    const u1 = await new TestClient(gateway.url).connect();
+    const u2 = await new TestClient(gateway.url).connect();
+    await u1.startUnproven();
+    await u2.startUnproven();
+    const fresh = await new TestClient(gateway.url).connect(); // fullt (3): u1 kastes ut
+    await fresh.startProven({ ...IDENTITY, device_id: "dev-wpv2-fresh" });
+    expect((await u1.waitClosed()).code).toBe(1013);
+    expect(owner.closeEvent).toBeNull();
+    expect(u2.closeEvent).toBeNull();
+    expect(fresh.closeEvent).toBeNull();
+    for (const c of [owner, u2, fresh]) c.close();
+  });
+
+  it("start-frist: en tilkobling uten velformet start lukkes (1000 start_timeout); en som starter i tide - også ubevist - berøres ikke", async () => {
+    gateway = await startGateway({ limits: { startTimeoutMs: 200, idleTimeoutMs: 10_000 } });
+    const silent = await new TestClient(gateway.url).connect();
+    const garbage = await new TestClient(gateway.url).connect();
+    const started = await new TestClient(gateway.url).connect();
+    const proven = await new TestClient(gateway.url).connect();
+    garbage.send({ type: "start", identity: { person_id: 42 } }); // malformed_message: teller IKKE som en start
+    await started.startUnproven();
+    await proven.startProven();
+    expect(await silent.waitClosed(3000)).toEqual({ code: 1000, reason: "start_timeout" });
+    expect(await garbage.waitClosed(3000)).toEqual({ code: 1000, reason: "start_timeout" });
+    await sleep(300);
+    expect(started.closeEvent).toBeNull();
+    expect(proven.closeEvent).toBeNull();
+    await expectBystanderAlive(started);
+    started.close();
+    proven.close();
   });
 });

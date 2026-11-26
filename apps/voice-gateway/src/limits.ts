@@ -17,6 +17,18 @@ export interface VoiceLimits {
   maxConnections: number;
   /** Maks samtidige tilkoblinger per peer (se `peerKey`). */
   maxConnectionsPerPeer: number;
+  /**
+   * FIX-2 (F2): maks UBEVISTE sesjoner (`start` uten enhetsbevis) per peer. Bak en Docker-bridge/proxy uten brukbar `X-Forwarded-For` er «peer» den
+   * samme adressen for ALLE klienter (NOT VERIFIED: faktisk topologi med Tailscale Serve er ikke målt), så fire ubeviste klienter kunne før
+   * utarme eierens egne enheter (målt: «eier» fikk `voice_busy` mens 4 ubeviste hvilte). Bevist enhet = Core har autorisert den: de telles
+   * ikke her og kastes aldri ut. En start over taket gir `voice_busy`; den eksisterende sesjonen røres ikke.
+   */
+  maxUnprovenPerPeer: number;
+  /**
+   * FIX-2: en tilkobling som ikke har sendt en velformet `start` innen så lenge (ms) lukkes (1000 `start_timeout`). Frigjør plassen fra
+   * tilkoblinger som aldri blir noe (ubevist sti: ellers holdt av enhver melding, opptil 30 min). Nettleseren sender `start` straks etter åpning.
+   */
+  startTimeoutMs: number;
   /** Token bucket for `audio`: jevn rate (nettleser ca. 16/s, 20 ms-satellitt 50/s) og burst. */
   audioFramesPerSecond: number;
   audioBurst: number;
@@ -70,6 +82,8 @@ export const DEFAULT_VOICE_LIMITS: Readonly<VoiceLimits> = Object.freeze({
   maxAudioFrameBytes: 16 * 1024,
   maxConnections: 16,
   maxConnectionsPerPeer: 4,
+  maxUnprovenPerPeer: 2,
+  startTimeoutMs: 10_000,
   audioFramesPerSecond: 100,
   audioBurst: 200,
   controlPerSecond: 5,
@@ -159,48 +173,114 @@ export function peerKey(req: Pick<IncomingMessage, "socket" | "headers">): strin
 
 export type ConnectionRefusal = "global_limit" | "peer_limit";
 
-/** Teller samtidige tilkoblinger totalt og per peer. */
+/**
+ * Hvor langt en tilkobling har kommet (FIX-2): `pending` = ingen velformet `start` ennå, `unproven` = startet uten enhetsbevis,
+ * `proven` = Core har autorisert enheten. Kun `proven` er vernet mot utkasting.
+ */
+export type ConnectionState = "pending" | "unproven" | "proven";
+
+/** Opak håndtak for én tilkobling i `ConnectionTracker` (gis til `claimUnproven`/`markProven`/`release`). */
+export interface ConnectionTicket {
+  readonly peer: string;
+  state: ConnectionState;
+  readonly evict: () => void;
+}
+
+export type AdmitResult = { ok: true; ticket: ConnectionTicket } | { ok: false; reason: ConnectionRefusal };
+
+/**
+ * Teller samtidige tilkoblinger totalt og per peer, og skiller BEVISTE fra ubeviste (FIX-2).
+ *
+ * Er det fullt (globalt eller for peeren), kastes den ELDSTE ikke-beviste tilkoblingen (pending/unproven) ut for å gi plass - en bevist enhet
+ * skal alltid kunne koble til når det bare er ubeviste som fyller opp. Finnes ingen å kaste ut (alt er bevist), avvises den nye. Alder =
+ * innsettingsrekkefølge. Når to tilkoblinger kan ha samme peer-adresse uten å være samme klient (proxy), er dette det som holder eieren inne.
+ */
 export class ConnectionTracker {
-  private total = 0;
-  private readonly perPeer = new Map<string, number>();
+  private readonly tickets = new Set<ConnectionTicket>();
   constructor(
     private readonly maxTotal: number,
-    private readonly maxPerPeer: number
+    private readonly maxPerPeer: number,
+    private readonly maxUnprovenPerPeer: number = Number.POSITIVE_INFINITY
   ) {}
 
-  /** `null` = plass (og tilkoblingen er regnet med; kall `release` ved lukking). Ellers avslagsgrunnen (ingenting regnet med). */
-  tryAcquire(peer: string): ConnectionRefusal | null {
-    if (this.total >= this.maxTotal) {
-      return "global_limit";
+  /** Tar inn en ny tilkobling (eventuelt ved å kaste ut den eldste ubeviste; `evict` på DEN kalles). Ellers avslagsgrunnen - ingenting regnet med. */
+  admit(peer: string, evict: () => void): AdmitResult {
+    let victim: ConnectionTicket | undefined;
+    if (this.activeFor(peer) >= this.maxPerPeer) {
+      victim = this.oldestEvictable((t) => t.peer === peer);
+      if (victim === undefined) {
+        return { ok: false, reason: "peer_limit" };
+      }
+    } else if (this.tickets.size >= this.maxTotal) {
+      victim = this.oldestEvictable(() => true);
+      if (victim === undefined) {
+        return { ok: false, reason: "global_limit" };
+      }
     }
-    const current = this.perPeer.get(peer) ?? 0;
-    if (current >= this.maxPerPeer) {
-      return "peer_limit";
+    if (victim !== undefined) {
+      this.tickets.delete(victim);
+      try {
+        victim.evict();
+      } catch {
+        // Utkastelsen er best effort: den nye tilkoblingen tas inn uansett (plassen er allerede frigjort).
+      }
     }
-    this.total += 1;
-    this.perPeer.set(peer, current + 1);
-    return null;
+    const ticket: ConnectionTicket = { peer, state: "pending", evict };
+    this.tickets.add(ticket);
+    return { ok: true, ticket };
   }
 
-  release(peer: string): void {
-    const current = this.perPeer.get(peer) ?? 0;
-    if (current <= 0) {
-      return;
+  /** Enheten er bevist (Core har utstedt en grant): vernet mot utkasting, og teller ikke mot ubevist-taket. */
+  markProven(ticket: ConnectionTicket): void {
+    if (this.tickets.has(ticket)) {
+      ticket.state = "proven";
     }
-    this.total = Math.max(0, this.total - 1);
-    if (current === 1) {
-      this.perPeer.delete(peer);
-    } else {
-      this.perPeer.set(peer, current - 1);
+  }
+
+  /** Tilkoblingen starter UBEVIST: `false` = peeren har allerede `maxUnprovenPerPeer` andre ubeviste sesjoner (eller tilkoblingen er kastet ut). */
+  claimUnproven(ticket: ConnectionTicket): boolean {
+    if (!this.tickets.has(ticket)) {
+      return false;
     }
+    if (ticket.state === "unproven") {
+      return true;
+    }
+    if (this.unprovenFor(ticket.peer, ticket) >= this.maxUnprovenPerPeer) {
+      return false;
+    }
+    ticket.state = "unproven";
+    return true;
+  }
+
+  /** Idempotent: en allerede utkastet tilkobling er borte fra før. */
+  release(ticket: ConnectionTicket): void {
+    this.tickets.delete(ticket);
   }
 
   get active(): number {
-    return this.total;
+    return this.tickets.size;
   }
 
   activeFor(peer: string): number {
-    return this.perPeer.get(peer) ?? 0;
+    let n = 0;
+    for (const t of this.tickets) if (t.peer === peer) n += 1;
+    return n;
+  }
+
+  /** Antall ubeviste sesjoner for `peer` (unntatt `except`). */
+  unprovenFor(peer: string, except?: ConnectionTicket): number {
+    let n = 0;
+    for (const t of this.tickets) if (t !== except && t.peer === peer && t.state === "unproven") n += 1;
+    return n;
+  }
+
+  private oldestEvictable(match: (t: ConnectionTicket) => boolean): ConnectionTicket | undefined {
+    for (const t of this.tickets) {
+      if (t.state !== "proven" && match(t)) {
+        return t;
+      }
+    }
+    return undefined;
   }
 }
 
