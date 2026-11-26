@@ -129,7 +129,7 @@ export function decideReconcile(e: ReconcileEvidence): ReconcileDecision {
     const changed = parseIsoInstant(observed["last_changed"]);
     if (changed === null) return unknown("change_time_unavailable");
     if (changed + HA_CLOCK_SKEW_MS > requestedMs) return unknown("state_changed_since_request");
-    // Før-tilstanden MÅ være lagret og stemme med den observerte: uten den er «uendret» et løst påstand (fiks-runde 1, LOW-1).
+    // Før-tilstanden MÅ være lagret og stemme med den observerte: uten den er «uendret» en løs påstand (fiks-runde 1, LOW-1).
     const before = isRecord(row.before_state) ? row.before_state["state"] : undefined;
     if (typeof before !== "string") return unknown("before_state_missing");
     if (before !== observed["state"]) return unknown("before_state_differs");
