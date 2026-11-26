@@ -1218,6 +1218,55 @@ describe("E7: review N6 - avkortede leverandørlister feiler LUKKET også for GB
     await v.stop();
   });
 
+  it("WP-P3 K1 (JARVIS-106, N10): en ULESELIG `ads`-kant (HTTP 400 GraphMethodException «missing permissions») er IKKE «ingen annonser» - list_ads gir truncated + ads_unreadable og create_ad nektes FØR noen POST; 500 på kanten kaster; en lesbar tom liste gir fortsatt opprettelse", async () => {
+    const v = new FakeVendor(); await v.start();
+    let edge: "unreadable" | "http500" | "empty" = "unreadable";
+    let setReadable = true;
+    let ads: Array<Record<string, unknown>> = [];
+    v.handler = (r) => {
+      if (r.method === "GET" && r.path === "/v26.0/act_1234567890123") return { json: { id: "act_1234567890123", currency: "NOK" } };
+      if (r.method === "GET" && r.path === "/v26.0/60010") return setReadable ? { json: { id: "60010", status: "ACTIVE", account_id: "1234567890123" } } : { status: 400, json: { error: { type: "GraphMethodException", code: 100, message: "Unsupported get request. Object with ID '60010' does not exist, cannot be loaded due to missing permissions, or does not support this operation" } } };
+      if (r.method === "GET" && r.path === "/v26.0/60010/ads") {
+        if (edge === "unreadable") return { status: 400, json: { error: { type: "GraphMethodException", code: 100, message: "Unsupported get request. Object with ID '60010' does not exist, cannot be loaded due to missing permissions, or does not support this operation" } } };
+        if (edge === "http500") return { status: 500, json: { error: { type: "OAuthException", code: 2, message: "Service temporarily unavailable" } } };
+        return { json: { data: ads } };
+      }
+      if (r.method === "POST" && r.path === "/v26.0/act_1234567890123/ads") { ads = [...ads, { id: "799999", name: r.body["name"], status: "PAUSED" }]; return { json: { id: "799999" } }; }
+      return { status: 404, json: {} };
+    };
+    const t = new MetaAdsWriteTransport({ ...killOpen, spec: specs.meta_ads, baseUrl: v.baseUrl, sleep: async () => undefined });
+    const base = { ad_account_id: "act_1234567890123", ad_set_id: "60010" };
+    const listed = async () => ((await t.invoke("list_ads", base, "fake-meta-token-for-test", { identity: owner })).data as Record<string, any>);
+    const run = (name: string) => t.invoke("create_ad", { ...base, name, page_id: "1234567890", link: "https://example.test/x", message: "Hei", headline: "Tittel" }, "fake-meta-token-for-test", { identity: owner });
+    // 1) uleselig kant: avkortet + merket, og INGEN skriving (hverken for et nytt navn eller et navn som kan finnes fra før).
+    const state = await listed();
+    expect(state["truncated"]).toBe(true);
+    expect(state["ads_unreadable"]).toBe(true);
+    expect(state["ads"]).toEqual([]);
+    expect(state["ad_set_status"]).toBe("ACTIVE");
+    await expect(run("Helt ny annonse")).rejects.toThrow("growth_precondition_failed:ad_list_truncated");
+    await expect(run("Annonse som kanskje finnes")).rejects.toThrow("growth_precondition_failed:ad_list_truncated");
+    expect(writes(v)).toHaveLength(0);
+    // 2) 5xx på kanten er en FEIL (kastes, svelges aldri) - uendret atferd; heller ingen skriving.
+    edge = "http500";
+    await expect(listed()).rejects.toThrow(/meta_ads_error_500/);
+    await expect(run("Helt ny annonse")).rejects.toThrow(/meta_ads_error_500/);
+    expect(writes(v)).toHaveLength(0);
+    // 3) uleselig ANNONSESETT (ikke kanten) er uendret «ikke funnet» (null), ikke en avkortet liste.
+    edge = "unreadable"; setReadable = false;
+    expect(await listed()).toBeNull();
+    await expect(run("Helt ny annonse")).rejects.toThrow("meta_ads_target_not_found");
+    expect(writes(v)).toHaveLength(0);
+    // 4) en LESBAR, tom liste er fortsatt «komplett»: truncated:false og opprettelse virker (ingen falsk positiv).
+    edge = "empty"; setReadable = true;
+    const empty = await listed();
+    expect(empty["truncated"]).toBe(false);
+    expect(empty["ads_unreadable"]).toBeUndefined();
+    expect(await run("Helt ny annonse")).toMatchObject({ external_id: "799999" });
+    expect(writes(v)).toHaveLength(1);
+    await v.stop();
+  });
+
   it("GA4: en full side (200) ELLER `nextPageToken` = KUTTET -> create_key_event nektes, delete_key_event av en id som ikke står i den kuttede listen nektes (aldri falsk «uendret»), en id som FINNES fjernes", async () => {
     const v = new FakeVendor(); await v.start();
     let events: Array<Record<string, unknown>> = Array.from({ length: 200 }, (_, i) => ({ name: `properties/123456789/keyEvents/${1000 + i}`, eventName: `hendelse_${i}`, custom: true, deletable: true }));
