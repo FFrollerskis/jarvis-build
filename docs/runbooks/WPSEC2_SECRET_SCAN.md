@@ -65,7 +65,7 @@ Navnet normaliseres (camelCase delt, små bokstaver, skilletegn likestilt) og de
 
 - **Korpus:** `modules/core/test/fixtures/secret-scan-benign.txt` (114 linjer: norske e-poster, kalender, møtenotater, kontonummer/KID/org.nr./telefon/fakturanr., git-SHA, UUID, docker-digest, filstier, stakksporinger, kode med `password`/`token` uten verdi, lange sammensatte norske ord, URL uten credentials, JSON med `token_count`, prefikser nevnt i prosa, Authorization/Cookie i prosa) skal gå byte-identisk gjennom skanneren (hver linje, NFC/NFD, hele filen). Hver ny regel har minst ett nytt godartet tilfelle der.
 - **Hex/base64 frittstående flagges ALDRI** (policy, ikke gap): hasher, digester (`sha256:`), trace-id-er, git-SHA-er, UUID-er og base64-data (`data:`-URI, vedlegg) står overalt i audit-/ledger-/forhåndsvisningsdata, og en frittstående 64-hex kan like gjerne være et sjekksum som en hemmelighet. De redigeres kun med et hemmelighetsord rett foran (`secret_blob`), og aldri hvis verdien er en UUID, en ren sifferrekke, en slug eller en sti. En frittstående hemmelighet i hex/base64 uten kontekst slipper dermed gjennom (kjent gap; en entropiklassifikator uten terskel og godartet korpus er utenfor omfanget - «Bygges IKKE»). Lead/eier kan overstyre.
-- Kortnummerregelen (Luhn) er IKKE utvidet.
+- Kortnummerregelen (Luhn) er IKKE utvidet; den er kun INNSNEVRET: et siffertreff inne i en UUID-formet hex/bindestrek-løpe røres ikke (`fin-pi-47015187-4988-4107-…` kunne tilfeldig bestå Luhn og ble `[REDACTED:card_number]` i en ledger-feilårsak - oppdaget av `modules/finance/test/wpf1-review-fixes.test.ts` i full-suite). Ekte kortnumre med mellomrom/bindestrek redigeres som før.
 - Kjente falske positiver som FINNES: et ferdig token med prosa uten skilletegn rett etter, hvis tokenet er kortere enn standardlengden og prosaen akkurat fyller opp lengden; et prefiks i prosa fulgt av nøyaktig så mange tegn kort tekst uten skilletegn som kroppen skal ha (sjeldent, og skaden er et par ord).
 
 ## 6. Grenser og ytelse (K6)
@@ -107,6 +107,10 @@ Maskinlesbar baseline: `modules/core/test/fixtures/secret-sink-baseline.json` (a
 - En privat nøkkel uten avslutning i ET søsken (strukturert) sluker ikke søsknene (hver streng skannes for seg), men BEGIN i ett og END i neste fanges.
 - `before_state`/`after_state` i ledger (§7), voice-gateway-logger (§7) og de uklassifiserte lagringsstedene er ikke dekket.
 - Overstyring av `Authorization`-tekst med ukjent skjema: credential = første ord etter et kjent skjemaord, ellers første ord; en hemmelighet med mellomrom i en ukjent-skjema-header kan stå delvis igjen.
+
+## 9b. Testkjøring (byggemiljø, ikke NAS)
+
+Full suite (1099 filer, `--exclude **/embedded-postgres-*`): 19 504 bestått, 6 feilet: 5 kjente sandkasse-feil (`wpc3-review1-hardening` F10a/b/c, `break-glass-guard`, `nas-ua0-gate` «friskt system»; `git check-ignore`/«dubious ownership») og 1 ekte funn (`wpf1-review-fixes`, UUID/Luhn, fikset og kjørt grønt etterpå). `embedded-postgres-port-lease.test.ts` alene: 71 bestått. `embedded-postgres-ipv4-contention.test.ts` (B.3) HENGER i dette sandkassemiljøet (to forsøk i full suite og ett alene, tidsavbrudd etter 480 s); den importerer ingen av de endrede filene (ingen skanner-/audit-avhengighet) og er ikke vurdert som relatert. Typecheck (alle workspaces), `pnpm lint` og `pnpm check:containment`: exit 0.
 
 ## 10. NOT VERIFIED: slik verifiseres det på NAS (eier/lead, ikke gjort)
 
