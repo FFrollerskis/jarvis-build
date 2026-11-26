@@ -548,6 +548,32 @@ export class LocalPiperTts implements TtsAdapter {
      * kalle `return()` (en forhåndshentet chunk som aldri spilles) står ellers evig parkert ved `yield` og holder plassen.
      */
     let releaseSlot: (() => void) | undefined;
+    /**
+     * FIX-9: plassen gis tilbake når prosessen er DØD (`exit`), ikke ved SIGTERM - ellers kunne en ny piper starte oppå en som ennå dør, og taket gjaldt
+     * generatorer, ikke prosesser. En prosess som ignorerer SIGTERM trappes opp til SIGKILL etter 2 s (selv om generatoren er parkert og aldri når sin egen
+     * `finally`), og en sikkerhetstimer (5 s) gir plassen tilbake uansett så den aldri blir hengende. `release` er idempotent.
+     */
+    const releaseWhenGone = (): void => {
+      const release = releaseSlot;
+      if (!release) {
+        return;
+      }
+      const proc = child;
+      // Ingen prosess (aldri startet), en som allerede er død, eller en som aldri kom i gang (spawn-feil: ingen pid, `exit` er ikke garantert): gi plassen tilbake nå.
+      if (!proc || proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null) {
+        release();
+        return;
+      }
+      const escalate = setTimeout(() => killProcessGroup(proc, "SIGKILL"), 2_000);
+      const safety = setTimeout(release, 5_000);
+      escalate.unref();
+      safety.unref();
+      proc.once("exit", () => {
+        clearTimeout(escalate);
+        clearTimeout(safety);
+        release();
+      });
+    };
     async function* spawnAndStream(extra: string[]): AsyncIterable<Buffer> {
       // `detached: true` (POSIX): piper blir gruppeleder for en NY
       // prosessgruppe - `killProcessGroup()` under kan da drepe HELE
@@ -654,10 +680,15 @@ export class LocalPiperTts implements TtsAdapter {
         throw err;
       }
       releaseSlot = release;
+      // FIX-9: `cancel()` kan ha kommet etter at plassen ble innvilget, men før denne fortsettelsen (mikro-vindu) - da startes ingen prosess, og plassen gis tilbake.
+      if (cancelled) {
+        release();
+        return;
+      }
       try {
         yield* spawnAndStream(extra);
       } finally {
-        release();
+        releaseWhenGone();
       }
     }
     /**
@@ -692,7 +723,7 @@ export class LocalPiperTts implements TtsAdapter {
         if (child) {
           killProcessGroup(child);
         }
-        releaseSlot?.();
+        releaseWhenGone();
       }
     };
   }

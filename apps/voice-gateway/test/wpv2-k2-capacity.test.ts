@@ -1,5 +1,9 @@
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConnectionTracker, DEFAULT_VOICE_LIMITS, ProcessSlots, TokenBucket, VoiceBusyError, peerKey, resolveLimits, type ConnectionTicket } from "../src/limits.ts";
@@ -726,4 +730,87 @@ describe("FIX-2 (F2): «peer» kan kollapse bak proxy/bridge - eierens bevisste 
     started.close();
     proven.close();
   });
+});
+
+describe("FIX-9 (F9): avviste sockets, og Piper-plassen følger prosessens liv", () => {
+  it("standardverdi: en avvist tilkobling får 2 s på å svare på close-rammen", () => {
+    expect(DEFAULT_VOICE_LIMITS.refusedCloseGraceMs).toBe(2_000);
+  });
+
+  it("en avvist tilkobling som aldri svarer på close terminereres etter fristen (ikke ws sine 30 s): fd frigjøres, de vanlige tilkoblingene røres ikke", async () => {
+    gateway = await startGateway({ limits: { maxConnections: 1, maxConnectionsPerPeer: 10, refusedCloseGraceMs: 300 } });
+    const owner = await new TestClient(gateway.url).connect();
+    await owner.startProven(); // bevist = aldri utkastet: nye tilkoblinger avvises
+    const connections = (): Promise<number> => new Promise((resolve, reject) => gateway!.server.getConnections((err, n) => (err ? reject(err) : resolve(n))));
+    const refused: Socket[] = [];
+    for (let i = 0; i < 5; i++) refused.push(await rawUpgradeNonReading(gateway.port)); // leser aldri og svarer aldri på close
+    expect(await connections()).toBe(6); // eieren + fem avviste som ennå venter på close-svaret
+    await sleep(800); // > 300 ms-fristen
+    expect(await connections()).toBe(1); // kun eieren er igjen
+    await expectBystanderAlive(owner);
+    for (const sock of refused) sock.destroy();
+    owner.close();
+  });
+
+  it("en avvist tilkobling som SVARER på close lukkes straks (ingen venting på fristen), og fristtimeren rydder seg selv", async () => {
+    gateway = await startGateway({ limits: { maxConnections: 1, maxConnectionsPerPeer: 10, refusedCloseGraceMs: 60_000 } });
+    const owner = await new TestClient(gateway.url).connect();
+    await owner.startProven();
+    const refused = await new TestClient(gateway.url).connect();
+    expect(await refused.waitClosed()).toEqual({ code: 1013, reason: "voice_busy" });
+    owner.close();
+  });
+
+  const PIPER_MODEL = `${FIXTURES}/fake-voice.onnx`;
+
+  it("cancel() rett etter at plassen er innvilget (mikro-vindu før prosessen starter): ingen prosess startes, plassen frigjøres", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wpv2-piper-"));
+    const marker = join(dir, "spawned");
+    const script = join(dir, "piper-marker.sh");
+    await writeFile(script, `#!/bin/bash\ncat >/dev/null\n: > '${marker}'\nprintf 'AAAA'\n`);
+    await chmod(script, 0o755);
+    const slots = new ProcessSlots(2, 500, 1);
+    const playback = new LocalPiperTts(script, PIPER_MODEL, undefined, slots, 10_000).synthesize("hei", undefined, { memorySpace: "personal", authority: "SERVER_VERIFIED" });
+    const first = playback.frames[Symbol.asyncIterator]().next(); // starter generatoren: acquire() er innvilget, men fortsettelsen ligger i mikrokøen
+    playback.cancel(); // ... og kansellering kommer FØR den
+    expect((await first).done).toBe(true);
+    await sleep(300);
+    expect(existsSync(marker)).toBe(false); // prosessen ble aldri startet
+    expect(slots.inUse).toBe(0);
+  });
+
+  it("spawn-feil (ingen prosess kom i gang) og vanlig fullføring gir plassen tilbake umiddelbart - ikke først ved sikkerhetstimeren", async () => {
+    const slots = new ProcessSlots(2, 500, 1);
+    const failing = new LocalPiperTts("/nonexistent/wpv2/piper-bin", PIPER_MODEL, undefined, slots, 10_000);
+    const err = await (async () => {
+      for await (const _ of failing.synthesize("hei", undefined, { memorySpace: "personal", authority: "SERVER_VERIFIED" }).frames) void _;
+    })().catch((e: unknown) => e);
+    expect((err as Error).message).toBe("local_piper_spawn_failed:ENOENT");
+    expect(slots.inUse).toBe(0); // straks (testen venter ikke på 5 s)
+    const ok = new LocalPiperTts(`${FIXTURES}/mock-piper-ok.sh`, PIPER_MODEL, undefined, slots, 10_000);
+    const frames: Buffer[] = [];
+    for await (const f of ok.synthesize("hei", undefined, { memorySpace: "personal", authority: "SERVER_VERIFIED" }).frames) frames.push(f);
+    expect(Buffer.concat(frames).toString()).toBe("AAAABBBBCCCC");
+    await sleep(50); // prosessen er død (exit) rett etter siste ramme
+    expect(slots.inUse).toBe(0);
+  });
+
+  it("cancel() frigjør plassen når prosessen er DØD, ikke ved SIGTERM: en prosess som ignorerer SIGTERM holder plassen til SIGKILL-opptrappingen", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wpv2-piper-"));
+    const script = join(dir, "piper-ignores-term.sh");
+    await writeFile(script, "#!/bin/bash\ntrap '' TERM\ncat >/dev/null\nprintf 'AAAA'\nsleep 30\n");
+    await chmod(script, 0o755);
+    const slots = new ProcessSlots(1, 100, 0);
+    const playback = new LocalPiperTts(script, PIPER_MODEL, undefined, slots, 60_000).synthesize("hei", undefined, { memorySpace: "personal", authority: "SERVER_VERIFIED" });
+    const first = await playback.frames[Symbol.asyncIterator]().next();
+    expect(first.done).toBe(false);
+    expect(slots.inUse).toBe(1);
+    playback.cancel();
+    await sleep(500);
+    expect(slots.inUse).toBe(1); // prosessen ignorerer SIGTERM og lever ennå: plassen er IKKE gitt videre (ellers kunne en ny piper starte oppå en døende)
+    const started = Date.now();
+    while (slots.inUse > 0 && Date.now() - started < 6000) await sleep(50);
+    expect(slots.inUse).toBe(0); // SIGKILL etter ca. 2 s
+    expect(Date.now() - started).toBeLessThan(4500);
+  }, 20_000);
 });

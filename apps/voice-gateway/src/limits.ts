@@ -25,6 +25,11 @@ export interface VoiceLimits {
    */
   maxUnprovenPerPeer: number;
   /**
+   * FIX-9 (F9): en AVVIST tilkobling (1013) får så lenge (ms) på å svare på close-rammen før socketen termineres. `ws` venter ellers 30 s, og en rå
+   * TCP-klient som aldri svarer holdt en fd per avviste forsøk (målt: 326 fd etter 500 forsøk). Close-rammen er allerede sendt; en klient som leser får den.
+   */
+  refusedCloseGraceMs: number;
+  /**
    * FIX-2: en tilkobling som ikke har sendt en velformet `start` innen så lenge (ms) lukkes (1000 `start_timeout`). Frigjør plassen fra
    * tilkoblinger som aldri blir noe (ubevist sti: ellers holdt av enhver melding, opptil 30 min). Nettleseren sender `start` straks etter åpning.
    */
@@ -90,6 +95,7 @@ export const DEFAULT_VOICE_LIMITS: Readonly<VoiceLimits> = Object.freeze({
   maxConnectionsPerPeer: 4,
   maxUnprovenPerPeer: 2,
   startTimeoutMs: 10_000,
+  refusedCloseGraceMs: 2_000,
   audioFramesPerSecond: 100,
   audioBurst: 200,
   controlPerSecond: 5,

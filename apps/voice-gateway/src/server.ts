@@ -523,6 +523,14 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
       } catch {
         ws.terminate();
       }
+      // FIX-9: close-rammen er sendt; en klient som ikke svarer får `refusedCloseGraceMs`, ikke ws sine 30 s (en fd per avviste forsøk hang før).
+      const refusedGrace = setTimeout(() => {
+        if (ws.readyState !== ws.CLOSED) {
+          ws.terminate();
+        }
+      }, limits.refusedCloseGraceMs);
+      refusedGrace.unref();
+      ws.once("close", () => clearTimeout(refusedGrace));
       return;
     }
     const ticket = admission.ticket;
