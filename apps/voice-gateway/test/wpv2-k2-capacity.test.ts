@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import { connect, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConnectionTracker, DEFAULT_VOICE_LIMITS, ProcessSlots, TokenBucket, VoiceBusyError, peerKey, resolveLimits } from "../src/limits.ts";
@@ -385,4 +387,133 @@ describe("backpressure", () => {
     await expectBystanderAlive(bystander);
     bystander.close();
   }, 20_000);
+});
+
+/** Venter til `predicate` er sann (maks `timeoutMs`); kaster ved tidsavbrudd. */
+async function waitUntil(predicate: () => boolean, timeoutMs = 4000): Promise<void> {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error("timeout i waitUntil");
+    }
+    await sleep(10);
+  }
+}
+
+/** Rå TCP + håndlaget WebSocket-oppgradering. Nøkkelen bygges ved kjøring (aldri en literal). Klienten leser aldri etter 101-svaret. */
+async function rawUpgradeNonReading(port: number): Promise<Socket> {
+  const sock = connect(port, "127.0.0.1");
+  sock.on("error", () => undefined);
+  await new Promise<void>((resolve) => sock.once("connect", () => resolve()));
+  const key = randomBytes(16).toString("base64");
+  sock.write(`GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+  await new Promise<void>((resolve) => sock.once("data", () => resolve()));
+  sock.pause(); // fra nå av leses ingenting fra serveren: alt serveren sender hoper seg opp i dens sendebuffer
+  return sock;
+}
+
+/** Maskert klientramme (opcode 0x9 ping / 0xA pong, 125 byte nyttelast = maks for en kontrollramme). */
+function maskedControlFrame(opcode: number): Buffer {
+  const mask = Buffer.from([1, 2, 3, 4]);
+  const payload = Buffer.alloc(125, 0x61);
+  const masked = Buffer.from(payload.map((b, i) => b ^ (mask[i % 4] as number)));
+  return Buffer.concat([Buffer.from([0x80 | opcode, 0x80 | 125]), mask, masked]);
+}
+
+describe("FIX-1 (F1): kontrollramme-flom (ping/pong) - ws svarer ikke lenger automatisk og uten grense", () => {
+  it("standardverdiene for ping/pong-bøtta (2/s, burst 10) er med i grensene", () => {
+    expect(DEFAULT_VOICE_LIMITS).toMatchObject({ pingPongPerSecond: 2, pingPongBurst: 10 });
+  });
+
+  it("legitim bruk: noen få pings innenfor bøtta besvares med SAMME nyttelast (RFC 6455 §5.5.3), og tilkoblingen lever", async () => {
+    gateway = await startGateway();
+    const client = await new TestClient(gateway.url).connect();
+    const pongs: string[] = [];
+    client.ws.on("pong", (data: Buffer) => pongs.push(data.toString("utf8")));
+    for (let i = 0; i < 5; i++) client.ws.ping(`p${i}`);
+    await waitUntil(() => pongs.length >= 5);
+    expect(pongs).toEqual(["p0", "p1", "p2", "p3", "p4"]);
+    expect(client.closeEvent).toBeNull();
+    await expectBystanderAlive(client);
+    client.close();
+  });
+
+  it("ping-flom fra en klient som LESER: kun bøtta besvares (aldri alle), tilkoblingen termineres, og en annen økt er upåvirket", async () => {
+    gateway = await startGateway();
+    const bystander = await new TestClient(gateway.url).connect();
+    await bystander.startUnproven();
+    const flood = await new TestClient(gateway.url).connect();
+    let pongs = 0;
+    flood.ws.on("pong", () => {
+      pongs += 1;
+    });
+    const payload = Buffer.alloc(125, 0x61);
+    for (let i = 0; i < 20_000; i++) flood.ws.ping(payload);
+    const closed = await flood.waitClosed(6000);
+    expect(closed.code).toBe(1006); // terminert uten høflig lukking: en flom får ikke 5 s ekstra parsing
+    expect(pongs).toBeLessThanOrEqual(DEFAULT_VOICE_LIMITS.pingPongBurst + 2);
+    await expectBystanderAlive(bystander);
+    bystander.close();
+  }, 20_000);
+
+  it("ping-flom fra en klient som IKKE leser (rå TCP): serveren lukker raskt og serverens minne vokser ikke", async () => {
+    gateway = await startGateway();
+    const sock = await rawUpgradeNonReading(gateway.port);
+    let closed = false;
+    sock.on("error", () => {
+      closed = true;
+    });
+    sock.on("close", () => {
+      closed = true;
+    });
+    const batch = Buffer.concat(Array.from({ length: 2000 }, () => maskedControlFrame(0x9))); // 262 KB per skriving
+    const rssBefore = process.memoryUsage().rss;
+    const startedAt = Date.now();
+    let sentBytes = 0;
+    while (!closed && Date.now() - startedAt < 2500) {
+      const flushed = sock.write(batch);
+      sentBytes += batch.length;
+      if (!flushed) {
+        await new Promise<void>((resolve) => {
+          const done = (): void => resolve();
+          sock.once("drain", done);
+          sock.once("close", done);
+          setTimeout(done, 100);
+        });
+      }
+    }
+    await sleep(100);
+    const rssGrowthMb = (process.memoryUsage().rss - rssBefore) / (1024 * 1024);
+    sock.destroy();
+    expect(closed).toBe(true);
+    expect(sentBytes).toBeLessThan(40 * 1024 * 1024); // avbrutt tidlig - ikke 2,5 s med full flom
+    expect(rssGrowthMb).toBeLessThan(60); // uten fiksen: hundrevis av MB (målt 105 MB -> 2,1 GB på 10 s)
+  }, 20_000);
+
+  it("pong-flom (ubedte pong): lukkes på samme måte; en ubedt pong er ellers lov (ensrettet hjerteslag)", async () => {
+    gateway = await startGateway();
+    const one = await new TestClient(gateway.url).connect();
+    one.ws.pong(); // én ubedt pong innenfor bøtta
+    await sleep(50);
+    expect(one.closeEvent).toBeNull();
+    one.close();
+    const flood = await new TestClient(gateway.url).connect();
+    for (let i = 0; i < 5000; i++) flood.ws.pong(Buffer.alloc(8, 0x62));
+    expect((await flood.waitClosed(6000)).code).toBe(1006);
+  }, 20_000);
+
+  it("pong som SVAR på serverens egen ping er forespurt og koster ingen token (halvåpen-vernet kan ikke slå seg selv av)", async () => {
+    // Bøtta har plass til ÉN ubedt pong og fylles nesten ikke på. Serveren pinger hvert 20. ms; en frisk klient svarer på hver ping.
+    gateway = await startGateway({ limits: { pingIntervalMs: 20, pingPongBurst: 1, pingPongPerSecond: 0.001, idleTimeoutMs: 10_000 } });
+    const healthy = await new TestClient(gateway.url).connect();
+    let serverPings = 0;
+    healthy.ws.on("ping", () => {
+      serverPings += 1;
+    });
+    await sleep(500);
+    expect(serverPings).toBeGreaterThanOrEqual(10); // serveren har pinget mange ganger, og klienten har (auto)svart på alle
+    expect(healthy.closeEvent).toBeNull();
+    await expectBystanderAlive(healthy);
+    healthy.close();
+  });
 });

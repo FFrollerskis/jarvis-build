@@ -23,6 +23,13 @@ export interface VoiceLimits {
   /** Token bucket for alle ANDRE meldinger (start, voice_sample, replay_final, voice_settings, ugyldig JSON): billige å sende, men dyre å utføre. */
   controlPerSecond: number;
   controlBurst: number;
+  /**
+   * FIX-1 (F1): token bucket for WebSocket-KONTROLLRAMMER fra klienten - `ping` og UBEDT `pong`. `ws` svarer ellers automatisk på hver ping,
+   * uten grense og før applikasjonen ser rammen (målt: 4,6 M pings på 10 s = serverens RSS 105 MB -> 2,1 GB). Legitim bruk er høyst én
+   * ping per 20-30 s (satellitt-keepalive); en nettleser kan ikke sende ping i det hele tatt. Et brudd termineres umiddelbart.
+   */
+  pingPongPerSecond: number;
+  pingPongBurst: number;
   /** Ingen melding fra klienten på så lenge (ms) lukker tilkoblingen (frigjør plass fra glemte/stille tilkoblinger). */
   idleTimeoutMs: number;
   /** Maks varighet (ms) for en tilkobling uten bevist enhet (en bevist sesjon har grant-levetiden, 15 min). */
@@ -51,6 +58,8 @@ export const DEFAULT_VOICE_LIMITS: Readonly<VoiceLimits> = Object.freeze({
   audioBurst: 200,
   controlPerSecond: 5,
   controlBurst: 20,
+  pingPongPerSecond: 2,
+  pingPongBurst: 10,
   idleTimeoutMs: 120_000,
   maxUnprovenSessionMs: 30 * 60_000,
   pingIntervalMs: 30_000,

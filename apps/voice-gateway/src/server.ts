@@ -422,7 +422,9 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
 
   // WP-V2 (K1/K2): `maxPayload` (ws-standarden er 100 MiB). En `error`-lytter på selve serveren er påkrevd: uten den blir en `ws`-feil en
   // uhåndtert `error`-hendelse = uncaughtException = hele gatewayen krasjer. `clientError` dekker ødelagte HTTP-forespørsler FØR oppgradering.
-  const wss = new WebSocketServer({ server, maxPayload: limits.maxPayloadBytes });
+  // FIX-1 (F1): `autoPong: false` - `ws` svarer ellers AUTOMATISK på hver ping, uten grense og før applikasjonen ser rammen. Svaret sendes i stedet
+  // i `ws.on("ping")` under, bak en token bucket (RFC 6455 §5.5.3 tillater å svare på kun den siste pingen).
+  const wss = new WebSocketServer({ server, maxPayload: limits.maxPayloadBytes, autoPong: false });
   wss.on("error", (err) => {
     console.error(JSON.stringify({ msg: "voice_wss_error", code: codeOf(err) }));
   });
@@ -812,7 +814,46 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
     };
     armMaxDuration();
     let alive = true;
+    // FIX-1 (F1): kontrollramme-flom. Målt mot ekte main.ts: 4,6 M pings (604 MB) på 10 s fra én klient som ikke leser = serverens RSS 105 MB -> 2,1 GB
+    // (tilkoblingen ble aldri lukket); fra en klient som leser: /health p50 2 -> 121 ms og en annen økts TTS-strøm 151 -> 58 rammer. Nå besvares
+    // `ping` manuelt bak en token bucket, og et brudd (ping ELLER ubedt pong) TERMINERES umiddelbart - ingen høflig lukking (en flom skal ikke få
+    // 5 s ekstra parsing), og den lukkede tilkoblingen frigjør plassen via `close`-handleren under. Et pong som svarer på VÅR ping er forespurt og
+    // koster ingen token, så halvåpen-vernet under kan ikke slå seg selv av. Pong-svar ut er høyst bøtta (2/s x 127 byte), så sendebufferet er begrenset.
+    const frameBucket = new TokenBucket(limits.pingPongPerSecond, limits.pingPongBurst);
+    let pingOutstanding = false;
+    const terminateFrameFlood = (frame: "ping" | "pong"): void => {
+      if (closing) {
+        return; // en flom leverer mange rammer i samme tikk: kun den første logges og terminerer
+      }
+      closing = true;
+      console.error(JSON.stringify({ msg: "voice_control_frame_flood", frame }));
+      session?.disconnect();
+      ws.terminate();
+    };
+    ws.on("ping", (data: Buffer) => {
+      if (closing) {
+        return;
+      }
+      if (!frameBucket.tryTake()) {
+        terminateFrameFlood("ping");
+        return;
+      }
+      try {
+        ws.pong(data, undefined, () => undefined);
+      } catch {
+        ws.terminate();
+      }
+    });
     ws.on("pong", () => {
+      if (closing) {
+        return;
+      }
+      if (pingOutstanding) {
+        pingOutstanding = false; // svar på vår egen ping
+      } else if (!frameBucket.tryTake()) {
+        terminateFrameFlood("pong");
+        return;
+      }
       alive = true;
     });
     const pingTimer = setInterval(() => {
@@ -822,6 +863,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         return;
       }
       alive = false;
+      pingOutstanding = true;
       try {
         ws.ping();
       } catch {
