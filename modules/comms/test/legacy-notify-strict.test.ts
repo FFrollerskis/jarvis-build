@@ -42,7 +42,7 @@ describe("FIX-4: Discord - kun en ren snowflake slipper gjennom, og den sendes n
     stubFetch();
     const crafted = [
       `${DISCORD_ID}/messages?`, `${DISCORD_ID}/../${DISCORD_ID}`, `${DISCORD_ID}?x=`, `${DISCORD_ID}#x`, `${DISCORD_ID}/`, `/${DISCORD_ID}`, `../${DISCORD_ID}`, `${DISCORD_ID}%2f..%2f${DISCORD_ID}`,
-      `${DISCORD_ID}\n`, ` ${DISCORD_ID} `, `${DISCORD_ID}​`, "１".repeat(18), "1".repeat(16), "1".repeat(21), "0x" + "1".repeat(18), "", "   ", "abc", "@me", "channels"
+      `${DISCORD_ID}\n`, ` ${DISCORD_ID} `, `${DISCORD_ID}\u200b`, "１".repeat(18), "1".repeat(16), "1".repeat(21), "0x" + "1".repeat(18), "", "   ", "abc", "@me", "channels"
     ];
     for (const channel_id of crafted) {
       seen.length = 0;

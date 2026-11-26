@@ -105,7 +105,7 @@ describe("createContentHasher: HMAC med nøkler per formål OG tenant", () => {
     const hasher = createContentHasher(TEST_PEPPER)!;
     expect(() => hasher.hmac("content", "", "Hei!")).toThrow("comms_hash_scope_invalid");
     expect(() => hasher.hmac("content", undefined as unknown as string, "Hei!")).toThrow("comms_hash_scope_invalid");
-    expect(hasher.hmac("content", "a|b", "x")).not.toBe(hasher.hmac("content|a", "b", "x"));
+    expect(hasher.hmac("content", "request", "x"), "formål og tenant kan ikke byttes om").not.toBe(hasher.hmac("request", "content", "x"));
     expect(hasher.hmac("content", 'a","b', "x")).not.toBe(hasher.hmac("content", "a", "x"));
   });
 

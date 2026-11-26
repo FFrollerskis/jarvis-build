@@ -47,7 +47,7 @@ describe("FIX-9 (DEFERRED): samme kontakt, ENDRET telefon og e-post mellom to sy
     publish(person("201", { phoneNumbers: [{ value: "+4722009201" }], emailAddresses: [{ value: "ny@x201.no" }] }));
     const second = await sync();
     expect(second.ok).toBe(true);
-    expect((second.data as { contacts_conflict: number }).contacts_conflict, "ingen konflikt oppdages").toBe(0);
+    expect(second.ok ? (second.data as { contacts_conflict: number }).contacts_conflict : null, "ingen konflikt oppdages").toBe(0);
 
     const newIdentity = await idOfEmail("ny@x201.no");
     expect(newIdentity, "de nye verdiene er lenket").not.toBeNull();
