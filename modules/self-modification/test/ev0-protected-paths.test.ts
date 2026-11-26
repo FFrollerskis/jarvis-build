@@ -203,6 +203,27 @@ describe("C: invarianter mellom hardkodede mønstre, sonder og signert manifest"
   });
 });
 
+describe("C2: de hardkodede mønstrene beskytter hele trærne selv når manifestet er minimalt", () => {
+  /** Et gyldig, men MINIMALT manifest: kun én eksakt regel pr. sonde (ingen prefiks) - så beskyttelsen av resten av treet må komme fra de hardkodede mønstrene. */
+  const minimal = (): ConstitutionManifest => ({ ...manifest(), protected_paths: REQUIRED_PROTECTED_PROBES.map((value) => ({ kind: "exact" as const, value })) });
+
+  it("C2a: manifestet er gyldig (alle sonder dekket), og en fil UTENFOR sondene men under et beskyttet tre er likevel E3", () => {
+    const c = buildConstitution(minimal());
+    for (const p of [
+      "modules/policy/src/aldri-sett.ts", "modules/owner-controls/src/ny.ts", "modules/self-modification/src/ny.ts", "modules/core/src/db/migrations/999_ny.sql", "infra/local/ny.yml",
+      "ops/security/ny.mjs", "ops/job-runner/lib/ny.mjs", "ops/claude-worker/ny.mjs", "docs/remediation/NY.md", "config/program/ny.json", ".github/workflows/ny.yml", "apps/web/package.json"
+    ]) {
+      expect(c.classify([p]), p).toBe("E3");
+    }
+  });
+
+  it("C2b: og vanlig kode er fortsatt E2 med et minimalt manifest (mønstrene er ikke for brede)", () => {
+    const c = buildConstitution(minimal());
+    for (const p of NEAR_MISSES) expect(c.classify([p]), p).toBe("E2");
+    expect(c.classify(["config/charlie-personality.json"])).toBe("E1");
+  });
+});
+
 describe("D: E3-handlinger - gulvet i koden og i manifestet", () => {
   it("D1: de 6 opprinnelige + 7 nye (HF2 kap. 5/6/13/28) handlingene er påkrevd", () => {
     expect([...REQUIRED_E3_ACTIONS].sort()).toEqual([
