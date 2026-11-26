@@ -151,7 +151,7 @@ async function buildAuthority(down: ReadonlySet<string>): Promise<ControlCenterR
     { match: /FROM devices d/, rows: fails("devices") ?? [dev("dev-current", "person-owner"), dev("dev-delegate", "person-delegate")] },
     { match: /SELECT DISTINCT domain FROM situations/, rows: fails("autonomy") ?? [{ domain: "finance" }] },
     { match: /AS n FROM situation_autonomy_policies/, rows: fails("autonomy") ?? [{ n: 0 }] },
-    { match: /FROM situation_autonomy_policies/, rows: fails("autonomy") ?? [{ memory_space_id: "business", domain: "finance", tool_id: "finance_spend", action: "sync_internal_spend", enabled: true, updated_at: ago(30 * H) }] },
+    { match: /FROM situation_autonomy_policies/, rows: fails("autonomy") ?? [{ memory_space_id: "business", domain: "finance", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) }] },
     { match: /FROM situation_domain_pauses/, rows: fails("pauses") ?? [] },
     { match: /FROM finance_kill_switch/, rows: fails("finance") ?? [] },
     { match: /FROM action_confirmations/, rows: fails("confirmations") ?? [] }

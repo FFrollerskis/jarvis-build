@@ -47,7 +47,8 @@ const blocked = async (num: string) => {
 };
 
 beforeAll(async () => {
-  chain = await startChain("g1n1", { JARVIS_COMMS_WEBHOOKS: "twilio,meta", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: BASE });
+  // Marginen 0 = ren sekvensmodell (en START løfter alt med lavere sekvens): denne testen legger inn en STOP og straks en START og forventer at START løfter. Tie-marginen (STOP vinner innenfor 5 s) er bevist i `stop-start-overlap.test.ts`.
+  chain = await startChain("g1n1", { JARVIS_COMMS_WEBHOOKS: "twilio,meta", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: BASE }, { startTieMarginMs: 0 });
   webhooks = new CommsWebhookService({
     store: chain.store, graph: chain.graph, config: chain.config,
     secrets: { get: async (ref) => (ref === WEBHOOK_SECRET_REFS.twilio ? TWILIO_TOKEN : ref === WEBHOOK_SECRET_REFS.meta ? META_SECRET : null) }, clock: chain.now
@@ -142,12 +143,17 @@ describe("A-N1: STOP-rader per (kanal, kilde) - en senere STOP absorberes aldri"
 });
 
 describe("A-N5: verktøyteksten for record_opt_out stemmer med koden", () => {
-  it("beskriver en EIERREGISTRERT avmelding som aldri løftes (verken av eieren eller av en START) - ikke «kun mottakerens START»; rollback-teksten sier det samme", () => {
+  it("beskriver en EIERREGISTRERT avmelding som aldri løftes av en START (kun av eierens angre, comms.lift_owner_opt_out, WP-G1c K5) - ikke «kun mottakerens START»; rollback-teksten sier det samme", () => {
     const def = commsToolDefinitions({ transport: {} as never, store: {} as never }).find((d) => d.action === "record_opt_out")!;
     expect(def.description).toContain("EIERREGISTRERT");
     expect(def.description).toContain("ALDRI");
     expect(def.description).not.toContain("kun mottakerens egen START på kanalen");
-    expect(def.rollback_procedure).toContain("verken oppheves av eieren eller av en START");
+    // WP-G1c K5: angre-veien finnes nå (og teksten sier det), men kun for en eierregistrert rad - aldri for mottakerens egne avmeldinger.
+    expect(def.description).toContain("comms.lift_owner_opt_out");
+    expect(def.description).toContain("recipient_request");
+    expect(def.rollback_procedure).toContain("oppheves ikke av noen START");
+    expect(def.rollback_procedure).toContain("comms.lift_owner_opt_out");
+    expect(def.rollback_procedure).not.toContain("verken oppheves av eieren eller av en START");
     expect(def.rollback_procedure).not.toContain("oppheves kun av mottakerens egen START");
     expect(def.reversible).toBe(false);
   });

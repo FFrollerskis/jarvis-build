@@ -268,9 +268,11 @@ describe("D: lesere - minimering og lokal midnatt", () => {
     expect(new Date(startOfLocalDayMs(new Date("2026-06-01T05:00:00Z"), "UTC")).toISOString()).toBe("2026-06-01T00:00:00.000Z");
   });
 
-  const location = (visits: Array<{ zone_id: string; entered_at: unknown }>, zones: Record<string, string>) => ({
+  // WP-G2c: ferskheten måles på personens SISTE observasjon (`getPersonLocation`); uten egen verdi antas den å være besøkets starttidspunkt, `null` = ingen observasjon. Se `wpg2c-family-reader-freshness.test.ts` for resten.
+  const location = (visits: Array<{ zone_id: string; entered_at: unknown }>, zones: Record<string, string>, lastSeen?: unknown) => ({
     listZoneVisits: vi.fn(async () => visits),
-    getZone: vi.fn(async (_t: string, _s: "personal", id: string) => (zones[id] === undefined ? null : ({ name: zones[id] as string, center_lat: 59.9, center_lon: 10.7 } as { name: string })))
+    getZone: vi.fn(async (_t: string, _s: "personal", id: string) => (zones[id] === undefined ? null : ({ name: zones[id] as string, center_lat: 59.9, center_lon: 10.7 } as { name: string }))),
+    getPersonLocation: vi.fn(async () => (lastSeen === null ? null : lastSeen !== undefined ? { observed_at: lastSeen } : visits[0] !== undefined ? { observed_at: visits[0].entered_at } : null))
   });
   const NOW = new Date("2026-11-18T10:30:00Z");
 

@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { correlationFields, type IdentityContext, type JsonValue, type MemorySpace } from "@jarvis/contracts";
-import { DailyBrief } from "@jarvis/tool-gateway";
+import { DailyBrief, financeWithheldMarker, withholdFinanceFromCurrentModel } from "@jarvis/tool-gateway";
 import type { BriefSource, ToolGateway, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { BusinessService } from "./service.ts";
 import { BusinessPipelineError, BusinessPipelineService, type PipelineContext } from "./pipeline-service.ts";
@@ -8,6 +8,7 @@ import { ChurnService } from "./churn-service.ts";
 import { ProductUsageService } from "./product-usage-service.ts";
 import { businessOpenLoopsSource, generateWeeklyBrief, renderWeeklyBrief } from "./business-brief.ts";
 import type { OpenLoopService } from "./open-loop-service.ts";
+import { isFinanceDerivedLoopType } from "./open-loop-types.ts";
 import { BusinessEventSyncService } from "./business-event-sync.ts";
 import type { ScoringService } from "./scoring-service.ts";
 import type { ScoreEntityType } from "./scoring-types.ts";
@@ -243,35 +244,43 @@ export class BusinessTransport implements ToolTransport {
         const metrics = await this.service.metrics(tenantId, memorySpace);
         return { data: metrics as unknown as JsonValue };
       }
+      // WP-N1b (JARVIS-116 a, K2): løkker avledet av finansdata (`finance_spend_*`, betalingsintensjoner, bank, kort, markedsutgift) bærer beløp i NOK, leverandørnavn, formål og id-er i `reason`/`next_action`. De holdes tilbake
+      // fra en sky-/ukjent modell VED UTFØRELSE (sentral lesning, `withholdFinanceFromCurrentModel`: kun med begrenset-vakten på og kun for sky/ukjent; lokal modell og eierens ruter får alt, flagg AV er uendret).
+      // Svaret til en slik modell har ALLTID det nøytrale merket (også uten finansløkker), så det aldri røper om noe er holdt tilbake, og en tom liste aldri leses som «ingen finansavvik».
       case "list_open_loops": {
         const status = (parameters["status"] !== undefined ? String(parameters["status"]) : "open") as "open" | "resolved" | "all";
         const rows = await this.requireOpenLoops().listOpenLoops(tenantId, memorySpace, status);
+        if (withholdFinanceFromCurrentModel()) return { data: { open_loops: rows.filter((r) => !isFinanceDerivedLoopType(r.loop_type)), ...financeWithheldMarker() } as unknown as JsonValue };
         return { data: rows as unknown as JsonValue };
       }
       case "read_open_loop": {
         const row = await this.requireOpenLoops().readOpenLoop(tenantId, memorySpace, requireString(parameters, "open_loop_id"));
+        // en finansavledet løkke gir KUN merket (ingen id i `external_id`, ingen felt); «ikke funnet» (`null`) er uendret
+        if (row !== null && withholdFinanceFromCurrentModel() && isFinanceDerivedLoopType(row.loop_type)) return { data: { ...financeWithheldMarker() } as unknown as JsonValue };
         return { ...(row ? { external_id: row.open_loop_id } : {}), data: row as unknown as JsonValue };
       }
       case "get_attention_queue": {
         const rows = await this.requireOpenLoops().attentionQueue(tenantId, memorySpace);
+        if (withholdFinanceFromCurrentModel()) return { data: { entries: rows.filter((r) => !isFinanceDerivedLoopType(r.loop.loop_type)), ...financeWithheldMarker() } as unknown as JsonValue };
         return { data: rows as unknown as JsonValue };
       }
       case "get_business_brief": {
         const period = (parameters["period"] !== undefined ? String(parameters["period"]) : "daily") as "daily" | "weekly";
+        const withhold = withholdFinanceFromCurrentModel();
         if (period === "weekly") {
-          const brief = await generateWeeklyBrief(this.requirePool(), tenantId, memorySpace);
-          return { data: { ...brief, rendered: renderWeeklyBrief(brief) } as unknown as JsonValue };
+          const brief = await (withhold ? generateWeeklyBrief(this.requirePool(), tenantId, memorySpace, { excludeFinanceDerived: true }) : generateWeeklyBrief(this.requirePool(), tenantId, memorySpace));
+          return { data: { ...brief, rendered: renderWeeklyBrief(brief), ...(withhold ? financeWithheldMarker() : {}) } as unknown as JsonValue };
         }
         const identity: IdentityContext = {
           person_id: "system", tenant_id: tenantId, memory_space_id: memorySpace,
           session_id: `business-brief-${tenantId}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
         };
         const dailyBrief = new DailyBrief(
-          [businessOpenLoopsSource(this.requireOpenLoops()), ...this.extraBriefSources],
+          [withhold ? businessOpenLoopsSource(this.requireOpenLoops(), "business", { excludeFinanceDerived: true }) : businessOpenLoopsSource(this.requireOpenLoops()), ...this.extraBriefSources],
           this.pool
         );
         const brief = await dailyBrief.generate(identity);
-        return { data: { ...brief, rendered: DailyBrief.render(brief) } as unknown as JsonValue };
+        return { data: { ...brief, rendered: DailyBrief.render(brief), ...(withhold ? financeWithheldMarker() : {}) } as unknown as JsonValue };
       }
       case "resolve_open_loop": {
         // WP-D2 (JARVIS-045): valgfritt utfall (acted/dismissed) = kalibreringsgrunnlag; tjenesten avviser alt annet FØR noe skrives.
@@ -291,8 +300,9 @@ export class BusinessTransport implements ToolTransport {
       }
       case "get_calibration_report": {
         const sinceDays = parameters["since_days"] !== undefined ? Number(parameters["since_days"]) : undefined;
-        const report = await this.requireOpenLoops().calibrationReport(tenantId, memorySpace, sinceDays !== undefined ? { sinceDays } : {});
-        return { data: report as unknown as JsonValue };
+        const withhold = withholdFinanceFromCurrentModel(); // WP-N1b: tall og utfall per finansløkketype holdes tilbake fra sky/ukjent (rapporten bygges på resten)
+        const report = await this.requireOpenLoops().calibrationReport(tenantId, memorySpace, { ...(sinceDays !== undefined ? { sinceDays } : {}), ...(withhold ? { excludeFinanceDerived: true } : {}) });
+        return { data: (withhold ? { ...report, ...financeWithheldMarker() } : report) as unknown as JsonValue };
       }
       case "link_product_account": {
         // Forsvar i dybden utover gatewayens scope-sjekk: identitetens tenant MÅ være tenanten det skrives i.

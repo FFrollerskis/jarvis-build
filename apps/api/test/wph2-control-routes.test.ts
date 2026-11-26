@@ -145,7 +145,8 @@ beforeAll(async () => {
   policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, authority });
   const pauses = new DomainPauseRegistry(db.appPool, { owner_person_id: OWNER });
   await pauses.restore();
-  engine = new SituationEngine(db.appPool, pauses, { owner_person_id: OWNER });
+  // WP-G4b K1: `test_actuator.assign` er et testverktøy som erklærer seg bindbar (bind-tid-oppslag mot en lokal tabell; produksjonens oppslag er `toolGateway.get`).
+  engine = new SituationEngine(db.appPool, pauses, { owner_person_id: OWNER }, { definitionLookup: (t, a) => (t === "test_actuator" && a === "assign" ? { autonomy_bindable: { reason: "testverktøy uten ekstern effekt: brukes kun til å bevise tilbakekall av autonomi-bindinger" } } : undefined) });
   // eierens bindinger: A/personal (pipeline, spend), A/business (pipeline, growth), A/health (wellbeing - isolert rom), B/personal (pipeline; bundet av B sin egen person - FK-en krever at aktøren er medlem av policyens tenant)
   await bind(TENANT_A, "personal", "pipeline");
   await bind(TENANT_A, "personal", "spend");
@@ -208,7 +209,7 @@ describe("A: avslag i samme rekkefølge som de øvrige knappene (handling → gr
   });
 });
 
-describe("B: revoke_autonomy_binding - nøyaktig én rad, i identitetens eget rom og egen tenant", () => {
+describe("B: revoke_autonomy_binding - kun identitetens eget (tenant, rom, domene); andre domener, rom og tenanter er urørt", () => {
   it("eieren: 200, bindingen for domenet er borte - andre domener, andre rom og andre tenanter er urørt", async () => {
     expect((await policyRows()).map((r) => `${r.tenant_id}/${r.memory_space_id}/${r.domain}`)).toEqual([
       `${TENANT_A}/business/growth`, `${TENANT_A}/business/pipeline`, `${TENANT_A}/health/wellbeing`, `${TENANT_A}/personal/pipeline`, `${TENANT_A}/personal/spend`, `${TENANT_B}/personal/pipeline`

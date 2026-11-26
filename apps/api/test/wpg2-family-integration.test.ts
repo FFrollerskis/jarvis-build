@@ -115,3 +115,13 @@ describe("lokasjon og helse leses fra subjektets egen datatenant, kun via en del
     expect(await code(family.readShared(actor(ADULT), OTHER, "location"))).toBe("share_required");
   });
 });
+
+describe("WP-G2c (D-483, JARVIS-113 e/5): «nå»-stedet har en maks alder - mot ekte LocationService", () => {
+  it("personen ble sist sett 08:30 i en åpen sone: vises til og med 6 timer senere (observed_at = sist sett), ukjent ett millisekund etter", async () => {
+    const at = (offsetMs: number) => familySharedDataReaders({ location, health, now: () => new Date(Date.parse("2026-11-18T08:30:00.000Z") + offsetMs) });
+    expect(await at(2 * 3_600_000).currentPlace(DATA, OTHER)).toEqual({ zone_name: "Hos andre", observed_at: "2026-11-18T08:30:00.000Z" });
+    expect(await at(6 * 3_600_000).currentPlace(DATA, OTHER)).toEqual({ zone_name: "Hos andre", observed_at: "2026-11-18T08:30:00.000Z" });
+    expect(await at(6 * 3_600_000 + 1).currentPlace(DATA, OTHER)).toBeNull();
+    expect(await at(3 * 24 * 3_600_000).currentPlace(DATA, OTHER)).toBeNull(); // en telefon som har vært borte i dagevis
+  });
+});

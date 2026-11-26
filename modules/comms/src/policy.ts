@@ -1,6 +1,7 @@
 import { containsSecret } from "@jarvis/core";
-import { CHANNEL_PROFILES, CUSTOMER_SERVICE_WINDOW_MS, normalizeRecipient, sha256Hex, type CommsChannel } from "./channels.ts";
+import { CHANNEL_PROFILES, CUSTOMER_SERVICE_WINDOW_MS, normalizeRecipient, type CommsChannel } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
+import { isSundayOrNorwegianHoliday } from "./holidays.ts";
 
 /**
  * WP-G1 (D-463, P1b): DEN felles, deterministiske utgående kommunikasjonspolicyen (CLAUDE.md regel 2/6: kode, aldri prompt). ALLE nye sendeveier (`comms.send`, `comms.edit_message`, `comms.add_reaction`, utgående samtale)
@@ -124,7 +125,11 @@ export interface PolicyDecision {
   /** NØYAKTIG teksten som sendes (AI-opplysningen lagt til). `null` for maler, reaksjoner og slettinger. */
   readonly final_text: string | null;
   readonly disclosure_applied: boolean;
-  readonly content_sha256: string | null;
+  /**
+   * K1: det KANONISKE innholdet policyen vurderte (teksten som sendes, malens kanoniske form, `delete:<id>` ...), `null` når handlingen ikke har noe innhold. Policyen HASHER ALDRI selv: en usaltet SHA-256 av innholdet er ordbok-gjettbar
+   * (JARVIS-112 b). Traktens `evaluate()` beregner HMAC-hashen med den server-side pepperen (`ContentHasher`) og feiler lukket når pepperen mangler. Skal aldri lagres eller logges - kun hashen og lengden.
+   */
+  readonly content_canonical: string | null;
   readonly content_length: number;
   readonly recipient_proof: RecipientProof;
 }
@@ -447,8 +452,12 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     const inWindow = Number.isInteger(hour) && (config.call_window_start_hour < config.call_window_end_hour
       ? hour >= config.call_window_start_hour && hour < config.call_window_end_hour
       : hour >= config.call_window_start_hour || hour < config.call_window_end_hour) && config.call_window_start_hour !== config.call_window_end_hour;
-    if (inWindow) add("call_window", "pass");
-    else deny("call_window", "outside_call_window");
+    // WP-G1c (JARVIS-112 g2): en AI-samtale ringes aldri en søndag eller en norsk helligdag (lokal dato i `config.time_zone`, ren kode i `holidays.ts`, ingen ekstern tjeneste). Begge reglene evalueres (ingen kortslutning), så eieren ser ALLE årsaker.
+    // Stille timer for MELDINGER er uendret (regel 5): de gjelder klokkeslett, ikke kalenderdag. Datoen som ikke kan fastslås (ugyldig sone) regnes som stengt (fail-closed).
+    const closedDay = isSundayOrNorwegianHoliday(now, config.time_zone);
+    if (!inWindow) deny("call_window", "outside_call_window");
+    if (closedDay) deny("call_window", "call_closed_sunday_or_holiday");
+    if (inWindow && !closedDay) add("call_window", "pass");
   } else {
     add("call_window", "not_applicable");
   }
@@ -469,7 +478,7 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     rules,
     final_text: finalText,
     disclosure_applied: disclosureApplied,
-    content_sha256: canonical === null ? null : sha256Hex(canonical),
+    content_canonical: canonical,
     content_length: canonical === null ? 0 : Array.from(canonical).length,
     recipient_proof
   });

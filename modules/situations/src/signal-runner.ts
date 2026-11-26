@@ -4,6 +4,7 @@ import type { ToolGateway } from "@jarvis/tool-gateway";
 import type { HealthObservation } from "./health-bridge.ts";
 import type { HomeObservation } from "./home-bridge.ts";
 import { ALL_DOMAINS } from "./domain-pause.ts";
+import type { MorningSummaryService } from "./morning-summary.ts";
 import { emptyBatchResult, mergeBatchResults, type PendingAssistEntry, type SituationSignalBus, type SignalBatchResult } from "./signal-bus.ts";
 import type { IncidentObservation, SignalObservation } from "./signal-bridges.ts";
 import { SignalLogService } from "./signal-log.ts";
@@ -95,6 +96,11 @@ export interface SignalRunnerDeps {
   autoActMaxAgeMs?: number;
   /** Åpne, uclaimede signalsituasjoner som ikke er sett så lenge løses av den daglige oppryddingen (standard 48 t). */
   resolveAfterHours?: number;
+  /**
+   * WP-G4b K5 (D-484): morgenoppsummering av nattlige kamerahendelser. Bygges KUN av `apps/api` når kamerakilden er på (`JARVIS_SITUATION_SIGNALS` OG `JARVIS_SITUATION_VISION`); utelatt = ingenting kjøres og tikkresultatet er uendret.
+   * Kjøres etter levering og auto-ACT for hvert (tenant, rom) som har et aktivt KAMERAabonnement (eieren som har fjernet kameraabonnementet har slått det av).
+   */
+  morningSummary?: Pick<MorningSummaryService, "deliver">;
   /** Kildenes EGEN oppbevaring (G2 helse, G3 kamera): en signalsituasjon overlever aldri kildedataene. Injiseres fra `apps/api` (modulene importerer ikke hverandre); en feil eller `null` = standard. */
   sourceRetention?: {
     healthDays?: (tenantId: string) => Promise<number | null>;
@@ -119,6 +125,8 @@ export interface SignalTickResult {
   warnings: string[];
   delivered: number;
   auto_act_attempted: number;
+  /** WP-G4b K5: antall morgenoppsummeringer SENDT i dette tikket. Feltet finnes KUN når tjenesten er koblet (kamerakilden på); uten den er tikkresultatet identisk med før. */
+  morning_summaries?: number;
   errors: string[];
 }
 
@@ -194,7 +202,10 @@ export class SituationSignalRunner {
   }
 
   async tick(): Promise<SignalTickResult> {
-    const result: SignalTickResult = { status: "ok", tick: 0, spaces: 0, bus: emptyBatchResult(), sources_read: 0, sources_skipped_paused: 0, source_failures: 0, retention_failures: 0, warnings: [], delivered: 0, auto_act_attempted: 0, errors: [] };
+    const result: SignalTickResult = {
+      status: "ok", tick: 0, spaces: 0, bus: emptyBatchResult(), sources_read: 0, sources_skipped_paused: 0, source_failures: 0, retention_failures: 0, warnings: [], delivered: 0, auto_act_attempted: 0,
+      ...(this.deps.morningSummary !== undefined ? { morning_summaries: 0 } : {}), errors: []
+    };
     if (this.running) {
       result.status = "blocked";
       result.reason = "tick_in_progress";
@@ -280,6 +291,16 @@ export class SituationSignalRunner {
             result.auto_act_attempted += act.attempted;
           } catch (err) {
             if (result.errors.length < 20) result.errors.push(`auto_act:${codeOf(err)}`);
+          }
+          // WP-G4b K5: etter levering (så det individuelle varselet alltid går først) - én samlet, NØYTRAL melding for det som stille timer holdt tilbake og aldri ble varslet. Idempotent per natt; feil er synlige men stopper ingenting.
+          if (this.deps.morningSummary !== undefined && subs.some((s) => s.source === "vision")) {
+            try {
+              const summary = await this.deps.morningSummary.deliver(tenantId, space, this.deps.gateway, identity, this.now());
+              if (summary.status === "sent") result.morning_summaries = (result.morning_summaries ?? 0) + 1;
+              else if (summary.status === "failed" && result.errors.length < 20) result.errors.push("summary:send_failed");
+            } catch (err) {
+              if (result.errors.length < 20) result.errors.push(`summary:${codeOf(err)}`);
+            }
           }
           await this.maybePurge(tenantId, space, result);
         } catch (err) {

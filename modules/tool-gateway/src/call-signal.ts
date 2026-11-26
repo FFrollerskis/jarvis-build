@@ -29,8 +29,10 @@ const store = new AsyncLocalStorage<{ signal: AbortSignal | undefined }>();
  * Standard er PÅ (alt annet enn «off»). Leses ved HVERT kall (ingen modulkonstant): en omstart er ikke nødvendig i tester, og en feilskrevet verdi slår aldri av beskyttelsen stille (kun «off» gjør det).
  * Mekanismen er på ca. 70 `guardedFetch`-kallesteder «ved konstruksjon» og H1 viste at en slik bred endring trenger en nødutgang som ikke krever tilbakerulling av kode.
  *
- * DEKNINGSGRENSER (bevisst, ikke et hull i bryteren): finans-transportene (`modules/finance`) har egne 20 s-signaler og rå fetch; gatewayens preflight- og re-arm-kall (`transport.invoke(preflight_action)`) har verken frist
- * eller signal (lesing FØR mutasjon); Postgres-drift avbryter klienten, ikke setningen på serveren. Se `docs/runbooks/WPK_LEDGER_REMNANTS.md` §3.
+ * DEKNINGSGRENSER (bevisst, ikke et hull i bryteren): Postgres-drift avbryter klienten, ikke setningen på serveren. Se `docs/runbooks/WPK_LEDGER_REMNANTS.md` §3.
+ * LUKKET av WP-FIN2 (D-486; fiks-runde 1 rettet denne kommentaren, som sto igjen fra før): finans-transportene (`modules/finance`) går nå gjennom `financeFetch` (`modules/finance/src/http.ts`: `composeSignals(<kallsignalet>, 20 s)`,
+ * `throwIfAborted()` før hvert forsøk og avbrytbar backoff), og gatewayens preflight- og re-arm-kall (`invokePreflight` i `gateway.ts`) har frist (`timeout_ms`) og signal. Klasse C svelger en kastet/tidsavbrutt preflight og
+ * fortsetter UTEN før-tilstand (reversible verktøy mister snapshot - ingen autorisasjon oppstår av en timeout); klasse D er fail-lukket FØR commit (`preflight_failed:tool_timeout`).
  */
 export function toolCallAbortEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return (env["JARVIS_TOOL_CALL_ABORT"] ?? "").trim().toLowerCase() !== "off";

@@ -13,6 +13,7 @@ import { DomainPauseRegistry } from "../../src/domain-pause.ts";
 import { SituationEngine } from "../../src/service.ts";
 import { SubscriptionRegistry } from "../../src/subscriptions.ts";
 import { SituationsTransport, situationsToolDefinitions } from "../../src/transport.ts";
+import { TEST_BINDABLE, lookupFrom } from "./bindable.ts";
 
 /**
  * WP-G4: delt oppsett for DB-testene (ekte embedded Postgres, NOSUPERUSER/NOBYPASSRLS-rolle, FORCE RLS, ekte `SituationEngine`/`ToolGateway`/`PolicyGateway`). Hver testfil starter sin EGEN klynge via `startG4Db()`.
@@ -91,7 +92,9 @@ export async function startG4Db(label: string): Promise<G4Db> {
   });
   const domainPauses = new DomainPauseRegistry(appPool, { owner_person_id: OWNER });
   await domainPauses.restore();
-  const engine = new SituationEngine(appPool, domainPauses, { owner_person_id: OWNER });
+  // WP-G4b K1: bind-tid-oppslaget mot den SISTE gatewayen testen bygde (`newGateway`), som `toolGateway.get` i produksjon.
+  let lastGateway: ToolGateway | undefined;
+  const engine = new SituationEngine(appPool, domainPauses, { owner_person_id: OWNER }, { definitionLookup: lookupFrom(() => lastGateway) });
   const registry = new SubscriptionRegistry(appPool, { owner_person_id: OWNER });
 
   const db: G4Db = {
@@ -100,14 +103,17 @@ export async function startG4Db(label: string): Promise<G4Db> {
       const telegram = new TelegramSpy();
       const actuator = new ActuatorSpy();
       const gateway = new ToolGateway(appPool, policy, secrets, undefined, undefined, options);
+      lastGateway = gateway;
       gateway.register({
         tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }), capability_class: "B", scopes: [], reversible: true,
-        rollback_procedure: "send correction", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram
+        rollback_procedure: "send correction", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram,
+        autonomy_bindable: TEST_BINDABLE
       });
       gateway.register({
         tool_id: "test_actuator", action: "close", description: "test", input_schema: record({ situation_id: z.string() }), capability_class: "D", scopes: [], reversible: true,
         rollback_procedure: "open", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuator,
-        preflight_action: "read_state", postcondition_predicate: (after) => (after as { done: boolean } | null)?.done === true
+        preflight_action: "read_state", postcondition_predicate: (after) => (after as { done: boolean } | null)?.done === true,
+        autonomy_bindable: TEST_BINDABLE
       });
       for (const tool of situationsToolDefinitions(new SituationsTransport(engine, domainPauses))) gateway.register(tool);
       return { gateway, telegram, actuator };

@@ -8,7 +8,7 @@ import {
   CommsStore, CommsTransport, OutboundFunnel, commsToolDefinitions, executeCommsOwnerAction, parseCommsConfig, parseCallParams, parseSendParams, rateCaps, recipientHash,
   type AdapterMap, type FunnelContext, type ParsedOutbound
 } from "../src/index.ts";
-import { OWNER, TENANT_A, scriptedAdapter, startCommsDb, type CommsDb } from "./support/harness.ts";
+import { OWNER, TENANT_A, scriptedAdapter, startCommsDb, type CommsDb, testContentHasher } from "./support/harness.ts";
 
 /**
  * WP-G1 fiks-runde A-H2: ratetakene er ATOMISKE under samtidighet. Før: policyen leste tellerne i én transaksjon og `beginAttempt` skrev i en annen uten lås - N samtidige sendinger så alle «0 sendt» (reviewer-repro:
@@ -41,7 +41,7 @@ beforeAll(async () => {
   const graph = new ConversationGraphService(db.app);
   (twilio as unknown as { call: unknown }).call = async (req: Record<string, unknown>, cred: string) => { twilio.calls.push({ op: "call", request: { ...req }, credential: cred }); return { provider_message_id: `CA-${twilio.calls.length}` }; };
   const adapters: AdapterMap = { twilio, slack };
-  funnel = new OutboundFunnel({ store, graph, adapters, config, clock });
+  funnel = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters, config, clock });
   const killSwitch = new KillSwitch();
   const controls = new OwnerControls(killSwitch);
   const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, controls, authority: { owner_person_id: OWNER, owner_tenants: [TENANT_A] } });

@@ -173,6 +173,11 @@ export interface ModelSignalAssistOptions {
   gateway: AssistModelGateway;
   /** Leverandørnavn som regnes som LOKALE (svar fra andre forkastes for begrensede domener). */
   localProviders?: readonly string[];
+  /**
+   * WP-G4b K4 (D-484): lokalitet slått opp LIVE mot modellregisteret (i drift `!servedByCloudModel`). Kan bare SNEVRE INN: et svar for et begrenset domene godtas kun når navnet står i `localProviders` OG registeret fortsatt regner
+   * leverandøren som lokal (en identitet hvis URL er ugyldig/offentlig er satt til `cloud` av oppstartsvakten og forkastes her selv om navnet står i listen). Utelatt = kun listen (uendret).
+   */
+  isLocalProvider?: (provider: string) => boolean;
   timeoutMs?: number;
 }
 
@@ -217,7 +222,7 @@ export class ModelSignalAssist implements SignalAssist {
     const provider = typeof result.provider === "string" ? result.provider.slice(0, 80) : "unknown";
     const model = typeof result.model === "string" ? result.model.slice(0, 120) : "unknown";
     // Utførelsesvern (siste lag): et svar for et begrenset/fysisk domene MÅ komme fra en lokal leverandør. Ruteren stenger allerede skyen; dette fanger en feilkonfigurert eller omgått rute.
-    if (localOnly && !this.localProviders.includes(provider)) {
+    if (localOnly && !(this.localProviders.includes(provider) && (this.options.isLocalProvider?.(provider) ?? true))) {
       console.error(JSON.stringify({ msg: "situation_assist_non_local_provider", domain: input.domain, provider }));
       return { status: "rejected", reason: "non_local_provider", provider, model };
     }

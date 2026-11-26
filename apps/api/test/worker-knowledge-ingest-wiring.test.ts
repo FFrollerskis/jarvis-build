@@ -33,7 +33,8 @@ describe("worker-main.ts registrerer 'knowledge-ingest-email' på SAMME InProces
   it("C: emailIngestHandler({...}) bruker den DELTE 'gateway' (ModelGateway) som visionGateway - ingen ny AI Mesh-instans/direkte leverandør-SDK", () => {
     const callIdx = source.indexOf("emailIngestHandler({");
     expect(callIdx).toBeGreaterThan(-1);
-    const callBlock = source.slice(callIdx, source.indexOf("})", callIdx) + 2);
+    // blokken til og med siste egenskap (`registry: knowledgeRegistry`); en embedding-fabrikk med opsjonsobjekt (`{ noRedirect }`, WP-G4b FIX-5) inneholder selv `})`
+    const callBlock = source.slice(callIdx, source.indexOf("registry: knowledgeRegistry", callIdx) + "registry: knowledgeRegistry".length);
     expect(callBlock).toContain("visionGateway: gateway");
     expect(callBlock).toContain("toolGateway");
     expect(callBlock).toContain("pool");
@@ -51,7 +52,8 @@ describe("worker-main.ts registrerer 'knowledge-ingest-email' på SAMME InProces
 
   it("E: D-396 (JARVIS-031) - bruker createEmbeddingProviderFromEnv fra @jarvis/memory (SAMME env-styrte leverandør som main.ts), ikke en hardkodet LocalHashEmbedding", () => {
     expect(source).toMatch(/import\s*\{[^}]*createEmbeddingProviderFromEnv[^}]*\}\s*from\s*"@jarvis\/memory"/s);
-    expect(source).toContain("embeddings: createEmbeddingProviderFromEnv()");
+    // WP-G4b FIX-5: fabrikken får (process.env, { noRedirect }) fra K4-vakten; samme env-styrte fabrikk som api
+    expect(source).toContain("embeddings: createEmbeddingProviderFromEnv(process.env, { noRedirect })");
     expect(source).not.toContain("new LocalHashEmbedding()");
   });
 });

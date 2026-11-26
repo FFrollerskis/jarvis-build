@@ -48,6 +48,11 @@ export class VippsFake implements VippsPaymentWriter {
   createCalls: Array<{ idempotencyKey: string }> = [];
   captureCalls: Array<{ amountOre: number; idempotencyKey: string }> = [];
   refundCalls: Array<{ amountOre: number; idempotencyKey: string }> = [];
+  /** WP-FIN2: tellere/porter for kansellering og lesing (additivt - eksisterende tester bruker dem ikke). */
+  cancelCalls: Array<{ reference: string; idempotencyKey: string }> = [];
+  cancelGate: Gate | null = null;
+  /** Overstyrer `getPayment` (f.eks. for å la en oppfrisking melde `CANCELLED` etter en delvis capture). */
+  paymentState: { state: string; value?: number } | null = null;
   gate: Gate | null = null;
   fail: (() => Error) | null = null;
   async createPayment(input: { amountOre: number; currency: string; reference: string; idempotencyKey: string }): Promise<VippsPaymentObject> {
@@ -56,14 +61,21 @@ export class VippsFake implements VippsPaymentWriter {
     if (this.fail) throw this.fail();
     return { reference: input.reference, state: "CREATED", amount: { currency: input.currency, value: input.amountOre } };
   }
-  async getPayment(reference: string): Promise<VippsPaymentObject> { return { reference, state: "AUTHORIZED", amount: { currency: "NOK", value: 10_000 } }; }
+  async getPayment(reference: string): Promise<VippsPaymentObject> {
+    return { reference, state: this.paymentState?.state ?? "AUTHORIZED", amount: { currency: "NOK", value: this.paymentState?.value ?? 10_000 } };
+  }
   async capturePayment(input: { reference: string; amountOre: number; currency: string; idempotencyKey: string }): Promise<VippsPaymentObject> {
     this.captureCalls.push({ amountOre: input.amountOre, idempotencyKey: input.idempotencyKey });
     if (this.gate) await this.gate.promise;
     if (this.fail) throw this.fail();
     return { reference: input.reference, state: "AUTHORIZED", amount: { currency: input.currency, value: input.amountOre } };
   }
-  async cancelPayment(reference: string): Promise<VippsPaymentObject> { return { reference, state: "CANCELLED", amount: { currency: "NOK", value: 10_000 } }; }
+  async cancelPayment(reference: string, idempotencyKey = ""): Promise<VippsPaymentObject> {
+    this.cancelCalls.push({ reference, idempotencyKey });
+    if (this.cancelGate) await this.cancelGate.promise;
+    if (this.fail) throw this.fail();
+    return { reference, state: "CANCELLED", amount: { currency: "NOK", value: 10_000 } };
+  }
   async refundPayment(input: { reference: string; amountOre: number; currency: string; idempotencyKey: string }): Promise<VippsPaymentObject> {
     this.refundCalls.push({ amountOre: input.amountOre, idempotencyKey: input.idempotencyKey });
     if (this.gate) await this.gate.promise;

@@ -65,8 +65,9 @@ const BUSINESS_JWT_LIFETIME_SECONDS = 5;
 /** Business-paginering (eier-levert primærkilde): `from_record`/`records_count`, ALDRI et gjettet side-token. */
 const RECORDS_COUNT = 100;
 
-import { financeSignal, isRetrySafe } from "./http.ts";
+import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
 import { parseMinorUnitsStrict } from "./ore.ts";
+import { ProviderResponseInvalidError, expectArray, expectId, expectRecord, expectStatus, optionalId, optionalStatus, type ResponseContext } from "./provider-response.ts";
 
 /**
  * WP-F1 (D-462, JARVIS-020/070): beløp og valuta fra leverandøren leses STRENGT - aldri `Number(x ?? 0)` (som gjorde et manglende beløp til 0, tekst til NaN og brøk til en
@@ -101,10 +102,6 @@ export class WallesterApiError extends Error {
     super(message);
     this.name = "WallesterApiError";
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Avkortet, token-/nøkkelfri sanering av feilkropp - ALDRI hemmeligheter i meldingen (byggeordrens §23). */
@@ -263,7 +260,7 @@ export class WallesterTransport implements WallesterGateway {
     private readonly accountId: string
   ) {}
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request(ctx: ResponseContext, method: string, path: string, body?: unknown): Promise<unknown> {
     const serialized = body !== undefined ? JSON.stringify(body) : "";
     let lastError: WallesterApiError | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -274,8 +271,7 @@ export class WallesterTransport implements WallesterGateway {
         sign: this.sign,
         nowEpochSeconds: Math.floor(Date.now() / 1000)
       });
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        signal: financeSignal(),
+      const response = await financeFetch(`${this.baseUrl}${path}`, {
         method,
         headers: {
           authorization: `Bearer ${jwt}`,
@@ -286,21 +282,37 @@ export class WallesterTransport implements WallesterGateway {
       });
       if (response.ok) {
         const text = await response.text();
-        return (text ? JSON.parse(text) : {}) as T;
+        // WP-FIN2 (K7): en tom kropp er et tomt objekt (PATCH-svar kan være tomme - `updateCardLimits` ekko-verifiserer uansett), en uparserbar kropp er et ugyldig svar. Metodene validerer feltene strengt.
+        try {
+          return text ? JSON.parse(text) : {};
+        } catch {
+          throw new ProviderResponseInvalidError(ctx.operation, "body_not_json", ctx.mutation);
+        }
       }
       const message = sanitizeErrorBody(await response.text().catch(() => ""));
       const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, false);
       lastError = new WallesterApiError(`wallester_api_failed_${response.status}:${message}`, response.status, retryable);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
-      await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+      await financeBackoff(BASE_BACKOFF_MS * 2 ** (attempt - 1));
     }
     throw lastError ?? new WallesterApiError("wallester_api_failed_unknown", 0, false);
   }
 
-  private mapCard(raw: Record<string, unknown>): WallesterCardObject {
+  /**
+   * WP-FIN2 (K7): kort-id og status er PÅKREVD i svaret (aldri `String(undefined)` som provider-kort-id og aldri en stille `"unknown"`-status fra et manglende felt) - for `createCard`/`getCard`,
+   * der kortet lagres med dem.
+   *
+   * FIX-1 (fiks-runde 1): LIVSSYKLUSVERBENE (`lifecycleOf` = forespurt kort-id; PATCH activate/block/unblock/close) bruker KUN `status` til `provider_state`, og kortets id står allerede i URL-en;
+   * `request()` sier selv at et PATCH-svar kan være tomt. En 2xx betyr at Wallester HAR utført verbet - et strengere svarkrav gjorde nødbremsen (`freeze_card`) til `outcome_unknown` mens kortet sto
+   * `active` lokalt. Derfor: tom/ufullstendig kropp er gyldig og gir `status: "unknown"` (samme verdi som `main` og runbook §11.3 A.2; tjenesten lagrer `provider_state = 'unconfirmed'` og
+   * `sync_card_state` bekrefter etterpå), `id` fra forespørselen. Felt som ER til stede valideres fortsatt (feil type/ugyldig = `outcome_unknown`), og ikke-JSON/liste/tekst-kropper feiler lukket.
+   */
+  private mapCard(body: unknown, ctx: ResponseContext, lifecycleOf?: string): WallesterCardObject {
+    const lifecycle = lifecycleOf !== undefined;
+    const raw = lifecycle && (body === null || body === undefined) ? {} : expectRecord(body, ctx);
     return {
-      id: String(raw["id"]),
-      status: String(raw["status"] ?? "unknown"),
+      id: lifecycle ? (optionalId(raw, "id", ctx) ?? lifecycleOf) : expectId(raw, "id", ctx),
+      status: lifecycle ? (optionalStatus(raw, "status", ctx) ?? "unknown") : expectStatus(raw, "status", ctx),
       maskedCardNumber: str(raw["masked_card_number"]) ?? str(raw["maskedCardNumber"]),
       accountId: str(raw["account_id"]) ?? str(raw["accountId"]),
       tokenizationStatus: str(raw["tokenization_status"]) ?? str(raw["tokenizationStatus"])
@@ -315,7 +327,8 @@ export class WallesterTransport implements WallesterGateway {
       // card-types.ts / eier-levert primærkilde-audit runde 4).
       throw new WallesterApiError("wallester_physical_card_delivery_fields_unavailable", 0, false);
     }
-    const raw = await this.request<Record<string, unknown>>("POST", "/v1/cards", {
+    const ctx: ResponseContext = { operation: "wallester.create_card", mutation: true };
+    const raw = await this.request(ctx, "POST", "/v1/cards", {
       external_reference: input.externalReference,
       account_id: this.accountId,
       // Business-kortenum (eier-levert primærkilde): "Virtual"/"ChipAndPin"
@@ -330,7 +343,7 @@ export class WallesterTransport implements WallesterGateway {
       limits: this.mapLimitsBody(input.limits),
       security: this.mapSecurityBody(input.limits)
     });
-    return this.mapCard(raw);
+    return this.mapCard(raw, ctx);
   }
 
   /**
@@ -367,24 +380,29 @@ export class WallesterTransport implements WallesterGateway {
   }
 
   async getCard(providerCardId: string): Promise<WallesterCardObject> {
-    return this.mapCard(await this.request<Record<string, unknown>>("GET", `/v1/cards/${encodeURIComponent(providerCardId)}`));
+    const ctx: ResponseContext = { operation: "wallester.get_card", mutation: false };
+    return this.mapCard(await this.request(ctx, "GET", `/v1/cards/${encodeURIComponent(providerCardId)}`), ctx);
   }
 
   // Business kortlivssyklus-verb (eier-levert primærkilde): PATCH, IKKE POST.
   async activateCard(providerCardId: string): Promise<WallesterCardObject> {
-    return this.mapCard(await this.request<Record<string, unknown>>("PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/activate`, {}));
+    const ctx: ResponseContext = { operation: "wallester.activate_card", mutation: true };
+    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/activate`, {}), ctx, providerCardId);
   }
 
   async blockCard(providerCardId: string): Promise<WallesterCardObject> {
-    return this.mapCard(await this.request<Record<string, unknown>>("PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/block`, {}));
+    const ctx: ResponseContext = { operation: "wallester.block_card", mutation: true };
+    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/block`, {}), ctx, providerCardId);
   }
 
   async unblockCard(providerCardId: string): Promise<WallesterCardObject> {
-    return this.mapCard(await this.request<Record<string, unknown>>("PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/unblock`, {}));
+    const ctx: ResponseContext = { operation: "wallester.unblock_card", mutation: true };
+    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/unblock`, {}), ctx, providerCardId);
   }
 
   async closeCard(providerCardId: string): Promise<WallesterCardObject> {
-    return this.mapCard(await this.request<Record<string, unknown>>("PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/close`, {}));
+    const ctx: ResponseContext = { operation: "wallester.close_card", mutation: true };
+    return this.mapCard(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/close`, {}), ctx, providerCardId);
   }
 
   /**
@@ -394,8 +412,9 @@ export class WallesterTransport implements WallesterGateway {
    * ETT sammenslått resultat (minst mulig arkitekturendring, §7 uendret).
    */
   async updateCardLimits(providerCardId: string, limits: WallesterCardLimitsInput): Promise<WallesterCardLimitsApplied> {
-    const rawLimits = await this.request<Record<string, unknown>>("PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/limits`, this.mapLimitsBody(limits));
-    const rawSecurity = await this.request<Record<string, unknown>>("PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/security`, this.mapSecurityBody(limits));
+    const ctx: ResponseContext = { operation: "wallester.update_card_limits", mutation: true };
+    const rawLimits = expectRecord(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/limits`, this.mapLimitsBody(limits)), ctx, "limits_body");
+    const rawSecurity = expectRecord(await this.request(ctx, "PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/security`, this.mapSecurityBody(limits)), ctx, "security_body");
     const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
     const bool = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback);
     const applied: Omit<WallesterCardLimitsApplied, "confirmed"> = {
@@ -422,13 +441,14 @@ export class WallesterTransport implements WallesterGateway {
     return { ...applied, confirmed };
   }
 
-  private mapAuthorization(raw: Record<string, unknown>): WallesterAuthorizationObject {
+  private mapAuthorization(item: unknown, ctx: ResponseContext): WallesterAuthorizationObject {
+    const raw = expectRecord(item, ctx, "authorization");
     const status = String(raw["status"] ?? "").toLowerCase();
     // Fail-safe (eier-levert primærkilde-korrigering, runde 4): en UKJENT
     // provider-status mappes ALDRI stille til "approved" - forblir "unknown".
     const knownStatus = status === "approved" || status === "declined" || status === "reversed" || status === "settled" || status === "expired";
     return {
-      id: String(raw["id"]),
+      id: expectId(raw, "id", ctx),
       cardId: String(raw["card_id"] ?? raw["cardId"] ?? ""),
       status: knownStatus ? (status as WallesterAuthorizationObject["status"]) : "unknown",
       amountOre: strictProviderAmount(raw["amount"], "authorization"),
@@ -445,19 +465,22 @@ export class WallesterTransport implements WallesterGateway {
   async listAuthorizations(providerCardId: string, pageToken: string | null): Promise<WallesterPage<WallesterAuthorizationObject>> {
     const fromRecord = pageToken ? Number(pageToken) : 0;
     const path = `/v1/cards/${encodeURIComponent(providerCardId)}/authorizations?from_record=${fromRecord}&records_count=${RECORDS_COUNT}`;
-    const raw = await this.request<Record<string, unknown>>("GET", path);
-    const list = (raw["authorizations"] as Array<Record<string, unknown>> | undefined) ?? [];
+    const ctx: ResponseContext = { operation: "wallester.list_authorizations", mutation: false };
+    const raw = expectRecord(await this.request(ctx, "GET", path), ctx);
+    // WP-FIN2 (K7): en manglende liste er et ugyldig svar - aldri en stille tom side (som ville sett ut som «ingen autorisasjoner»).
+    const list = expectArray(raw["authorizations"], ctx, "authorizations");
     const nextFromRecord = fromRecord + list.length;
-    return { items: list.map((a) => this.mapAuthorization(a)), nextPageToken: list.length === RECORDS_COUNT ? String(nextFromRecord) : null };
+    return { items: list.map((a) => this.mapAuthorization(a, ctx)), nextPageToken: list.length === RECORDS_COUNT ? String(nextFromRecord) : null };
   }
 
-  private mapTransaction(raw: Record<string, unknown>): WallesterTransactionObject {
+  private mapTransaction(item: unknown, ctx: ResponseContext): WallesterTransactionObject {
+    const raw = expectRecord(item, ctx, "transaction");
     const type = String(raw["type"] ?? "").toLowerCase();
     // Fail-safe (eier-levert primærkilde-korrigering, runde 4): en UKJENT
     // provider-transaksjonstype mappes ALDRI stille til "purchase".
     const knownType = type === "purchase" || type === "refund" || type === "reversal" || type === "fee";
     return {
-      id: String(raw["id"]),
+      id: expectId(raw, "id", ctx),
       cardId: String(raw["card_id"] ?? raw["cardId"] ?? ""),
       authorizationId: str(raw["authorization_id"]),
       type: knownType ? (type as WallesterTransactionObject["type"]) : "unknown",
@@ -474,15 +497,17 @@ export class WallesterTransport implements WallesterGateway {
   async listTransactions(providerCardId: string, pageToken: string | null): Promise<WallesterPage<WallesterTransactionObject>> {
     const fromRecord = pageToken ? Number(pageToken) : 0;
     const path = `/v1/cards/${encodeURIComponent(providerCardId)}/transactions?from_record=${fromRecord}&records_count=${RECORDS_COUNT}`;
-    const raw = await this.request<Record<string, unknown>>("GET", path);
-    const list = (raw["transactions"] as Array<Record<string, unknown>> | undefined) ?? [];
+    const ctx: ResponseContext = { operation: "wallester.list_transactions", mutation: false };
+    const raw = expectRecord(await this.request(ctx, "GET", path), ctx);
+    const list = expectArray(raw["transactions"], ctx, "transactions");
     const nextFromRecord = fromRecord + list.length;
-    return { items: list.map((t) => this.mapTransaction(t)), nextPageToken: list.length === RECORDS_COUNT ? String(nextFromRecord) : null };
+    return { items: list.map((t) => this.mapTransaction(t, ctx)), nextPageToken: list.length === RECORDS_COUNT ? String(nextFromRecord) : null };
   }
 
   /** Business Account-ressursen (eier-levert primærkilde) - IKKE en gjettet global `/v1/accounts/balance`. */
   async getAccountBalance(): Promise<WallesterAccountBalance> {
-    const raw = await this.request<Record<string, unknown>>("GET", `/v1/accounts/${encodeURIComponent(this.accountId)}`);
+    const ctx: ResponseContext = { operation: "wallester.get_account_balance", mutation: false };
+    const raw = expectRecord(await this.request(ctx, "GET", `/v1/accounts/${encodeURIComponent(this.accountId)}`), ctx);
     return {
       accountId: this.accountId,
       availableAmountOre: strictProviderAmount(raw["available_amount"], "balance"),

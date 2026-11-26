@@ -104,6 +104,29 @@ export const RULES: readonly RuleDefinition[] = Object.freeze([
   rule("incident", "incident_active", "infra", { urgent: false, assist: true, tunable: null })
 ]);
 
+/**
+ * WP-G4b K2 (D-484, Q-75 pkt 7): LUKKET kategori per regel - nivået mellom «én regel» og «hele domenet» eieren kan skope en autonomi-binding til (`category:<navn>`). Eksempel: kategorien `opening` er «dør/port åpen for lenge»
+ * og kameraets åpningshendelse (samme fysiske hendelse), men ikke lekkasje (`leak`) eller alarm (`alarm`). Dekningen er pinnet av en test: hver regel i `RULES` har nøyaktig én kategori.
+ */
+export const RULE_CATEGORY: Readonly<Record<string, string>> = Object.freeze({
+  "home_assistant:door_open_too_long": "opening",
+  "vision:opening_detected": "opening",
+  "home_assistant:water_leak": "leak",
+  "home_assistant:alarm_triggered": "alarm",
+  "home_assistant:power_over_limit": "power",
+  "vision:motion_detected": "camera_activity",
+  "vision:person_present": "camera_activity",
+  "vision:package_detected": "camera_activity",
+  "vision:doorbell_event": "doorbell",
+  "vision:security_alert": "camera_security",
+  "health:resting_heart_rate_deviation": "health_deviation",
+  "health:sleep_duration_deviation": "health_deviation",
+  "health:activity_deviation": "health_deviation",
+  "incident:incident_active": "incident"
+});
+/** De lukkede kategoriene (sortert). */
+export const SCOPE_CATEGORIES: readonly string[] = Object.freeze([...new Set(Object.values(RULE_CATEGORY))].sort());
+
 const RULE_INDEX: ReadonlyMap<string, RuleDefinition> = new Map(RULES.map((r) => [r.rule_key, r]));
 
 export function ruleFor(source: SignalSource, eventType: string): RuleDefinition | undefined {
@@ -189,6 +212,27 @@ export const FILTER_SCHEMAS = {
 /** Minimert fakta-mengde (kun skalarer; strenger er korte og lukkede). Dette er ALT som lagres om selve signalet i loggen. */
 export type SignalFacts = Record<string, string | number | boolean>;
 
+/**
+ * WP-G4b K3 (D-484, Q-75 pkt 10, JARVIS-115 b): GLIDENDE dedupe-vindu for kamerahendelser. Broen er ren (ingen I/O) og kan derfor ikke selv se hva som allerede er varslet; den beskriver i stedet vinduet, og inntaksbussen finner
+ * episoden hendelsen hører til (`SituationSignalBus.episodeKey`). `detection_key` fra broen er forslaget «ny episode som starter nå»: `<key_prefix><anker-ms med 13 siffer>`.
+ */
+export interface EpisodeWindow {
+  /** Nøkkelprefikset for (kamera, hendelsestype): `vision:<type>:<kilde>:`. */
+  key_prefix: string;
+  /** Hendelsestidspunktet (epoch-ms) = ankeret hvis hendelsen starter en ny episode. */
+  anchor_ms: number;
+  /** Vinduet (ms): en hendelse mindre enn dette etter episodens anker er en duplikat (strengt `<`; akkurat på grensen starter en ny episode). */
+  window_ms: number;
+}
+
+/** Antall siffer i ankeret (epoch-ms) i en episodenøkkel: fast bredde slik at tekstsortering = tidssortering og eldre bøttenøkler (kort suffiks) aldri tolkes som anker. */
+export const EPISODE_ANCHOR_DIGITS = 13;
+
+/** Episodenøkkelen for et anker: `<prefiks><anker-ms med fast bredde>`. */
+export function episodeKeyFor(keyPrefix: string, anchorMs: number): string {
+  return `${keyPrefix}${String(Math.max(0, Math.trunc(anchorMs))).padStart(EPISODE_ANCHOR_DIGITS, "0")}`;
+}
+
 export interface BridgeResult {
   rule_key: string;
   source: SignalSource;
@@ -200,6 +244,8 @@ export interface BridgeResult {
   facts: SignalFacts;
   urgent: boolean;
   occurred_at: string;
+  /** K3: kun kamerareglene med glidende vindu (ikke haste-regler). Bussen løser den faktiske episodenøkkelen; uten feltet er `candidate.detection_key` endelig. */
+  episode?: EpisodeWindow;
 }
 
 export interface BridgeContext {
