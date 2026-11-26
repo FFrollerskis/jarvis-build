@@ -255,6 +255,11 @@ export interface VisionRuntimeDeps {
   /** Resultatet av `verifyVisionEndpoints` (navneoppløsningen av embedding-endepunktet, kjørt av main.ts ved oppstart). Utelatt = kun den syntaktiske sjekken. */
   embeddingBlockedReason?: string | null;
   /**
+   * WP-G3b fiks-runde 1 (F1): det effektive vinduet G4-signalsituasjoner i domenet `vision` følger ved sveipet (`SituationSignalsWiring.visionSituationWindowDays`, fra den allerede parsede G4-konfigurasjonen), gitt videre til
+   * retensjonsruten. Utelatt (signalbryteren AV) = ruten er uendret. Kjøretiden leser ikke miljøet for dette.
+   */
+  signalSituationWindowDays?: (visionRetentionDays: number | null) => number;
+  /**
    * Test-injeksjon for vedlikeholdsvaktene (standard: konstantene `MAINTENANCE_*`/`LIGHT_MAINTENANCE_MAX_RUN_MS`/`SKIP_LOG_INTERVAL_MS`). `now` er en millisekundklokke; `sweep` erstatter selve vedlikeholdssveipet
    * (slik at en test kan styre nøyaktig når en kjøring fullfører). Ugyldige grenser KASTER ved oppstart.
    */
@@ -393,7 +398,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
     flags,
     // Review B-L4: egen strenge per-IP-grense for opplastingsruten (kroppen er opptil ca. 7 MB og leses FØR grantet verifiseres): 20 opplastinger per minutt per IP er rause rom for én iPhone (ETT opptak per forespørsel).
     // WP-G3b (D-485): retensjonsvinduene (`/vision/retention/get|set`) går mot den EKSISTERENDE VisionService (samme instans som pipeline og sveip bruker) - ingen ny tjeneste, ingen ny tabell, ingen ny pool.
-    api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024, uploadLimiter: new RateLimiter(VISION_UPLOADS_PER_IP_PER_MINUTE, 60_000), status, retention: deps.vision },
+    api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024, uploadLimiter: new RateLimiter(VISION_UPLOADS_PER_IP_PER_MINUTE, 60_000), status, retention: deps.vision, ...(deps.signalSituationWindowDays !== undefined ? { signalSituationWindowDays: deps.signalSituationWindowDays } : {}) },
     pipeline,
     classifier,
     poller,

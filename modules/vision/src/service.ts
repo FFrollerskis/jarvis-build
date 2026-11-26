@@ -193,17 +193,42 @@ export interface RetentionShortening {
   snapshot_retention_days: boolean;
 }
 
-/** Blir noen av de EFFEKTIVE vinduene kortere enn de gjeldende (konfigurert eller standard)? Sammenlignes på effektive verdier, så en forkortet `retention_days` som klemmer bildevinduet også teller som forkorting av bildene. */
-export function retentionShortening(previous: VisionRetentionView, next: VisionRetentionRequest): RetentionShortening {
+/**
+ * WP-G3b fiks-runde 1 (F1): det EFFEKTIVE vinduet (dager) AVLEDEDE data følger ved sveip, som funksjon av `retention_days` i `vision_retention_policies` (`null` = ingen rad for dette spacet). Avledede data = signalsituasjoner i domenet `vision`
+ * (G4, kun med JARVIS_SITUATION_SIGNALS=on), som ryddes mot `min(grunnvindu, retention_days)` ved hvert sveip - ikke forankret ved skriving som tabellene. Funksjonen leveres av kjøretiden (main.ts, fra G4-konfigurasjonen); tjenesten kjenner
+ * verken G4 eller miljøvariabler.
+ */
+export type DerivedWindowDays = (retentionDays: number | null) => number;
+
+/** Hvilke EKSISTERENDE (allerede lagrede) data en forkorting kan fjerne, utover det som gjelder nye rader: stabile koder, aldri fri tekst. */
+export type RetentionAffectsExisting = "signal_situations";
+
+/**
+ * Blir det AVLEDEDE vinduet kortere? `derived(ny hendelsesvindu) < derived(gjeldende rad, eller `null` uten rad)` - uten rad gjelder grunnvinduet selv, så en første setting under grunnvinduet er en forkorting også når den er lengre enn
+ * standarden (30). Uten funksjon (signalbryteren AV) finnes ingen avledede data å beskytte: alltid `false`.
+ */
+export function derivedWindowShortened(previous: VisionRetentionView, next: VisionRetentionRequest, derivedWindowDays: DerivedWindowDays | undefined): boolean {
+  if (derivedWindowDays === undefined) return false;
+  return derivedWindowDays(next.retention_days) < derivedWindowDays(previous.configured ? previous.retention_days : null);
+}
+
+/**
+ * Blir noen av de EFFEKTIVE vinduene kortere enn de gjeldende (konfigurert eller standard)? Sammenlignes på effektive verdier, så en forkortet `retention_days` som klemmer bildevinduet også teller som forkorting av bildene.
+ * `retention_days` teller også som forkortet når det AVLEDEDE vinduet blir kortere (`derivedWindowDays`, se `derivedWindowShortened`) - uten den funksjonen (standard) gjelder kun de effektive vinduene for nye rader.
+ */
+export function retentionShortening(previous: VisionRetentionView, next: VisionRetentionRequest, derivedWindowDays?: DerivedWindowDays): RetentionShortening {
   return {
-    retention_days: next.retention_days < previous.retention_days,
+    retention_days: next.retention_days < previous.retention_days || derivedWindowShortened(previous, next, derivedWindowDays),
     snapshot_retention_days: effectiveSnapshotRetentionDays(next.retention_days, next.snapshot_retention_days) < previous.effective_snapshot_retention_days
   };
 }
 
-/** En forkorting kom uten bekreftelse. Kastes INNE i den låste transaksjonen FØR noe skrives; ruten gjør den til 409 `confirmation_required`. */
+/**
+ * En forkorting kom uten bekreftelse. Kastes INNE i den låste transaksjonen FØR noe skrives; ruten gjør den til 409 `confirmation_required`. `affectsExisting` = hvilke EKSISTERENDE data en bekreftet forkorting kan fjerne
+ * (`signal_situations`: avledede signalsituasjoner eldre enn det nye vinduet, også åpne og `security_alert`); tom = kun nye rader berøres.
+ */
 export class VisionRetentionConfirmationRequiredError extends Error {
-  constructor(public readonly shortened: ReadonlyArray<"retention_days" | "snapshot_retention_days">) {
+  constructor(public readonly shortened: ReadonlyArray<"retention_days" | "snapshot_retention_days">, public readonly affectsExisting: ReadonlyArray<RetentionAffectsExisting> = []) {
     super(`vision_retention_confirmation_required:${shortened.join(",")}`);
     this.name = "VisionRetentionConfirmationRequiredError";
   }
@@ -214,6 +239,11 @@ export interface ApplyRetentionOptions extends VisionChangeProvenance {
   actor_person_id: string;
   /** `true` = eieren har bekreftet en FORKORTING (den typede bekreftelsen sjekkes av kalleren, ruten). Uten den kastes `VisionRetentionConfirmationRequiredError` ved en forkorting. */
   confirm_shortening?: boolean | undefined;
+  /**
+   * WP-G3b fiks-runde 1 (F1): det effektive vinduet AVLEDEDE data følger (G4-signalsituasjoner i domenet `vision`), satt av kjøretiden KUN når signalbryteren er på. Utelatt = ingen avledede data å beskytte: da gjelder kun de effektive
+   * vinduene for nye rader (uendret oppførsel). Satt: en endring som gjør det avledede vinduet kortere regnes som forkorting av `retention_days` og krever den typede bekreftelsen, evaluert mot raden som faktisk overskrives (inne i låsen).
+   */
+  derived_window_days?: DerivedWindowDays | undefined;
 }
 
 export interface VisionRetentionChange {
@@ -287,9 +317,10 @@ export class VisionService {
    * overskrives (ingen sjekk-så-skriv-glipp):
    *  1. validering (`parseRetentionRequest`, stabile koder) FØR noe leses;
    *  2. IDEMPOTENS: er forespørselen allerede gjeldende rad, gjøres ingenting (`changed: false`, ingen skriving, ingen revisjonsrad) - en gjenspilling er ufarlig og en omkringflytende kopi av samme forespørsel støyer ikke i revisjonen;
-   *  3. en FORKORTING (effektivt hendelses- eller bildevindu blir kortere, se `retentionShortening`) krever `confirm_shortening` - ellers kastes `VisionRetentionConfirmationRequiredError` og ingenting skrives;
+   *  3. en FORKORTING (effektivt hendelses- eller bildevindu blir kortere, eller - med `derived_window_days` - det AVLEDEDE G4-vinduet, se `retentionShortening`) krever `confirm_shortening` - ellers kastes `VisionRetentionConfirmationRequiredError` og ingenting skrives;
    *  4. upsert via samme SQL som `setRetentionPolicy` + revisjonsrad (`vision.retention_set`, kun tall/enums) i SAMME transaksjon (`audit: true`): en endring uten revisjonsrad kan ikke committes.
-   * Vinduene er FORANKRET VED SKRIVING (`retention_expires_at` settes ved innsetting): en endring gjelder rader som skrives ETTER den, og sletter ikke eksisterende hendelser, bilder eller inventar (bevist i wpg3b-vision-retention-db.test.ts).
+   * Vinduene er FORANKRET VED SKRIVING (`retention_expires_at` settes ved innsetting): en endring gjelder rader som skrives ETTER den, og sletter ikke eksisterende hendelser, bilder eller inventar (bevist av TRIPWIRE-testen i g3b-retention.test.ts).
+   * UNNTAK (en egen, avledet tabell): signalsituasjoner i domenet `vision` (G4) ryddes ved sveipet mot `min(grunnvindu, retention_days)`, så en forkorting kan fjerne EKSISTERENDE avledede situasjoner - derfor `derived_window_days`.
    */
   async applyRetentionPolicy(tenantId: string, memorySpace: MemorySpace, input: { retention_days?: unknown; snapshot_retention_days?: unknown }, options: ApplyRetentionOptions): Promise<VisionRetentionChange> {
     const next = parseRetentionRequest(input);
@@ -304,9 +335,10 @@ export class VisionService {
       if (row !== undefined && row.retention_days === next.retention_days && row.snapshot_retention_days === next.snapshot_retention_days) {
         return { changed: false, shortened: { retention_days: false, snapshot_retention_days: false }, previous, current: previous };
       }
-      const shortened = retentionShortening(previous, next);
+      const shortened = retentionShortening(previous, next, options.derived_window_days);
       const shortenedFields = (["retention_days", "snapshot_retention_days"] as const).filter((field) => shortened[field]);
-      if (shortenedFields.length > 0 && options.confirm_shortening !== true) throw new VisionRetentionConfirmationRequiredError(shortenedFields);
+      const affectsExisting: RetentionAffectsExisting[] = derivedWindowShortened(previous, next, options.derived_window_days) ? ["signal_situations"] : [];
+      if (shortenedFields.length > 0 && options.confirm_shortening !== true) throw new VisionRetentionConfirmationRequiredError(shortenedFields, affectsExisting);
       const saved = await this.upsertRetention(client, tenantId, memorySpace, { ...next, actor_person_id: options.actor_person_id });
       const current = describeRetention(saved);
       await writeVisionAudit(client, tenantId, options.actor_person_id, options, {
@@ -316,7 +348,8 @@ export class VisionService {
           previous_retention_days: previous.retention_days, previous_snapshot_retention_days: previous.snapshot_retention_days,
           retention_days: current.retention_days, snapshot_retention_days: current.snapshot_retention_days,
           effective_snapshot_retention_days: current.effective_snapshot_retention_days,
-          shortened: shortenedFields, confirmed: shortenedFields.length > 0
+          shortened: shortenedFields, confirmed: shortenedFields.length > 0,
+          ...(affectsExisting.length > 0 ? { affects_existing: affectsExisting } : {})
         }
       });
       return { changed: true, shortened, previous, current };

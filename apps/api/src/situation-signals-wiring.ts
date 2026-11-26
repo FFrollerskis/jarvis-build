@@ -4,7 +4,7 @@ import { homeAssistantSituationReadTools, type ToolDefinition, type ToolGateway,
 import type { SituationSignalApiDeps } from "./situation-signal-routes.ts";
 import {
   boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, MAX_OBSERVATIONS_PER_BATCH, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
-  SituationSignalsTransport, SituationsTransport, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS, SOURCE_SPACES,
+  SituationSignalsTransport, SituationsTransport, signalSituationWindowDays, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS, SOURCE_SPACES,
   type AssistModelGateway, type DailyPoint, type DomainPauseRegistry, type HealthObservation, type HealthSignalMetric, type HomeObservation, type IncidentObservation, type SignalSourceReaders,
   type SituationEngine, type SituationFlags, type VisionObservation
 } from "@jarvis/situations";
@@ -55,6 +55,12 @@ export interface SituationSignalsWiring {
   registry: SubscriptionRegistry | null;
   /** Eierens HTTP-flate `/situations/signals/*` (B-MEDIUM-5). `null` uten hovedbryteren = ingen ruter (404, identisk med main). */
   api: SituationSignalApiDeps | null;
+  /**
+   * WP-G3b fiks-runde 1 (F1): det EFFEKTIVE vinduet (dager) signalsituasjoner i domenet `vision` følger ved det daglige sveipet, som funksjon av hendelsesvinduet i `vision_retention_policies` (`null` = ingen rad): `min(grunnvindu, dager ?? grunnvindu)`
+   * med grunnvinduet fra `JARVIS_SITUATION_LOG_RETENTION_DAYS` slik wiringen allerede har parset det (samme regel som sveipet: `signalSituationWindowDays`). Gis til eierens vision-rute (via `buildVisionRuntime`) så en forkorting regnes mot DET sveipet
+   * bruker - ikke mot rutens standard. `null` uten hovedbryteren (ingen løper, ingen sveip: ingenting avledet å beskytte, så ruten er uendret).
+   */
+  visionSituationWindowDays: ((visionRetentionDays: number | null) => number) | null;
   /** Startlogg (kun når noe er på). */
   describe(): Record<string, unknown> | null;
   /** Starter løperen (ingen effekt uten flagg). */
@@ -224,7 +230,7 @@ export function createIncidentReader(deps: { incidents: SituationSignalsWiringDe
 
 export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): SituationSignalsWiring {
   const flags = situationFlagsFromEnv(deps.env);
-  if (!flags.signals) return { flags, tools: [], runner: null, registry: null, api: null, describe: () => null, start: () => undefined };
+  if (!flags.signals) return { flags, tools: [], runner: null, registry: null, api: null, visionSituationWindowDays: null, describe: () => null, start: () => undefined };
 
   const now = deps.now ?? Date.now;
   const authority = { owner_person_id: deps.ownerPersonId };
@@ -279,6 +285,8 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
   return {
     flags, tools, runner, registry,
     api: { registry, engine: deps.engine, logs, runner, simulation, ...(feedback ? { feedback } : {}) },
+    // Uten kamerapolicy fra tjenesten (`getRetentionPolicy` utelatt) leser ikke sveipet raden: vinduet er da alltid grunnvinduet, uansett hva raden sier.
+    visionSituationWindowDays: deps.vision.getRetentionPolicy ? (visionRetentionDays) => signalSituationWindowDays(retentionDays, visionRetentionDays) : () => retentionDays,
     describe: () => ({
       msg: "situation_signals", interval_seconds: intervalSeconds, log_retention_days: retentionDays, spaces: [...spaces], retention_spaces: [...retentionSpaces],
       sources: { home: flags.home, vision: flags.vision, health: flags.health, incidents: flags.incidents }, model_assist: flags.modelAssist, feedback: flags.feedback

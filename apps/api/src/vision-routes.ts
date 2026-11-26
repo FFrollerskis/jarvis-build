@@ -4,7 +4,7 @@ import { ownerStepUpDenial } from "@jarvis/tool-gateway";
 import { clientKey, type RateLimiter } from "./http-guard.ts";
 import {
   DEFAULT_RETENTION_DAYS, DEFAULT_SNAPSHOT_RETENTION_DAYS, MAX_RETENTION_DAYS, MAX_SNAPSHOT_RETENTION_DAYS, MIN_RETENTION_DAYS, VisionCameraValidationError, VisionCaptureError, VisionObservationValidationError,
-  VisionRetentionConfirmationRequiredError, type CaptureRequest, type SignedCaptureUpload, type VisionCameraService, type VisionCaptureService, type VisionInventoryService, type VisionLastSeenService,
+  VisionRetentionConfirmationRequiredError, type CaptureRequest, type DerivedWindowDays, type SignedCaptureUpload, type VisionCameraService, type VisionCaptureService, type VisionInventoryService, type VisionLastSeenService,
   type VisionRetentionView, type VisionService
 } from "@jarvis/vision";
 
@@ -77,6 +77,11 @@ export interface VisionApiDeps {
    * kolonne og omkobling av kvotesjekken (ny lagringslogikk), og er ikke bygget her.
    */
   retention?: Pick<VisionService, "getRetentionView" | "applyRetentionPolicy">;
+  /**
+   * WP-G3b fiks-runde 1 (F1): det effektive vinduet (dager) G4-signalsituasjoner i domenet `vision` følger ved sveipet, som funksjon av hendelsesvinduet (`null` = ingen rad) - `signalSituationWindowDays` med grunnvinduet fra den parsede
+   * G4-konfigurasjonen. Satt av main.ts KUN med `JARVIS_SITUATION_SIGNALS=on`; utelatt = ingen avledede situasjoner å beskytte (ruten er da uendret, uten `affects_existing`). Gis videre til `applyRetentionPolicy` som `derived_window_days`.
+   */
+  signalSituationWindowDays?: DerivedWindowDays;
 }
 
 export interface VisionRouteHelpers {
@@ -151,9 +156,10 @@ function publicRequest(request: CaptureRequest): Record<string, unknown> {
 /**
  * Retensjonssvaret (get og set): KUN dager og tidspunkt (aldri tenant, aktør eller andre kolonner), pluss de faste standardene og grensene slik at klienten ikke trenger å gjette dem. Feltene bygges eksplisitt (ingen spread), så en
  * utvidet rad aldri kan lekke ut. `applies_to: "new_records"`: vinduene er forankret VED SKRIVING (`retention_expires_at` settes ved innsetting) - en endring gjelder rader som skrives etter den og sletter ikke lagrede hendelser, bilder eller
- * inventar. Unntak (egen, avledet tabell): signalsituasjoner i domenet `vision` ryddes mot hendelsesvinduet slik det er ved sveipet (G4, kun med JARVIS_SITUATION_SIGNALS=on), så en forkorting kan fjerne eldre avledede situasjoner - derfor typet bekreftelse.
+ * inventar. Unntak (egen, avledet tabell): signalsituasjoner i domenet `vision` ryddes mot `min(JARVIS_SITUATION_LOG_RETENTION_DAYS, hendelsesvinduet)` ved sveipet (G4, kun med JARVIS_SITUATION_SIGNALS=on), så en forkorting kan fjerne EKSISTERENDE
+ * avledede situasjoner (også åpne og `security_alert`) - derfor typet bekreftelse, og derfor `affects_existing: ["signal_situations"]` (stabil kode; feltet finnes KUN med signalbryteren på, ellers er svaret uendret).
  */
-function retentionData(view: VisionRetentionView): Record<string, unknown> {
+function retentionData(view: VisionRetentionView, derivedOn: boolean): Record<string, unknown> {
   return {
     configured: view.configured,
     retention_days: view.retention_days,
@@ -162,7 +168,8 @@ function retentionData(view: VisionRetentionView): Record<string, unknown> {
     updated_at: view.updated_at,
     defaults: { retention_days: DEFAULT_RETENTION_DAYS, snapshot_retention_days: DEFAULT_SNAPSHOT_RETENTION_DAYS },
     limits: { retention_days: { min: MIN_RETENTION_DAYS, max: MAX_RETENTION_DAYS }, snapshot_retention_days: { min: MIN_RETENTION_DAYS, max: MAX_SNAPSHOT_RETENTION_DAYS } },
-    applies_to: "new_records"
+    applies_to: "new_records",
+    ...(derivedOn ? { affects_existing: ["signal_situations"] } : {})
   };
 }
 
@@ -283,7 +290,7 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
           h.json(503, { error: "retention_unavailable", request_id: requestId });
           return true;
         }
-        h.json(200, { ok: true, data: { retention: retentionData(await deps.retention.getRetentionView(tenant, space)) } });
+        h.json(200, { ok: true, data: { retention: retentionData(await deps.retention.getRetentionView(tenant, space), deps.signalSituationWindowDays !== undefined) } });
         return true;
       }
       case "/vision/retention/set": {
@@ -296,14 +303,21 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
         try {
           const result = await deps.retention.applyRetentionPolicy(
             tenant, space, { retention_days: body["retention_days"], snapshot_retention_days: body["snapshot_retention_days"] },
-            { actor_person_id: person, confirm_shortening: confirmed, task_id: "vision-api:retention_set", session_id: identity.session_id, device_id: identity.device_id, audit: true }
+            {
+              actor_person_id: person, confirm_shortening: confirmed, task_id: "vision-api:retention_set", session_id: identity.session_id, device_id: identity.device_id, audit: true,
+              ...(deps.signalSituationWindowDays !== undefined ? { derived_window_days: deps.signalSituationWindowDays } : {})
+            }
           );
           // `shortened`: navnene på vinduene som ble kortere (samme form som i 409-svaret og i revisjonsraden; tom liste = ingen forkorting).
           const shortened = (["retention_days", "snapshot_retention_days"] as const).filter((field) => result.shortened[field]);
-          h.json(200, { ok: true, data: { changed: result.changed, shortened, retention: retentionData(result.current) } });
+          h.json(200, { ok: true, data: { changed: result.changed, shortened, retention: retentionData(result.current, deps.signalSituationWindowDays !== undefined) } });
         } catch (err) {
           if (!(err instanceof VisionRetentionConfirmationRequiredError)) throw err;
-          h.json(409, { error: "confirmation_required", reason: "confirm_true_and_confirm_memory_space_required", shortened: err.shortened, confirm_memory_space_required: space, request_id: requestId });
+          // `affects_existing` (kun når DENNE endringen gjør det avledede G4-vinduet kortere): å bekrefte kan la neste sveip slette eksisterende avledede situasjoner (også åpne og `security_alert`). Stabile koder, aldri fri tekst.
+          h.json(409, {
+            error: "confirmation_required", reason: "confirm_true_and_confirm_memory_space_required", shortened: err.shortened, confirm_memory_space_required: space,
+            ...(err.affectsExisting.length > 0 ? { affects_existing: err.affectsExisting } : {}), request_id: requestId
+          });
         }
         return true;
       }

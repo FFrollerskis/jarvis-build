@@ -1535,7 +1535,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-G3 (D-465): UA-9-kjøretiden (pipeline, HA-poller, `/vision/*`-rutene, vedlikehold). `null` (ingenting bygget) uten JARVIS_VISION_ENABLED=on. Se vision-runtime.ts for flaggene.
   const visionRuntime = buildVisionRuntime({
     pool, env: process.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, ownerTenantId: owner.tenant_id, secrets: readSecretProvider,
-    ownerControls: { killSwitch, controls: ownerControls }, embeddingBlockedReason: visionEndpoints.embeddingBlockedReason
+    ownerControls: { killSwitch, controls: ownerControls }, embeddingBlockedReason: visionEndpoints.embeddingBlockedReason,
+    // WP-G3b fiks-runde 1 (F1): G4-vinduet for avledede kamera-situasjoner fra den ALLEREDE parsede signal-wiringen (aldri en ny miljølesing); `null` uten JARVIS_SITUATION_SIGNALS=on = ingenting sendes (ruten er uendret).
+    ...(situationSignals.visionSituationWindowDays !== null ? { signalSituationWindowDays: situationSignals.visionSituationWindowDays } : {})
   });
   visionControlRef.runtime = visionRuntime; // WP-G3b: fyller den late kilden til Syn-kortet (null uten JARVIS_VISION_ENABLED=on; da er kortet heller ikke koblet inn)
   const deps: ApiDeps = {
