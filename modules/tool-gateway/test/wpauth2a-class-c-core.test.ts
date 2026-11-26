@@ -165,6 +165,9 @@ describe("D: diff og forventninger", () => {
     expect(evaluateExpectation({ path: "gone", op: "absent" }, before, after)).toBeNull();
     expect(evaluateExpectation({ path: "made", op: "absent" }, before, after)).toEqual({ path: "made", rule: "expected_absent", actual: "y" });
   });
+  it("unobservable er aldri oppfylt: gir et brudd med årsaken (verdiktet avgjøres av pipelinen, ikke av evalueringen)", () => {
+    expect(evaluateExpectation({ path: "v", op: "unobservable", reason: "ingen_revisjon" }, { v: 1 }, { v: 1 })).toEqual({ path: "v", rule: "unobservable", expected: "ingen_revisjon" });
+  });
   it("equals sammenligner dypt og strukturelt (matriser i rekkefølge, objekter uavhengig av nøkkelrekkefølge)", () => {
     expect(evaluateExpectation({ path: "p", op: "equals", value: ["a", "b"] }, {}, { p: ["a", "b"] })).toBeNull();
     expect(evaluateExpectation({ path: "p", op: "equals", value: ["a", "b"] }, {}, { p: ["b", "a"] })).not.toBeNull();
@@ -400,6 +403,21 @@ describe("G: etterkontroll (readback, diff, verdikt)", () => {
     const fresh = run("enforce");
     expect((await fresh.verify(PARAMS, MUTATION, read)).postconditionReason).toBe("postcondition_unverified:class_c_no_baseline");
     expect(fresh.auditBlock()["verdict_detail"]).toBe("before_state_missing");
+  });
+
+  it("en effekt som ikke kan observeres gir unverified (aldri verified), også når alt annet stemmer; et reelt brudd går foran og gir mismatch", async () => {
+    const adapter = itemAdapter({ expect: (p) => [{ path: "name", op: "equals", value: p["name"] ?? null }, { path: "trashed", op: "unobservable", reason: "ikke_lesbar" }] });
+    const { r, read } = await preflighted("enforce", adapter);
+    expect((await r.verify(PARAMS, MUTATION, read)).postconditionReason).toBe("postcondition_unverified:class_c_unobservable");
+    expect(r.auditBlock()["verdict"]).toBe("unverified");
+    expect(r.auditBlock()["verdict_detail"]).toBe("unobservable:trashed");
+    expect(r.auditBlock()["violations"]).toEqual([{ path: "trashed", rule: "unobservable", expected: "ikke_lesbar" }]);
+    const both = itemAdapter({ expect: () => [{ path: "name", op: "equals", value: "feil" }, { path: "trashed", op: "unobservable", reason: "ikke_lesbar" }] });
+    const m = await preflighted("enforce", both);
+    expect((await m.r.verify(PARAMS, MUTATION, m.read)).postconditionReason).toBe("postcondition_mismatch");
+    const o = await preflighted("observe", adapter);
+    expect((await o.r.verify(PARAMS, MUTATION, o.read)).postconditionReason).toBeNull();
+    expect(o.r.auditBlock()["would_block"]).toEqual(["verify:postcondition_unverified:class_c_unobservable"]);
   });
 
   it("ugyldige stier i forventninger er en adapterfeil (ikke en stille bestått kontroll)", async () => {

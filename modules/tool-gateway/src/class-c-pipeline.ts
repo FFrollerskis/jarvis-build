@@ -71,7 +71,9 @@ export type ClassCExpectation =
   | { path: string; op: "unchanged" }
   | { path: string; op: "changed" }
   | { path: string; op: "present" }
-  | { path: string; op: "absent" };
+  | { path: string; op: "absent" }
+  /** Effekten på `path` kan ikke observeres med eksisterende lesinger (i denne tilstanden): verdiktet kan aldri bli `verified` - det blir `unverified` (aldri en stille suksess), med `reason` i audit. */
+  | { path: string; op: "unobservable"; reason: string };
 
 export interface ClassCRollbackStep { tool_id: string; action: string; parameters: Record<string, JsonValue> }
 export interface ClassCRollbackDraft {
@@ -237,6 +239,8 @@ export function evaluateExpectation(expectation: ClassCExpectation, before: Json
       return now !== null ? null : { path: expectation.path, rule: "expected_present" };
     case "absent":
       return now === null ? null : { path: expectation.path, rule: "expected_absent", actual: now };
+    case "unobservable":
+      return { path: expectation.path, rule: "unobservable", expected: expectation.reason };
   }
 }
 
@@ -460,8 +464,15 @@ export class ClassCRun {
       this.verdict = "verified";
       return null;
     }
+    // Et brudd er `mismatch`; kun «kan ikke observeres» (uten brudd) er `unverified`: handlingen kan ha virket, men gatewayen kan ikke bevise det.
+    const broken = violations.filter((v) => v.rule !== "unobservable");
+    if (broken.length === 0) {
+      this.verdict = "unverified";
+      this.verdictDetail = reasonCode(`unobservable:${violations.map((v) => v.path).join(",")}`, 60);
+      return "postcondition_unverified:class_c_unobservable";
+    }
     this.verdict = "mismatch";
-    this.verdictDetail = reasonCode(violations[0]?.rule ?? "mismatch", 40);
+    this.verdictDetail = reasonCode(broken[0]?.rule ?? "mismatch", 40);
     return "postcondition_mismatch";
   }
 
