@@ -37,6 +37,8 @@ async function seed(tenant: string, space: string, tag: string, i: number): Prom
     `INSERT INTO comms_inbound_events (tenant_id, event_id, memory_space_id, provider, channel, event_key, kind, identity_id, signature_verified, retention_until, source, ingest_id)
      VALUES ($1, $2, $3, 'twilio', 'sms', $4, 'message', $5, true, now() + interval '1 day', 'webhook:twilio', $6)`, [tenant, `cevt-${tag}-0001`, space, `key-${tag}`, `conv-id-${tag}`, `ingest-${tag}-0001`]);
   await admin.query(
+    `INSERT INTO comms_inbound_receipts (tenant_id, memory_space_id, provider, event_key, kind, recv_seq, retention_until, source, ingest_id) VALUES ($1, $2, 'twilio', $3, 'opt_in', $4, now() + interval '1 day', 'webhook:twilio', $5)`, [tenant, space, `twilio:msg:${tag}`, 1000 + i, `ingest-${tag}-0002`]);
+  await admin.query(
     `INSERT INTO comms_meetings (tenant_id, meeting_id, memory_space_id, source, content_sha256, segment_count, legal_basis_attested, person_id, session_id, retention_until)
      VALUES ($1, $2, $3, 'text_transcript', $4, 1, true, $5, 's', now() + interval '1 day')`, [tenant, `meet-${tag}-0001`, space, hash("c"), OWNER]);
   await admin.query(
@@ -45,7 +47,7 @@ async function seed(tenant: string, space: string, tag: string, i: number): Prom
     `INSERT INTO comms_meeting_commitments (tenant_id, meeting_id, memory_space_id, commitment_id, commitment_text, rule, segment_index) VALUES ($1, $2, $3, $4, 'Jeg skal sende tilbudet', 'no_skal_maa', 0)`, [tenant, `meet-${tag}-0001`, space, `mcom-${tag}-0001`]);
 }
 
-const TABLES = ["comms_authorized_accounts", "comms_recipient_opt_outs", "comms_outbound_log", "comms_inbound_events", "comms_meetings", "comms_meeting_participants", "comms_meeting_commitments", "conversation_identities"];
+const TABLES = ["comms_authorized_accounts", "comms_recipient_opt_outs", "comms_outbound_log", "comms_inbound_events", "comms_inbound_receipts", "comms_meetings", "comms_meeting_participants", "comms_meeting_commitments", "conversation_identities"];
 const count = async (table: string, tenant: string, space: string) => ((await admin.query(`SELECT count(*)::int AS n FROM ${table} WHERE tenant_id = $1 AND memory_space_id = $2`, [tenant, space])).rows[0] as { n: number }).n;
 
 beforeAll(async () => {

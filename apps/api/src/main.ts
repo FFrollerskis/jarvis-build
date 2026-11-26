@@ -106,13 +106,14 @@ import { ProductService, ProductTransport } from "@jarvis/product";
 import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import { LocationService, runLocationRetentionSweepForAllTenants } from "@jarvis/location";
 import { HealthService, runHealthRetentionSweepForAllTenants } from "@jarvis/health";
-import { VisionService, runVisionRetentionSweepForAllTenants } from "@jarvis/vision";
-import { buildVisionRuntime, verifyVisionEndpoints, visionAdapterFromEnv } from "./vision-runtime.ts";
+import { DEFAULT_RETENTION_DAYS as VISION_DEFAULT_RETENTION_DAYS, DEFAULT_SNAPSHOT_RETENTION_DAYS as VISION_DEFAULT_SNAPSHOT_RETENTION_DAYS, VisionService, runVisionRetentionSweepForAllTenants } from "@jarvis/vision";
+import { buildVisionRuntime, verifyVisionEndpoints, visionAdapterFromEnv, visionFlagsFromEnv, type VisionRuntime } from "./vision-runtime.ts";
 import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
 } from "@jarvis/situations";
 import { createSituationSignalsWiring } from "./situation-signals-wiring.ts";
+import { enforceLocalModelEndpoints, localModelNoRedirect } from "./local-model-endpoints.ts";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, parseFollowUpPushPolicy, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
@@ -339,6 +340,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-G3 (D-465): `local_vision` (lokal bildeklassifisering av kamerabilder) registreres KUN når JARVIS_VISION_ENABLED=on og JARVIS_VISION_CLASSIFIER=on - ellers `null` (ingenting registreres, identisk med main).
   // En ikke-lokal/manglende JARVIS_VISION_LOCAL_URL KASTER her og stopper oppstarten (kamerabilder forlater aldri maskinen).
   // Review A-L5/A-INFO-4: vertsnavnene i endepunktene løses ved oppstart og må peke til det lokale nettet (offentlig oppløsning KASTER); embedding-endepunktet som ikke er lokalt gir kun «ingen vision-embedding».
+  // WP-G4b K4 (D-484, JARVIS-115 d): «lokal» modell er en etikett i registeret; med `JARVIS_LOCAL_MODEL_URL_GUARD=on` valideres URL-en til `gemma_local`/`local_llm`/`ollama` ved oppstart (G3-vakten, DNS inkludert), og en ugyldig/offentlig
+  // URL gjør identiteten IKKE-lokal på SELVE profilen (alle lokalitetsavgjørelser ser det: ruter, gateway-låser, finanslåsen). Flagg AV = ingenting skjer. Kjøres FØR gatewayen bygges (samme i worker-main.ts).
+  await enforceLocalModelEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
+  // WP-G4b fiks-runde 1 (FIX-5): med vakten PÅ følger lokale modellkall (local_llm/gemma_local/ollama og minnets embedding) aldri en omdirigering; AV = ingen `redirect`-nøkkel (main-atferd).
+  const noRedirect = localModelNoRedirect(process.env);
   const visionEndpoints = await verifyVisionEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
   const visionAdapter = visionAdapterFromEnv(process.env);
   const gateway = new ModelGateway({
@@ -361,7 +367,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       new AnthropicAdapter(),
       new GeminiAdapter(),
       new GemmaHostedAdapter(),
-      new LocalOpenAiCompatibleAdapter(),
+      new LocalOpenAiCompatibleAdapter(undefined, undefined, undefined, undefined, undefined, { noRedirect }),
       // D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): SAMME
       // `LocalOpenAiCompatibleAdapter`-klasse som `local_llm` over, registrert
       // EN GANG TIL under en distinkt provider-identitet (`gemma_local`) for
@@ -376,11 +382,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         // egen `envOrDefault()`-fiksede default), `||` retter opp samme sted.
         process.env["JARVIS_GEMMA_LOCAL_MODEL"] || "gemma-local",
         undefined,
-        "gemma_local"
+        "gemma_local",
+        undefined,
+        { noRedirect }
       ),
       new KimiAdapter(),
       new HermesAdapter(),
-      new OllamaAdapter(),
+      new OllamaAdapter(undefined, undefined, undefined, { noRedirect }),
       ...(visionAdapter !== null ? [visionAdapter] : [])
       // D-106 HOST-FIX (produksjonsherding, Defekt E): `ScriptedAdapter` er ALDRI
       // registrert her lenger - live host-kjøring viste at den, som en ordinær
@@ -697,7 +705,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // SAMME ene register-løkke, aldri en parallell registreringsvei.
   const situationDomainPauses = new DomainPauseRegistry(pool, { owner_person_id: ownerIdentity.person_id });
   await situationDomainPauses.restore();
-  const situationEngine = new SituationEngine(pool, situationDomainPauses, { owner_person_id: ownerIdentity.person_id });
+  // WP-G4b K1 (D-484): bindbarhet til autonom ACT er en egenskap på verktøydefinisjonen (default-deny). Bind-tid-vakten slår opp i SAMME register som utfører handlingen (`toolGateway.get`); kjøringstid-vakten bruker gatewayen den får.
+  const situationEngine = new SituationEngine(pool, situationDomainPauses, { owner_person_id: ownerIdentity.person_id }, { definitionLookup: (toolId, action) => toolGateway.get(toolId, action) });
   // Task #118 ("Charlie"-minne-verifisering): hevet ut hit (FØR register-
   // løkken) slik at DEN SAMME instansen kan registreres som
   // `memory.search`-verktøyet i `additionalTools` under OG gjenbrukes av
@@ -706,7 +715,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // D-386 (Minne v2): ÉN faktory for embedding-provideren - alltid LOKAL (`assertLocalEmbedding` i writer/retriever
   // stopper en sky-provider ved oppstart). `ollama` (bge-m3 o.l.) gir ekte semantisk gjenfinning; `local-hash` er
   // kun fallback uten semantikk og logges som advarsel så det aldri går ubemerket i drift.
-  const memoryEmbedding = createEmbeddingProviderFromEnv();
+  const memoryEmbedding = createEmbeddingProviderFromEnv(process.env, { noRedirect });
   console.log(JSON.stringify({
     msg: memoryEmbedding.model === "local-hash-v1" ? "memory_embedding_fallback_hash_no_semantics" : "memory_embedding_provider",
     model: memoryEmbedding.model, dim: memoryEmbedding.dim, locality: memoryEmbedding.locality
@@ -810,6 +819,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   };
   const goldenSuiteRunner = flagOn(process.env, CONTROL_FEATURE_FLAGS.goldenSuite) ? createGoldenSuiteRunner({ surface: () => modelToolSurface }) : undefined;
   const processStartedAt = new Date(Date.now() - Math.round(process.uptime() * 1000));
+  // WP-G3b (D-485): Syn-kortet i Personvern-senteret leser kjøretidens helsebilde gjennom en LAT funksjon (kjøretiden bygges lenger ned, som ExecutiveService over). Kilden gis KUN med JARVIS_VISION_ENABLED=on;
+  // uten den er senteret byte-identisk med main. Kjøretiden fylles i `visionControlRef` rett etter at den er bygget; før det (eller om den mangler) gir kortet ærlig «utilgjengelig», aldri en kastet feil ut av senteret.
+  const visionControlRef: { runtime: VisionRuntime | null } = { runtime: null };
   registerControlCenters(controlCenters, {
     pool, env: process.env, toolGateway, ownerControls, meshStatus: () => gateway.meshStatus(),
     authority: ownerAuthority, killSwitch, infraGate,
@@ -819,7 +831,20 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     evolutionReadiness, ev0Status: () => getLastEv0BootStatus(), evolutionTenantId: owner.tenant_id,
     valueReport: (tenantId) => lateExecutive().getValueReport(tenantId), infraStatus: (tenantId) => lateExecutive().getInfraStatus(tenantId),
     ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
-    ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
+    ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {}),
+    ...(visionFlagsFromEnv(process.env).enabled
+      ? {
+          vision: {
+            status: () => {
+              if (visionControlRef.runtime === null) throw new Error("vision_runtime_not_ready");
+              return visionControlRef.runtime.status();
+            },
+            defaults: { retention_days: VISION_DEFAULT_RETENTION_DAYS, snapshot_retention_days: VISION_DEFAULT_SNAPSHOT_RETENTION_DAYS }
+          }
+        }
+      : {}),
+    // WP-N1b fiks-runde 1 (FIX-1): Sikkerhet-senteret holder finanskoblinger/-credentials ute for en skymodell KUN med begrenset-vakten på (flagg AV: nøkkelen settes ikke = H2-oppførselen som på main).
+    ...(restrictedContextGuard.enabled ? { financeGuard: true as const } : {})
   });
   // WP-D3 (UA-4 Growth, D-459): skrivehandlinger mot annonse-/analyseplattformene + eksperimentregisteret. ALT er AV som standard: uten `JARVIS_GROWTH_WRITE_PLATFORMS` registreres INGEN skriveverktøy, og uten
   // `JARVIS_GROWTH_EXPERIMENTS=on` ingen eksperimentverktøy - verktøylister, utvalg og rate-grenser er da identiske med main, og `deps.growthWrites` (rutene) finnes ikke (404). Skriving krever dessuten
@@ -856,6 +881,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // (verktøylister, utvalg, intents, rate-grenser, ruter og det daglige sveipet er identiske med main). Helse-/visjonsporten tas strukturelt inn fra de ALLEREDE konstruerte tjenestene (denne filen er en godkjent helse-importør).
   const situationSignals = createSituationSignalsWiring({
     env: process.env, pool, engine: situationEngine, domainPauses: situationDomainPauses, gateway: toolGateway, modelGateway: gateway, ownerIdentity, ownerTenant: owner.tenant_id,
+    // WP-G4b K4: assist-vakten følger den SENTRALE lokalitetsregelen (samme `financeLockServedLocally` som finanslåsen; ingen egen kopi): en lokal identitet med ugyldig URL er `cloud` og forkastes.
+    isLocalProvider: (provider) => financeLockServedLocally({ provider, model: "" }),
     ownerPersonId: owner.owner_person_id, incidents: incidentService, vision: visionService, health: healthService, killSwitch,
     haTransport: new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))
   });
@@ -874,18 +901,19 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // GmailTransport/GithubTransport over) - ingen resolver-closure nødvendig
     // her, i motsetning til Telegram sin `chat_id` (Slack sender `channel`
     // som et vanlig model-/trusted-lag-parameter, ALDRI en fast bot-config).
-    slack: new SlackTransport(),
+    // WP-G1c (D-481, JARVIS-112 g5): de fem eldre `*.notify`-transportene får en STOP-vakt når comms er på (avmeldt mottaker = policy-avslag før noe sendes); med alle `JARVIS_COMMS_*` AV er `guardLegacyNotifyTransport` identiteten (samme objekt som før).
+    slack: commsRuntime.guardLegacyNotifyTransport("slack", new SlackTransport()),
     // D-294: samme mønster som Slack over - Discord sender `channel_id` som
     // et vanlig handlingsparameter per kall, ingen resolver-closure nødvendig.
-    discord: new DiscordTransport(),
+    discord: commsRuntime.guardLegacyNotifyTransport("discord", new DiscordTransport()),
     // D-295: Twilio krever TO faste konfigurasjonsverdier utover selve
     // credential-en (`AccountSid`/`From`-nummer) - SAMME resolver-mot-
     // readSecretProvider-mønster som Telegram sin `chat_id` (D-247) over,
     // slått opp PÅ NYTT ved hvert kall, ikke frosset ved oppstart.
-    twilio: new TwilioTransport(
+    twilio: commsRuntime.guardLegacyNotifyTransport("twilio", new TwilioTransport(
       () => readSecretProvider.get("JARVIS_TWILIO_ACCOUNT_SID"),
       () => readSecretProvider.get("JARVIS_TWILIO_FROM_NUMBER")
-    ),
+    )),
     // D-296: ren tom-konstruktør, samme mønster som Slack/Discord over -
     // Brave Search sender `query` som et vanlig handlingsparameter per kall,
     // ingen resolver-closure nødvendig (ingen ekstra fast kontokonfigurasjon
@@ -968,7 +996,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     }),
     // D-314: `phone_number_id` er Jarvis sin egen avsenderidentitet - SAMME
     // resolver-mot-readSecretProvider-mønster som Telegram sin chat_id.
-    whatsapp: new WhatsAppTransport(() => readSecretProvider.get("JARVIS_WHATSAPP_PHONE_NUMBER_ID")),
+    whatsapp: commsRuntime.guardLegacyNotifyTransport("whatsapp", new WhatsAppTransport(() => readSecretProvider.get("JARVIS_WHATSAPP_PHONE_NUMBER_ID"))),
     // D-315: SAMME resolver-mot-readSecretProvider-mønster som n8n - Make
     // sin API-base-URL er zone-spesifikk (brukerens kontosone).
     make: new MakeTransport(() => readSecretProvider.get("JARVIS_MAKE_API_BASE_URL")),
@@ -977,7 +1005,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     openai_images: new OpenAIImagesTransport(),
     // D-321: `from`-nummeret er Jarvis sin egen avsenderidentitet - SAMME
     // resolver-mot-readSecretProvider-mønster som Twilio (D-295).
-    telnyx: new TelnyxTransport(() => readSecretProvider.get("JARVIS_TELNYX_FROM_NUMBER")),
+    telnyx: commsRuntime.guardLegacyNotifyTransport("telnyx", new TelnyxTransport(() => readSecretProvider.get("JARVIS_TELNYX_FROM_NUMBER"))),
     // D-322: tom konstruktør - fast Runway-vertsnavn, kun Bearer-token +
     // en fast X-Runway-Version-header (satt inni transporten selv).
     runway: new RunwayTransport(),
@@ -1528,8 +1556,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-G3 (D-465): UA-9-kjøretiden (pipeline, HA-poller, `/vision/*`-rutene, vedlikehold). `null` (ingenting bygget) uten JARVIS_VISION_ENABLED=on. Se vision-runtime.ts for flaggene.
   const visionRuntime = buildVisionRuntime({
     pool, env: process.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, ownerTenantId: owner.tenant_id, secrets: readSecretProvider,
-    ownerControls: { killSwitch, controls: ownerControls }, embeddingBlockedReason: visionEndpoints.embeddingBlockedReason
+    ownerControls: { killSwitch, controls: ownerControls }, embeddingBlockedReason: visionEndpoints.embeddingBlockedReason,
+    // WP-G3b fiks-runde 1 (F1): G4-vinduet for avledede kamera-situasjoner fra den ALLEREDE parsede signal-wiringen (aldri en ny miljølesing); `null` uten JARVIS_SITUATION_SIGNALS=on = ingenting sendes (ruten er uendret).
+    ...(situationSignals.visionSituationWindowDays !== null ? { signalSituationWindowDays: situationSignals.visionSituationWindowDays } : {})
   });
+  visionControlRef.runtime = visionRuntime; // WP-G3b: fyller den late kilden til Syn-kortet (null uten JARVIS_VISION_ENABLED=on; da er kortet heller ikke koblet inn)
   const deps: ApiDeps = {
     // D-393 (JARVIS-026): `/health` svarer 503 når databasen ikke svarer (tidligere konstant «ok»).
     readiness: makeReadiness({ database: () => pool.query("SELECT 1") }),

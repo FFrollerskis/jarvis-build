@@ -7,7 +7,7 @@ import { ALL_DOMAINS, type DomainPauseRegistry } from "./domain-pause.ts";
 import { homeKeyPrefix, homeStateIsNormal } from "./home-bridge.ts";
 import { resolveNormalizedHome, touchSituation } from "./signal-retention.ts";
 import { bridgeObservation, deriveEventType, type SignalObservation } from "./signal-bridges.ts";
-import { assertMinimalFacts, resolveRuleThreshold, ruleByKey, type BridgeContext, type BridgeResult, type RuleDefinition, type SignalFacts } from "./signal-types.ts";
+import { EPISODE_ANCHOR_DIGITS, assertMinimalFacts, episodeKeyFor, resolveRuleThreshold, ruleByKey, type BridgeContext, type BridgeResult, type EpisodeWindow, type RuleDefinition, type SignalFacts } from "./signal-types.ts";
 import { SituationDetectionKeyConflictError, type SituationEngine } from "./service.ts";
 import type { SituationSubscription } from "./subscriptions.ts";
 import type { Situation } from "./types.ts";
@@ -18,6 +18,7 @@ import type { Situation } from "./types.ts";
  *   1. hendelsestype (lukket sett)    -> ingen regel = ingen signal
  *   2. abonnement (eierens register)  -> ingen aktivt abonnement = forkastet (fail-closed), aldri et stille standardvalg
  *   3. bro (ren, terskler tunet innenfor harde grenser) -> under terskel/utenfor filter = ingen signal
+ *   3b. EPISODE (WP-G4b K3): kamerahendelser (ikke haste) har et GLIDENDE dedupe-vindu per (kamera, hendelsestype): bussen slår opp episoden hendelsen hører til (`episodeKey`) og setter nøkkelen deretter. Se `EpisodeWindow`.
  *   4. PAUSE (domene og hele motoren, både prosess-cache og varig database) -> pauset = ikke innlest (ikke bufret; tilstandsbaserte kilder gjenoppdages ved neste tikk, hendelsesbaserte innenfor oppslagsvinduet).
  *      Sjekkes på nytt RETT ETTER en modellvurdering (en pause satt mens modellen vurderte slipper ikke signalet gjennom), og løperen leser ikke engang kilden når alle abonnementsdomenene er pauset (`pausedDomains`).
  *   4b. FLAPP-DEMPING (A-LOW-8): en ikke-haste Home Assistant-entitet slipper inn høyst `FLAP_MAX_EPISODES` nye episoder per `FLAP_WINDOW_MS`; resten `damped` (forsinket, aldri tapt). Hver batch behandler høyst `MAX_OBSERVATIONS_PER_BATCH` (B-LOW-6).
@@ -44,6 +45,26 @@ export const FLAP_WINDOW_MS = 60 * 60_000;
 export const FLAP_MAX_EPISODES = 3;
 /** B-LOW-6: høyst så mange observasjoner behandles per `publishBatch`; resten telles som `over_cap` (backpressure: en leser kan aldri mate bussen ubegrenset). */
 export const MAX_OBSERVATIONS_PER_BATCH = 500;
+
+/**
+ * WP-G4b K3: kamerahendelser behandles i STIGENDE hendelsestid innenfor en batch, så ankeret til en episode alltid er den ELDSTE hendelsen i den (leseren kan levere nyeste først). Øvrige kilder beholder sin rekkefølge: kamerahendelsenes
+ * posisjoner gjenbrukes med de sorterte hendelsene. Stabil (lik tid beholder leserekkefølgen); en ugyldig tid sorteres sist (broen forkaster den uansett).
+ */
+export function orderVisionAscending(observations: readonly SignalObservation[]): readonly SignalObservation[] {
+  const vision = observations.map((observation, index) => ({ observation, index })).filter((e) => e.observation.source === "vision");
+  if (vision.length < 2) return observations;
+  const timeOf = (o: SignalObservation): number => {
+    const ms = o.source === "vision" ? Date.parse(o.observed_at) : Number.NaN;
+    return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
+  };
+  const sorted = [...vision].sort((a, b) => {
+    const ta = timeOf(a.observation);
+    const tb = timeOf(b.observation);
+    return ta === tb ? a.index - b.index : ta < tb ? -1 : 1;
+  });
+  let next = 0;
+  return observations.map((o) => (o.source === "vision" ? (sorted[next++] as { observation: SignalObservation }).observation : o));
+}
 
 export type PublishResult =
   | { status: "ignored"; reason: IgnoredReason }
@@ -222,6 +243,32 @@ export class SituationSignalBus {
     return admitted >= maxEpisodes;
   }
 
+  /**
+   * WP-G4b K3 (D-484, Q-75 pkt 10): episodenøkkelen for en kamerahendelse med glidende vindu. Finner den SISTE eksisterende episoden (en situasjon med nøkkel `<prefiks><anker-ms>`) for samme kamera og hendelsestype med
+   * anker <= hendelsestidspunktet og hendelsestidspunkt - anker < vinduet (strengt: akkurat på vindusgrensen starter en NY episode). Finnes ingen, er hendelsen starten på en ny episode (anker = eget tidspunkt).
+   * Ankeret er hendelsen som åpnet episoden og dermed utløste (eller, i stille timer, holdt) varselet; en undertrykt duplikat flytter det aldri, så vinduet «sklir» med siste VARSEL, ikke med siste hendelse, og ikke med en klokkebøtte.
+   * Tilstanden ligger i databasen (situasjonens nøkkel), ikke i minnet: omstart endrer ingenting. Alle statuser teller (en løst episode åpnes på nytt av motoren, som før). Eldre bøttenøkler (kort suffiks) tolkes aldri som anker.
+   * Tenant og rom er eksplisitte (RLS); søket er et områdesøk på nøkkelens unike indeks.
+   * `starts_with` (byte-sammenligning) er IKKE overflødig i produksjon (fiks-runde 1, FIX-12): `BETWEEN` følger kolonnens KOLLASJON, og under en ICU-kollasjon (`und-x-icu`, `en-US-x-icu`) er `camera.A` og `camera.a` like på første nivå, så
+   * søket ville også truffet nøkler for en ANNEN kamera-id som kun skiller seg på store/små bokstaver. VERIFISERT mot C, POSIX og ICU (`wpg4b-camera-window-icu.test.ts`, som feller fjerning av filteret); IKKE verifisert mot glibc `en_US`
+   * (NAS-ens Postgres-image), men `starts_with` gir riktig resultat uansett kollasjon, så filteret skal stå.
+   */
+  private async episodeKey(tenantId: string, memorySpace: MemorySpace, episode: EpisodeWindow): Promise<string> {
+    const upper = episodeKeyFor(episode.key_prefix, episode.anchor_ms);
+    const lower = episodeKeyFor(episode.key_prefix, Math.max(0, episode.anchor_ms - episode.window_ms + 1));
+    const found = await withMemoryTransaction(this.deps.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT detection_key FROM situations
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND detection_key BETWEEN $3 AND $4 AND starts_with(detection_key, $5)
+           AND substr(detection_key, $6) ~ $7
+         ORDER BY detection_key DESC LIMIT 1`,
+        [tenantId, memorySpace, lower, upper, episode.key_prefix, episode.key_prefix.length + 1, `^[0-9]{${EPISODE_ANCHOR_DIGITS}}$`]
+      );
+      return rows[0] as { detection_key: string } | undefined;
+    });
+    return found?.detection_key ?? upper;
+  }
+
   private async alreadyLogged(tenantId: string, memorySpace: MemorySpace, source: string, sourceRef: string): Promise<boolean> {
     return withMemoryTransaction(this.deps.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
@@ -307,12 +354,15 @@ export class SituationSignalBus {
         if (bridge !== null) { chosen = { sub, bridge }; break; }
       }
       if (chosen === null) return { status: "ignored", reason: "no_signal" };
-      const { sub, bridge } = chosen;
+      const { sub } = chosen;
+      let bridge = chosen.bridge;
       const rule = ruleByKey(bridge.rule_key);
       if (rule === undefined) return { status: "ignored", reason: "no_rule" };
 
       // Pause FØR alt som skriver (også før logg-oppslaget): et pauset domene leses ikke inn, og signalet regnes ikke som sett (det gjenoppdages etter at pausen er opphevet).
       if (await this.isPaused(tenantId, memorySpace, bridge.candidate.domain)) return { status: "ignored", reason: "paused" };
+      // K3: glidende vindu - nøkkelen settes til episoden hendelsen hører til (før logg-oppslaget, så en allerede loggført hendelse «sist sett»-bumper riktig situasjon).
+      if (bridge.episode !== undefined) bridge = { ...bridge, candidate: { ...bridge.candidate, detection_key: await this.episodeKey(tenantId, memorySpace, bridge.episode) } };
       if (await this.alreadyLogged(tenantId, memorySpace, bridge.source, bridge.source_ref)) {
         // A-MEDIUM-4: tilstanden gjelder FORTSATT (observert nå) -> «sist sett» (høyst hvert 5. minutt). Auto-ACT krever en fersk observasjon, så et gammelt forslag utføres aldri.
         await touchSituation(this.deps.pool, tenantId, memorySpace, bridge.candidate.detection_key);
@@ -371,7 +421,7 @@ export class SituationSignalBus {
       const before = await this.deps.engine.findByDetectionKey(tenantId, memorySpace, candidate.detection_key);
       // A-LOW-6: `no_downgrade` - en senere, lavere prioritet fra en annen kilde (eller et senere svakere nivå) overskriver aldri en høyere prioritet på den åpne situasjonen (begrunnelsen følger vinneren).
       const evaluated = await this.deps.engine.evaluateCandidate(
-        tenantId, memorySpace, { ...candidate, no_downgrade: true, ...(bridge.urgent ? { urgent: true } : {}) }, this.now()
+        tenantId, memorySpace, { ...candidate, no_downgrade: true, rule_key: bridge.rule_key, ...(bridge.urgent ? { urgent: true } : {}) }, this.now()
       );
       const created = ctx.createdHint ?? before === null;
       const held = heldByQuietHours(evaluated, candidate.priority);
@@ -401,7 +451,9 @@ export class SituationSignalBus {
       return result;
     }
     // B-LOW-6: backpressure - høyst `MAX_OBSERVATIONS_PER_BATCH` behandles; resten telles (`over_cap`) og leses på nytt neste tikk (loggen er idempotent) i stedet for å mate bussen ubegrenset.
-    const accepted = observations.length > MAX_OBSERVATIONS_PER_BATCH ? observations.slice(0, MAX_OBSERVATIONS_PER_BATCH) : observations;
+    // K3: kamerahendelser i stigende tid (eldste først) FØR taket: ankeret til en episode er alltid den eldste hendelsen, og et tak kutter de nyeste (leses igjen neste tikk) i stedet for å la en episode ankres på en sen hendelse.
+    const ordered = orderVisionAscending(observations);
+    const accepted = ordered.length > MAX_OBSERVATIONS_PER_BATCH ? ordered.slice(0, MAX_OBSERVATIONS_PER_BATCH) : ordered;
     for (const observation of accepted) {
       result.received += 1;
       const out = await this.publish(tenantId, memorySpace, observation, subs, thresholds, ctx, result);

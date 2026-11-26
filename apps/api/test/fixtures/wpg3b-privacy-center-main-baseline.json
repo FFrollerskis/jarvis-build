@@ -1,0 +1,821 @@
+{
+ "baseline_sha": "71a31d8bb5bc8c09359c491dd6b843cbc16a4140",
+ "scenarios": {
+  "synthetic_doc": {
+   "center": "privacy",
+   "title_no": "Personvern",
+   "generated_at": "2026-11-14T10:00:00.000Z",
+   "status": "FAIL",
+   "sensitivity": "PRIVATE",
+   "sections": [
+    {
+     "id": "inventory",
+     "title_no": "Behandlingsoversikt",
+     "status": "WARN",
+     "measured": true,
+     "summary_no": "Oversikten er et UTKAST. 2 advarsel.",
+     "items": [
+      {
+       "id": "inventory_doc",
+       "label": "Behandlingsoversikten (dokumentet)",
+       "status": "WARN",
+       "detail_no": "UTKAST, ikke juridisk gjennomgått og ikke godkjent av eier (som dokumentet selv sier); 2 datakategorier, 3 dokumenterte tabeller.",
+       "facts": {
+        "status": "draft",
+        "categories": 2,
+        "documented_tables": 3,
+        "not_approved_by_owner": true
+       }
+      },
+      {
+       "id": "coverage",
+       "label": "Dekning: levende tabeller mot oversikten",
+       "status": "WARN",
+       "detail_no": "1 av 4 tabeller i databasen står IKKE i behandlingsoversikten: ny_tabell_uten_rad.",
+       "facts": {
+        "live_tables": 4,
+        "undocumented": 1,
+        "documented_not_in_database": 0
+       }
+      }
+     ],
+     "source": "docs/security/PROCESSING_INVENTORY.md (D-420; repo-innhold, parset strukturelt - kun tabellnavn, antall rader og statusord) + pg_tables (systemkatalogen, ingen rader)",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    },
+    {
+     "id": "processors",
+     "title_no": "Eksterne behandlere",
+     "status": "WARN",
+     "measured": true,
+     "summary_no": "2 av 3 behandlerrader har uverifiserte vilkår (slik dokumentet erklærer; ikke en juridisk vurdering). 2 advarsel.",
+     "items": [
+      {
+       "id": "model_providers",
+       "label": "Modellleverandører (LLM)",
+       "status": "WARN",
+       "detail_no": "1 av 2 rader har vilkår (region, DPA, trening, retensjon) som er IKKE VERIFISERT. Sensitivitetsregelen holder uansett SECRET_RESTRICTED lokalt (D-378).",
+       "facts": {
+        "rows": 2,
+        "unverified": 1
+       }
+      },
+      {
+       "id": "connectors",
+       "label": "Connectorer (eierens kontoer)",
+       "status": "WARN",
+       "detail_no": "1 av 1 connectorer har vilkår som er IKKE VERIFISERT (krever eier/juridisk handling, Q-32).",
+       "facts": {
+        "rows": 1,
+        "unverified": 1
+       }
+      }
+     ],
+     "source": "docs/security/PROCESSING_INVENTORY.md (D-420; repo-innhold, parset strukturelt - kun tabellnavn, antall rader og statusord) (§2a og §2b)",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    },
+    {
+     "id": "dpia",
+     "title_no": "DPIA-status",
+     "status": "WARN",
+     "measured": true,
+     "summary_no": "0 av 2 DPIA-triggere har godkjent DPIA (slik dokumentet erklærer; ingen juridisk verifisering). 2 advarsel.",
+     "items": [
+      {
+       "id": "dpia:2",
+       "label": "Helse",
+       "status": "WARN",
+       "detail_no": "UTKAST/ikke godkjent; 1 DPIA-dokument(er) oppgitt, 1 finnes IKKE.",
+       "facts": {
+        "approved": false,
+        "documents": 1,
+        "missing_documents": 1,
+        "unknown_documents": 0,
+        "label_filtered": false
+       }
+      },
+      {
+       "id": "dpia:1",
+       "label": "Kamera og bilder",
+       "status": "WARN",
+       "detail_no": "UTKAST/ikke godkjent; 1 DPIA-dokument(er) oppgitt.",
+       "facts": {
+        "approved": false,
+        "documents": 1,
+        "missing_documents": 0,
+        "unknown_documents": 0,
+        "label_filtered": false
+       }
+      }
+     ],
+     "source": "docs/security/PROCESSING_INVENTORY.md (D-420; repo-innhold, parset strukturelt - kun tabellnavn, antall rader og statusord) (§3 DPIA-trigger-matrisen) + eksistens av de oppgitte DPIA-filene (kun lstat)",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    },
+    {
+     "id": "retention",
+     "title_no": "Oppbevaring",
+     "status": "WARN",
+     "measured": true,
+     "summary_no": "5 oppbevaringssveip følges. Revisjon, kostnad, samtaler og jobber har ingen automatisk sletting (eierbeslutning). 3 advarsel, 1 ikke målt, 7 i orden.",
+     "items": [
+      {
+       "id": "no_auto:cost_events",
+       "label": "Kostnadsledger (cost_events) - ingen automatisk sletting",
+       "status": "WARN",
+       "detail_no": "Append-only/beholdes: oppbevaringsgrense er en eierbeslutning (ikke satt). Eldste rad for 150 d siden (150 døgn).",
+       "facts": {
+        "oldest_at": "2026-06-17T10:00:00.000Z",
+        "age_days": 150,
+        "automatic_deletion": false
+       },
+       "observed_at": "2026-06-17T10:00:00.000Z"
+      },
+      {
+       "id": "no_auto:audit_events",
+       "label": "Revisjonslogg (audit_events) - ingen automatisk sletting",
+       "status": "WARN",
+       "detail_no": "Append-only/beholdes: oppbevaringsgrense er en eierbeslutning (ikke satt). Eldste rad for 200 d siden (200 døgn).",
+       "facts": {
+        "oldest_at": "2026-04-28T10:00:00.000Z",
+        "age_days": 200,
+        "automatic_deletion": false
+       },
+       "observed_at": "2026-04-28T10:00:00.000Z"
+      },
+      {
+       "id": "backlog_tool_executions",
+       "label": "Verktøyutføringer eldre enn 180 døgn",
+       "status": "WARN",
+       "detail_no": "3 ferdige rader er eldre enn oppbevaringsgrensen og er ikke slettet - sveipet henger etter eller har ikke kjørt.",
+       "facts": {
+        "overdue": 3,
+        "retention_days": 180
+       }
+      },
+      {
+       "id": "no_auto:messages_tasks",
+       "label": "Samtaler (messages) og jobber (tasks) - ingen automatisk sletting",
+       "status": "UNKNOWN",
+       "detail_no": "Ingen oppbevaringsgrense finnes (eierbeslutning, jf. behandlingsoversikten §4). Alderen på eldste rad er IKKE målt her (en full telling ville vært tung på store tabeller).",
+       "facts": {
+        "automatic_deletion": false,
+        "measured": false
+       }
+      },
+      {
+       "id": "memory_consolidation_days",
+       "label": "Minnekonsolidering (episodiske samtaleminner)",
+       "status": "OK",
+       "detail_no": "Gamle episodiske samtaleminner konsolideres til dagssammendrag etter 90 døgn (JARVIS_MEMORY_RETENTION_DAYS). Rører aldri preferanser, beslutninger, relasjoner eller semantiske minner.",
+       "facts": {
+        "configured_days": 90,
+        "default_days": 60
+       }
+      },
+      {
+       "id": "job:operational-retention-sweep",
+       "label": "Sveip: Driftsrader (godkjenninger, grants, billetter, verktøyutføringer, scheduler)",
+       "status": "OK",
+       "detail_no": "sist fullført for 5 t siden",
+       "facts": {
+        "job": "operational-retention-sweep",
+        "last_completed_at": "2026-11-14T05:00:00.000Z",
+        "lag_hours": 5
+       },
+       "observed_at": "2026-11-14T05:00:00.000Z"
+      },
+      {
+       "id": "job:health-retention-sweep",
+       "label": "Sveip: Helse",
+       "status": "OK",
+       "detail_no": "sist fullført for 5 t siden",
+       "facts": {
+        "job": "health-retention-sweep",
+        "last_completed_at": "2026-11-14T05:00:00.000Z",
+        "lag_hours": 5
+       },
+       "observed_at": "2026-11-14T05:00:00.000Z"
+      },
+      {
+       "id": "job:memory-retention-sweep",
+       "label": "Sveip: Minne (konsolidering av gamle samtaleminner)",
+       "status": "OK",
+       "detail_no": "sist fullført for 5 t siden",
+       "facts": {
+        "job": "memory-retention-sweep",
+        "last_completed_at": "2026-11-14T05:00:00.000Z",
+        "lag_hours": 5
+       },
+       "observed_at": "2026-11-14T05:00:00.000Z"
+      },
+      {
+       "id": "job:location-retention-sweep",
+       "label": "Sveip: Sted",
+       "status": "OK",
+       "detail_no": "sist fullført for 5 t siden",
+       "facts": {
+        "job": "location-retention-sweep",
+        "last_completed_at": "2026-11-14T05:00:00.000Z",
+        "lag_hours": 5
+       },
+       "observed_at": "2026-11-14T05:00:00.000Z"
+      },
+      {
+       "id": "job:vision-retention-sweep",
+       "label": "Sveip: Syn",
+       "status": "OK",
+       "detail_no": "sist fullført for 5 t siden",
+       "facts": {
+        "job": "vision-retention-sweep",
+        "last_completed_at": "2026-11-14T05:00:00.000Z",
+        "lag_hours": 5
+       },
+       "observed_at": "2026-11-14T05:00:00.000Z"
+      },
+      {
+       "id": "backlog_session_grants",
+       "label": "Utløpte/tilbakekalte sesjons-grants eldre enn 30 døgn",
+       "status": "OK",
+       "detail_no": "Ingen grants står igjen etter oppbevaringsgrensen.",
+       "facts": {
+        "overdue": 0,
+        "retention_days": 30
+       }
+      }
+     ],
+     "source": "scheduler_state (retensjonssveipene) + tool_executions + session_grants + audit_events + cost_events (tenant-RLS; kun antall og tidsstempler)",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    },
+    {
+     "id": "deletion_evidence",
+     "title_no": "Slettebevis",
+     "status": "FAIL",
+     "measured": true,
+     "summary_no": "2 fullførte slettinger, 1 mislykkede, 5 slettebevis. 1 feil, 1 advarsel, 1 ikke målt, 3 i orden.",
+     "items": [
+      {
+       "id": "failed",
+       "label": "Mislykkede slettinger",
+       "status": "FAIL",
+       "detail_no": "1 sletteforespørsler FEILET - innholdet er ikke bevist slettet.",
+       "facts": {
+        "failed": 1
+       }
+      },
+      {
+       "id": "entry_point",
+       "label": "Slette-inngang (ErasureService)",
+       "status": "WARN",
+       "detail_no": "Sletting på forespørsel er ikke tilgjengelig som app-rute (JARVIS-060, DEFERRED): bevisene over kommer fra sletteforespørsler som er kjørt utenfor appen.",
+       "facts": {
+        "wired": false
+       }
+      },
+      {
+       "id": "restore_reapply",
+       "label": "Gjenanvendelse av slettinger etter restore",
+       "status": "UNKNOWN",
+       "detail_no": "IKKE målt: om reapplyErasuresAfterRestore er kjørt etter siste restore registreres ikke noe sted. Etter en restore må slettinger gjenanvendes før systemet regnes som klart.",
+       "facts": {
+        "measured": false
+       }
+      },
+      {
+       "id": "completed",
+       "label": "Fullførte slettinger",
+       "status": "OK",
+       "detail_no": "2 sletteforespørsler er fullført, sist for 10 d siden.",
+       "facts": {
+        "completed": 2,
+        "last_completed_at": "2026-11-04T10:00:00.000Z"
+       },
+       "observed_at": "2026-11-04T10:00:00.000Z"
+      },
+      {
+       "id": "fingerprints",
+       "label": "Slettebevis (fingeravtrykk)",
+       "status": "OK",
+       "detail_no": "5 fingeravtrykk er lagret: de beviser en sletting og hindrer at slettet innhold kommer tilbake ved synk - uten å inneholde selve innholdet.",
+       "facts": {
+        "fingerprints": 5
+       }
+      },
+      {
+       "id": "pending_stale",
+       "label": "Slettinger som står fast",
+       "status": "OK",
+       "detail_no": "Ingen slettinger står fast.",
+       "facts": {
+        "pending_stale": 0
+       }
+      }
+     ],
+     "source": "erasure_requests + erasure_fingerprints (tenant-RLS; omfang og antall, aldri innhold) - samme leser som Minne-senteret",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    }
+   ],
+   "actions": [],
+   "summary_no": "Personvern: feil - 5 seksjoner (1 feiler, 4 med advarsel)."
+  },
+  "missing_doc": {
+   "center": "privacy",
+   "title_no": "Personvern",
+   "generated_at": "2026-11-14T10:00:00.000Z",
+   "status": "FAIL",
+   "sensitivity": "PRIVATE",
+   "sections": [
+    {
+     "id": "inventory",
+     "title_no": "Behandlingsoversikt",
+     "status": "UNKNOWN",
+     "measured": true,
+     "summary_no": "Dokumentdelen er ikke målt. 2 ikke målt.",
+     "items": [
+      {
+       "id": "inventory_doc",
+       "label": "Behandlingsoversikten (dokumentet)",
+       "status": "UNKNOWN",
+       "detail_no": "IKKE MÅLT: dokumentet finnes ikke i denne kjøringen (docs/ følger ikke med api-imaget; monter docs/ skrivebeskyttet for å måle det i drift).",
+       "facts": {
+        "measured": false
+       }
+      },
+      {
+       "id": "coverage",
+       "label": "Dekning: levende tabeller mot oversikten",
+       "status": "UNKNOWN",
+       "detail_no": "4 tabeller finnes i databasen, men dekningen kan ikke vurderes uten dokumentet.",
+       "facts": {
+        "live_tables": 4,
+        "measured": false
+       }
+      }
+     ],
+     "source": "docs/security/PROCESSING_INVENTORY.md (D-420; repo-innhold, parset strukturelt - kun tabellnavn, antall rader og statusord) + pg_tables (systemkatalogen, ingen rader)",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    },
+    {
+     "id": "processors",
+     "title_no": "Eksterne behandlere",
+     "status": "UNKNOWN",
+     "measured": false,
+     "summary_no": "Ikke målt: dokumentet finnes ikke i denne kjøringen (docs/ følger ikke med api-imaget; monter docs/ skrivebeskyttet for å måle det i drift)",
+     "items": [],
+     "source": "docs/security/PROCESSING_INVENTORY.md (D-420; repo-innhold, parset strukturelt - kun tabellnavn, antall rader og statusord)",
+     "observed_at": null
+    },
+    {
+     "id": "dpia",
+     "title_no": "DPIA-status",
+     "status": "UNKNOWN",
+     "measured": false,
+     "summary_no": "Ikke målt: dokumentet finnes ikke i denne kjøringen (docs/ følger ikke med api-imaget; monter docs/ skrivebeskyttet for å måle det i drift)",
+     "items": [],
+     "source": "docs/security/PROCESSING_INVENTORY.md (D-420; repo-innhold, parset strukturelt - kun tabellnavn, antall rader og statusord)",
+     "observed_at": null
+    },
+    {
+     "id": "retention",
+     "title_no": "Oppbevaring",
+     "status": "WARN",
+     "measured": true,
+     "summary_no": "5 oppbevaringssveip følges. Revisjon, kostnad, samtaler og jobber har ingen automatisk sletting (eierbeslutning). 3 advarsel, 1 ikke målt, 7 i orden.",
+     "items": [
+      {
+       "id": "no_auto:cost_events",
+       "label": "Kostnadsledger (cost_events) - ingen automatisk sletting",
+       "status": "WARN",
+       "detail_no": "Append-only/beholdes: oppbevaringsgrense er en eierbeslutning (ikke satt). Eldste rad for 150 d siden (150 døgn).",
+       "facts": {
+        "oldest_at": "2026-06-17T10:00:00.000Z",
+        "age_days": 150,
+        "automatic_deletion": false
+       },
+       "observed_at": "2026-06-17T10:00:00.000Z"
+      },
+      {
+       "id": "no_auto:audit_events",
+       "label": "Revisjonslogg (audit_events) - ingen automatisk sletting",
+       "status": "WARN",
+       "detail_no": "Append-only/beholdes: oppbevaringsgrense er en eierbeslutning (ikke satt). Eldste rad for 200 d siden (200 døgn).",
+       "facts": {
+        "oldest_at": "2026-04-28T10:00:00.000Z",
+        "age_days": 200,
+        "automatic_deletion": false
+       },
+       "observed_at": "2026-04-28T10:00:00.000Z"
+      },
+      {
+       "id": "backlog_tool_executions",
+       "label": "Verktøyutføringer eldre enn 180 døgn",
+       "status": "WARN",
+       "detail_no": "3 ferdige rader er eldre enn oppbevaringsgrensen og er ikke slettet - sveipet henger etter eller har ikke kjørt.",
+       "facts": {
+        "overdue": 3,
+        "retention_days": 180
+       }
+      },
+      {
+       "id": "no_auto:messages_tasks",
+       "label": "Samtaler (messages) og jobber (tasks) - ingen automatisk sletting",
+       "status": "UNKNOWN",
+       "detail_no": "Ingen oppbevaringsgrense finnes (eierbeslutning, jf. behandlingsoversikten §4). Alderen på eldste rad er IKKE målt her (en full telling ville vært tung på store tabeller).",
+       "facts": {
+        "automatic_deletion": false,
+        "measured": false
+       }
+      },
+      {
+       "id": "memory_consolidation_days",
+       "label": "Minnekonsolidering (episodiske samtaleminner)",
+       "status": "OK",
+       "detail_no": "Gamle episodiske samtaleminner konsolideres til dagssammendrag etter 90 døgn (JARVIS_MEMORY_RETENTION_DAYS). Rører aldri preferanser, beslutninger, relasjoner eller semantiske minner.",
+       "facts": {
+        "configured_days": 90,
+        "default_days": 60
+       }
+      },
+      {
+       "id": "job:operational-retention-sweep",
+       "label": "Sveip: Driftsrader (godkjenninger, grants, billetter, verktøyutføringer, scheduler)",
+       "status": "OK",
+       "detail_no": "sist fullført for 5 t siden",
+       "facts": {
+        "job": "operational-retention-sweep",
+        "last_completed_at": "2026-11-14T05:00:00.000Z",
+        "lag_hours": 5
+       },
+       "observed_at": "2026-11-14T05:00:00.000Z"
+      },
+      {
+       "id": "job:health-retention-sweep",
+       "label": "Sveip: Helse",
+       "status": "OK",
+       "detail_no": "sist fullført for 5 t siden",
+       "facts": {
+        "job": "health-retention-sweep",
+        "last_completed_at": "2026-11-14T05:00:00.000Z",
+        "lag_hours": 5
+       },
+       "observed_at": "2026-11-14T05:00:00.000Z"
+      },
+      {
+       "id": "job:memory-retention-sweep",
+       "label": "Sveip: Minne (konsolidering av gamle samtaleminner)",
+       "status": "OK",
+       "detail_no": "sist fullført for 5 t siden",
+       "facts": {
+        "job": "memory-retention-sweep",
+        "last_completed_at": "2026-11-14T05:00:00.000Z",
+        "lag_hours": 5
+       },
+       "observed_at": "2026-11-14T05:00:00.000Z"
+      },
+      {
+       "id": "job:location-retention-sweep",
+       "label": "Sveip: Sted",
+       "status": "OK",
+       "detail_no": "sist fullført for 5 t siden",
+       "facts": {
+        "job": "location-retention-sweep",
+        "last_completed_at": "2026-11-14T05:00:00.000Z",
+        "lag_hours": 5
+       },
+       "observed_at": "2026-11-14T05:00:00.000Z"
+      },
+      {
+       "id": "job:vision-retention-sweep",
+       "label": "Sveip: Syn",
+       "status": "OK",
+       "detail_no": "sist fullført for 5 t siden",
+       "facts": {
+        "job": "vision-retention-sweep",
+        "last_completed_at": "2026-11-14T05:00:00.000Z",
+        "lag_hours": 5
+       },
+       "observed_at": "2026-11-14T05:00:00.000Z"
+      },
+      {
+       "id": "backlog_session_grants",
+       "label": "Utløpte/tilbakekalte sesjons-grants eldre enn 30 døgn",
+       "status": "OK",
+       "detail_no": "Ingen grants står igjen etter oppbevaringsgrensen.",
+       "facts": {
+        "overdue": 0,
+        "retention_days": 30
+       }
+      }
+     ],
+     "source": "scheduler_state (retensjonssveipene) + tool_executions + session_grants + audit_events + cost_events (tenant-RLS; kun antall og tidsstempler)",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    },
+    {
+     "id": "deletion_evidence",
+     "title_no": "Slettebevis",
+     "status": "FAIL",
+     "measured": true,
+     "summary_no": "2 fullførte slettinger, 1 mislykkede, 5 slettebevis. 1 feil, 1 advarsel, 1 ikke målt, 3 i orden.",
+     "items": [
+      {
+       "id": "failed",
+       "label": "Mislykkede slettinger",
+       "status": "FAIL",
+       "detail_no": "1 sletteforespørsler FEILET - innholdet er ikke bevist slettet.",
+       "facts": {
+        "failed": 1
+       }
+      },
+      {
+       "id": "entry_point",
+       "label": "Slette-inngang (ErasureService)",
+       "status": "WARN",
+       "detail_no": "Sletting på forespørsel er ikke tilgjengelig som app-rute (JARVIS-060, DEFERRED): bevisene over kommer fra sletteforespørsler som er kjørt utenfor appen.",
+       "facts": {
+        "wired": false
+       }
+      },
+      {
+       "id": "restore_reapply",
+       "label": "Gjenanvendelse av slettinger etter restore",
+       "status": "UNKNOWN",
+       "detail_no": "IKKE målt: om reapplyErasuresAfterRestore er kjørt etter siste restore registreres ikke noe sted. Etter en restore må slettinger gjenanvendes før systemet regnes som klart.",
+       "facts": {
+        "measured": false
+       }
+      },
+      {
+       "id": "completed",
+       "label": "Fullførte slettinger",
+       "status": "OK",
+       "detail_no": "2 sletteforespørsler er fullført, sist for 10 d siden.",
+       "facts": {
+        "completed": 2,
+        "last_completed_at": "2026-11-04T10:00:00.000Z"
+       },
+       "observed_at": "2026-11-04T10:00:00.000Z"
+      },
+      {
+       "id": "fingerprints",
+       "label": "Slettebevis (fingeravtrykk)",
+       "status": "OK",
+       "detail_no": "5 fingeravtrykk er lagret: de beviser en sletting og hindrer at slettet innhold kommer tilbake ved synk - uten å inneholde selve innholdet.",
+       "facts": {
+        "fingerprints": 5
+       }
+      },
+      {
+       "id": "pending_stale",
+       "label": "Slettinger som står fast",
+       "status": "OK",
+       "detail_no": "Ingen slettinger står fast.",
+       "facts": {
+        "pending_stale": 0
+       }
+      }
+     ],
+     "source": "erasure_requests + erasure_fingerprints (tenant-RLS; omfang og antall, aldri innhold) - samme leser som Minne-senteret",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    }
+   ],
+   "actions": [],
+   "summary_no": "Personvern: feil - 5 seksjoner (1 feiler, 1 med advarsel, 3 ikke målt)."
+  },
+  "everything_down": {
+   "center": "privacy",
+   "title_no": "Personvern",
+   "generated_at": "2026-11-14T10:00:00.000Z",
+   "status": "WARN",
+   "sensitivity": "PRIVATE",
+   "sections": [
+    {
+     "id": "inventory",
+     "title_no": "Behandlingsoversikt",
+     "status": "WARN",
+     "measured": true,
+     "summary_no": "Oversikten er et UTKAST. 1 advarsel, 1 ikke målt.",
+     "items": [
+      {
+       "id": "inventory_doc",
+       "label": "Behandlingsoversikten (dokumentet)",
+       "status": "WARN",
+       "detail_no": "UTKAST, ikke juridisk gjennomgått og ikke godkjent av eier (som dokumentet selv sier); 2 datakategorier, 3 dokumenterte tabeller.",
+       "facts": {
+        "status": "draft",
+        "categories": 2,
+        "documented_tables": 3,
+        "not_approved_by_owner": true
+       }
+      },
+      {
+       "id": "coverage",
+       "label": "Dekning: levende tabeller mot oversikten",
+       "status": "UNKNOWN",
+       "detail_no": "Tabelloversikten kunne ikke leses (Error).",
+       "facts": {
+        "measured": false
+       }
+      }
+     ],
+     "source": "docs/security/PROCESSING_INVENTORY.md (D-420; repo-innhold, parset strukturelt - kun tabellnavn, antall rader og statusord) + pg_tables (systemkatalogen, ingen rader)",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    },
+    {
+     "id": "processors",
+     "title_no": "Eksterne behandlere",
+     "status": "WARN",
+     "measured": true,
+     "summary_no": "2 av 3 behandlerrader har uverifiserte vilkår (slik dokumentet erklærer; ikke en juridisk vurdering). 2 advarsel.",
+     "items": [
+      {
+       "id": "model_providers",
+       "label": "Modellleverandører (LLM)",
+       "status": "WARN",
+       "detail_no": "1 av 2 rader har vilkår (region, DPA, trening, retensjon) som er IKKE VERIFISERT. Sensitivitetsregelen holder uansett SECRET_RESTRICTED lokalt (D-378).",
+       "facts": {
+        "rows": 2,
+        "unverified": 1
+       }
+      },
+      {
+       "id": "connectors",
+       "label": "Connectorer (eierens kontoer)",
+       "status": "WARN",
+       "detail_no": "1 av 1 connectorer har vilkår som er IKKE VERIFISERT (krever eier/juridisk handling, Q-32).",
+       "facts": {
+        "rows": 1,
+        "unverified": 1
+       }
+      }
+     ],
+     "source": "docs/security/PROCESSING_INVENTORY.md (D-420; repo-innhold, parset strukturelt - kun tabellnavn, antall rader og statusord) (§2a og §2b)",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    },
+    {
+     "id": "dpia",
+     "title_no": "DPIA-status",
+     "status": "WARN",
+     "measured": true,
+     "summary_no": "0 av 2 DPIA-triggere har godkjent DPIA (slik dokumentet erklærer; ingen juridisk verifisering). 2 advarsel.",
+     "items": [
+      {
+       "id": "dpia:2",
+       "label": "Helse",
+       "status": "WARN",
+       "detail_no": "UTKAST/ikke godkjent; 1 DPIA-dokument(er) oppgitt, 1 finnes IKKE.",
+       "facts": {
+        "approved": false,
+        "documents": 1,
+        "missing_documents": 1,
+        "unknown_documents": 0,
+        "label_filtered": false
+       }
+      },
+      {
+       "id": "dpia:1",
+       "label": "Kamera og bilder",
+       "status": "WARN",
+       "detail_no": "UTKAST/ikke godkjent; 1 DPIA-dokument(er) oppgitt.",
+       "facts": {
+        "approved": false,
+        "documents": 1,
+        "missing_documents": 0,
+        "unknown_documents": 0,
+        "label_filtered": false
+       }
+      }
+     ],
+     "source": "docs/security/PROCESSING_INVENTORY.md (D-420; repo-innhold, parset strukturelt - kun tabellnavn, antall rader og statusord) (§3 DPIA-trigger-matrisen) + eksistens av de oppgitte DPIA-filene (kun lstat)",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    },
+    {
+     "id": "retention",
+     "title_no": "Oppbevaring",
+     "status": "UNKNOWN",
+     "measured": true,
+     "summary_no": "5 oppbevaringssveip følges. Revisjon, kostnad, samtaler og jobber har ingen automatisk sletting (eierbeslutning). 10 ikke målt, 1 i orden.",
+     "items": [
+      {
+       "id": "no_auto:cost_events",
+       "label": "Kostnadsledger - oppbevaring",
+       "status": "UNKNOWN",
+       "detail_no": "Kunne ikke leses (Error).",
+       "facts": {
+        "measured": false
+       }
+      },
+      {
+       "id": "no_auto:audit_events",
+       "label": "Revisjonslogg - oppbevaring",
+       "status": "UNKNOWN",
+       "detail_no": "Kunne ikke leses (Error).",
+       "facts": {
+        "measured": false
+       }
+      },
+      {
+       "id": "no_auto:messages_tasks",
+       "label": "Samtaler (messages) og jobber (tasks) - ingen automatisk sletting",
+       "status": "UNKNOWN",
+       "detail_no": "Ingen oppbevaringsgrense finnes (eierbeslutning, jf. behandlingsoversikten §4). Alderen på eldste rad er IKKE målt her (en full telling ville vært tung på store tabeller).",
+       "facts": {
+        "automatic_deletion": false,
+        "measured": false
+       }
+      },
+      {
+       "id": "backlog_session_grants",
+       "label": "Sesjons-grants - oppbevaring",
+       "status": "UNKNOWN",
+       "detail_no": "Kunne ikke leses (Error).",
+       "facts": {
+        "measured": false
+       }
+      },
+      {
+       "id": "job:operational-retention-sweep",
+       "label": "Sveip: Driftsrader (godkjenninger, grants, billetter, verktøyutføringer, scheduler)",
+       "status": "UNKNOWN",
+       "detail_no": "Kunne ikke leses (Error).",
+       "facts": {
+        "job": "operational-retention-sweep",
+        "measured": false
+       }
+      },
+      {
+       "id": "job:health-retention-sweep",
+       "label": "Sveip: Helse",
+       "status": "UNKNOWN",
+       "detail_no": "Kunne ikke leses (Error).",
+       "facts": {
+        "job": "health-retention-sweep",
+        "measured": false
+       }
+      },
+      {
+       "id": "job:memory-retention-sweep",
+       "label": "Sveip: Minne (konsolidering av gamle samtaleminner)",
+       "status": "UNKNOWN",
+       "detail_no": "Kunne ikke leses (Error).",
+       "facts": {
+        "job": "memory-retention-sweep",
+        "measured": false
+       }
+      },
+      {
+       "id": "job:location-retention-sweep",
+       "label": "Sveip: Sted",
+       "status": "UNKNOWN",
+       "detail_no": "Kunne ikke leses (Error).",
+       "facts": {
+        "job": "location-retention-sweep",
+        "measured": false
+       }
+      },
+      {
+       "id": "job:vision-retention-sweep",
+       "label": "Sveip: Syn",
+       "status": "UNKNOWN",
+       "detail_no": "Kunne ikke leses (Error).",
+       "facts": {
+        "job": "vision-retention-sweep",
+        "measured": false
+       }
+      },
+      {
+       "id": "backlog_tool_executions",
+       "label": "Verktøyutføringer - oppbevaring",
+       "status": "UNKNOWN",
+       "detail_no": "Kunne ikke leses (Error).",
+       "facts": {
+        "measured": false
+       }
+      },
+      {
+       "id": "memory_consolidation_days",
+       "label": "Minnekonsolidering (episodiske samtaleminner)",
+       "status": "OK",
+       "detail_no": "Gamle episodiske samtaleminner konsolideres til dagssammendrag etter 90 døgn (JARVIS_MEMORY_RETENTION_DAYS). Rører aldri preferanser, beslutninger, relasjoner eller semantiske minner.",
+       "facts": {
+        "configured_days": 90,
+        "default_days": 60
+       }
+      }
+     ],
+     "source": "scheduler_state (retensjonssveipene) + tool_executions + session_grants + audit_events + cost_events (tenant-RLS; kun antall og tidsstempler)",
+     "observed_at": "2026-11-14T10:00:00.000Z"
+    },
+    {
+     "id": "deletion_evidence",
+     "title_no": "Slettebevis",
+     "status": "UNKNOWN",
+     "measured": false,
+     "summary_no": "Ikke målt: kunne ikke leses (Error)",
+     "items": [],
+     "source": "erasure_requests + erasure_fingerprints (tenant-RLS)",
+     "observed_at": null
+    }
+   ],
+   "actions": [],
+   "summary_no": "Personvern: advarsel - 5 seksjoner (3 med advarsel, 2 ikke målt)."
+  }
+ }
+}

@@ -301,7 +301,8 @@ describe("E: WallesterTransport - kort-/grense-/sikkerhets-wire-kontrakten (owne
       "fetch",
       vi.fn(async (url: string) => {
         capturedUrl = url;
-        return new Response(JSON.stringify([]), { status: 200 });
+        // WP-FIN2 (K7): en manglende `transactions`-liste er et ugyldig svar (ikke en stille tom side) - fiksturen bærer en tom liste.
+        return new Response(JSON.stringify({ transactions: [] }), { status: 200 });
       })
     );
     const transport = new WallesterTransport("https://sandbox.example", "wba-fake-key", e2eSign, "wacc-1");

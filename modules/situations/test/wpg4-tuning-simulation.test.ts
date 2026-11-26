@@ -13,6 +13,7 @@ import {
   decideTuning, FeedbackService, FeedbackUnauthorizedError, FeedbackValidationError, TUNING_COOLDOWN_HOURS, type FeedbackVote
 } from "../src/tuning.ts";
 import { actorOwner, identity, minutesAgo, NOW, OTHER, OWNER, record, startG4Db, TENANT_A, TENANT_B, type G4Db } from "./support/wpg4-db.ts";
+import { TEST_BINDABLE } from "./support/bindable.ts";
 
 /**
  * WP-G4 (D-466), UA-10 P2d: tilbakemeldingslæring og kontrafaktisk simulering.
@@ -621,7 +622,7 @@ describe("D: SimulationService - leser registrerte rader, ingen skriving, riktig
     const { gateway } = db.newGateway();
     gateway.register({
       tool_id: "test_stepup", action: "apply", description: "test", input_schema: record({ situation_id: z.string() }), capability_class: "D", scopes: [], reversible: true, rollback_procedure: "angre via test_stepup",
-      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_STEPUP_TOKEN", output_trust: "internal", step_up_required: true,
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_STEPUP_TOKEN", output_trust: "internal", step_up_required: true, autonomy_bindable: TEST_BINDABLE,
       transport: { invoke: async () => ({ external_id: "x" }) }
     });
     const sim = new SimulationService(db.appPool, simulationToolInfoFrom(gateway));

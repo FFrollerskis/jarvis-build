@@ -305,6 +305,26 @@ export class DeviceService {
     return pem ? { fingerprint: fingerprintPem(pem) } : null;
   }
 
+  /**
+   * WP-G2c (D-483, JARVIS-113 j): FELLES, DETERMINISTISK LÅSREKKEFØLGE for alle veier som låser mer enn én enhetsrad i samme transaksjon. Låser (`FOR UPDATE`) de EKSISTERENDE radene i `deviceIds` som tilhører
+   * (tenant, person), i STIGENDE `device_id` - i ÉN setning (`LockRows` ligger over `Sort`, så radene låses i den sorterte rekkefølgen), med SAMME `ORDER BY device_id` (databasens kollasjon) som fjerningen fra en familiesirkel bruker når den
+   * tilbakekaller personens enheter én for én. Uten en felles rekkefølge kunne en `device_proof`-innrullering som låser den autoriserende enheten D1 og så skriver/roterer en eksisterende enhet D2, mot en fjerning som låser D2 før D1
+   * (D2 sorterer før D1), vente på hverandres rader (Postgres 40P01; hele transaksjonen rullet tilbake, men fjerningen - en sikkerhetskontroll - feilet). Radene låses uavhengig av `revoked_at` (kun rekkefølgen er poenget;
+   * `lockDeviceKeyOn` leser og verifiserer nøkkelen etterpå). Ingen autentiseringslogikk er endret: dette er kun rekkefølgen radlåsene tas i.
+   */
+  async lockDeviceRowsOn(
+    client: pg.PoolClient,
+    principal: { tenant_id: string; person_id: string },
+    deviceIds: readonly string[]
+  ): Promise<void> {
+    const ids = [...new Set(deviceIds)];
+    if (ids.length === 0) return;
+    await client.query(
+      `SELECT device_id FROM devices WHERE tenant_id = $1 AND person_id = $2 AND device_id = ANY($3::text[]) ORDER BY device_id FOR UPDATE`,
+      [principal.tenant_id, principal.person_id, ids]
+    );
+  }
+
   private async publicKeyFromDb(
     tenantId: string,
     deviceId: string,

@@ -3,8 +3,8 @@ import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { homeAssistantSituationReadTools, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
 import type { SituationSignalApiDeps } from "./situation-signal-routes.ts";
 import {
-  boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, MAX_OBSERVATIONS_PER_BATCH, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
-  SituationSignalsTransport, SituationsTransport, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS, SOURCE_SPACES,
+  boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, MAX_OBSERVATIONS_PER_BATCH, ModelSignalAssist, MorningSummaryService, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
+  SituationSignalsTransport, SituationsTransport, signalSituationWindowDays, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS, SOURCE_SPACES,
   type AssistModelGateway, type DailyPoint, type DomainPauseRegistry, type HealthObservation, type HealthSignalMetric, type HomeObservation, type IncidentObservation, type SignalSourceReaders,
   type SituationEngine, type SituationFlags, type VisionObservation
 } from "@jarvis/situations";
@@ -25,6 +25,8 @@ export interface SituationSignalsWiringDeps {
   gateway: ToolGateway;
   /** Den ekte `ModelGateway` (strukturelt: `complete`). Alle modellkall går gjennom den (sensitivitetsruting først, så Claude-kreditten). */
   modelGateway: AssistModelGateway;
+  /** WP-G4b K4: lokalitet slått opp LIVE mot modellregisteret (i drift `!servedByCloudModel`); snevrer inn assist-vaktens navneliste, widner aldri. Utelatt = kun navnelisten (uendret). */
+  isLocalProvider?: (provider: string) => boolean;
   ownerIdentity: IdentityContext;
   /** Eierens tenant (løperen betjener kun denne). Navnet er bevisst ikke `ownerTenantId`: `wpg3-vision-runtime.test.ts` teller den strengen i main.ts (kun HA-polleren skal få eierens tenant dit). */
   ownerTenant: string;
@@ -55,6 +57,12 @@ export interface SituationSignalsWiring {
   registry: SubscriptionRegistry | null;
   /** Eierens HTTP-flate `/situations/signals/*` (B-MEDIUM-5). `null` uten hovedbryteren = ingen ruter (404, identisk med main). */
   api: SituationSignalApiDeps | null;
+  /**
+   * WP-G3b fiks-runde 1 (F1): det EFFEKTIVE vinduet (dager) signalsituasjoner i domenet `vision` følger ved det daglige sveipet, som funksjon av hendelsesvinduet i `vision_retention_policies` (`null` = ingen rad): `min(grunnvindu, dager ?? grunnvindu)`
+   * med grunnvinduet fra `JARVIS_SITUATION_LOG_RETENTION_DAYS` slik wiringen allerede har parset det (samme regel som sveipet: `signalSituationWindowDays`). Gis til eierens vision-rute (via `buildVisionRuntime`) så en forkorting regnes mot DET sveipet
+   * bruker - ikke mot rutens standard. `null` uten hovedbryteren (ingen løper, ingen sveip: ingenting avledet å beskytte, så ruten er uendret).
+   */
+  visionSituationWindowDays: ((visionRetentionDays: number | null) => number) | null;
   /** Startlogg (kun når noe er på). */
   describe(): Record<string, unknown> | null;
   /** Starter løperen (ingen effekt uten flagg). */
@@ -224,14 +232,14 @@ export function createIncidentReader(deps: { incidents: SituationSignalsWiringDe
 
 export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): SituationSignalsWiring {
   const flags = situationFlagsFromEnv(deps.env);
-  if (!flags.signals) return { flags, tools: [], runner: null, registry: null, api: null, describe: () => null, start: () => undefined };
+  if (!flags.signals) return { flags, tools: [], runner: null, registry: null, api: null, visionSituationWindowDays: null, describe: () => null, start: () => undefined };
 
   const now = deps.now ?? Date.now;
   const authority = { owner_person_id: deps.ownerPersonId };
   const registry = new SubscriptionRegistry(deps.pool, authority);
   const logs = new SignalLogService(deps.pool);
   const identityFor = (tenantId: string, space: MemorySpace): IdentityContext => ({ ...deps.ownerIdentity, tenant_id: tenantId, memory_space_id: space, session_id: `${deps.ownerIdentity.session_id}-situation-signals` });
-  const assist = flags.modelAssist ? new ModelSignalAssist({ gateway: deps.modelGateway }) : null;
+  const assist = flags.modelAssist ? new ModelSignalAssist({ gateway: deps.modelGateway, ...(deps.isLocalProvider !== undefined ? { isLocalProvider: deps.isLocalProvider } : {}) }) : null;
   // Tilbakemeldingslæring (P2d) KUN med `JARVIS_SITUATION_FEEDBACK=on`: uten flagget finnes verken handlingene eller en terskelkilde (alle regler bruker standard). Simulering er ren lesing og følger hovedbryteren.
   const feedback = flags.feedback ? new FeedbackService(deps.pool, authority, true, now) : undefined;
   const simulation = new SimulationService(deps.pool, simulationToolInfoFrom(deps.gateway), now);
@@ -260,6 +268,8 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
     pool: deps.pool, bus, engine: deps.engine, gateway: deps.gateway, readers, subscriptions: (t, s) => registry.listEnabled(t, s), targets, retentionTargets, identityFor,
     guard: { blocked: async () => ((await deps.killSwitch.isActiveDurable()) ? "kill_switch_active" : null) },
     intervalMs: intervalSeconds * 1000, logRetentionDays: retentionDays, now,
+    // WP-G4b K5 (D-484): morgenoppsummering av nattlige kamerahendelser - kun når kamerakilden er på (ellers finnes ingen tjeneste og tikkresultatet er identisk med før).
+    ...(flags.vision ? { morningSummary: new MorningSummaryService(deps.pool) } : {}),
     // Signalsituasjonene (kamera/helse/hjem) rydder etter kildedataenes egen oppbevaring (G3/G2) når den finnes; ellers etter `logRetentionDays`.
     sourceRetention: {
       ...(deps.health.getRetentionPolicy ? { healthDays: async (tenantId: string) => (await deps.health.getRetentionPolicy!(tenantId))?.retention_days ?? null } : {}),
@@ -269,7 +279,8 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
 
   // `set_autonomy_policy` får et valgfritt `expires_at` KUN med hovedbryteren på. Definisjonen (samme tool_id/action) ERSTATTER den eksisterende ved registrering (`ToolGateway.register` er en `Map.set`, siste vinner);
   // `main.ts` legger denne listen ETTER `situationsToolDefinitions(...)`, hvis linje står uendret slik at flagg AV er byte-identisk med main (kildevakten i `executive-wiring.test.ts`).
-  const autonomyWithExpiry = situationsToolDefinitions(new SituationsTransport(deps.engine, deps.domainPauses), { autonomyExpiry: true }).filter((d) => d.action === "set_autonomy_policy");
+  // WP-G4b K2: `set_autonomy_policy` OG `clear_autonomy_policy` får i tillegg valgfrie `rule`/`category` (skop) - samme gating, samme erstatningsmekanisme.
+  const autonomyWithExpiry = situationsToolDefinitions(new SituationsTransport(deps.engine, deps.domainPauses), { autonomyExpiry: true, autonomyScope: true }).filter((d) => d.action === "set_autonomy_policy" || d.action === "clear_autonomy_policy");
   const tools: ToolDefinition[] = [
     ...autonomyWithExpiry,
     ...situationSignalsToolDefinitions(new SituationSignalsTransport({ registry, engine: deps.engine, logs, runner, simulation, ...(feedback ? { feedback } : {}) }), { feedback: flags.feedback }),
@@ -279,6 +290,8 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
   return {
     flags, tools, runner, registry,
     api: { registry, engine: deps.engine, logs, runner, simulation, ...(feedback ? { feedback } : {}) },
+    // Uten kamerapolicy fra tjenesten (`getRetentionPolicy` utelatt) leser ikke sveipet raden: vinduet er da alltid grunnvinduet, uansett hva raden sier.
+    visionSituationWindowDays: deps.vision.getRetentionPolicy ? (visionRetentionDays) => signalSituationWindowDays(retentionDays, visionRetentionDays) : () => retentionDays,
     describe: () => ({
       msg: "situation_signals", interval_seconds: intervalSeconds, log_retention_days: retentionDays, spaces: [...spaces], retention_spaces: [...retentionSpaces],
       sources: { home: flags.home, vision: flags.vision, health: flags.health, incidents: flags.incidents }, model_assist: flags.modelAssist, feedback: flags.feedback

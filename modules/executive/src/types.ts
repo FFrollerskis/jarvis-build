@@ -1,7 +1,8 @@
 import type { FinanceKillSwitch } from "@jarvis/finance";
 import type { FrozenConnectorEntry, OwnerControlState, RevokedCredentialEntry } from "@jarvis/owner-controls";
 import type { Situation, SituationAutonomyPolicy, SituationPriority, SituationStage } from "@jarvis/situations";
-import type { ConnectorStatus } from "@jarvis/tool-gateway";
+import type { ConnectorStatus, FinanceWithheldMarker } from "@jarvis/tool-gateway";
+import type { OwnerControlStateForCloud } from "./finance-withheld.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): JARVIS_CANONICAL attention-ranking-
@@ -115,8 +116,9 @@ export interface AttentionItemDetail extends AttentionItem {
  * ENE sannferdige, tidsstempel-bundne bekreftelsen - IKKE en løpende
  * status her.
  */
-export interface ControlSurfaceStatus {
-  owner_control: OwnerControlState;
+export interface ControlSurfaceStatus extends Partial<FinanceWithheldMarker> {
+  /** WP-N1b (K2): for en sky-/ukjent modell med begrenset-vakten på er finansavledede koblinger/legitimasjon utelatt og fritekst-begrunnelsene holdt tilbake (`OwnerControlStateForCloud`). */
+  owner_control: OwnerControlState | OwnerControlStateForCloud;
   situation_domain_pauses: { paused: string[] };
   finance_kill_switch: FinanceKillSwitch | null;
   /**
@@ -145,10 +147,11 @@ export interface ControlSurfaceStatus {
  *   `ControlSurfaceStatus` (se der for full begrunnelse) - spend-
  *   muliggjørende finans-/kort-handlinger er selv en delegert kapabilitet.
  */
-export interface DelegationBoard {
+export interface DelegationBoard extends Partial<FinanceWithheldMarker> {
   autonomy_domains: SituationAutonomyPolicy[];
-  frozen_connectors: FrozenConnectorEntry[];
-  revoked_credentials: RevokedCredentialEntry[];
+  /** WP-N1b (K2): for en sky-/ukjent modell med begrenset-vakten på: uten finanskoblinger og med `reason: null` (fritekst holdt tilbake, se `OwnerControlStateForCloud`). */
+  frozen_connectors: Array<FrozenConnectorEntry | OwnerControlStateForCloud["frozen_connectors"][number]>;
+  revoked_credentials: Array<RevokedCredentialEntry | OwnerControlStateForCloud["revoked_credentials"][number]>;
   finance_kill_switch: FinanceKillSwitch | null;
   /** WP-N1 (F-B1): se `ControlSurfaceStatus.finance_kill_switch_withheld`. */
   finance_kill_switch_withheld?: true;
@@ -190,7 +193,7 @@ export interface DelegationBoard {
  * omfanget her (ville krevd en egen "ping"-primitiv per leverandør-adapter)
  * - se D-209/task-sporing for videre arbeid.
  */
-export interface CapabilityStatus {
+export interface CapabilityStatus extends Partial<FinanceWithheldMarker> {
   chat_accessible_tools: Array<{
     tool_id: string;
     actions: string[];

@@ -8,7 +8,7 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { withMemoryTransaction } from "@jarvis/memory";
 import {
-  FAMILY_ROLES, FAMILY_ROLE_ACTIONS, FamilyError, FamilyService, familyCan, roleMayActFor, roleMayViewCategory, scopeAction,
+  FAMILY_ERROR_CODES, FAMILY_ROLES, FAMILY_ROLE_ACTIONS, FamilyError, FamilyService, familyCan, roleMayActFor, roleMayViewCategory, scopeAction,
   type FamilyActor, type FamilyRole, type SharedDataReaders
 } from "../src/index.ts";
 
@@ -164,8 +164,9 @@ describe("C: sirkel, eier og invitasjoner", () => {
     const inv = await svc.invite(act(c, c.owner), { invitee_person_id: c.adult, role: "adult" });
     expect(inv).toMatchObject({ status: "pending", role: "adult", invitee_person_id: c.adult, invited_by_person_id: c.owner });
     expect(await code(svc.invite(act(c, c.owner), { invitee_person_id: c.adult, role: "guest" }))).toBe("invitation_pending");
-    expect(await code(svc.acceptInvitation(act(c, c.child), inv.invitation_id))).toBe("not_the_invitee");
-    expect(await code(svc.acceptInvitation(act(c, c.owner), inv.invitation_id))).toBe("not_the_invitee");
+    // WP-G2c (D-483): en annens invitasjon og en id som ikke finnes gir SAMME svar (`not_found`); `not_the_invitee` finnes ikke lenger (den avslørte at id-en finnes).
+    expect(await code(svc.acceptInvitation(act(c, c.child), inv.invitation_id))).toBe("not_found");
+    expect(await code(svc.acceptInvitation(act(c, c.owner), inv.invitation_id))).toBe("not_found");
     expect(await code(svc.acceptInvitation(act(c, c.adult), "fam-inv-finnes-ikke"))).toBe("not_found");
 
     // Kun eieren (og den inviterte selv) ser invitasjonen.
@@ -196,9 +197,71 @@ describe("C: sirkel, eier og invitasjoner", () => {
     const second = await svc.invite(act(c, c.owner), { invitee_person_id: c.guest, role: "guest" });
     expect((await svc.declineInvitation(act(c, c.guest), second.invitation_id)).status).toBe("declined");
     expect(await code(svc.acceptInvitation(act(c, c.guest), second.invitation_id))).toBe("invitation_not_pending");
-    expect(await code(svc.declineInvitation(act(c, c.owner), second.invitation_id))).toBe("not_the_invitee");
+    expect(await code(svc.declineInvitation(act(c, c.owner), second.invitation_id))).toBe("not_found");
     const third = await svc.invite(act(c, c.owner), { invitee_person_id: c.guest, role: "guest" });
     expect((await svc.acceptInvitation(act(c, c.guest), third.invitation_id)).role).toBe("guest");
+  });
+
+  /** Venter (avgrenset) til en backend står i kø på en radlås med en spørring som matcher; `false` = ingen gjorde det innen fristen. */
+  async function waitUntilLockWaiting(pattern: RegExp, timeoutMs = 10_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const { rows } = await admin.query(`SELECT query FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`);
+      if ((rows as Array<{ query: string }>).some((r) => pattern.test(r.query))) return true;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return false;
+  }
+
+  it("invitasjonens radlås (fiks-runde 1, M30): en aksept STÅR I KØ bak en samtidig tilbakekalling som holder raden og ser etterpå `revoked` (invitation_not_pending) - aldri et medlemskap fra en tilbakekalt invitasjon", async () => {
+    const c = await mkCircle();
+    await svc.bootstrapOwner(act(c, c.owner), c.owner);
+    const inv = await svc.invite(act(c, c.owner), { invitee_person_id: c.guest, role: "guest" });
+    const holder = await admin.connect(); // en tilbakekalling («eierens transaksjon») som har tatt radlåsen men ikke committet
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT 1 FROM family_invitations WHERE invitation_id = $1 FOR UPDATE`, [inv.invitation_id]);
+      const accepting = code(svc.acceptInvitation(act(c, c.guest), inv.invitation_id));
+      expect(await waitUntilLockWaiting(/FROM family_invitations[\s\S]*invitee_person_id[\s\S]*FOR UPDATE/), "aksepten leser invitasjonen med FOR UPDATE og står i kø bak holderen").toBe(true);
+      await holder.query(`UPDATE family_invitations SET status = 'revoked', decided_at = $2, decided_by_person_id = $3 WHERE invitation_id = $1`, [inv.invitation_id, clock.toISOString(), c.owner]);
+      await holder.query("COMMIT");
+      expect(await accepting).toBe("invitation_not_pending");
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+    const members = await admin.query(`SELECT 1 FROM family_members WHERE tenant_id = $1 AND person_id = $2`, [c.tenant, c.guest]);
+    expect(members.rows).toHaveLength(0);
+    expect((await admin.query(`SELECT status FROM family_invitations WHERE invitation_id = $1`, [inv.invitation_id])).rows[0]).toMatchObject({ status: "revoked" });
+  });
+
+  it("samme radlås for avslag: en avslag-avgjørelse venter på holderen og ser en allerede AKSEPTERT invitasjon (invitation_not_pending), aldri en overskriving av et utfall", async () => {
+    const c = await mkCircle();
+    await svc.bootstrapOwner(act(c, c.owner), c.owner);
+    const inv = await svc.invite(act(c, c.owner), { invitee_person_id: c.guest, role: "guest" });
+    const holder = await admin.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT 1 FROM family_invitations WHERE invitation_id = $1 FOR UPDATE`, [inv.invitation_id]);
+      const declining = code(svc.declineInvitation(act(c, c.guest), inv.invitation_id));
+      expect(await waitUntilLockWaiting(/FROM family_invitations[\s\S]*invitee_person_id[\s\S]*FOR UPDATE/)).toBe(true);
+      await holder.query(`UPDATE family_invitations SET status = 'accepted', decided_at = $2, decided_by_person_id = $3 WHERE invitation_id = $1`, [inv.invitation_id, clock.toISOString(), c.guest]);
+      await holder.query("COMMIT");
+      expect(await declining).toBe("invitation_not_pending");
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+    expect((await admin.query(`SELECT status FROM family_invitations WHERE invitation_id = $1`, [inv.invitation_id])).rows[0]).toMatchObject({ status: "accepted" });
+  });
+
+  it("to samtidige aksepter av SAMME invitasjon (dobbeltklikk/retry): nøyaktig én lykkes, den andre får `invitation_not_pending` - aldri en rå databasefeil, og kun ett medlemskap", async () => {
+    const c = await mkCircle();
+    await svc.bootstrapOwner(act(c, c.owner), c.owner);
+    const inv = await svc.invite(act(c, c.owner), { invitee_person_id: c.guest, role: "guest" });
+    const outcomes = (await Promise.all([code(svc.acceptInvitation(act(c, c.guest), inv.invitation_id)), code(svc.acceptInvitation(act(c, c.guest), inv.invitation_id))])).sort();
+    expect(outcomes).toEqual(["invitation_not_pending", "ok"]);
+    expect((await admin.query(`SELECT 1 FROM family_members WHERE tenant_id = $1 AND person_id = $2`, [c.tenant, c.guest])).rows).toHaveLength(1);
   });
 
   it("utløpt invitasjon: aksept gir invitation_expired og MARKERES utløpt (committet); en utløpt «pending» blokkerer ikke en ny", async () => {
@@ -660,5 +723,68 @@ describe("G: DB-forsvar mot kodefeil (direkte SQL som app-rolle)", () => {
     expect(text).not.toContain("Hjemme"); // verken sonenavn, koordinater eller helseverdier havner i revisjonsloggen
     expect(text).not.toContain("4200");
     expect((rows as Array<{ payload: { channel?: string } }>).every((r) => r.payload.channel === "api")).toBe(true);
+  });
+});
+
+describe("H: WP-G2c (D-483, JARVIS-113 e/8): «ikke din» og «finnes ikke» er samme svar for en invitasjons-id", () => {
+  /** Alt en kaller kan observere av et avslag: kode, melding og klasse (aldri en forskjell som avslører at id-en finnes). */
+  async function observed(p: Promise<unknown>): Promise<{ code: string; message: string; name: string }> {
+    try { await p; return { code: "ok", message: "", name: "" }; } catch (e) { const err = e as FamilyError; return { code: err.code, message: err.message, name: err.name }; }
+  }
+
+  it("aksept og avslag: en annens invitasjon (som medlem, som eier, som utenforstående) og en id som ikke finnes er IDENTISKE svar; og den ekte inviterte får fortsatt sin", async () => {
+    const c = await mkCircle();
+    await svc.bootstrapOwner(act(c, c.owner), c.owner);
+    const inv = await svc.invite(act(c, c.owner), { invitee_person_id: c.adult, role: "adult" });
+    const missing = "fam-inv-finnes-ikke";
+    // `stranger` er ikke innrullert i sirkel-tenanten: aksept stoppes allerede av datatenant-kontrollen FØR invitasjonen slås opp (samme svar uansett id), avslag når oppslaget.
+    for (const [who, acceptCode] of [[c.child, "not_found"], [c.owner, "not_found"], [c.guest, "not_found"], [c.stranger, "data_tenant_not_member"]] as const) {
+      const theirs = await observed(svc.acceptInvitation(act(c, who), inv.invitation_id));
+      const nothing = await observed(svc.acceptInvitation(act(c, who), missing));
+      expect(theirs, `aksept som ${who}`).toEqual(nothing);
+      expect(theirs.code).toBe(acceptCode);
+      const theirsDecline = await observed(svc.declineInvitation(act(c, who), inv.invitation_id));
+      const nothingDecline = await observed(svc.declineInvitation(act(c, who), missing));
+      expect(theirsDecline, `avslag som ${who}`).toEqual(nothingDecline);
+      expect(theirsDecline.code).toBe("not_found");
+    }
+    // Avslagene endret ingenting: invitasjonen er fortsatt `pending` og kan aksepteres av den inviterte.
+    const { rows } = await admin.query(`SELECT status, decided_at, decided_by_person_id FROM family_invitations WHERE invitation_id = $1`, [inv.invitation_id]);
+    expect(rows[0]).toMatchObject({ status: "pending", decided_at: null, decided_by_person_id: null });
+    expect((await svc.acceptInvitation(act(c, c.adult), inv.invitation_id)).role).toBe("adult");
+    // Riktig invitert, men feil tilstand: da (og bare da) får personen vite tilstanden.
+    expect(await code(svc.acceptInvitation(act(c, c.adult), inv.invitation_id))).toBe("invitation_not_pending");
+  });
+
+  it("en invitasjon i en ANNEN tenant er heller ikke synlig: samme `not_found`", async () => {
+    const a = await mkCircle();
+    const b = await mkCircle();
+    await svc.bootstrapOwner(act(a, a.owner), a.owner);
+    await svc.bootstrapOwner(act(b, b.owner), b.owner);
+    const inv = await svc.invite(act(a, a.owner), { invitee_person_id: a.adult, role: "adult" });
+    expect(await observed(svc.acceptInvitation(act(b, b.adult), inv.invitation_id))).toEqual(await observed(svc.acceptInvitation(act(b, b.adult), "fam-inv-finnes-ikke")));
+  });
+
+  it("samme tidsklasse: en annens invitasjon venter ALDRI på en radlås (tidligere ble raden låst FØR eierskapet ble sjekket, så et medlem kunne både se at id-en finnes og vente på den)", async () => {
+    const c = await mkCircle();
+    await svc.bootstrapOwner(act(c, c.owner), c.owner);
+    const inv = await svc.invite(act(c, c.owner), { invitee_person_id: c.adult, role: "adult" });
+    const holder = await admin.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT 1 FROM family_invitations WHERE invitation_id = $1 FOR UPDATE`, [inv.invitation_id]); // en samtidig transaksjon holder raden
+      const TIMEOUT = Symbol("blocked");
+      const race = async (p: Promise<unknown>): Promise<unknown> => Promise.race([p.then(() => "resolved", (e: unknown) => (e as FamilyError).code), new Promise((r) => setTimeout(() => r(TIMEOUT), 5_000))]);
+      // utenforstående og eier (ikke den inviterte) svarer umiddelbart, uten å vente på låsen
+      expect(await race(svc.acceptInvitation(act(c, c.child), inv.invitation_id))).toBe("not_found");
+      expect(await race(svc.declineInvitation(act(c, c.owner), inv.invitation_id))).toBe("not_found");
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+  }, 30_000);
+
+  it("`not_the_invitee` finnes ikke lenger som feilkode", () => {
+    expect((FAMILY_ERROR_CODES as readonly string[]).includes("not_the_invitee")).toBe(false);
   });
 });

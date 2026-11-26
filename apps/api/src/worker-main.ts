@@ -6,6 +6,8 @@ import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { createWatchdogIncidentBridge, parseIncidentProducerConfig } from "./incident-producers.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { poolPing, startWatchdogHeartbeat } from "./watchdog-heartbeat.ts";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { enforceLocalModelEndpoints, localModelNoRedirect } from "./local-model-endpoints.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPolicyAuditSinkFromEnv, createPool, installPolicyAuditDrain, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ClaudeBudgetEnforcer, claudeBudgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv, type ClaudeBudgetConfig } from "@jarvis/model-gateway";
@@ -102,6 +104,15 @@ try {
 } catch (err) {
   failStartup(err);
 }
+// WP-G4b K4 (D-484, JARVIS-115 d): samme oppstartsvakt for lokale modell-URL-er som i apps/api/src/main.ts (workeren kjører også begrenset innhold gjennom ModelGateway: minneuttrekk, sammendrag, delegerte jobber). Flagg AV = ingenting skjer.
+// FIX-1: en ikke-lokal embedding-URL for minnet KASTER (`memory_embedding_must_be_local:<kode>`, aldri URL i meldingen) og stopper oppstarten som øvrige konfigurasjonsfeil.
+try {
+  await enforceLocalModelEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
+} catch (err) {
+  failStartup(err);
+}
+// WP-G4b fiks-runde 1 (FIX-5): samme som i apps/api/src/main.ts: med vakten PÅ følger lokale modellkall aldri en omdirigering; AV = main-atferd.
+const noRedirect = localModelNoRedirect(process.env);
 const workerTrace = traceSinkFromEnv("var/worker-traces.jsonl");
 const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace: workerTrace, actor_person_id: owner.owner_person_id, owner_tenant_id: owner.tenant_id });
 const gateway = new ModelGateway({
@@ -113,18 +124,20 @@ const gateway = new ModelGateway({
     new AnthropicAdapter(),
     new GeminiAdapter(),
     new GemmaHostedAdapter(),
-    new LocalOpenAiCompatibleAdapter(),
+    new LocalOpenAiCompatibleAdapter(undefined, undefined, undefined, undefined, undefined, { noRedirect }),
     // D-106: samme lokal-Gemma-registrering som apps/api/src/main.ts - se der for full begrunnelse.
     new LocalOpenAiCompatibleAdapter(
       process.env["JARVIS_GEMMA_LOCAL_URL"],
       // D-340: samme tom-streng-.env-bug som apps/api/src/main.ts - se der for full begrunnelse.
       process.env["JARVIS_GEMMA_LOCAL_MODEL"] || "gemma-local",
       undefined,
-      "gemma_local"
+      "gemma_local",
+      undefined,
+      { noRedirect }
     ),
     new KimiAdapter(),
     new HermesAdapter(),
-    new OllamaAdapter()
+    new OllamaAdapter(undefined, undefined, undefined, { noRedirect })
   ],
   // D-395 (JARVIS-039): workeren hadde INGEN egen budsjettkonfig (falt tilbake til DEFAULT_BUDGET med spend_approved=false) - en godkjenning eieren ga
   // i api gjaldt ikke her. Samme kilde som api: `budgetConfigFromEnv()`.
@@ -377,7 +390,7 @@ const microsoftGraphAuth = new MicrosoftGraphAuth({
   persist: (value) => toolGateway.setSecret("JARVIS_MICROSOFT_REFRESH_TOKEN", value)
 });
 // D-433: ÉN lokal embedding-leverandør for minneverktøyet (samme env-styrte factory som api; `assertLocalEmbedding` stopper en sky-provider).
-const memoryEmbedding = createEmbeddingProviderFromEnv();
+const memoryEmbedding = createEmbeddingProviderFromEnv(process.env, { noRedirect });
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(githubRateLimitController), telegram: telegramTransport,
@@ -769,7 +782,7 @@ worker.register(
   "knowledge-ingest-email",
   emailIngestHandler({
     pool, toolGateway, // D-396 (JARVIS-031): samme embedding-leverandør som api (env-styrt) - ikke en hardkodet LocalHashEmbedding i workeren.
-    embeddings: createEmbeddingProviderFromEnv(), visionGateway: gateway, registry: knowledgeRegistry
+    embeddings: createEmbeddingProviderFromEnv(process.env, { noRedirect }), visionGateway: gateway, registry: knowledgeRegistry
   })
 );
 

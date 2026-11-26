@@ -7,7 +7,7 @@ import { ToolGateway, type ClassDNotification, type SecretProvider } from "@jarv
 import {
   CommsStore, CommsTransport, OutboundFunnel, SlackAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, commsToolDefinitions, executeCommsOwnerAction, parseCommsConfig, scopedIdempotencyKey, type AdapterMap
 } from "../src/index.ts";
-import { OWNER, TENANT_A, startCommsDb, type CommsDb } from "./support/harness.ts";
+import { OWNER, TENANT_A, startCommsDb, type CommsDb, testContentHasher } from "./support/harness.ts";
 
 /** Et Twilio-lignende meldings-SID bygget ved kjøring (aldri en bokstavelig nøkkel-lignende streng i kildekoden). */
 const SM_SID = `SM${"0123456789abcdef".repeat(2)}`;
@@ -50,7 +50,7 @@ beforeAll(async () => {
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "phone,sms,slack", JARVIS_COMMS_CALLS: "on", JARVIS_COMMS_VENDOR_READS: "on" });
   const sid = async () => "ACfaketestsid0000000000";
   const adapters: AdapterMap = { twilio: new TwilioSmsAdapter(sid), telnyx: new TelnyxSmsAdapter(), slack: new SlackAdapter() };
-  funnel = new OutboundFunnel({ store, graph, adapters, config, clock });
+  funnel = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters, config, clock });
   const killSwitch = new KillSwitch();
   const controls = new OwnerControls(killSwitch);
   const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, controls, authority: { owner_person_id: OWNER, owner_tenants: [TENANT_A] } });

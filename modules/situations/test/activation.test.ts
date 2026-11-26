@@ -23,6 +23,7 @@ import {
 import { assertSituationSweepHealthy, runSituationSweep } from "../src/sweep.ts";
 import { SituationsTransport, situationsToolDefinitions } from "../src/transport.ts";
 import type { Situation } from "../src/types.ts";
+import { TEST_BINDABLE, lookupFrom } from "./support/bindable.ts";
 
 /**
  * UA-10 P1 AKTIVERING (D-160): ende-til-ende-bevis for at motoren er LEVENDE -
@@ -143,7 +144,8 @@ beforeAll(async () => {
   });
   domainPauses = new DomainPauseRegistry(appPool, { owner_person_id: OWNER });
   await domainPauses.restore();
-  engine = new SituationEngine(appPool, domainPauses, { owner_person_id: OWNER });
+  // WP-G4b K1: bind-tid-oppslaget mot testens gateway (som `toolGateway.get` i produksjon).
+  engine = new SituationEngine(appPool, domainPauses, { owner_person_id: OWNER }, { definitionLookup: lookupFrom(() => gateway) });
   openLoops = new OpenLoopService(appPool);
 }, 240_000);
 
@@ -155,7 +157,7 @@ beforeEach(async () => {
     tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
     capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
     idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000,
-    credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram
+    credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram, autonomy_bindable: TEST_BINDABLE
   });
   gateway.register({
     tool_id: "test_actuator", action: "assign", description: "test", input_schema: record({ open_loop_id: z.string(), assignee: z.string() }),
@@ -163,7 +165,8 @@ beforeEach(async () => {
     idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000,
     credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuator,
     preflight_action: "read_state",
-    postcondition_predicate: (after) => (after as { done: boolean } | null)?.done === true
+    postcondition_predicate: (after) => (after as { done: boolean } | null)?.done === true,
+    autonomy_bindable: TEST_BINDABLE
   });
   for (const tool of situationsToolDefinitions(new SituationsTransport(engine, domainPauses))) gateway.register(tool);
   // Ren tilstand per test: kun DENNE testfilens tenants røres.

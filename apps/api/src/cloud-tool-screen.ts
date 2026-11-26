@@ -158,9 +158,10 @@ export function cloudScreenedExecutor(
  * #228 (D-450): leverandørene som er registrert som LOKALE (`locality: "local"` i modellregisteret) får se alt; alt annet - sky, hostet gratis-tier og leverandører som ikke står i registeret - regnes som sky (fail-closed,
  * motsatt av `cloudToolTurnsAllowed`, som regner en ukjent leverandør som lokal for sin egen "ikke sky"-vurdering: her er spørsmålet hva som kan lekke, og da er ukjent = sky).
  */
-const LOCAL_PROVIDERS: ReadonlySet<string> = new Set(DEFAULT_PROFILES.filter((profile) => profile.locality === "local").map((profile) => profile.provider));
+// WP-G4b K4 (D-484): leses PER KALL fra profilene (ikke et sett frosset ved import): oppstartsvakten for lokale endepunkter (`local-model-endpoints.ts`) kan sette en identitet med ugyldig/offentlig URL til `cloud` på SELVE
+// profilen etter at denne filen er lastet, og alle lokalitetsavgjørelser (også `financeLockServedLocally`) følger det. Uten vakten (flagg AV) er resultatet byte-likt det frosne settet.
 export function servedByCloudModel(call: Pick<ToolCallRequest, "provider">): boolean {
-  return !LOCAL_PROVIDERS.has(call.provider);
+  return !DEFAULT_PROFILES.some((profile) => profile.provider === call.provider && profile.locality === "local");
 }
 
 /** Merknaden i chatten (bak svaret) når minnetreff ble holdt tilbake fra en skymodell. Samme tekst som for jobber, men med blank linje foran slik rutemerknadene i chatten har. */

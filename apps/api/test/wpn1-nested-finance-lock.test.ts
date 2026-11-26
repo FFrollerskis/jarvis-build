@@ -174,8 +174,10 @@ describe("A: nøstede finansavlesninger holdes tilbake fra skymodeller (lås + v
 });
 
 describe("B: flagg AV er uendret fra main (valget utelatt)", () => {
-  it("uten `withholdFinanceFromCloud` får en skymodell fortsatt svaret og det nøstede finance-kallet gjøres uten servingModel (kontroll: dette er lekkasjen fiksen lukker når vakten er på)", async () => {
-    const { gateway, financeCalls } = rig({ lock: LOCK });
+  // WP-N1b (K1): «flagg AV» er verken lås eller vakt (main.ts setter begge fra SAMME flagg). Før N1b brukte denne testen `rig({ lock: LOCK })` (lås PÅ, vakt AV) som stedfortreder; den konfigurasjonen er nå lukket
+  // SENTRALT (nøstede kall arver modellen, se `wpn1b-model-scope.test.ts` og C under), så flagg-AV-beviset bruker den ekte flagg-AV-tilstanden: ingen lås og ingen vakt.
+  it("uten lås og uten `withholdFinanceFromCloud` får en skymodell fortsatt svaret og det nøstede finance-kallet gjøres uten servingModel (kontroll: dette er lekkasjen som lukkes når vakten er på)", async () => {
+    const { gateway, financeCalls } = rig();
     for (const action of NESTED_TOOLS) {
       const r = await run(gateway, "executive", action, {}, CLOUD);
       expect(JSON.stringify(r), action).toContain(KILL_REASON);
@@ -247,10 +249,17 @@ describe("C: GENERELL invariant - alle web_chat-tildelte verktøy kalt som skymo
     expect(touched.has("finance.get_kill_switch")).toBe(true);
   });
 
-  it("låsen PÅ men vakten AV (kun gateway-låsen): de DIREKTE finansverktøyene er nektet, men det nøstede kallet gjøres - dette er hullet «vakten» (withholdFinanceFromCloud) lukker, og hvorfor begge følger samme flagg i main.ts", async () => {
+  it("WP-N1b (K1): låsen PÅ men den eksplisitte per-tjeneste-vakten (`withholdFinanceFromCloud`) AV: hullet fra fiks-runde 1 er nå lukket SENTRALT - nøstede kall arver modellen, så tjenesten/gatewayen holder det nøstede kallet tilbake uansett (vakten er dybdeforsvar)", async () => {
     const { gateway, financeCalls } = rig({ lock: LOCK });
-    for (const action of NESTED_TOOLS) await run(gateway, "executive", action, {}, CLOUD);
-    expect(financeCalls().length).toBe(2);
+    for (const action of NESTED_TOOLS) {
+      const r = await run(gateway, "executive", action, {}, CLOUD);
+      expect(JSON.stringify(r), action).not.toContain(KILL_REASON);
+      expect((r as { data: Record<string, unknown> }).data["finance_kill_switch_withheld"], action).toBe(true);
+    }
+    expect(financeCalls(), "det nøstede finance-kallet gjøres ikke i det hele tatt for en skymodell").toEqual([]);
+    // lokal modell og eierens rute får fortsatt alt (K1 ii)
+    for (const model of [LOCAL, undefined] as const) for (const action of NESTED_TOOLS) expect(JSON.stringify(await run(gateway, "executive", action, {}, model)), `${action}/${model?.provider ?? "eier"}`).toContain(KILL_REASON);
+    expect(financeCalls().length).toBe(NESTED_TOOLS.length * 2);
   });
 });
 

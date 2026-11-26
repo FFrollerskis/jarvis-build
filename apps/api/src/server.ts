@@ -28,8 +28,8 @@ import { ProductUsageError, UsageImportError, USAGE_LIMITS, USAGE_WEBHOOK_SIGNAT
 import { CONTROL_CENTER_READ_TOOLS, isControlCenterId, isExtensionControlCenterId } from "@jarvis/executive";
 import { GROWTH_EXPERIMENT_TOOL_ACTIONS, executeGrowthWrite, type GrowthWriteExecutorDeps, type GrowthWriteStatusFilter } from "@jarvis/growth";
 import {
-  COMMS_CONTACT_READ_ACTIONS, COMMS_KNOWN_ACTIONS, COMMS_MEETING_READ_ACTIONS, COMMS_READ_ACTIONS, COMMS_VENDOR_READ_ACTIONS, WEBHOOK_MAX_BYTES as COMMS_WEBHOOK_MAX_BYTES, executeCommsOwnerAction, previewCommsSend,
-  type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel
+  COMMS_CONTACT_READ_ACTIONS, COMMS_KNOWN_ACTIONS, COMMS_MEETING_READ_ACTIONS, COMMS_READ_ACTIONS, COMMS_VENDOR_READ_ACTIONS, WEBHOOK_MAX_BYTES_BY_PROVIDER as COMMS_WEBHOOK_MAX_BYTES_BY_PROVIDER, executeCommsOwnerAction, previewCommsSend,
+  type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel, type PreSignatureRejection
 } from "@jarvis/comms";
 import type { ConversationEngine } from "./conversation.ts";
 import { handlePersonalRoute, type PersonalApiDeps } from "./personal-routes.ts";
@@ -40,7 +40,7 @@ import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import { confirmationRestrictsOrigin } from "./restricted-context-guard.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
-  FORBIDDEN_IDENTITY_BODY_KEYS, HttpError, RateLimiter, clientKey, newRequestId, readJsonBody, readRawBodyLimited
+  FORBIDDEN_IDENTITY_BODY_KEYS, HttpError, RateLimiter, clientKey, newRequestId, readJsonBody, readRawBodyGuarded, readRawBodyLimited, webhookBodyGuardFor, type WebhookBodyReadConfig
 } from "./http-guard.ts";
 
 /**
@@ -193,7 +193,8 @@ export interface ApiDeps {
    *    (policy, eier-binding, klasse D-kjeden, idempotens, varsling). Ruten har ingen egen sendevei og ingen egen sjekk å omgå, og er ALDRI et modellverktøy.
    */
   comms?: {
-    webhooks?: { service: CommsWebhookService; providers: ReadonlySet<CommsWebhookProvider> };
+    /** `bodyRead` (FIX-2, runde 2): lesefrist og global samtidighetsgrense for store kropper; utelatt = standardverdiene (`DEFAULT_WEBHOOK_BODY_READ`). Kun testene setter den. */
+    webhooks?: { service: CommsWebhookService; providers: ReadonlySet<CommsWebhookProvider>; bodyRead?: Partial<WebhookBodyReadConfig> };
     outbound?: { gateway: ToolGateway; funnel: OutboundFunnel };
   };
   /**
@@ -1890,7 +1891,25 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   const commsWebhookProvider = deps.comms?.webhooks !== undefined ? COMMS_WEBHOOK_ROUTES.get(url.pathname) : undefined;
   if (commsWebhookProvider !== undefined && deps.comms?.webhooks?.providers.has(commsWebhookProvider) === true) {
     if (req.method !== "POST") req.resume();
-    const rawBody = req.method === "POST" ? await readRawBodyLimited(req, COMMS_WEBHOOK_MAX_BYTES) : Buffer.alloc(0);
+    // FIX-1: byte-grensen er per leverandør (Meta 4 MiB, øvrige 256 KB) og håndheves FØR signaturen. Et avslag (413) logges med leverandør og årsakskode - aldri innhold - så en gyldig, stor batch som avvises ikke er usynlig for driften.
+    let rawBody: Buffer = Buffer.alloc(0);
+    if (req.method === "POST") {
+      // FIX-2 (runde 2): lesefrist og GLOBAL samtidighetsgrense for store kropper (Meta, 4 MiB); en avvist lesing (413 for stor, 408 for treg, 503 `webhook_busy` for full) logges med leverandør og årsakskode - aldri innhold.
+      const bodyGuard = webhookBodyGuardFor(deps.comms.webhooks, deps.comms.webhooks.bodyRead);
+      try {
+        rawBody = await readRawBodyGuarded(req, COMMS_WEBHOOK_MAX_BYTES_BY_PROVIDER[commsWebhookProvider], bodyGuard);
+      } catch (err) {
+        if (err instanceof HttpError) {
+          // 503: be leverandøren prøve igjen om litt, og lukk forbindelsen så resten av den store kroppen ikke leses videre.
+          if (err.status === 503) { res.setHeader("retry-after", String(bodyGuard.config.retryAfterSeconds)); res.setHeader("connection", "close"); }
+          // En loggfeil skal aldri endre svaret: leverandøren skal fortsatt få 413/503 (ikke 500) selv om logghjelperen kaster.
+          try { deps.comms.webhooks.service.noteRejectedBeforeSignature(commsWebhookProvider, err.code as PreSignatureRejection); } catch {
+            // bevisst ignorert (linjekommentar, ikke blokkommentar: kildevaktene `wpn1-job-delivery` D, `d449` og `wpn1-guard-env` fjerner kommentarer naivt, og en ulukket blokkstart i en streng, f.eks. i CSP-linjen, kan da skjule kode; ingen blokk-avslutter etter den linjen)
+          }
+        }
+        throw err;
+      }
+    }
     const headers: Record<string, string | undefined> = {};
     for (const [name, value] of Object.entries(req.headers)) headers[name.toLowerCase()] = typeof value === "string" ? value : undefined;
     const out = await deps.comms.webhooks.service.handle(commsWebhookProvider, {
@@ -2077,6 +2096,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   // WP-G2 (D-464): `/personal/*` finnes KUN når `deps.personal` er satt (minst ett JARVIS_PERSONAL_*-flagg på). Eier-kun og step-up håndheves inni rutene; uten verdien er dette en vanlig 404.
   if (deps.personal !== undefined && url.pathname.startsWith("/personal/")) {
     const personalDeps = deps.personal;
+    // WP-G2c (D-483, JARVIS-113 e/5): ALT under `/personal/` bærer personopplysninger (lokasjon, helse, familie, kalender, økonomi, handlinger). `setHeader` (ikke `json()`-argumentet) slik at også 401/400/413/500 fra grant-/kropp-/feilgrenene
+    // bærer den: ingen nettleser eller mellomliggende cache skal lagre et svar. Kun her (flagg PÅ): uten `deps.personal` er svarene byte-identiske med main.
+    res.setHeader("cache-control", "no-store");
     const handled = await handlePersonalRoute({
       req, res, url, deps: personalDeps,
       authed: (allowedKeys) => authedRequest(req, res, deps, allowedKeys),
@@ -2532,6 +2554,25 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       const authed = await authedRequest(req, res, deps, []);
       if (!authed) return;
       const infra = await infraGate.statusDurable();
+      // WP-P3 K4 (JARVIS-094): frosne connectorer leses fra det VARIGE registeret (alle, sortert) - ikke en hardkodet liste og ikke prosess-lokal tilstand. Lesefeil eller ingen `controls` => readable=false og tom liste; feilteksten lekker aldri.
+      // WP-P3 fiks-runde 1 (JARVIS-094, eier-grensen): det globale registeret (ALLE frosne connector-id-er, også finans- og `model:`-id-er) er en eier-opplysning, men ruten har bare grant. Det listes derfor KUN for den suverene eieren
+      // (`deps.ownerGate`, samme predikat som `requireOwner`; fail-closed: mangler porten, kaster den eller svarer den noe annet enn `true`, er kalleren ikke eieren). Alle andre får `[]` og readable=false, og registeret leses ikke.
+      let isOwner = false;
+      try {
+        isOwner = deps.ownerGate !== undefined && deps.ownerGate(authed.identity) === true;
+      } catch {
+        isOwner = false;
+      }
+      let frozen: string[] = [];
+      let frozenReadable = false;
+      if (controls && isOwner) {
+        try {
+          frozen = (await controls.listFrozenConnectorsDurable()).map((r) => r.connector_id).sort();
+          frozenReadable = true;
+        } catch {
+          frozen = [];
+        }
+      }
       return json(res, 200, {
         infra_mode: infra.state,
         infra_mode_local: infra.local,
@@ -2540,7 +2581,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         // false = en innstramming gjelder KUN denne prosessen (f.eks. en pause som ikke fikk lagret) eller den delte modusen kan ikke leses: workeren er da ikke nødvendigvis stanset.
         infra_mode_in_sync: infra.in_sync,
         connector_health: Object.fromEntries(gateway.health),
-        frozen_connectors: controls ? ["github"].filter((id) => controls.isFrozen(id)) : []
+        // gateway.health er PER PROSESS (denne API-prosessen): workerens helse sees ikke her (JARVIS-025-resten er DEFERRED).
+        connector_health_scope: "api_process",
+        frozen_connectors: frozen,
+        frozen_connectors_readable: frozenReadable
       });
     }
   }

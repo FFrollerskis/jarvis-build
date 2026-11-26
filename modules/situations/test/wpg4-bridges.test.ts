@@ -149,16 +149,22 @@ describe("C: kamerabroen - innholdsfri, ingen identitet, ingen konfidens", () =>
     expect(bridgeVisionObservation(ev(), { night_hours_utc: { start: 5, end: 5 } }, ctx())?.candidate.priority).toBe("low");
   });
 
-  it("samme type fra samme kilde slås sammen i cooldown-vinduet (én nøkkel); et nytt vindu er en ny nøkkel", () => {
+  it("K3 (glidende vindu): broen foreslår en NY episode med anker = hendelsestidspunktet og vindu = cooldown; sammenslåingen (anker innenfor vinduet) skjer i bussen, ikke i den rene broen", () => {
     const a = bridgeVisionObservation(ev({ observed_at: "2026-11-19T11:40:30.000Z", observation_id: "a" }), {}, ctx());
     const b = bridgeVisionObservation(ev({ observed_at: "2026-11-19T11:44:00.000Z", observation_id: "b" }), {}, ctx());
-    const c = bridgeVisionObservation(ev({ observed_at: "2026-11-19T11:59:59.000Z", observation_id: "c" }), {}, ctx());
-    expect(a?.candidate.detection_key).toBe(b?.candidate.detection_key);
-    expect(a?.candidate.detection_key).not.toBe(c?.candidate.detection_key);
+    const aMs = Date.parse("2026-11-19T11:40:30.000Z");
+    expect(a?.episode).toEqual({ key_prefix: "vision:motion_detected:camera.inngang:", anchor_ms: aMs, window_ms: 10 * 60_000 });
+    expect(a?.candidate.detection_key).toBe(`vision:motion_detected:camera.inngang:${String(aMs).padStart(13, "0")}`);
+    // samme (kamera, type) deler prefiks og vindu; hver hendelse foreslår sitt eget anker
+    expect(b?.episode?.key_prefix).toBe(a?.episode?.key_prefix);
+    expect(b?.episode?.window_ms).toBe(a?.episode?.window_ms);
+    expect(b?.candidate.detection_key).not.toBe(a?.candidate.detection_key);
     expect(a?.source_ref).not.toBe(b?.source_ref);
+    // et annet kamera og en annen type har egne prefiks
+    expect(bridgeVisionObservation(ev({ source_instance_id: "camera.hage" }), {}, ctx())?.episode?.key_prefix).toBe("vision:motion_detected:camera.hage:");
+    expect(bridgeVisionObservation(ev({ event_type: "doorbell_event" }), {}, ctx())?.episode?.key_prefix).toBe("vision:doorbell_event:camera.inngang:");
     // tunet cooldown (30 min) flytter vinduet
-    expect(bridgeVisionObservation(ev({ observed_at: "2026-11-19T11:31:00.000Z", observation_id: "d" }), {}, ctx({ "vision:motion_detected": 30 }))?.candidate.detection_key)
-      .toBe(bridgeVisionObservation(ev({ observed_at: "2026-11-19T11:59:00.000Z", observation_id: "e" }), {}, ctx({ "vision:motion_detected": 30 }))?.candidate.detection_key);
+    expect(bridgeVisionObservation(ev({ observed_at: "2026-11-19T11:31:00.000Z", observation_id: "d" }), {}, ctx({ "vision:motion_detected": 30 }))?.episode?.window_ms).toBe(30 * 60_000);
   });
 
   it("dørklokke = normal, sikkerhetsvarsel = high + urgent; ALDRI konfidens (stadiet kan ikke nå suggest)", () => {

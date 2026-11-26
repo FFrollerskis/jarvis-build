@@ -216,6 +216,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
   readonly name: string;
   private readonly chatCompletionsUrl: string | undefined;
   private readonly vision: boolean;
+  private readonly noRedirect: boolean;
 
   constructor(
     private readonly baseUrl: string | undefined = process.env["LOCAL_LLM_BASE_URL"],
@@ -232,10 +233,18 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
      * WP-G3 (D-465): `vision: true` sender bildedeler (`image_url` med base64 `data:`-URL) i stedet for å droppe dem stille (`textOnly`). Av som standard:
      * `local_llm`/`gemma_local` er byte-for-byte uendret. Brukes KUN av den dedikerte `local_vision`-identiteten (`JARVIS_VISION_LOCAL_URL`).
      */
-    options: { vision?: boolean } = {}
+    options: {
+      vision?: boolean;
+      /**
+       * WP-G4b fiks-runde 1 (FIX-5, review B L1): `noRedirect: true` følger ALDRI en omdirigering (`redirect: "error"`): en 307/308 fra den lokale URL-en (http->https på en omvendt proxy, en kapret/feilkonfigurert vert) ville sendt
+       * forespørselskroppen (modellinnhold) videre til `Location`. Settes av komposisjonsroten kun når `JARVIS_LOCAL_MODEL_URL_GUARD=on`; av som standard = ingen `redirect`-nøkkel (som før).
+       */
+      noRedirect?: boolean;
+    } = {}
   ) {
     this.name = name;
     this.vision = options.vision === true;
+    this.noRedirect = options.noRedirect === true;
     this.chatCompletionsUrl = baseUrl ? `${normalizeLocalLlmBaseUrl(baseUrl)}/v1/chat/completions` : undefined;
   }
 
@@ -317,7 +326,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
         signal: AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs),
         body: JSON.stringify(this.buildBody(request, false)),
         // WP-G3: den dedikerte visjonsidentiteten følger ALDRI en redirect (en 307/308 ville sendt kamerabildene videre til et annet mål); øvrige identiteter er uendret.
-        ...(this.vision ? { redirect: "error" as const } : {})
+        ...(this.vision || this.noRedirect ? { redirect: "error" as const } : {})
       });
     } catch (err) {
       throw classifyFetchError(this.name, err);
@@ -390,7 +399,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
         headers: { "content-type": "application/json" },
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
         body: JSON.stringify(this.buildBody(request, true)),
-        ...(this.vision ? { redirect: "error" as const } : {})
+        ...(this.vision || this.noRedirect ? { redirect: "error" as const } : {})
       });
     } catch (err) {
       if (signal?.aborted) throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);

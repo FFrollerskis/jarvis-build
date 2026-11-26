@@ -228,10 +228,19 @@ export class MetaAdsWriteTransport extends GrowthWriteTransportBase {
         const set = await this.get(id, { fields: "id,status,account_id" }, auth);
         if (set === null || str(set["account_id"]) !== acct) return null;
         const list = await this.get(`${id}/ads`, { fields: "id,name,status", limit: String(ADS_PAGE_SIZE) }, auth);
+        // WP-P3 K1 (JARVIS-106, review N10): `get()` svelger HTTP 400 «does not exist / cannot be loaded / missing permissions» som `null`. For selve annonsesettet er det «ikke funnet», men for `ads`-KANTEN
+        // (annonsesettet ble nettopp lest) betyr `null` at listen er ULESELIG - fravær av annonser er da ikke bevist. Tilstanden er derfor avkortet (`truncated`) og merket `ads_unreadable`, så `create_ad`
+        // nektes `ad_list_truncated` FØR noen POST (ellers ville dedupe sett en tom liste og laget en duplikat). Alle andre feil (401/403/5xx/nett) kastes fortsatt av `get()`.
+        // WP-P3 fiks-runde 1 (K1-rest): `get()` gir `asObj` av ALT HTTP 200-innhold, så `{}`, tom kropp, `{data:null}`, `{data:{}}`, `{error:...}` og en toppnivå-liste ble «komplett og tom» (`truncated:false`) og `create_ad` sendte
+        // en POST. Bare en faktisk `data`-LISTE beviser «ingen annonser». Pagineringen må også være forståelig: `paging` fraværende/null eller et objekt uten `next` (null likestilt med fraværende) = siste side; en `next` som finnes
+        // (streng ELLER uforståelig: tall, true/false, objekt, liste) eller en `paging` som ikke er et objekt kan ikke bevise «siste side» og regnes som KUTTET (uten `ads_unreadable`: selve listen er lesbar).
+        const unreadable = list === null || !Array.isArray(list["data"]);
         const rawAds = asArr(list?.["data"]);
-        const truncated = str(asObj(list?.["paging"])["next"]) !== null || rawAds.length >= ADS_PAGE_SIZE;
+        const paging = list?.["paging"];
+        const pagingProvesLast = paging === undefined || paging === null || (typeof paging === "object" && !Array.isArray(paging) && (asObj(paging)["next"] ?? null) === null);
+        const truncated = unreadable || !pagingProvesLast || rawAds.length >= ADS_PAGE_SIZE;
         const ads = rawAds.slice(0, ADS_PAGE_SIZE).map((a) => ({ id: str(asObj(a)["id"]), name: cleanText(asObj(a)["name"], 100), status: str(asObj(a)["status"]) }));
-        return { ad_account_id: acct, ad_set_id: id, account_id: acct, ad_set_status: str(set["status"]), ads, truncated };
+        return { ad_account_id: acct, ad_set_id: id, account_id: acct, ad_set_status: str(set["status"]), ads, truncated, ...(unreadable ? { ads_unreadable: true } : {}) };
       }
       default:
         throw new Error(`meta_ads_action_not_implemented:${action}`);

@@ -9,6 +9,7 @@ import { DomainLockBusyError, domainLockCapacity, MAX_LOCK_WAITERS, withDomainAd
 import { DomainPauseRegistry } from "../src/domain-pause.ts";
 import { SituationEngine } from "../src/service.ts";
 import { identity, NOW, OWNER, record, startG4Db, TENANT_A, type G4Db } from "./support/wpg4-db.ts";
+import { TEST_BINDABLE } from "./support/bindable.ts";
 
 /**
  * WP-G4 (D-466) FIKS-RUNDE, A-MEDIUM-5 (ARVET, men G4 gjør ACT hyppigere): `withDomainAdvisoryLocks` holdt ÉN pool-forbindelse per sesjonslås (`pg_advisory_lock`) - også mens den VENTET på låsen. Pool max 10 uten
@@ -146,14 +147,16 @@ describe("A-MEDIUM-5: probe R4 - én pågående actOn + to samtidige pause_domai
       const blocking: ToolTransport = { async invoke() { entered = true; await gate; return { external_id: "b-1" }; } };
       gateway.register({
         tool_id: "test_act", action: "apply", description: "t", input_schema: record({ situation_id: z.string() }), capability_class: "B", scopes: [], reversible: true,
-        rollback_procedure: "undo", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_ACT_TOKEN", output_trust: "internal", transport: blocking
+        rollback_procedure: "undo", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_ACT_TOKEN", output_trust: "internal", transport: blocking, autonomy_bindable: TEST_BINDABLE
       });
       gateway.register({
         tool_id: "telegram", action: "notify", description: "t", input_schema: record({ message: z.string() }), capability_class: "B", scopes: [], reversible: true,
-        rollback_procedure: "x", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: new Spy()
+        rollback_procedure: "x", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: new Spy(), autonomy_bindable: TEST_BINDABLE
       });
       await db.engine.evaluateCandidate(TENANT_A, "home", { domain: "home", detection_key: "home:deadlock:1", priority: "high", confidence: 0.9, reason: "r" }, NOW);
-      await db.engine.setAutonomyPolicy(TENANT_A, "home", { domain: "home", tool_id: "test_act", action: "apply", parameters: { situation_id: "{{situation_id}}" } }, OWNER);
+      // WP-G4b K1: bindingen skrives med en motor (stor pool) som slår opp definisjonen i DENNE testens gateway; den lille poolen er det som testes.
+      const binder = new SituationEngine(db.appPool, db.domainPauses, { owner_person_id: OWNER }, { definitionLookup: (t, a) => gateway.get(t, a) });
+      await binder.setAutonomyPolicy(TENANT_A, "home", { domain: "home", tool_id: "test_act", action: "apply", parameters: { situation_id: "{{situation_id}}" } }, OWNER);
       const acting = engineSmall.autoActPending(TENANT_A, "home", gateway, identity(TENANT_A, "home"));
       for (let i = 0; i < 200 && !entered; i += 1) await sleep(25);
       expect(entered).toBe(true);

@@ -74,7 +74,7 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 // D-121: DEN delte prioriteringsregelen fra `@jarvis/business` - aldri en
 // nesten-lik kopi (se `classifyAttentionBucket` i open-loop-types.ts).
-import { classifyAttentionBucket } from "@jarvis/business";
+import { NON_FINANCE_LOOP_TYPES, classifyAttentionBucket } from "@jarvis/business";
 import { normalizeChannelIdentifier, normalizeE164 } from "./normalize.ts";
 import { PHONE_CHANNELS } from "./types.ts";
 import type {
@@ -101,6 +101,15 @@ class ExclusiveLinkRace extends Error {
   constructor() {
     super("conversation_exclusive_link_race");
   }
+}
+
+/**
+ * WP-N1b (JARVIS-116 a, K2): valg for tverr-kanal-lesningene. `excludeFinanceDerived` utelater finansavledede åpne løkker (beløp, leverandør, formål i `reason`/`next_action`) FRA SPØRRINGEN - settes av
+ * `ConversationGraphTransport` når en sky-/ukjent modell betjener kallet (`withholdFinanceFromCurrentModel()`). Filteret er en HVITLISTE over kjent ikke-finansielle løkketyper (`NON_FINANCE_LOOP_TYPES`):
+ * en ukjent type utelates (fail-closed). Uten valget er SQL-teksten og parametrene NØYAKTIG som før (eierens egne ruter, oppfølgingsvarsler og tester ser alt).
+ */
+export interface CrossChannelReadOptions {
+  excludeFinanceDerived?: boolean;
 }
 
 export class ConversationGraphService {
@@ -333,7 +342,10 @@ export class ConversationGraphService {
               WHERE tenant_id = $1 AND identity_id = $2 AND status = 'active' AND source_type = $3 AND external_id IS NOT NULL AND external_id <> $4`,
             [tenantId, identityId, input.source.source_type, input.source.external_id]
           );
-          if ((owners.rowCount ?? 0) > 0) return { status: "conflict", with: (owners.rows as Array<{ external_id: string }>).map((r) => r.external_id) };
+          // WP-G1c: eierens uttrykkelig godtatte delte kilder (`allow_shared_with`) er ikke en konflikt; ALLE andre eiere er det fortsatt.
+          const allowed = new Set(input.allow_shared_with ?? []);
+          const blocking = (owners.rows as Array<{ external_id: string }>).map((r) => r.external_id).filter((id) => !allowed.has(id));
+          if (blocking.length > 0) return { status: "conflict", with: blocking };
         }
         let linked = 0;
         for (const item of items) {
@@ -653,7 +665,8 @@ export class ConversationGraphService {
     tenantId: string,
     memorySpace: MemorySpace,
     identityId: string,
-    now: number = Date.now()
+    now: number = Date.now(),
+    options: CrossChannelReadOptions = {}
   ): Promise<CrossChannelCommitmentView> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const effective = await this.resolveEffectiveIdentityIn(client, tenantId, identityId);
@@ -676,7 +689,7 @@ export class ConversationGraphService {
         return { ...base, resolution: "no_linked_contact" as const, commitments: [] };
       }
       const commitments = await this.commitmentsForContacts(
-        client, tenantId, [effective.linked_business_contact_id], now
+        client, tenantId, [effective.linked_business_contact_id], now, options
       );
       return { ...base, resolution: "resolved" as const, commitments: commitments.map((c) => c.entry) };
     });
@@ -718,10 +731,11 @@ export class ConversationGraphService {
   async crossChannelAttention(
     tenantId: string,
     memorySpace: MemorySpace,
-    now: number = Date.now()
+    now: number = Date.now(),
+    options: CrossChannelReadOptions = {}
   ): Promise<CrossChannelAttentionEntry[]> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const commitments = await this.commitmentsForContacts(client, tenantId, null, now);
+      const commitments = await this.commitmentsForContacts(client, tenantId, null, now, options);
       const contactIds = [...new Set(commitments.map((c) => c.contact_id).filter((id): id is string => id !== null))];
 
       // Kun AKTIVE identiteter: en tombstonet (sammenslaatt) identitet skal
@@ -896,10 +910,12 @@ export class ConversationGraphService {
     client: pg.PoolClient,
     tenantId: string,
     contactIds: string[] | null,
-    now: number
+    now: number,
+    options: CrossChannelReadOptions = {}
   ): Promise<Array<{ contact_id: string | null; entry: CrossChannelCommitmentEntry }>> {
     const scoped = contactIds !== null;
     if (scoped && contactIds.length === 0) return [];
+    const excludeFinance = options.excludeFinanceDerived === true;
 
     const followups = await client.query(
       `SELECT followup_id, contact_id, title, reason, next_action, due_at, priority
@@ -913,8 +929,9 @@ export class ConversationGraphService {
               detection_method, canonical_uri
        FROM business_open_loops
        WHERE tenant_id = $1 AND status = 'open'
-         AND ($2::boolean = false OR contact_id = ANY($3::text[]))`,
-      [tenantId, scoped, contactIds ?? []]
+         AND ($2::boolean = false OR contact_id = ANY($3::text[]))${excludeFinance ? `
+         AND loop_type = ANY($4::text[])` : ""}`,
+      excludeFinance ? [tenantId, scoped, contactIds ?? [], [...NON_FINANCE_LOOP_TYPES]] : [tenantId, scoped, contactIds ?? []]
     );
 
     const toIso = (value: Date | string | null): string | null =>

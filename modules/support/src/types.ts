@@ -109,6 +109,12 @@ export interface IngestMessageInput {
    * `agent_reply` - ellers ville et svar som aldri nådde kunden telle som besvart i "trenger svar"-deteksjonen.
    */
   outbound_outcome?: "failed_send";
+  /**
+   * WP-P3 K3 (JARVIS-104, Q-63 pkt 8): INTERN id til et EKSISTERENDE ticket. Satt => `ingestMessage` leser raden på (tenant_id, ticket_id) under RLS/rom, kaster `support_ticket_not_found` hvis den mangler
+   * og OPPRETTER ALDRI et ticket (tråd-oppslaget hoppes over). Brukes av `SupportEmailService.reply()` så et svar på et MANUELT ticket (ingen kildeinstans/-tråd) havner på DENNE ticketen.
+   * Feltet settes KUN av betrodd intern kode - aldri fra verktøyets `parameters` (`transport.ts` `ingest_message` leser det ikke; skjemaet i `integrations.ts` er strengt).
+   */
+  ticket_id?: string;
 }
 
 export interface IngestMessageResult {

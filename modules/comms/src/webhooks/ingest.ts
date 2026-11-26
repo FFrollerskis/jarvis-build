@@ -5,9 +5,9 @@ import { scanForSecrets } from "@jarvis/core";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import { optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel } from "../channels.ts";
 import type { CommsConfig, CommsWebhookProvider } from "../config.ts";
-import { OPT_KEYWORD_CHANNELS, parseOptKeyword } from "../optout.ts";
+import { OPT_KEYWORD_CHANNELS, parseOptKeyword, type OptKeyword } from "../optout.ts";
 import type { Clock, CommsStore, OptEffect } from "../store.ts";
-import { parseMetaBody, parseSlackBody, parseTelnyxBody, parseTwilioParams, type NormalizedInbound, type ParseOutcome } from "./parsers.ts";
+import { MAX_EVENTS_PER_REQUEST, PROCESSING_CAP_FACTOR, parseMetaBody, parseSlackBody, parseTelnyxBody, parseTwilioParams, type NormalizedInbound, type ParseOutcome } from "./parsers.ts";
 import { secretsEqual, verifyMetaSignature, verifySlackSignature, verifyTelnyxSignature, verifyTwilioSignature } from "./verify.ts";
 
 /**
@@ -45,6 +45,16 @@ export interface WebhookDeps {
   readonly clock: Clock;
   readonly business?: Pick<BusinessService, "recordActivity">;
   readonly warn?: (event: Record<string, unknown>) => void;
+  /**
+   * K3: høyeste antall NYE hendelser (som faktisk skrives) som behandles per signert forespørsel (standard `MAX_EVENTS_PER_REQUEST` = Metas dokumenterte batch-størrelse). Kjente duplikater og hendelser som ikke lagres (ignorert) teller ikke (FIX-2).
+   * Gjenstår det nye hendelser etter taket, svarer tjenesten 503 så leverandøren prøver på nytt, og hver retry tar neste porsjon. Kun testene setter den lavere.
+   */
+  readonly maxEventsPerRequest?: number;
+  /**
+   * FIX-3 (fiks-runde 2): høyeste antall hendelser som BEHANDLES (alt som ikke er et kjent duplikat: skrevet, ignorert eller duplikat i et kappløp) per signert forespørsel; standard `PROCESSING_CAP_FACTOR` x taket over (5000). Stopp-ord (STOP) er unntatt
+   * (de skrives alltid og er begrenset av skrivetaket). Over taket svarer tjenesten 503 `batch_over_cap` og resten utsettes. Kun testene setter den.
+   */
+  readonly maxProcessedPerRequest?: number;
 }
 
 export const WEBHOOK_SECRET_REFS = {
@@ -55,8 +65,21 @@ export const WEBHOOK_SECRET_REFS = {
   telnyx: "JARVIS_TELNYX_WEBHOOK_PUBLIC_KEY"
 } as const;
 
-/** Maks størrelse på en webhook-kropp (ruten håndhever den FØR signaturen vurderes). */
+/** Maks størrelse på en webhook-kropp for leverandører uten egen grense (ruten håndhever den FØR signaturen vurderes). */
 export const WEBHOOK_MAX_BYTES = 256 * 1024;
+/**
+ * FIX-1 (WP-G1c fiks-runde 1): byte-grensen per leverandør, håndhevet av ruten FØR signaturen vurderes (413). Meta sender batcher på inntil 1000 meldinger (266-439 B per melding, dvs. 270-440 KB per batch) og oppgir selv inntil 3 MB per forespørsel
+ * (UVERIFISERT mot primærkilden: `developers.facebook.com` var ikke nåbar; kun søkeutdrag), så Meta får 4 MiB; en felles 256 KB-grense ga 413 på en GYLDIG, korrekt signert batch, og en STOP i den ble aldri registrert. HMAC-SHA256 over 4 MiB koster millisekunder.
+ * De andre leverandørene sender én hendelse per forespørsel og beholder 256 KB. Signatur-før-parsing og den strenge per-IP-grensen (30/min) er uendret.
+ */
+export const WEBHOOK_MAX_BYTES_BY_PROVIDER: Readonly<Record<CommsWebhookProvider, number>> = {
+  slack: WEBHOOK_MAX_BYTES, meta: 4 * 1024 * 1024, twilio: WEBHOOK_MAX_BYTES, telnyx: WEBHOOK_MAX_BYTES
+};
+/**
+ * FIX-2 (fiks-runde 2): årsakskodene ruten logger når den avviser en forespørsel FØR signaturen er vurdert: kroppen over byte-grensen (413), kroppen ble ikke ferdig lest innen lesefristen (408, forbindelsen lukkes) eller for mange store kropper leses
+ * samtidig (503, `Retry-After`). Aldri innhold, hode eller avsender.
+ */
+export type PreSignatureRejection = "payload_too_large" | "body_read_timeout" | "webhook_busy";
 /** Avmeldings-/gjenopptakshendelser beholdes lenge (kun pseudonym, ingen tekst): en gjenspilt gammel START skal ikke kunne oppheve en nyere avmelding. */
 const OPT_EVENT_RETENTION_DAYS = 1825;
 const EXCERPT_MAX = 2000;
@@ -93,6 +116,16 @@ export interface IngestSummary {
   ignored: number;
   opt_outs: number;
   opt_ins: number;
+  /** K3: hendelser som IKKE ble behandlet fordi forespørselen overskred taket (kun satt ved 503 `batch_over_cap`). */
+  deferred?: number;
+}
+
+/**
+ * Er hendelsen et stopp-/start-ord (en hel melding som er ett av ordene, på en kanal der tekst-STOP tolkes)? Brukes både til prioritering (K3: slike hendelser behandles FØRST) og til selve avmeldingsbehandlingen,
+ * så de aldri kan komme ut av takt.
+ */
+function optKeywordOf(ev: NormalizedInbound): OptKeyword | null {
+  return ev.kind === "message" && ev.reply_to !== null && OPT_KEYWORD_CHANNELS.has(ev.channel) ? parseOptKeyword(ev.text) : null;
 }
 
 const emptySummary = (): IngestSummary => ({ received: 0, inserted: 0, duplicates: 0, ignored: 0, opt_outs: 0, opt_ins: 0 });
@@ -167,9 +200,33 @@ export class CommsWebhookService {
     const summary = emptySummary();
     summary.ignored += outcome.ignored;
     const ingestId = `ingest-${randomUUID()}`;
-    for (const event of outcome.events) {
+    // K3 (JARVIS-112 d): stopp-/start-ord behandles FØRST (de er rettighetsbærende; de beholder sin innbyrdes rekkefølge så en STOP og en START i samme batch aldri bytter plass), deretter resten. Taket gjelder KUN antall NYE hendelser som
+    // skrives; overskrides det, svarer vi med en FEILSTATUS (leverandøren prøver på nytt, dedupe gjør gjentak trygt) - aldri 200 med stille droppede hendelser. Logg: kun årsakskode og antall.
+    // FIX-2: kjente duplikater (dedupe-raden finnes, og effekten ble skrevet i SAMME transaksjon, B-H2) slås opp i ÉN spørring og hoppes over uten arbeid, og hendelser som ikke lagres (ignorert) teller heller ikke mot taket. Før telte taket
+    // ALLE hendelser, så en retry brukte taket på duplikatene og de siste hendelsene (en STOP som nr. 1001) ble aldri behandlet. Nå tar hver retry neste porsjon, og 503 betyr alltid at det gjenstår nye hendelser.
+    const keywordEvents = outcome.events.filter((e) => optKeywordOf(e) !== null);
+    const ordered = [...keywordEvents, ...outcome.events.filter((e) => optKeywordOf(e) === null)];
+    const cap = this.deps.maxEventsPerRequest ?? MAX_EVENTS_PER_REQUEST;
+    // FIX-3 (fiks-runde 2): et EGET tak på hendelser som BEHANDLES (ikke kjente duplikater), ellers var arbeidet per forespørsel bare byte-begrenset (hver ignorerte hendelse koster minst ett kontooppslag). Stopp-ord (STOP) er unntatt: de skrives alltid
+    // (skrivetaket begrenser dem) og står først, så en STOP kan aldri sultes ut av ignorerbare hendelser foran seg. Utsatte hendelser (`continue`) kostet ingenting; resten av kroppen leses fortsatt så en STOP lenger bak nås. Merk: en ignorert hendelse lagres
+    // aldri og kan derfor aldri bli «kjent» - en kropp med flere ignorerbare hendelser enn taket gir 503 ved hver retry (Meta sender ikke så mange: dokumentert grense, runbook), men en STOP er registrert i første forsøk.
+    const processingCap = this.deps.maxProcessedPerRequest ?? cap * PROCESSING_CAP_FACTOR;
+    const known = await this.deps.store.knownEventKeys(config.webhook_tenant_id, config.webhook_memory_space, provider, ordered.map((e) => e.event_key));
+    let deferred = 0;
+    let processed = 0;
+    let capReason: "write_cap" | "processing_cap" | null = null;
+    for (let i = 0; i < ordered.length; i++) {
+      const event = ordered[i] as NormalizedInbound;
+      if (known.has(event.event_key)) { summary.received++; summary.duplicates++; continue; }
+      if (summary.inserted >= cap) { deferred += ordered.slice(i).filter((e) => !known.has(e.event_key)).length; capReason ??= "write_cap"; break; }
+      if (processed >= processingCap && optKeywordOf(event) !== "stop") { deferred++; capReason ??= "processing_cap"; continue; }
+      processed++;
       summary.received++;
       await this.processEvent(event, ingestId, summary);
+    }
+    if (deferred > 0) {
+      this.deps.warn?.({ msg: "comms_webhook_batch_over_cap", provider, reason: capReason, events: ordered.length, cap, deferred });
+      return { status: 503, body: { error: "batch_over_cap", events: { ...summary, deferred } } };
     }
     return { status: 200, body: { received: true, events: { ...summary } } };
   }
@@ -183,6 +240,14 @@ export class CommsWebhookService {
     const challenge = req.query.get("hub.challenge");
     if (mode !== "subscribe" || token === null || challenge === null || !secretsEqual(token, expected) || !/^[A-Za-z0-9_-]{1,200}$/.test(challenge)) return this.reject(403, "forbidden");
     return { status: 200, body: challenge };
+  }
+
+  /**
+   * FIX-1/FIX-2: ruten avviste en forespørsel FØR signaturen ble vurdert (kroppen over leverandørens byte-grense 413, for treg lesing 408, eller for mange samtidige store lesinger 503). Loggføres med leverandør og årsakskode - aldri kropp, hode eller avsender.
+   * Uten dette var en gyldig, stor batch som ble avvist usynlig for driften.
+   */
+  noteRejectedBeforeSignature(provider: CommsWebhookProvider, reason: PreSignatureRejection): void {
+    this.deps.warn?.({ msg: "comms_webhook_rejected", provider, reason });
   }
 
   private invalid(provider: CommsWebhookProvider, reason: string): WebhookResponse {
@@ -204,12 +269,13 @@ export class CommsWebhookService {
     const tenantId = config.webhook_tenant_id as string;
     const space: MemorySpace = config.webhook_memory_space;
     const account = await store.findActiveAccount(tenantId, space, ev.channel, ev.account_ref);
-    const keyword = ev.kind === "message" && ev.reply_to !== null && OPT_KEYWORD_CHANNELS.has(ev.channel) ? parseOptKeyword(ev.text) : null;
+    const keyword = optKeywordOf(ev);
     // Kun kontoer eieren har autorisert: en hendelse til en ukjent konto lagres ikke (ingen unødvendige personopplysninger). UNNTAK (A-M7): en STOP registreres ALLTID, også til en ikke-autorisert/tilbakekalt konto - mottakerens
     // rett til å slippe avhenger ikke av at eieren har lagt kontoen i allowlisten (kun pseudonym + hint lagres, aldri tekst).
     if (account === null && keyword !== "stop") { summary.ignored++; return; }
-    // Ferskhet: en hendelse eldre enn dedupe-vinduet (retensjon) kan være en gjenspilling etter at dedupe-raden er slettet.
-    if (ev.provider_ts !== null && clock().getTime() - Date.parse(ev.provider_ts) > config.inbound_retention_days * 86_400_000) { summary.ignored++; return; }
+    // Ferskhet: en hendelse eldre enn dedupe-vinduet (retensjon) kan være en gjenspilling etter at dedupe-raden er slettet. UNNTAK (K3): en STOP forkastes aldri på alder - en gjenspilt gammel STOP er ufarlig (den registrerer en avmelding, den
+    // aldri løfter noe), mens en forsinket levering av en ekte STOP ikke skal forsvinne stille.
+    if (keyword !== "stop" && ev.provider_ts !== null && clock().getTime() - Date.parse(ev.provider_ts) > config.inbound_retention_days * 86_400_000) { summary.ignored++; return; }
 
     const hash = ev.reply_to === null ? null : recipientHash(tenantId, ev.channel, ev.reply_to);
     const hint = ev.reply_to === null ? null : recipientHint(ev.channel, ev.reply_to);

@@ -67,7 +67,7 @@ beforeAll(async () => {
 
   // Autonomi-bindinger (parametrene er hemmelige i testen og skal ALDRI leses), situasjoner, pause, finansbryter, bekreftelser
   const policy = (tenant: string, person: string, space: string, domain: string, enabled = true): Promise<unknown> =>
-    admin.query("INSERT INTO situation_autonomy_policies (tenant_id, memory_space_id, domain, tool_id, action, parameters, enabled, actor_person_id, updated_at) VALUES ($1,$2,$3,'finance_spend','sync_internal_spend',$4::jsonb,$5,$6,$7)", [tenant, space, domain, JSON.stringify({ token: SECRET_PARAM }), enabled, person, ago(30 * H)]);
+    admin.query("INSERT INTO situation_autonomy_policies (tenant_id, memory_space_id, domain, tool_id, action, parameters, enabled, actor_person_id, updated_at) VALUES ($1,$2,$3,'business','create_followup',$4::jsonb,$5,$6,$7)", [tenant, space, domain, JSON.stringify({ token: SECRET_PARAM }), enabled, person, ago(30 * H)]);
   await policy(TENANT_A, idA.person_id, "business", "finance");
   await policy(TENANT_A, idA.person_id, "personal", "support", false);
   await policy(TENANT_A, idA.person_id, "health", "helse-domene");
@@ -180,7 +180,7 @@ describe("hele senteret mot ekte data", () => {
     expect(item(r, "devices", "dev-ac-del").facts).toMatchObject({ delegated: true, active_grants: 2 });
     expect(item(r, "devices", "dev-ac-cur").facts).toMatchObject({ current_device: true });
     expect(r.actions.map((a) => a.id).filter((id) => id.startsWith("authority.revoke_device:")).sort()).toEqual(["authority.revoke_device:dev-ac-del", "authority.revoke_device:dev-ac-phone"]);
-    expect(item(r, "autonomy", "business:finance")).toMatchObject({ status: "OK", facts: { tool: "finance_spend", action: "sync_internal_spend", enabled: true } });
+    expect(item(r, "autonomy", "business:finance")).toMatchObject({ status: "OK", facts: { tool: "business", action: "create_followup", enabled: true } });
     expect(sec(r, "autonomy").summary_no).toContain("1 i health-rommet");
     expect(item(r, "switches", "kill_switch")).toMatchObject({ status: "OK", facts: { active: false } });
     expect(item(r, "switches", "finance_kill_switch")).toMatchObject({ status: "WARN", facts: { enabled: true } });

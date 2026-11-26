@@ -8,7 +8,7 @@ import {
   type ClassDNotification, type SecretProvider, type ToolDefinition
 } from "@jarvis/tool-gateway";
 import { CommsStore, CommsTransport, OutboundFunnel, commsToolDefinitions, parseCommsConfig, type AdapterMap } from "../src/index.ts";
-import { OWNER, TENANT_A, scriptedAdapter, startCommsDb, type CommsDb } from "./support/harness.ts";
+import { OWNER, TENANT_A, scriptedAdapter, startCommsDb, type CommsDb, testContentHasher } from "./support/harness.ts";
 
 /**
  * WP-G1 (P1b/P1c): `comms.*` gjennom den EKTE `ToolGateway`-pipelinen (embedded Postgres, ekte policy, ekte klasse D-kjede): preflight-avslag FØR reservasjon, ledger/idempotens, umiddelbart eier-varsel uten
@@ -38,7 +38,7 @@ beforeAll(async () => {
   const graph = new ConversationGraphService(db.app);
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms,slack,whatsapp" });
   const adapters: AdapterMap = { twilio: sms, slack };
-  const funnel = new OutboundFunnel({ store, graph, adapters, config, clock });
+  const funnel = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters, config, clock });
   killSwitch = new KillSwitch();
   controls = new OwnerControls(killSwitch);
   const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, controls, authority: { owner_person_id: OWNER, owner_tenants: [TENANT_A] } });
@@ -203,7 +203,7 @@ describe("B: utsendelse gjennom hele kjeden", () => {
   it("leverandørfeil: UKJENT utfall gir `unverified` i ledgeren (aldri retry-bar) og eieren varsles om ukjent utfall; entydig avslag gir `failed`", async () => {
     const unknown = scriptedAdapter("twilio", () => { throw new Error("outcome_unknown:comms_twilio_http_503"); });
     const graph = new ConversationGraphService(db.app);
-    const funnel = new OutboundFunnel({ store, graph, adapters: { twilio: unknown }, config: parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms" }), clock });
+    const funnel = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters: { twilio: unknown }, config: parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms" }), clock });
     const gw2 = new ToolGateway(db.app, new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, controls, authority: { owner_person_id: OWNER, owner_tenants: [TENANT_A] } }),
       { name: "fake", get: async (ref) => (ref === BUSINESS_INTERNAL_CREDENTIAL_REF ? "internal-no-external-credential" : "fake-token-for-test") }, controls, undefined, {
         classDPipeline: { enforce: true, notifier: { ready: () => true, notify: async (x) => { notifications.push(x); } } },

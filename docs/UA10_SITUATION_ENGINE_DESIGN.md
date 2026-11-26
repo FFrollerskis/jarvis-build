@@ -541,7 +541,7 @@ aldri). Backpressure: hver lesing har et tak (kamera 500, helse 20 000 rader per
 (`situation_autonomy_policies`, valgfri `expires_at` <= 365 dager, re-verifisert rett før hvert kall OG i
 claim-transaksjonen under domenelåsen, sammen med ferskhet). `health` og `vision` kan aldri få ACT
 (`NEVER_ACT_DOMAINS`: avvist ved binding, i `actOn()` og i SQL for auto-ACT). Fysiske/kritiske handlinger
-(allowlist-regel i `autonomy-guard.ts`: kun kjente lese-handlinger i `home-assistant`/`car` er bindbare) kan
+(navnerom-regel i `autonomy-guard.ts`: ENHVER handling i `home-assistant`/`car` er stengt, også lesing; ingen allowlist) kan
 ALDRI bindes eller utføres autonomt (bind-tid, `autoActPending`, `actOn`, simulering). Hjemhandlinger som er
 bindbare går gjennom ToolGateway-kjeden; for de G2-kritiske handlingene nekter step-up den autonome
 sveipe-identiteten (målt mot de ekte G2-definisjonene): situasjonen eskalerer ærlig, aldri en stille omgåelse.

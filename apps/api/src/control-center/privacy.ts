@@ -10,6 +10,7 @@ import {
 } from "@jarvis/executive";
 import { jobState, readJobs } from "./integration.ts";
 import { readErasure, type ErasureRead } from "./memory.ts";
+import { buildVisionSection, type PrivacyVisionSource } from "./privacy-vision.ts";
 import {
   DAY_MS, bySeverityThenLabel, countsNo, globalRows, relativeNo, safeCategory, settle, tenantRead, toInt, toIso,
   type ControlCenterPool, type Settled
@@ -25,6 +26,9 @@ import {
  *  - OPPBEVARING: de daglige sveipene (`scheduler_state`) og rader som er eldre enn oppbevaringsgrensen likevel står igjen (`tool_executions`, `session_grants`), pluss alder på de eldste radene i tabellene
  *    UTEN automatisk sletting (`audit_events`, `cost_events`; oppbevaring der er en eierbeslutning, jf. migrasjon 073).
  *  - SLETTEBEVIS: `erasure_requests` + `erasure_fingerprints` (gjenbruker leseren fra Minne-senteret, så to sentre aldri teller ulikt).
+ *
+ * WP-G3b (D-485): med `deps.vision` (kun med JARVIS_VISION_ENABLED=on, se `registerControlCenters`) kommer en sjette seksjon, «Syn og kamera» (`privacy-vision.ts`): kamerakjøretidens helsebilde og de gjeldende oppbevaringsvinduene, kun lesing.
+ * Uten `vision` er senteret BYTE-IDENTISK med main (opptak i `wpg3b-privacy-parity.test.ts`).
  *
  * ÆRLIGHET: DPIA-status er det dokumentet ERKLÆRER («UTKAST», «ikke godkjent») - ikke en juridisk vurdering. Alle skyleverandører står som IKKE VERIFISERT i dokumentet, og det telles her. Slette-inngangen
  * (`ErasureService`) er ikke koblet i produksjon (JARVIS-060), og om slettinger er gjenanvendt etter en restore (`reapplyErasuresAfterRestore`) måles ikke - begge står rett ut.
@@ -353,6 +357,8 @@ export interface PrivacyCenterDeps {
   repoRoot?: string;
   /** Gjennomgang L4: dokumentleseren (cache, single-flight og backoff mot en hengt mount). Standard: den delte leseren for prosessen; injiserbar for tester. */
   docReader?: DocReader;
+  /** WP-G3b (D-485): Syn-kortet. Utelatt (standard, og alltid med JARVIS_VISION_ENABLED av) = ingen seksjon og en rapport byte-identisk med main. */
+  vision?: PrivacyVisionSource;
 }
 
 const DEFAULT_REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -585,6 +591,9 @@ export function createPrivacyCenter(deps: PrivacyCenterDeps): ControlCenterDefin
       } else {
         sections.push(unknownControlSection("deletion_evidence", "Slettebevis", "erasure_requests + erasure_fingerprints (tenant-RLS)", `kunne ikke leses${failed(erasureR)}`));
       }
+
+      // WP-G3b (D-485): Syn-kortet SIST og kun når en kilde er koblet inn - uten den er alt over uendret. Bygges aldri-kastende (en feil gir «utilgjengelig», ikke et kastet senter).
+      if (deps.vision !== undefined) sections.push(await buildVisionSection({ source: deps.vision, pool: deps.pool, tenantId, nowMs, nowIso }));
 
       return { sections, actions: [] };
     }
