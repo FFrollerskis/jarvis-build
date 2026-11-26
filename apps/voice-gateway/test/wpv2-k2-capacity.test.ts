@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConnectionTracker, DEFAULT_VOICE_LIMITS, ProcessSlots, TokenBucket, VoiceBusyError, peerKey, resolveLimits, type ConnectionTicket } from "../src/limits.ts";
+import { killProcessGroup } from "../src/local-binary.ts";
 import type { TtsAdapter, TtsPlayback } from "../src/tts.ts";
 import { LocalWhisperStt } from "../src/stt.ts";
 import { LocalPiperTts } from "../src/tts.ts";
@@ -155,6 +156,21 @@ describe("ConnectionTracker: grenser, bevist/ubevist og utkasting av eldste ubev
     expect(t.admit("p", noop)).toEqual({ ok: false, reason: "peer_limit" }); // nå er alle bevist: ingen utkasting
     expect(evicted).toEqual(["b"]);
     expect(t.admit("annen", noop).ok).toBe(true); // en annen peer er upåvirket
+  });
+
+  it("fullt for PEEREN: utkastet er den eldste ikke-beviste fra SAMME peer - aldri en annen peers tilkobling, selv om den er eldre (en peer kan ikke kaste ut naboens)", () => {
+    const t = new ConnectionTracker(10, 2, 2);
+    const evicted: string[] = [];
+    admitOk(t, "b", () => evicted.push("b-eldst")); // eldst av alle, men en ANNEN peer
+    admitOk(t, "a", () => evicted.push("a1"));
+    admitOk(t, "a", () => evicted.push("a2")); // peer a er full (2)
+    admitOk(t, "a", () => evicted.push("a3")); // a1 (a sin eldste) kastes ut - ikke b-eldst
+    expect(evicted).toEqual(["a1"]);
+    expect(t.activeFor("a")).toBe(2);
+    expect(t.activeFor("b")).toBe(1);
+    admitOk(t, "a", () => evicted.push("a4")); // neste: a2
+    expect(evicted).toEqual(["a1", "a2"]);
+    expect(t.activeFor("b")).toBe(1);
   });
 
   it("fullt globalt: eldste ikke-beviste uansett peer kastes ut; en annen peers BEVISTE er trygge; alt bevist = avvist", () => {
@@ -614,6 +630,20 @@ describe("FIX-1 (F1): kontrollramme-flom (ping/pong) - ws svarer ikke lenger aut
     expect((await flood.waitClosed(6000)).code).toBe(1006);
   }, 20_000);
 
+  it("flagget «forespurt pong» nullstilles når serverens ping er besvart: en pong-flom ETTER første server-ping er ikke gratis", async () => {
+    // Uten nullstillingen holdt `pingOutstanding` seg sann for alltid etter første server-ping, og enhver ubedt pong var «et svar» (gratis).
+    gateway = await startGateway({ limits: { pingIntervalMs: 250, pingPongBurst: 1, pingPongPerSecond: 0.001, idleTimeoutMs: 10_000 } });
+    const client = await new TestClient(gateway.url).connect();
+    let serverPings = 0;
+    client.ws.on("ping", () => {
+      serverPings += 1;
+    });
+    await waitUntil(() => serverPings >= 1);
+    await sleep(40); // klientens automatiske svar er behandlet av serveren (flagget er nullstilt) - neste server-ping kommer først ca. 210 ms senere
+    for (let i = 0; i < 30; i++) client.ws.pong(Buffer.alloc(8, 0x62)); // ubedte pong (bøtta rommer ÉN)
+    expect((await client.waitClosed(3000)).code).toBe(1006);
+  });
+
   it("pong som SVAR på serverens egen ping er forespurt og koster ingen token (halvåpen-vernet kan ikke slå seg selv av)", async () => {
     // Bøtta har plass til ÉN ubedt pong og fylles nesten ikke på. Serveren pinger hvert 100. ms; en frisk klient svarer på hver ping.
     gateway = await startGateway({ limits: { pingIntervalMs: 100, pingPongBurst: 1, pingPongPerSecond: 0.001, idleTimeoutMs: 10_000 } });
@@ -793,6 +823,28 @@ describe("FIX-9 (F9): avviste sockets, og Piper-plassen følger prosessens liv",
     expect(Buffer.concat(frames).toString()).toBe("AAAABBBBCCCC");
     await sleep(50); // prosessen er død (exit) rett etter siste ramme
     expect(slots.inUse).toBe(0);
+  });
+
+  it("en piper drept av en SIGNAL (chunk-timeout gir SIGKILL, exitCode er null men signalCode satt): plassen frigjøres STRAKS - ikke først ved 5 s-sikkerhetstimeren", async () => {
+    const slots = new ProcessSlots(1, 100, 0);
+    const tts = new LocalPiperTts(`${FIXTURES}/mock-piper-hang.sh`, PIPER_MODEL, undefined, slots, 300);
+    const err = await (async () => {
+      for await (const _ of tts.synthesize("hei", undefined, { memorySpace: "personal", authority: "SERVER_VERIFIED" }).frames) void _;
+    })().catch((e: unknown) => e);
+    expect((err as Error).message).toBe("local_piper_timeout");
+    await sleep(100);
+    expect(slots.inUse).toBe(0); // uten `signalCode`-vakten i releaseWhenGone ventet `exit`-lytteren på en hendelse som allerede var sendt, og plassen kom først etter 5 s
+  });
+
+  it("killProcessGroup rører aldri en prosess som er død - verken exitCode eller signalCode (pid kan være gjenbrukt av en fremmed prosess)", () => {
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const proc = (exitCode: number | null, signalCode: string | null): Parameters<typeof killProcessGroup>[0] => ({ pid: 4242, killed: false, exitCode, signalCode }) as never;
+    killProcessGroup(proc(0, null), "SIGKILL");
+    killProcessGroup(proc(null, "SIGTERM"), "SIGKILL");
+    killProcessGroup(proc(null, "SIGKILL"), "SIGTERM");
+    expect(kill).not.toHaveBeenCalled();
+    killProcessGroup(proc(null, null), "SIGKILL"); // i live: hele gruppen (-pid)
+    expect(kill).toHaveBeenCalledExactlyOnceWith(-4242, "SIGKILL");
   });
 
   it("cancel() frigjør plassen når prosessen er DØD, ikke ved SIGTERM: en prosess som ignorerer SIGTERM holder plassen til SIGKILL-opptrappingen", async () => {

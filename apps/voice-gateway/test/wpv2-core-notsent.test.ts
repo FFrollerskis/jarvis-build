@@ -111,6 +111,13 @@ describe("FIX-5: klassifisering - kun BEVIS for at ingenting ble sendt frigjør 
     let deep: unknown = sysErr("ECONNREFUSED", "connect");
     for (let i = 0; i < 6; i++) deep = withCause(deep);
     expect(isRequestNotSent(deep)).toBe(false);
+    // Syscall-presedens: feilens EGEN syscall avgjør. En ikke-pre-send-syscall (read/write) kan aldri «reddes» av en nestet connect-årsak eller en aggregate under seg.
+    const readOverConnect = Object.assign(sysErr("ECONNRESET", "read"), { cause: sysErr("ECONNREFUSED", "connect") });
+    expect(isRequestNotSent(withCause(readOverConnect))).toBe(false);
+    const readAggregate = Object.assign(new AggregateError([sysErr("ECONNREFUSED", "connect")], "x"), { syscall: "write" });
+    expect(isRequestNotSent(withCause(readAggregate))).toBe(false);
+    const writeWithConnectCause = Object.assign(sysErr("EPIPE", "write"), { errors: [sysErr("ECONNREFUSED", "connect")] });
+    expect(isRequestNotSent(writeWithConnectCause)).toBe(false);
   });
 });
 
