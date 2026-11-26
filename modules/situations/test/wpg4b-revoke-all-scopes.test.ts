@@ -22,6 +22,29 @@ class Spy implements ToolTransport {
   calls = 0;
   async invoke(): Promise<{ external_id?: string; data?: JsonValue }> { this.calls += 1; return { external_id: `x-${this.calls}` }; }
 }
+
+const deferred = (): { promise: Promise<void>; resolve: () => void } => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+};
+/** Første kall blir stående «i flukt» (holder domenelåsen) til testen åpner porten; hver hendelse logges i EN felles rekkefølge, så rekkefølgen kan sammenlignes uten klokke. */
+class GatedSpy implements ToolTransport {
+  calls = 0;
+  readonly started = deferred();
+  readonly gate = deferred();
+  constructor(private readonly order: string[]) {}
+  async invoke(): Promise<{ external_id?: string; data?: JsonValue }> {
+    this.calls += 1;
+    this.order.push(`call:${this.calls}:start`);
+    if (this.calls === 1) {
+      this.started.resolve();
+      await this.gate.promise;
+    }
+    this.order.push(`call:${this.calls}:end`);
+    return { external_id: `x-${this.calls}` };
+  }
+}
 const toolDef = (tool_id: string, transport: ToolTransport): ToolDefinition => ({
   tool_id, action: "act", description: "t", input_schema: record({ situation_id: z.string().optional() }), capability_class: "B", scopes: [], reversible: true, rollback_procedure: "angre", idempotent_external: false,
   timeout_ms: 5000, rate_limit_per_minute: 100000, credential_ref: "TEST_TOKEN", output_trust: "internal", transport, autonomy_bindable: TEST_BINDABLE
@@ -185,5 +208,40 @@ describe("FIX-2/2b: domenebredt tilbakekall fjerner ALLE bindinger i domenet (ek
     await expect(db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", "person-g4-other")).rejects.toBeInstanceOf(SituationAutonomyUnauthorizedError);
     await expect(db.engine.clearAutonomyPolicy(TENANT_A, "home", "home", undefined)).rejects.toBeInstanceOf(SituationAutonomyUnauthorizedError);
     expect(await scopes()).toEqual([`home/${ROW_RULE}`, "home/*"].sort());
+  });
+
+  /** FIX-B (delta-review, mutant D08: `[domain]` -> `[]` i `clearAutonomyPolicyScopes`): domenelåsen er det som gjør at et tilbakekall ikke kan kappløpe med et auto-ACT-kall i flukt. */
+  it("tilbakekall under et PÅGÅENDE auto-ACT-kall venter på domenelåsen: clear returnerer først ETTER at kallet er ferdig, og INGEN kall starter etter at clear har returnert", async () => {
+    const order: string[] = [];
+    const spy = new GatedSpy(order);
+    const built = db.newGateway();
+    built.gateway.register(toolDef("lock_tool", spy));
+    await insertRow("*", "lock_tool", "active");
+    await insertRow(ROW_RULE, "lock_tool", "active");
+    for (let i = 0; i < 4; i++) await seedDoorSituation(`home:lock:${i}`);
+    const sweepP = db.engine.autoActPending(TENANT_A, "home", built.gateway, identity(TENANT_A, "home"));
+    await spy.started.promise; // første kall er i flukt og holder domenelåsen (porten er lukket)
+    expect(order).toEqual(["call:1:start"]);
+    let cleared = false;
+    const clearP = db.engine.clearAutonomyPolicyScopes(TENANT_A, "home", "home", OWNER).then((removed) => { cleared = true; order.push("clear:returned"); return removed; });
+    // Uten domenelåsen ville tilbakekallet vært ferdig på noen få millisekunder (én DELETE); med den står det og venter så lenge kallet er i flukt.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(cleared, "clear venter på domenelåsen mens kallet er i flukt").toBe(false);
+    expect(order, "ingenting er skjedd siden det første kallet startet").toEqual(["call:1:start"]);
+    expect(await scopes(), "radene står fortsatt: tilbakekallet har ikke kjørt").toEqual([`home/${ROW_RULE}`, "home/*"].sort());
+    spy.gate.resolve(); // kallet blir ferdig, låsen frigjøres
+    expect(await clearP).toEqual(["*", ROW_RULE]);
+    await sweepP;
+    const returned = order.indexOf("clear:returned");
+    expect(order.indexOf("call:1:end"), "det pågående kallet ble ferdig FØR clear returnerte").toBeGreaterThan(-1);
+    expect(order.indexOf("call:1:end")).toBeLessThan(returned);
+    expect(order.slice(returned + 1).filter((e) => e.endsWith(":start")), "INGEN kall starter etter at clear har returnert").toEqual([]);
+    const callsAtClear = spy.calls;
+    expect(callsAtClear).toBeLessThanOrEqual(2); // det i-flukt-kallet, og høyst ett som rakk låsen før clear (låsen er ikke ordnet av testen)
+    expect(await scopes()).toEqual([]);
+    // et nytt sveip etterpå: ingen binding, ingen utførelse
+    await seedDoorSituation("home:lock:after");
+    expect(await db.engine.autoActPending(TENANT_A, "home", built.gateway, identity(TENANT_A, "home"))).toMatchObject({ attempted: 0, succeeded: 0 });
+    expect(spy.calls).toBe(callsAtClear);
   });
 });
