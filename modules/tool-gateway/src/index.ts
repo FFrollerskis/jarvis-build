@@ -10,6 +10,8 @@ export * from "./transport-errors.ts";
 export * from "./policy-denied.ts";
 export * from "./after-accepted-mutation.ts";
 export * from "./class-d-pipeline.ts";
+// WP-AUTH2a (JARVIS-014): deterministisk klasse C-behandling (preflight, før/etter-diff, rollback-plan, forsterket audit); modus AV = identisk med main.
+export * from "./class-c-pipeline.ts";
 export * from "./finance-class-d.ts";
 export * from "./integrations.ts";
 export * from "./home-assistant.ts";

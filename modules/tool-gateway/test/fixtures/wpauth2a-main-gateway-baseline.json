@@ -1,0 +1,1371 @@
+{
+ "baseline": "origin/main",
+ "baseline_sha": "a5ef98b36075fb6b29267a7e90887388244d2794",
+ "scenarios": [
+  {
+   "id": "c.create.ok",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "ext-1",
+     "data": {
+      "n": 1
+     },
+     "output_trust": "internal",
+     "deduplicated": false
+    },
+    {
+     "ok": true,
+     "external_id": "ext-1",
+     "output_trust": "internal",
+     "deduplicated": true
+    }
+   ],
+   "calls": [
+    {
+     "transport": "c.create.ok",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "c.create.ok#k1",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "external_id": "ext-1",
+     "status": "succeeded",
+     "before_state": null,
+     "after_state": null,
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "rollback": "rull tilbake manuelt",
+      "external_id": "ext-1",
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    },
+    {
+     "type": "tool.deduplicated",
+     "decision": null,
+     "reason": null,
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": null,
+     "payload": {
+      "external_id": "ext-1",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "c.nokey.ok",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "ext-1",
+     "output_trust": "internal",
+     "deduplicated": false
+    },
+    {
+     "ok": true,
+     "external_id": "ext-2",
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "c.nokey.ok",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "c.nokey.ok",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "rollback": "rull tilbake manuelt",
+      "external_id": "ext-1",
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    },
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "rollback": "rull tilbake manuelt",
+      "external_id": "ext-2",
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "c.preflight.ok",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "ext-1",
+     "data": {
+      "changed": true
+     },
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "c.preflight.ok",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "c.preflight.ok",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "c.preflight.ok",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "c.preflight.ok#k1",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "external_id": "ext-1",
+     "status": "succeeded",
+     "before_state": {
+      "v": 1
+     },
+     "after_state": {
+      "v": 2
+     },
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "recovery": {
+       "snapshot": {
+        "v": 1
+       },
+       "procedure": "rull tilbake manuelt"
+      },
+      "rollback": "rull tilbake manuelt",
+      "after_state": {
+       "v": 2
+      },
+      "external_id": "ext-1",
+      "before_state": {
+       "v": 1
+      },
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "c.preflight.throws",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "ext-1",
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "c.preflight.throws",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "c.preflight.throws",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "c.preflight.throws",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "c.preflight.throws#k1",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "external_id": "ext-1",
+     "status": "succeeded",
+     "before_state": null,
+     "after_state": null,
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "recovery": {
+       "snapshot": null,
+       "procedure": "rull tilbake manuelt"
+      },
+      "rollback": "rull tilbake manuelt",
+      "after_state": null,
+      "external_id": "ext-1",
+      "before_state": null,
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "c.preflight.null",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "ext-1",
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "c.preflight.null",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "c.preflight.null",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "c.preflight.null",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "c.preflight.null#k1",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "external_id": "ext-1",
+     "status": "succeeded",
+     "before_state": null,
+     "after_state": null,
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "recovery": {
+       "snapshot": null,
+       "procedure": "rull tilbake manuelt"
+      },
+      "rollback": "rull tilbake manuelt",
+      "after_state": null,
+      "external_id": "ext-1",
+      "before_state": null,
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "c.mutation.fails_then_retry",
+   "results": [
+    {
+     "ok": false,
+     "reason": "tool_failed:vendor_500"
+    },
+    {
+     "ok": true,
+     "external_id": "ext-9",
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "c.mutation.fails_then_retry",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "c.mutation.fails_then_retry",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "c.mutation.fails_then_retry#k1",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "external_id": "ext-9",
+     "status": "succeeded",
+     "before_state": null,
+     "after_state": null,
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.failed",
+     "decision": "DENY",
+     "reason": "vendor_500",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": "C",
+     "payload": {
+      "credential_ref": "GEN_C_TOKEN",
+      "outcome_unknown": false,
+      "policy_decision_id": "<id>"
+     }
+    },
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "rollback": "rull tilbake manuelt",
+      "external_id": "ext-9",
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "c.mutation.timeout_then_replay",
+   "results": [
+    {
+     "ok": false,
+     "reason": "tool_failed:tool_timeout"
+    },
+    {
+     "ok": false,
+     "reason": "postcondition_unverified:tool_timeout_outcome_unknown"
+    }
+   ],
+   "calls": [
+    {
+     "transport": "c.mutation.timeout_then_replay",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "c.mutation.timeout_then_replay#k1",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "external_id": null,
+     "status": "unverified",
+     "before_state": null,
+     "after_state": null,
+     "postcondition_reason": "postcondition_unverified:tool_timeout_outcome_unknown"
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.failed",
+     "decision": "DENY",
+     "reason": "tool_timeout",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": "C",
+     "payload": {
+      "credential_ref": "GEN_C_TOKEN",
+      "outcome_unknown": true,
+      "policy_decision_id": "<id>"
+     }
+    },
+    {
+     "type": "tool.postcondition_unverified",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": "C",
+     "payload": {
+      "reason": "postcondition_unverified:tool_timeout_outcome_unknown",
+      "replayed": true,
+      "external_id": null,
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "c.invalid_params",
+   "results": [
+    {
+     "ok": false,
+     "reason": "invalid_parameters"
+    }
+   ],
+   "calls": [],
+   "ledger": [],
+   "audit": [
+    {
+     "type": "tool.denied",
+     "decision": "DENY",
+     "reason": "invalid_parameters",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": null,
+     "payload": {}
+    }
+   ]
+  },
+  {
+   "id": "c.credential_missing",
+   "results": [
+    {
+     "ok": false,
+     "reason": "credential_unavailable"
+    }
+   ],
+   "calls": [],
+   "ledger": [],
+   "audit": [
+    {
+     "type": "tool.denied",
+     "decision": "DENY",
+     "reason": "credential_unavailable",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": null,
+     "payload": {
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "c.frozen",
+   "results": [
+    {
+     "ok": false,
+     "reason": "connector_frozen"
+    }
+   ],
+   "calls": [],
+   "ledger": [],
+   "audit": [
+    {
+     "type": "tool.denied",
+     "decision": "DENY",
+     "reason": "connector_frozen",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": null,
+     "payload": {
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "c.revoked",
+   "results": [
+    {
+     "ok": false,
+     "reason": "credential_revoked"
+    }
+   ],
+   "calls": [],
+   "ledger": [],
+   "audit": [
+    {
+     "type": "tool.denied",
+     "decision": "DENY",
+     "reason": "credential_revoked",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": null,
+     "payload": {
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "c.kill_switch",
+   "results": [
+    {
+     "ok": false,
+     "reason": "kill_switch_active"
+    }
+   ],
+   "calls": [],
+   "ledger": [],
+   "audit": [
+    {
+     "type": "tool.denied",
+     "decision": "DENY",
+     "reason": "kill_switch_active",
+     "tool_id": "gen-c",
+     "action": "mutate",
+     "capability_class": null,
+     "payload": {
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "d.chain.ok",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "ext-d",
+     "output_trust": "internal",
+     "deduplicated": false,
+     "notified": true
+    }
+   ],
+   "calls": [
+    {
+     "transport": "d.chain.ok",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "d.chain.ok",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "d.chain.ok",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "d.chain.ok#k1",
+     "tool_id": "gen-d",
+     "action": "mutate",
+     "external_id": "ext-d",
+     "status": "succeeded",
+     "before_state": {
+      "v": 1
+     },
+     "after_state": {
+      "v": 2
+     },
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-d",
+     "action": "mutate",
+     "capability_class": "D",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "recovery": {
+       "snapshot": {
+        "v": 1
+       },
+       "procedure": "rull tilbake manuelt"
+      },
+      "rollback": "rull tilbake manuelt",
+      "after_state": {
+       "v": 2
+      },
+      "external_id": "ext-d",
+      "before_state": {
+       "v": 1
+      },
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "d.validator.invalid",
+   "results": [
+    {
+     "ok": false,
+     "reason": "preflight_invalid:bad_state"
+    }
+   ],
+   "calls": [
+    {
+     "transport": "d.validator.invalid",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [],
+   "audit": [
+    {
+     "type": "tool.denied",
+     "decision": "DENY",
+     "reason": "preflight_invalid:bad_state",
+     "tool_id": "gen-d",
+     "action": "mutate",
+     "capability_class": null,
+     "payload": {
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "d.postcondition.mismatch",
+   "results": [
+    {
+     "ok": false,
+     "reason": "postcondition_mismatch"
+    }
+   ],
+   "calls": [
+    {
+     "transport": "d.postcondition.mismatch",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "d.postcondition.mismatch",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    },
+    {
+     "transport": "d.postcondition.mismatch",
+     "action": "read_state",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "d.postcondition.mismatch#k1",
+     "tool_id": "gen-d",
+     "action": "mutate",
+     "external_id": "ext-d",
+     "status": "unverified",
+     "before_state": {
+      "v": 1
+     },
+     "after_state": {
+      "v": 1
+     },
+     "postcondition_reason": "postcondition_mismatch"
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.postcondition_unverified",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-d",
+     "action": "mutate",
+     "capability_class": "D",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "recovery": {
+       "snapshot": {
+        "v": 1
+       },
+       "procedure": "rull tilbake manuelt"
+      },
+      "rollback": "rull tilbake manuelt",
+      "after_state": {
+       "v": 1
+      },
+      "external_id": "ext-d",
+      "before_state": {
+       "v": 1
+      },
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "a.read.ok",
+   "results": [
+    {
+     "ok": true,
+     "data": {
+      "rows": [
+       1,
+       2
+      ]
+     },
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "a.read.ok",
+     "action": "read",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-a",
+     "action": "read",
+     "capability_class": "A",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "rollback": "ingen (lesing)",
+      "external_id": null,
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "b.write.ok",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "ext-b",
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "b.write.ok",
+     "action": "mutate",
+     "parameters": {
+      "target": "a"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "b.write.ok#k1",
+     "tool_id": "gen-b",
+     "action": "mutate",
+     "external_id": "ext-b",
+     "status": "succeeded",
+     "before_state": null,
+     "after_state": null,
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "gen-b",
+     "action": "mutate",
+     "capability_class": "B",
+     "payload": {
+      "scopes": [
+       "gen:write"
+      ],
+      "rollback": "rull tilbake manuelt",
+      "external_id": "ext-b",
+      "credential_ref": "GEN_C_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "prod.github.create_pr",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "7",
+     "data": {
+      "number": "7",
+      "html_url": "https://example.invalid/pr/7",
+      "created": true
+     },
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "prod.github.create_pr",
+     "action": "create_pr",
+     "parameters": {
+      "repo": "owner/repo",
+      "branch": "feature/x",
+      "title": "Endring",
+      "base": "main"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "prod.github.create_pr#k1",
+     "tool_id": "github",
+     "action": "create_pr",
+     "external_id": "7",
+     "status": "succeeded",
+     "before_state": null,
+     "after_state": null,
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "github",
+     "action": "create_pr",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "repo:write-pr"
+      ],
+      "rollback": "lukk PR (github.update_pr med state=closed)",
+      "external_id": "7",
+      "credential_ref": "JARVIS_GITHUB_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "prod.drive.rename",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "f1",
+     "data": {
+      "id": "f1",
+      "name": "nytt"
+     },
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "prod.drive.rename",
+     "action": "get_metadata",
+     "parameters": {
+      "file_id": "f1",
+      "new_name": "nytt"
+     }
+    },
+    {
+     "transport": "prod.drive.rename",
+     "action": "rename",
+     "parameters": {
+      "file_id": "f1",
+      "new_name": "nytt"
+     }
+    },
+    {
+     "transport": "prod.drive.rename",
+     "action": "get_metadata",
+     "parameters": {
+      "file_id": "f1",
+      "new_name": "nytt"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "prod.drive.rename#k1",
+     "tool_id": "drive",
+     "action": "rename",
+     "external_id": "f1",
+     "status": "succeeded",
+     "before_state": {
+      "id": "f1",
+      "name": "gammelt",
+      "parents": [
+       "p1"
+      ],
+      "trashed": false,
+      "mimeType": "text/plain",
+      "modifiedTime": "2026-01-01T00:00:00.000Z",
+      "headRevisionId": "r1"
+     },
+     "after_state": {
+      "id": "f1",
+      "name": "nytt",
+      "parents": [
+       "p1"
+      ],
+      "trashed": false,
+      "mimeType": "text/plain",
+      "modifiedTime": "2026-01-01T00:00:01.000Z",
+      "headRevisionId": "r1"
+     },
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "drive",
+     "action": "rename",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "drive.write"
+      ],
+      "recovery": {
+       "snapshot": {
+        "id": "f1",
+        "name": "gammelt",
+        "parents": [
+         "p1"
+        ],
+        "trashed": false,
+        "mimeType": "text/plain",
+        "modifiedTime": "2026-01-01T00:00:00.000Z",
+        "headRevisionId": "r1"
+       },
+       "procedure": "gi tilbake det opprinnelige navnet"
+      },
+      "rollback": "gi tilbake det opprinnelige navnet",
+      "after_state": {
+       "id": "f1",
+       "name": "nytt",
+       "parents": [
+        "p1"
+       ],
+       "trashed": false,
+       "mimeType": "text/plain",
+       "modifiedTime": "2026-01-01T00:00:01.000Z",
+       "headRevisionId": "r1"
+      },
+      "external_id": "f1",
+      "before_state": {
+       "id": "f1",
+       "name": "gammelt",
+       "parents": [
+        "p1"
+       ],
+       "trashed": false,
+       "mimeType": "text/plain",
+       "modifiedTime": "2026-01-01T00:00:00.000Z",
+       "headRevisionId": "r1"
+      },
+      "credential_ref": "JARVIS_GOOGLE_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "prod.drive.trash_fails",
+   "results": [
+    {
+     "ok": false,
+     "reason": "tool_failed:drive_not_found_f1"
+    }
+   ],
+   "calls": [
+    {
+     "transport": "prod.drive.trash_fails",
+     "action": "get_metadata",
+     "parameters": {
+      "file_id": "f1"
+     }
+    },
+    {
+     "transport": "prod.drive.trash_fails",
+     "action": "trash",
+     "parameters": {
+      "file_id": "f1"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "prod.drive.trash_fails#k1",
+     "tool_id": "drive",
+     "action": "trash",
+     "external_id": null,
+     "status": "failed",
+     "before_state": {
+      "id": "f1",
+      "name": "a",
+      "parents": [],
+      "trashed": false,
+      "mimeType": "text/plain",
+      "modifiedTime": null,
+      "headRevisionId": null
+     },
+     "after_state": null,
+     "postcondition_reason": "tool_failed:drive_not_found_f1"
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.failed",
+     "decision": "DENY",
+     "reason": "drive_not_found_f1",
+     "tool_id": "drive",
+     "action": "trash",
+     "capability_class": "C",
+     "payload": {
+      "credential_ref": "JARVIS_GOOGLE_TOKEN",
+      "outcome_unknown": false,
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "prod.vercel.rollback_deployment",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "rollback:dpl_1",
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "prod.vercel.rollback_deployment",
+     "action": "rollback_deployment",
+     "parameters": {
+      "project": "p1",
+      "deployment_id": "dpl_1"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "prod.vercel.rollback_deployment#k1",
+     "tool_id": "vercel",
+     "action": "rollback_deployment",
+     "external_id": "rollback:dpl_1",
+     "status": "succeeded",
+     "before_state": null,
+     "after_state": null,
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "vercel",
+     "action": "rollback_deployment",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "deployments:write"
+      ],
+      "rollback": "promoter den nyere deploymenten igjen via promote_deployment",
+      "external_id": "rollback:dpl_1",
+      "credential_ref": "JARVIS_VERCEL_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "prod.business.update_lead_status",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "lead-1",
+     "data": {
+      "lead_id": "lead-1",
+      "status": "qualified"
+     },
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "prod.business.update_lead_status",
+     "action": "inspect_lead",
+     "parameters": {
+      "tenant_id": "tenant-a",
+      "lead_id": "lead-1",
+      "status": "qualified"
+     }
+    },
+    {
+     "transport": "prod.business.update_lead_status",
+     "action": "update_lead_status",
+     "parameters": {
+      "tenant_id": "tenant-a",
+      "lead_id": "lead-1",
+      "status": "qualified"
+     }
+    },
+    {
+     "transport": "prod.business.update_lead_status",
+     "action": "inspect_lead",
+     "parameters": {
+      "tenant_id": "tenant-a",
+      "lead_id": "lead-1",
+      "status": "qualified"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "prod.business.update_lead_status#k1",
+     "tool_id": "business",
+     "action": "update_lead_status",
+     "external_id": "lead-1",
+     "status": "succeeded",
+     "before_state": {
+      "status": "new",
+      "lead_id": "lead-1"
+     },
+     "after_state": {
+      "status": "qualified",
+      "lead_id": "lead-1"
+     },
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "business",
+     "action": "update_lead_status",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "business.write"
+      ],
+      "recovery": {
+       "snapshot": {
+        "status": "new",
+        "lead_id": "lead-1"
+       },
+       "procedure": "sett status tilbake til forrige verdi"
+      },
+      "rollback": "sett status tilbake til forrige verdi",
+      "after_state": {
+       "status": "qualified",
+       "lead_id": "lead-1"
+      },
+      "external_id": "lead-1",
+      "before_state": {
+       "status": "new",
+       "lead_id": "lead-1"
+      },
+      "credential_ref": "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  },
+  {
+   "id": "prod.growth.set_campaign_status",
+   "results": [
+    {
+     "ok": true,
+     "external_id": "camp-1",
+     "data": {
+      "campaign_id": "camp-1",
+      "status": "paused"
+     },
+     "output_trust": "internal",
+     "deduplicated": false
+    }
+   ],
+   "calls": [
+    {
+     "transport": "prod.growth.set_campaign_status",
+     "action": "set_campaign_status",
+     "parameters": {
+      "tenant_id": "tenant-a",
+      "campaign_id": "camp-1",
+      "status": "paused"
+     }
+    }
+   ],
+   "ledger": [
+    {
+     "idempotency_key": "prod.growth.set_campaign_status#k1",
+     "tool_id": "growth",
+     "action": "set_campaign_status",
+     "external_id": "camp-1",
+     "status": "succeeded",
+     "before_state": null,
+     "after_state": null,
+     "postcondition_reason": null
+    }
+   ],
+   "audit": [
+    {
+     "type": "tool.executed",
+     "decision": "ALLOW",
+     "reason": null,
+     "tool_id": "growth",
+     "action": "set_campaign_status",
+     "capability_class": "C",
+     "payload": {
+      "scopes": [
+       "growth.write"
+      ],
+      "rollback": "eksplisitt nytt set_campaign_status-kall tilbake til forrige status (unntatt korreksjonsveien fra 'ended', som kun går til 'draft')",
+      "external_id": "camp-1",
+      "credential_ref": "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      "policy_decision_id": "<id>"
+     }
+    }
+   ]
+  }
+ ]
+}
