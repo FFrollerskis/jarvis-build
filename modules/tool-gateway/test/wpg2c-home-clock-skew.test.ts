@@ -22,8 +22,7 @@ describe("lese-handlingen bærer målt klokkeskjevhet (HTTP-`Date`)", () => {
     const out = await read();
     expect(Number.isInteger(out["clock_skew_ms"])).toBe(true);
     expect(Math.abs(out["clock_skew_ms"] as number)).toBeLessThanOrEqual(2_000);
-    const { clock_skew_ms: _skew, ...rest } = out;
-    expect(Object.keys(rest).sort()).toEqual(["domain", "entity_id", "last_changed", "locked", "settled", "state", "usable"]);
+    expect(Object.keys(out).filter((k) => k !== "clock_skew_ms").sort()).toEqual(["domain", "entity_id", "last_changed", "locked", "settled", "state", "usable"]);
   });
 
   it("HA-klokken 5 min BAK og 5 min FREM måles som ca. -300 000 og +300 000 ms (innen sekundoppløsningen)", async () => {
