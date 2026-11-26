@@ -75,6 +75,11 @@ export const WEBHOOK_MAX_BYTES = 256 * 1024;
 export const WEBHOOK_MAX_BYTES_BY_PROVIDER: Readonly<Record<CommsWebhookProvider, number>> = {
   slack: WEBHOOK_MAX_BYTES, meta: 4 * 1024 * 1024, twilio: WEBHOOK_MAX_BYTES, telnyx: WEBHOOK_MAX_BYTES
 };
+/**
+ * FIX-2 (fiks-runde 2): årsakskodene ruten logger når den avviser en forespørsel FØR signaturen er vurdert: kroppen over byte-grensen (413), kroppen ble ikke ferdig lest innen lesefristen (408, forbindelsen lukkes) eller for mange store kropper leses
+ * samtidig (503, `Retry-After`). Aldri innhold, hode eller avsender.
+ */
+export type PreSignatureRejection = "payload_too_large" | "body_read_timeout" | "webhook_busy";
 /** Avmeldings-/gjenopptakshendelser beholdes lenge (kun pseudonym, ingen tekst): en gjenspilt gammel START skal ikke kunne oppheve en nyere avmelding. */
 const OPT_EVENT_RETENTION_DAYS = 1825;
 const EXCERPT_MAX = 2000;
@@ -238,10 +243,10 @@ export class CommsWebhookService {
   }
 
   /**
-   * FIX-1: ruten avviste en forespørsel FØR signaturen ble vurdert (kroppen over leverandørens byte-grense, 413). Loggføres med leverandør og årsakskode - aldri kropp, hode eller avsender. Uten dette var en gyldig, stor batch som
-   * ble avvist usynlig for driften.
+   * FIX-1/FIX-2: ruten avviste en forespørsel FØR signaturen ble vurdert (kroppen over leverandørens byte-grense 413, for treg lesing 408, eller for mange samtidige store lesinger 503). Loggføres med leverandør og årsakskode - aldri kropp, hode eller avsender.
+   * Uten dette var en gyldig, stor batch som ble avvist usynlig for driften.
    */
-  noteRejectedBeforeSignature(provider: CommsWebhookProvider, reason: "payload_too_large"): void {
+  noteRejectedBeforeSignature(provider: CommsWebhookProvider, reason: PreSignatureRejection): void {
     this.deps.warn?.({ msg: "comms_webhook_rejected", provider, reason });
   }
 

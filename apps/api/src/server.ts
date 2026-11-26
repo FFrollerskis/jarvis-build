@@ -29,7 +29,7 @@ import { CONTROL_CENTER_READ_TOOLS, isControlCenterId, isExtensionControlCenterI
 import { GROWTH_EXPERIMENT_TOOL_ACTIONS, executeGrowthWrite, type GrowthWriteExecutorDeps, type GrowthWriteStatusFilter } from "@jarvis/growth";
 import {
   COMMS_CONTACT_READ_ACTIONS, COMMS_KNOWN_ACTIONS, COMMS_MEETING_READ_ACTIONS, COMMS_READ_ACTIONS, COMMS_VENDOR_READ_ACTIONS, WEBHOOK_MAX_BYTES_BY_PROVIDER as COMMS_WEBHOOK_MAX_BYTES_BY_PROVIDER, executeCommsOwnerAction, previewCommsSend,
-  type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel
+  type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel, type PreSignatureRejection
 } from "@jarvis/comms";
 import type { ConversationEngine } from "./conversation.ts";
 import { handlePersonalRoute, type PersonalApiDeps } from "./personal-routes.ts";
@@ -40,7 +40,7 @@ import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import { confirmationRestrictsOrigin } from "./restricted-context-guard.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
-  FORBIDDEN_IDENTITY_BODY_KEYS, HttpError, RateLimiter, clientKey, newRequestId, readJsonBody, readRawBodyLimited
+  FORBIDDEN_IDENTITY_BODY_KEYS, HttpError, RateLimiter, clientKey, newRequestId, readJsonBody, readRawBodyGuarded, readRawBodyLimited, webhookBodyGuardFor, type WebhookBodyReadConfig
 } from "./http-guard.ts";
 
 /**
@@ -193,7 +193,8 @@ export interface ApiDeps {
    *    (policy, eier-binding, klasse D-kjeden, idempotens, varsling). Ruten har ingen egen sendevei og ingen egen sjekk å omgå, og er ALDRI et modellverktøy.
    */
   comms?: {
-    webhooks?: { service: CommsWebhookService; providers: ReadonlySet<CommsWebhookProvider> };
+    /** `bodyRead` (FIX-2, runde 2): lesefrist og global samtidighetsgrense for store kropper; utelatt = standardverdiene (`DEFAULT_WEBHOOK_BODY_READ`). Kun testene setter den. */
+    webhooks?: { service: CommsWebhookService; providers: ReadonlySet<CommsWebhookProvider>; bodyRead?: Partial<WebhookBodyReadConfig> };
     outbound?: { gateway: ToolGateway; funnel: OutboundFunnel };
   };
   /**
@@ -1893,12 +1894,16 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     // FIX-1: byte-grensen er per leverandør (Meta 4 MiB, øvrige 256 KB) og håndheves FØR signaturen. Et avslag (413) logges med leverandør og årsakskode - aldri innhold - så en gyldig, stor batch som avvises ikke er usynlig for driften.
     let rawBody: Buffer = Buffer.alloc(0);
     if (req.method === "POST") {
+      // FIX-2 (runde 2): lesefrist og GLOBAL samtidighetsgrense for store kropper (Meta, 4 MiB); en avvist lesing (413 for stor, 408 for treg, 503 `webhook_busy` for full) logges med leverandør og årsakskode - aldri innhold.
+      const bodyGuard = webhookBodyGuardFor(deps.comms.webhooks, deps.comms.webhooks.bodyRead);
       try {
-        rawBody = await readRawBodyLimited(req, COMMS_WEBHOOK_MAX_BYTES_BY_PROVIDER[commsWebhookProvider]);
+        rawBody = await readRawBodyGuarded(req, COMMS_WEBHOOK_MAX_BYTES_BY_PROVIDER[commsWebhookProvider], bodyGuard);
       } catch (err) {
-        if (err instanceof HttpError && err.status === 413) {
-          // En loggfeil skal aldri endre svaret: leverandøren skal fortsatt få 413 (ikke 500) selv om logghjelperen kaster.
-          try { deps.comms.webhooks.service.noteRejectedBeforeSignature(commsWebhookProvider, "payload_too_large"); } catch { /* bevisst ignorert */ }
+        if (err instanceof HttpError) {
+          // 503: be leverandøren prøve igjen om litt, og lukk forbindelsen så resten av den store kroppen ikke leses videre.
+          if (err.status === 503) { res.setHeader("retry-after", String(bodyGuard.config.retryAfterSeconds)); res.setHeader("connection", "close"); }
+          // En loggfeil skal aldri endre svaret: leverandøren skal fortsatt få 413/503 (ikke 500) selv om logghjelperen kaster.
+          try { deps.comms.webhooks.service.noteRejectedBeforeSignature(commsWebhookProvider, err.code as PreSignatureRejection); } catch { /* bevisst ignorert */ }
         }
         throw err;
       }
