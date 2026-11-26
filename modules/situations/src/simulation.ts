@@ -226,7 +226,9 @@ export class SimulationService {
     if (gathered.pol === undefined) binding = { bound: false, tool_id: null, action: null, risk_class: null, step_up_required: null };
     else {
       const info = this.toolInfoOf(gathered.pol.tool_id, gathered.pol.action);
-      binding = { bound: true, tool_id: gathered.pol.tool_id, action: gathered.pol.action, risk_class: info?.risk_class ?? null, step_up_required: info === null ? null : info.step_up_required, bindable: info === null ? null : info.bindable };
+      // WP-G4b fiks-runde 1 (FIX-10, review A LOW-3): en handling UTEN kjent definisjon (ikke registrert) er ikke bindbar (fail-closed, samme som motoren: `autonomyBindBlocker` gir `action_not_bindable` for en ukjent definisjon);
+      // risikoklasse og step-up er fortsatt ukjente (`null`: ingen påstand), men hinderet settes.
+      binding = { bound: true, tool_id: gathered.pol.tool_id, action: gathered.pol.action, risk_class: info?.risk_class ?? null, step_up_required: info === null ? null : info.step_up_required, bindable: info === null ? false : info.bindable };
     }
     return simulateCounterfactual({ situation: gathered.situation, rule_key: gathered.ruleKey, similar: gathered.similar, binding, nowMs: this.now() });
   }

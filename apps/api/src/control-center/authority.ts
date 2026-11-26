@@ -8,7 +8,7 @@ import type { PolicyAuditSinkStats } from "@jarvis/core";
 import { budgetConfigFromEnv } from "@jarvis/model-gateway";
 import { resolveAuthorityMode, type AuthorityConfig, type InfraExecutionGate, type KillSwitch, type OwnerControls, type PolicyAuditStats } from "@jarvis/policy";
 import { allowedReposFromEnv } from "@jarvis/tasks";
-import { autonomyActionBlocker, autonomyBindBlocker } from "@jarvis/situations";
+import { autonomyBindBlocker } from "@jarvis/situations";
 import {
   assertManifestInvariants, buildToolManifest, configuredGithubRepo, githubReposUnlocked, parseDockerMutationTargets, parseGceMutationTargets,
   ToolManifestViolationError, type ToolGateway, type ToolManifestEntry
@@ -292,13 +292,14 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
           const scopeKey = p.scope_key ?? "*";
           const scoped = scopeKey !== "*";
           const itemId = scoped ? `${p.memory_space_id}:${p.domain}:${scopeKey}` : `${p.memory_space_id}:${p.domain}`;
-          // WP-G4b K1 (D-484): en lagret binding til en handling som ikke (lenger) er bindbar til autonom ACT (fysisk, eller definisjonen erklærer ikke `autonomy_bindable`) utføres ALDRI og slettes aldri; den vises her så eieren ser
-          // at den ikke virker. Kun når definisjonen er kjent i registeret (eller handlingen er fysisk): en ukjent handling i en ren test-/delvis-oppsett gir ingen påstand.
-          const notBindable = deps.toolGateway.get(p.tool_id, p.action) !== undefined || autonomyActionBlocker(p.tool_id, p.action) !== null ? autonomyBindBlocker(p.tool_id, p.action, (t, a) => deps.toolGateway.get(t, a)) : null;
+          // WP-G4b K1 (D-484): en lagret binding til en handling som ikke (lenger) er bindbar til autonom ACT (fysisk, definisjonen erklærer ikke `autonomy_bindable`, eller handlingen er ikke registrert i det hele tatt) utføres ALDRI
+          // og slettes aldri; den vises her så eieren ser at den ikke virker. FIX-10 (review A LOW-3 / B L5): en UKJENT handling gir også WARN (motoren nekter den uansett; tidligere stod den som OK her).
+          const known = deps.toolGateway.get(p.tool_id, p.action) !== undefined;
+          const notBindable = autonomyBindBlocker(p.tool_id, p.action, (t, a) => deps.toolGateway.get(t, a));
           const inDomain = groups.get(`${p.memory_space_id}:${p.domain}`) ?? [p];
           return controlItem({
             id: itemId, label: `${p.domain} (${p.memory_space_id})${scoped ? ` · ${scopeKey}` : ""}`, status: pauseUnknown ? "UNKNOWN" : p.enabled && (paused || notBindable !== null) ? "WARN" : "OK", observed_at: p.updated_at,
-            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${scoped ? ` · gjelder KUN skopet ${scopeKey} (resten av domenet er uberørt; «Tilbakekall autonomi» for domenet fjerner den sammen med resten, eller den fjernes alene med situations.clear_autonomy_policy)` : ""}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${notBindable !== null ? ` · UTFØRES IKKE autonomt (${notBindable.code === "physical_action_not_bindable" ? "fysisk/kritisk handling" : "definisjonen erklærer ikke handlingen bindbar til autonom ACT"}); bindingen er ikke slettet - fjern eller erstatt den` : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
+            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${scoped ? ` · gjelder KUN skopet ${scopeKey} (resten av domenet er uberørt; «Tilbakekall autonomi» for domenet fjerner den sammen med resten, eller den fjernes alene med situations.clear_autonomy_policy)` : ""}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${notBindable !== null ? ` · UTFØRES IKKE autonomt (${notBindable.code === "physical_action_not_bindable" ? "fysisk/kritisk handling" : known ? "definisjonen erklærer ikke handlingen bindbar til autonom ACT" : "handlingen er ikke registrert i verktøyregisteret (ukjent verktøy/handling)"}); bindingen er ikke slettet - fjern eller erstatt den` : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
             facts: { tool: p.tool_id, action: p.action, ...(scoped ? { scope: scopeKey } : {}), ...(!scoped && inDomain.length > 1 ? { bindings_in_domain: inDomain.length } : {}), risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id, ...(notBindable !== null ? { not_bindable: notBindable.code } : {}) }
           });
         });

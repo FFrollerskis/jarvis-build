@@ -183,6 +183,21 @@ describe("seksjonene og eier-/delegert autoritet", () => {
     expect(scoped.facts).not.toHaveProperty("not_bindable");
   });
 
+  it("WP-G4b fiks-runde 1 (FIX-10, review A LOW-3 / B L5): en lagret binding til en UKJENT handling (ikke registrert) er WARN med forklaring (ikke OK); en avslått slik rad er ikke en advarsel; bindingen er ikke slettet", async () => {
+    const r = await build({ policies: [
+      { memory_space_id: "business", domain: "ops", scope_key: "*", tool_id: "ukjent_verktoy", action: "handling", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "business", domain: "ops2", scope_key: "*", tool_id: "ukjent_verktoy", action: "handling", enabled: false, updated_at: ago(30 * H) }
+    ] }).run();
+    const unknown = item(r, "autonomy", "business:ops");
+    expect(unknown.status).toBe("WARN");
+    expect(unknown.detail_no).toContain("UTFØRES IKKE autonomt");
+    expect(unknown.detail_no).toContain("ikke registrert i verktøyregisteret");
+    expect(unknown.detail_no).toContain("ikke slettet");
+    expect(unknown.facts).toMatchObject({ not_bindable: "action_not_bindable", risk_class: "ukjent", enabled: true });
+    expect(item(r, "autonomy", "business:ops2").status).toBe("OK"); // avslått = virker ikke uansett
+    expect(section(r, "autonomy").items).toHaveLength(2);
+  });
+
   it("WP-G4b fiks-runde 1 (FIX-2/2b): «Tilbakekall autonomi» er DOMENEBREDT: ÉN knapp per (rom, domene) som sier at ALLE bindinger i domenet fjernes (også regel-/kategoribindinger og rene smale rader); kun økta sitt eget rom tilbys", async () => {
     const policies = [
       { memory_space_id: "personal", domain: "home", scope_key: "*", tool_id: "telegram", action: "notify", enabled: true, updated_at: ago(30 * H) },
