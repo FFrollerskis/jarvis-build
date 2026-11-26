@@ -186,7 +186,7 @@ describe("set: eierens setting (PUT med absolutte verdier)", () => {
     const res = await set({ retention_days: 60, snapshot_retention_days: 14 });
     expect(res.status, res.text).toBe(200);
     expect(res.body["ok"]).toBe(true);
-    expect(res.body["data"]).toMatchObject({ changed: true, shortened: { retention_days: false, snapshot_retention_days: false }, retention: { configured: true, retention_days: 60, snapshot_retention_days: 14, effective_snapshot_retention_days: 14, ...STATIC_PART } });
+    expect(res.body["data"]).toMatchObject({ changed: true, shortened: [], retention: { configured: true, retention_days: 60, snapshot_retention_days: 14, effective_snapshot_retention_days: 14, ...STATIC_PART } });
     expect((await get()).body["data"]["retention"]).toEqual(res.body["data"]["retention"]);
     expect(await row()).toMatchObject({ retention_days: 60, snapshot_retention_days: 14, actor_person_id: T.owner });
     expect((await vision.getRetentionPolicy(T.tenant, "home"))?.retention_days).toBe(60);
@@ -214,7 +214,7 @@ describe("set: eierens setting (PUT med absolutte verdier)", () => {
     for (let i = 0; i < 3; i += 1) {
       const again = await set({ retention_days: 45, snapshot_retention_days: 10 });
       expect(again.status).toBe(200);
-      expect(again.body["data"]).toMatchObject({ changed: false, shortened: { retention_days: false, snapshot_retention_days: false } });
+      expect(again.body["data"]).toMatchObject({ changed: false, shortened: [] });
       expect(again.body["data"]["retention"]).toEqual(first.body["data"]["retention"]);
     }
     expect(await row()).toEqual(rowBefore);
@@ -307,9 +307,12 @@ describe("typet bekreftelse KUN for forkorting (effektivt kortere hendelses- ell
   it("riktig bekreftelse (`confirm: true` + `confirm_memory_space` = grantets space): forkortingen utføres, svaret sier hva som ble kortere, og revisjonen bærer `shortened` og `confirmed`", async () => {
     const res = await set({ retention_days: 20, snapshot_retention_days: 14, confirm: true, confirm_memory_space: "home" });
     expect(res.status, res.text).toBe(200);
-    expect(res.body["data"]).toMatchObject({ changed: true, shortened: { retention_days: true, snapshot_retention_days: false }, retention: { retention_days: 20, snapshot_retention_days: 14 } });
+    expect(res.body["data"]).toMatchObject({ changed: true, shortened: ["retention_days"], retention: { retention_days: 20, snapshot_retention_days: 14 } });
     const audit = (await db.admin.query(`SELECT payload FROM audit_events WHERE tenant_id = $1 AND type = 'vision.retention_set' ORDER BY audit_id DESC LIMIT 1`, [T.tenant])).rows[0] as { payload: Json };
     expect(audit.payload).toMatchObject({ previous_retention_days: 60, retention_days: 20, shortened: ["retention_days"], confirmed: true });
+    // hendelsesvinduet 20 -> 5 klemmer også bildevinduet (effektivt 14 -> 5): begge navnene, i samme form som i 409-svaret og revisjonen
+    const both = await set({ retention_days: 5, snapshot_retention_days: null, confirm: true, confirm_memory_space: "home" });
+    expect(both.body["data"]).toMatchObject({ changed: true, shortened: ["retention_days", "snapshot_retention_days"], retention: { retention_days: 5, snapshot_retention_days: null, effective_snapshot_retention_days: 5 } });
   });
 
   it("ekkoet er grantets space: en eier-økt i et ANNET space må ekko sitt eget, og kan ikke bruke et annet space sin bekreftelse", async () => {
@@ -324,7 +327,7 @@ describe("typet bekreftelse KUN for forkorting (effektivt kortere hendelses- ell
   it("forlengelse og uendret krever ingen bekreftelse, og en overflødig bekreftelse er ufarlig", async () => {
     expect((await set({ retention_days: 120, snapshot_retention_days: 14 })).status).toBe(200);
     expect((await set({ retention_days: 120, snapshot_retention_days: 30 })).status).toBe(200);
-    expect((await set({ retention_days: 200, snapshot_retention_days: 30, confirm: true, confirm_memory_space: "home" })).body["data"]).toMatchObject({ changed: true, shortened: { retention_days: false, snapshot_retention_days: false } });
+    expect((await set({ retention_days: 200, snapshot_retention_days: 30, confirm: true, confirm_memory_space: "home" })).body["data"]).toMatchObject({ changed: true, shortened: [] });
     const audit = (await db.admin.query(`SELECT payload FROM audit_events WHERE tenant_id = $1 AND type = 'vision.retention_set' ORDER BY audit_id DESC LIMIT 1`, [T.tenant])).rows[0] as { payload: Json };
     expect(audit.payload).toMatchObject({ shortened: [], confirmed: false }); // `confirmed` betyr «en forkorting ble bekreftet», ikke «klienten sendte confirm»
   });

@@ -298,7 +298,9 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
             tenant, space, { retention_days: body["retention_days"], snapshot_retention_days: body["snapshot_retention_days"] },
             { actor_person_id: person, confirm_shortening: confirmed, task_id: "vision-api:retention_set", session_id: identity.session_id, device_id: identity.device_id, audit: true }
           );
-          h.json(200, { ok: true, data: { changed: result.changed, shortened: result.shortened, retention: retentionData(result.current) } });
+          // `shortened`: navnene på vinduene som ble kortere (samme form som i 409-svaret og i revisjonsraden; tom liste = ingen forkorting).
+          const shortened = (["retention_days", "snapshot_retention_days"] as const).filter((field) => result.shortened[field]);
+          h.json(200, { ok: true, data: { changed: result.changed, shortened, retention: retentionData(result.current) } });
         } catch (err) {
           if (!(err instanceof VisionRetentionConfirmationRequiredError)) throw err;
           h.json(409, { error: "confirmation_required", reason: "confirm_true_and_confirm_memory_space_required", shortened: err.shortened, confirm_memory_space_required: space, request_id: requestId });
