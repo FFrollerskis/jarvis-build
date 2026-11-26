@@ -59,7 +59,8 @@ async function waitFor(what: string, predicate: () => Promise<boolean>, timeoutM
 const waiters = async (): Promise<number> => ((await chain.db.admin.query("SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")).rows[0] as { n: number }).n;
 
 beforeAll(async () => {
-  chain = await startChain("g1c2", { JARVIS_COMMS_WEBHOOKS: "twilio,meta", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: BASE });
+  // Marginen 0 = ren sekvensmodell: disse testene legger inn en STOP og straks en START og forventer at START løfter (sekvensregelen alene). Tie-marginen (STOP vinner innenfor 5 s) er bevist i `stop-start-overlap.test.ts`.
+  chain = await startChain("g1c2", { JARVIS_COMMS_WEBHOOKS: "twilio,meta", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: BASE }, { startTieMarginMs: 0 });
   webhooks = new CommsWebhookService({
     store: chain.store, graph: chain.graph, config: chain.config,
     secrets: { get: async (ref) => (ref === WEBHOOK_SECRET_REFS.twilio ? TWILIO_TOKEN : ref === WEBHOOK_SECRET_REFS.meta ? META_SECRET : null) }, clock: chain.now
@@ -199,8 +200,9 @@ describe("K2: forsinket (retry) START kan ikke løfte en nyere STOP", () => {
     const a = await chain.store.receiveOptEvent(TENANT_A, "business", input, 30);
     const b = await chain.store.receiveOptEvent(TENANT_A, "business", input, 30);
     const c = await chain.store.receiveOptEvent(TENANT_A, "business", { ...input, event_key: "twilio:msg:SMfixed00000000000000000000000002" }, 30);
-    expect(b).toBe(a);
-    expect(c).toBeGreaterThan(a);
+    expect(b, "samme hendelse = samme sekvens OG samme databasetid (retry beholder det opprinnelige mottaket)").toEqual(a);
+    expect(c.seq).toBeGreaterThan(a.seq);
+    expect(Math.abs(c.at.getTime() - Date.now()), "mottakstiden er databasens `clock_timestamp()` (nå), ikke den injiserte klokken (2026-11-17)").toBeLessThan(60_000);
   });
 });
 

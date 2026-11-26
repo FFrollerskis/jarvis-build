@@ -41,6 +41,11 @@ export interface ChainOptions {
   /** K1: pepperen traktens HMAC-hasher bruker (standard: en falsk testverdi). `null` = manglende pepper (fail-closed: ingen utsendelse). En funksjon gir en pepper som kan endres under testen (rotasjon). */
   readonly pepper?: string | null | (() => string | null);
   readonly rateLimitPerMinute?: number;
+  /**
+   * FIX-3 (WP-G1c fiks-runde 1): tie-marginen en START må ha til en STOP for å løfte den (millisekunder, databasens klokke). Utelatt = produksjonsstandarden (`START_TIE_MARGIN_MS`, 5 s). `0` = ren sekvensmodell (en START løfter alt med lavere
+   * sekvens uansett tid): brukes av tester som legger inn en STOP og så straks en START og forventer at den løfter, og av sekvens-orakelet.
+   */
+  readonly startTieMarginMs?: number;
   /** Løfter gatewayens per-verktøy-grense (autorisering/avmelding har 10-20/min) for tester som kjører mange handlinger raskt etter hverandre. */
   readonly lenientToolLimits?: boolean;
   /**
@@ -54,7 +59,7 @@ export async function startChain(prefix: string, env: Record<string, string> = {
   const db = await startCommsDb(prefix);
   let current = new Date("2026-11-17T11:00:00Z"); // 12:00 Oslo
   const clock = () => current;
-  const store = new CommsStore(db.app, clock);
+  const store = new CommsStore(db.app, clock, options.startTieMarginMs !== undefined ? { startTieMarginMs: options.startTieMarginMs } : {});
   const graph = new ConversationGraphService(db.app);
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms,slack,phone,whatsapp", JARVIS_COMMS_CALLS: "on", JARVIS_COMMS_VENDOR_READS: "on", ...env });
   const twilio = scriptedAdapter("twilio");

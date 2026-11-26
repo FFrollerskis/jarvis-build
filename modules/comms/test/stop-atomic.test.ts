@@ -33,7 +33,8 @@ const optRows = async (e164: string) => (await db.admin.query("SELECT status, so
 
 beforeAll(async () => {
   db = await startCommsDb("g1stp");
-  store = new CommsStore(db.app, clock);
+  // Marginen 0 = ren sekvensmodell (en START løfter alt med lavere sekvens): denne testen legger inn en STOP og straks en START og forventer at START løfter. Tie-marginen (STOP vinner innenfor 5 s) er bevist i `stop-start-overlap.test.ts`.
+  store = new CommsStore(db.app, clock, { startTieMarginMs: 0 });
   const graph = new ConversationGraphService(db.app);
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "whatsapp", JARVIS_COMMS_WEBHOOKS: "meta", JARVIS_COMMS_TENANT_ID: TENANT_A });
   service = new CommsWebhookService({ store, graph, config, secrets: { get: async (ref) => (ref === WEBHOOK_SECRET_REFS.meta ? META_SECRET : null) }, clock });

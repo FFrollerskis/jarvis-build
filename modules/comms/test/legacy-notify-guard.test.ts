@@ -24,7 +24,8 @@ const optOut = (tenant: string, channel: CommsChannel, recipient: string, source
   chain.store.recordOptOut(tenant, "business", { channel, recipient_hash: hashFor(tenant, channel, recipient), recipient_hint: recipientHint(channel, recipient), source, recorded_by: OWNER });
 
 beforeAll(async () => {
-  chain = await startChain("g1cln", {}, { lenientToolLimits: true });
+  // Marginen 0 = ren sekvensmodell (en START løfter alt med lavere sekvens): denne testen legger inn en STOP og straks en START og forventer at START løfter. Tie-marginen (STOP vinner innenfor 5 s) er bevist i `stop-start-overlap.test.ts`.
+  chain = await startChain("g1cln", {}, { lenientToolLimits: true, startTieMarginMs: 0 });
 }, 240_000);
 afterAll(async () => { await chain?.stop(); }, 120_000);
 

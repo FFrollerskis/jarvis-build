@@ -7,12 +7,17 @@
 --      lifted_by = 'owner_undo' (eierens angre av en feilregistrert STOP, K5): KUN `owner_recorded`, med obligatorisk begrunnelse, person og sesjon. ALDRI `recipient_request` og aldri en avmelding som kom fra mottakeren selv.
 --    Alt annet feiler med `check_violation` (23514) `comms_opt_out_lift_forbidden:<årsak>`. (`recipient_request` kan i dag ikke løftes av noen - samme regel som app-koden hadde; en senere beslutning kan åpne den ved å endre EN linje her.)
 --
--- 2) STOP/START-REKKEFØLGE (JARVIS-112 c, Q-72/N-C). Twilio har ingen signert tidsstempel, så rekkefølgen avgjøres av PLATTFORMENS egen mottakssekvens (en monoton databasesekvens), ikke av leverandørens tid:
+-- 2) STOP/START-REKKEFØLGE (JARVIS-112 c, Q-72/N-C; FIX-3 i fiks-runde 1). Twilio har ingen signert tidsstempel, så rekkefølgen avgjøres av PLATTFORMENS egen mottakssekvens (en monoton databasesekvens) og databasens klokke, ikke av leverandørens tid:
 --      `comms_event_seq`            - EN sekvens (CACHE 1: strengt monoton på tvers av tilkoblinger) som gir både mottakssekvensen til en START og registreringssekvensen til en STOP.
---      `comms_recipient_opt_outs.stop_seq` - registreringssekvensen til den SISTE STOP som er lagt inn i raden (økes når en senere STOP absorberes; kan aldri minke - trigger). NULL = rad fra før denne migrasjonen (regnes som 0).
---      `comms_inbound_receipts`     - første mottak av en opt-in-/opt-out-hendelse, persistert FØR behandlingen (egen, committet transaksjon): en leverandør-retry av en START som feilet midtveis beholder sin OPPRINNELIGE sekvens
---                                     og kan dermed aldri løfte en STOP som ble registrert etter at START-en først ble mottatt.
---    Regelen (i app-SQL, under advisory-lås per mottaker): en START løfter KUN rader med `stop_seq` < START-ens mottakssekvens («STOP vinner» når registreringen skjedde etter at START-en ble mottatt, eller samtidig).
+--      `comms_recipient_opt_outs.stop_seq`   - registreringssekvensen til den SISTE STOP som er lagt inn i raden (økes når en senere STOP absorberes; kan aldri minke - trigger). NULL = rad fra før denne migrasjonen (regnes som 0).
+--      `comms_recipient_opt_outs.stop_db_at` - databasens klokke (`clock_timestamp()`, i samme setning som sekvensen) for samme STOP; kan heller aldri minke. NULL = rad fra før denne migrasjonen (regnes som eldre enn enhver START).
+--      `comms_inbound_receipts`     - første mottak av en opt-in-/opt-out-hendelse, persistert FØR behandlingen (egen, committet transaksjon): en leverandør-retry av en START som feilet midtveis beholder sin OPPRINNELIGE sekvens og
+--                                     mottakstid (`recv_seq`, `recv_db_at`) og kan dermed aldri løfte en STOP som ble registrert etter at START-en først ble mottatt.
+--    Regelen (i app-SQL, under advisory-lås per mottaker): en START løfter KUN en rad hvis (1) `stop_seq` < START-ens mottakssekvens OG (2) siste STOP ble registrert MER enn tie-marginen (5 s, `START_TIE_MARGIN_MS` i appen) før START-en ble mottatt.
+--    NØYAKTIG HVA SOM GARANTERES: (a) en STOP registrert ETTER at en START ble mottatt løftes aldri av den START-en (sekvens); (b) innenfor marginen vinner STOP uansett sekvens og uansett hvilken transaksjon som allokerte først - en START mottatt mens en
+--    STOP holdt låsen ucommittet, eller sendt «samtidig» (samme millisekund, samme tick, begge rekkefølger), kan ikke løfte den; (c) utenfor marginen avgjør sekvensrekkefølgen (plattformens mottaksrekkefølge). En START innenfor marginen etter en STOP
+--    løfter altså ingenting (mottakeren forblir avmeldt og må sende START på nytt). IKKE GARANTERT og AKSEPTERT som restrisiko: en leverandør som leverer i feil rekkefølge eller forsinket (Twilio har ingen signert tid) kan gi en annen rekkefølge enn
+--    mottakeren sendte - plattformen kjenner bare sin egen mottaksrekkefølge.
 --
 -- 3) DELETE-VERN (JARVIS-112 b). `jarvis_app` beholder DELETE-granten (retensjonssveipet og Q-20-slettingen er LOVLIGE bruk), men en BEFORE DELETE-trigger gjør sletting umulig utenom dem:
 --      comms_recipient_opt_outs: KUN i en erasure-transaksjon (`jarvis.erasure_in_progress = 'true'`, satt av ErasureService etter policy-autorisering; samme mønster som 062/101).
@@ -26,6 +31,7 @@ GRANT USAGE, SELECT ON SEQUENCE comms_event_seq TO jarvis_app;
 
 ALTER TABLE comms_recipient_opt_outs
   ADD COLUMN stop_seq bigint CHECK (stop_seq IS NULL OR stop_seq > 0),
+  ADD COLUMN stop_db_at timestamptz,
   -- Eierens angre (K5): obligatorisk begrunnelse (kort, én linje, uten hemmeligheter - valideres i koden), hvem (person), og sesjon/oppgave for sporbarhet (CLAUDE.md regel 4).
   ADD COLUMN lift_reason text CHECK (lift_reason IS NULL OR char_length(lift_reason) BETWEEN 3 AND 200),
   ADD COLUMN lifted_by_person_id text REFERENCES people (person_id),
@@ -67,6 +73,9 @@ BEGIN
   ELSIF NEW.stop_seq IS DISTINCT FROM OLD.stop_seq AND (NEW.stop_seq IS NULL OR (OLD.stop_seq IS NOT NULL AND NEW.stop_seq < OLD.stop_seq)) THEN
     -- Registreringssekvensen kan bare økes (en senere STOP): å senke den ville latt en eldre START løfte en nyere STOP.
     RAISE EXCEPTION 'comms_recipient_opt_outs: stop_seq kan kun øke' USING ERRCODE = '23514';
+  ELSIF NEW.stop_db_at IS DISTINCT FROM OLD.stop_db_at AND (NEW.stop_db_at IS NULL OR (OLD.stop_db_at IS NOT NULL AND NEW.stop_db_at < OLD.stop_db_at)) THEN
+    -- Samme for registreringstiden (tie-marginen, FIX-3): å flytte den bakover ville latt en START som ble mottatt rett etter en STOP løfte den.
+    RAISE EXCEPTION 'comms_recipient_opt_outs: stop_db_at kan kun øke' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END
@@ -80,6 +89,8 @@ CREATE TABLE comms_inbound_receipts (
   event_key            text NOT NULL CHECK (char_length(event_key) BETWEEN 1 AND 300),
   kind                 text NOT NULL CHECK (kind IN ('opt_in','opt_out')),
   recv_seq             bigint NOT NULL CHECK (recv_seq > 0),
+  -- Databasens klokke (`clock_timestamp()`) i samme setning som `recv_seq`: START-ens mottakstid for tie-marginen (FIX-3). `received_at` under er appens (injiserbare) klokke og brukes ikke til avgjørelser.
+  recv_db_at           timestamptz NOT NULL DEFAULT clock_timestamp(),
   received_at          timestamptz NOT NULL DEFAULT now(),
   retention_until      timestamptz NOT NULL,
   -- Kilde og sporing (regel 4): webhooks har ingen person/sesjon - `ingest_id` er per-forespørsel-id'en, `source` er alltid 'webhook:<leverandør>'.

@@ -42,7 +42,8 @@ const service = (extra: { maxEventsPerRequest?: number } = {}) => new CommsWebho
 });
 
 beforeAll(async () => {
-  chain = await startChain("g1c3", { JARVIS_COMMS_WEBHOOKS: "twilio,meta", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: BASE });
+  // Marginen 0 = ren sekvensmodell (en START løfter alt med lavere sekvens): denne testen legger inn en STOP og straks en START og forventer at START løfter. Tie-marginen (STOP vinner innenfor 5 s) er bevist i `stop-start-overlap.test.ts`.
+  chain = await startChain("g1c3", { JARVIS_COMMS_WEBHOOKS: "twilio,meta", JARVIS_COMMS_TENANT_ID: TENANT_A, JARVIS_COMMS_PUBLIC_BASE_URL: BASE }, { startTieMarginMs: 0 });
   webhooks = service();
   await authorizeAll(chain, [["whatsapp", PHONE_ID, "meta_whatsapp"], ["sms", "+4791000000", "twilio"]]);
 }, 240_000);

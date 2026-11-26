@@ -40,7 +40,8 @@ const journal = async (tenant: string, requestId: string) =>
 
 beforeAll(async () => {
   db = await startCommsDb("g1fun");
-  store = new CommsStore(db.app, clock);
+  // Marginen 0 = ren sekvensmodell (en START løfter alt med lavere sekvens): denne testen legger inn en STOP og straks en START og forventer at START løfter. Tie-marginen (STOP vinner innenfor 5 s) er bevist i `stop-start-overlap.test.ts`.
+  store = new CommsStore(db.app, clock, { startTieMarginMs: 0 });
   graph = new ConversationGraphService(db.app);
   business = new BusinessService(db.app);
   const adapters: AdapterMap = { twilio: sms, slack, meta_whatsapp: wa };

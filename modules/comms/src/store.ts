@@ -49,8 +49,27 @@ export interface OptEffect {
   readonly recipient_hint: string;
   /** Peker til hendelsen (DB-grense 200 tegn: bruk `evidenceRefFor`). */
   readonly evidence_ref: string;
-  /** K2: for en START - plattformens mottakssekvens for HENDELSEN (persistert ved første mottak). Utelatt = `recordInbound` allokerer og persisterer den selv (`receiveOptEvent`). Brukes av en test som simulerer en retry. */
-  readonly recv_seq?: number;
+}
+
+/**
+ * FIX-3 (WP-G1c fiks-runde 1): tie-marginen en START må ha til en STOP for å løfte den. En START løfter KUN en avmelding hvis registreringssekvensen er lavere enn START-ens mottakssekvens OG den siste STOP-en ble registrert MER enn denne marginen
+ * før START-en ble mottatt (begge tidspunkt er DATABASENS klokke, `clock_timestamp()` i samme setning som sekvensen). Innenfor marginen vinner STOP, uansett sekvens og uansett hvilken transaksjon som rakk å allokere først: «samtidig» betyr «innenfor
+ * marginen», ikke «samme millisekund». Uten marginen avgjorde den som tilfeldigvis allokerte sekvensen først (en START mottatt mens en STOP holdt låsen ucommittet kunne løfte den, og mottakeren ble FRI). 5 s: mye lengre enn en transaksjon
+ * (millisekunder, også på NAS) og enn skjevheten mellom to forespørsler som ankom «samtidig», men kortere enn noe et menneske gjør (en START rett etter en STOP). En START innenfor marginen er IKKE tapt som hendelse (kvitteringen og dedupe-raden
+ * står), men løfter ingenting - mottakeren forblir avmeldt (strengeste regel) og må sende START på nytt.
+ * RESTRISIKO (akseptert): en leverandør som leverer i feil rekkefølge eller forsinket (Twilio har ingen signert tidsstempel å avgjøre på) kan fortsatt gi en annen rekkefølge enn mottakeren sendte; marginen dekker kun plattformens egen behandling.
+ */
+export const START_TIE_MARGIN_MS = 5000;
+
+export interface CommsStoreOptions {
+  /** Tie-marginen i millisekunder (standard `START_TIE_MARGIN_MS`). `0` = ren sekvensmodell (kun testene, som legger inn en STOP og straks en START og forventer at den løfter). Negativt eller ikke-endelig er en feil. */
+  readonly startTieMarginMs?: number;
+}
+
+/** Plattformens sekvensnummer (`comms_event_seq`) og DATABASENS klokke i SAMME setning - aldri leverandørens tid. */
+export interface OptReceipt {
+  readonly seq: number;
+  readonly at: Date;
 }
 
 export type OptOutLifter = "inbound_start_keyword" | "owner_undo";
@@ -215,7 +234,13 @@ const ACTIVE_STATUSES = ["requested", "sent", "outcome_unknown"];
 const COMMS_SPACES: readonly MemorySpace[] = ["personal", "business", "project", "shared"];
 
 export class CommsStore {
-  constructor(private readonly pool: pg.Pool, private readonly clock: Clock = () => new Date()) {}
+  private readonly startTieMarginMs: number;
+
+  constructor(private readonly pool: pg.Pool, private readonly clock: Clock = () => new Date(), options: CommsStoreOptions = {}) {
+    const margin = options.startTieMarginMs ?? START_TIE_MARGIN_MS;
+    if (!Number.isFinite(margin) || margin < 0) throw new Error("comms_invalid_start_tie_margin");
+    this.startTieMarginMs = margin;
+  }
 
   // ---------------------------------------------------------------- konto-allowlist (eierens egen)
   async authorizeAccount(
@@ -307,10 +332,14 @@ export class CommsStore {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340464))", [`comms-optout|${tenantId}|${recipientHash}`]);
   }
 
-  /** Plattformens monotone sekvens (`comms_event_seq`, CACHE 1: strengt økende på tvers av tilkoblinger): mottakssekvens for en START og registreringssekvens for en STOP. Aldri leverandørens tidsstempel. */
-  private async nextSeq(client: pg.PoolClient): Promise<number> {
-    const res = await client.query("SELECT nextval('comms_event_seq')::text AS seq");
-    return Number((res.rows[0] as { seq: string }).seq);
+  /**
+   * Plattformens monotone sekvens (`comms_event_seq`, CACHE 1: strengt økende på tvers av tilkoblinger): mottakssekvens for en START og registreringssekvens for en STOP, sammen med DATABASENS klokke i SAMME setning (tie-marginen, FIX-3).
+   * Aldri leverandørens tidsstempel.
+   */
+  private async nextSeq(client: pg.PoolClient): Promise<OptReceipt> {
+    const res = await client.query("SELECT nextval('comms_event_seq')::text AS seq, clock_timestamp() AS at");
+    const row = res.rows[0] as { seq: string; at: Date };
+    return { seq: Number(row.seq), at: row.at };
   }
 
   private async recordOptOutIn(
@@ -319,8 +348,9 @@ export class CommsStore {
   ): Promise<{ opt_out_id: string; created: boolean }> {
     // To samtidige STOP for samme mottaker (f.eks. SMS og WhatsApp i samme sekund) serialiseres, så vi aldri får to aktive rader i SAMME (kanal, kilde)-spor.
     await this.lockRecipient(client, tenantId, input.recipient_hash);
-    // K2: registreringssekvensen allokeres UNDER låsen - en START som ble mottatt FØR denne registreringen (mindre sekvens) kan aldri løfte den («STOP vinner» også ved samtidighet).
-    const seq = await this.nextSeq(client);
+    // K2: registreringssekvensen allokeres UNDER låsen - en START som ble mottatt FØR denne registreringen (mindre sekvens) kan aldri løfte den. FIX-3: registreringstiden (databasens klokke, samme setning) er den andre halvdelen: en START som ble
+    // mottatt mindre enn `START_TIE_MARGIN_MS` etter denne registreringen kan heller ikke løfte den (en START mottatt mens denne transaksjonen holdt låsen ucommittet har høyere sekvens, men er innenfor marginen).
+    const { seq, at } = await this.nextSeq(client);
     const slot = OPT_OUT_SLOT[input.source];
     const existing = await client.query(
       `SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 AND channel = $3 AND account_ref = $4 AND status = 'active' LIMIT 1`,
@@ -329,14 +359,18 @@ export class CommsStore {
     if (existing.rowCount === 1) {
       // En senere STOP i samme spor «absorberes» i raden, men registreringen mistes ikke: sekvensen økes, så en START som ble mottatt før denne STOP-en aldri kan løfte raden.
       const id = (existing.rows[0] as { opt_out_id: string }).opt_out_id;
-      await client.query(`UPDATE comms_recipient_opt_outs SET stop_seq = $3 WHERE tenant_id = $1 AND opt_out_id = $2 AND (stop_seq IS NULL OR stop_seq < $3)`, [tenantId, id, seq]);
+      // `GREATEST`: registreringstiden kan aldri gå bakover (triggeren avviser det), heller ikke om databasens klokke skulle stilles tilbake - en STOP skal aldri feile på det.
+      await client.query(
+        `UPDATE comms_recipient_opt_outs SET stop_seq = $3, stop_db_at = GREATEST(COALESCE(stop_db_at, $4::timestamptz), $4::timestamptz) WHERE tenant_id = $1 AND opt_out_id = $2 AND (stop_seq IS NULL OR stop_seq < $3)`,
+        [tenantId, id, seq, at]
+      );
       return { opt_out_id: id, created: false };
     }
     const id = newId("optout");
     await client.query(
-      `INSERT INTO comms_recipient_opt_outs (tenant_id, opt_out_id, memory_space_id, channel, account_ref, recipient_hash, recipient_hint, source, evidence_ref, recorded_by, session_id, task_id, created_at, stop_seq)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-      [tenantId, id, space, input.channel, slot, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock(), seq]
+      `INSERT INTO comms_recipient_opt_outs (tenant_id, opt_out_id, memory_space_id, channel, account_ref, recipient_hash, recipient_hint, source, evidence_ref, recorded_by, session_id, task_id, created_at, stop_seq, stop_db_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [tenantId, id, space, input.channel, slot, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock(), seq, at]
     );
     return { opt_out_id: id, created: true };
   }
@@ -344,43 +378,47 @@ export class CommsStore {
   /**
    * KUN mottakerens egen START kan oppheve en avmelding, og kun en som kom fra et stopp-ord/leverandørfeil og på SAMME kanal som START-en kom på (konservativt: en STOP på SMS opphever ikke en START på WhatsApp - mottakeren må
    * svare START der den ble avmeldt). En avmelding eieren har registrert (`owner_recorded`) eller mottakeren har bedt om utenfor kanalen (`recipient_request`) kan aldri oppheves av et tekstsvar (håndhevet av databasetriggeren, 141).
-   * K2: `recvSeq` er START-ens mottakssekvens; utelatt = «mottatt nå» (en ny sekvens). En START løfter KUN rader hvis registreringssekvens er mindre enn mottakssekvensen.
+   * K2: `recv` er START-ens mottak (sekvens og databasetid); utelatt = «mottatt nå» (ny sekvens). En START løfter KUN rader hvis registreringssekvens er mindre enn mottakssekvensen OG (FIX-3) hvis siste STOP ble registrert mer enn
+   * `START_TIE_MARGIN_MS` før mottaket - innenfor marginen vinner STOP.
    */
-  async liftByStartKeyword(tenantId: string, input: { channel: CommsChannel; recipient_hash: string }, recvSeq?: number): Promise<number> {
+  async liftByStartKeyword(tenantId: string, input: { channel: CommsChannel; recipient_hash: string }, recv?: OptReceipt): Promise<number> {
     return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
       await this.lockRecipient(client, tenantId, input.recipient_hash);
-      return this.liftIn(client, tenantId, input, recvSeq ?? (await this.nextSeq(client)));
+      return this.liftIn(client, tenantId, input, recv ?? (await this.nextSeq(client)));
     });
   }
 
-  private async liftIn(client: pg.PoolClient, tenantId: string, input: { channel: CommsChannel; recipient_hash: string }, recvSeq: number): Promise<number> {
-    // `COALESCE(stop_seq, 0)`: en rad fra før migrasjon 141 har ingen registreringssekvens og regnes som eldre enn enhver START (uendret atferd for gamle rader).
+  private async liftIn(client: pg.PoolClient, tenantId: string, input: { channel: CommsChannel; recipient_hash: string }, recv: OptReceipt): Promise<number> {
+    // `COALESCE(stop_seq, 0)`: en rad fra før migrasjon 141 har ingen registreringssekvens og regnes som eldre enn enhver START (uendret atferd for gamle rader); `stop_db_at IS NULL` på samme måte (ingen registreringstid = gammel).
+    // Marginen `<= 0` (kun testene) er den rene sekvensmodellen. Streng ulikhet: en STOP nøyaktig på marginen er fortsatt et uavgjort (STOP vinner).
     const res = await client.query(
       `UPDATE comms_recipient_opt_outs SET status = 'lifted', lifted_at = $4, lifted_by = 'inbound_start_keyword'
-        WHERE tenant_id = $1 AND channel = $2 AND recipient_hash = $3 AND status = 'active' AND source IN ('inbound_stop_keyword', 'provider_error') AND COALESCE(stop_seq, 0) < $5`,
-      [tenantId, input.channel, input.recipient_hash, this.clock(), recvSeq]
+        WHERE tenant_id = $1 AND channel = $2 AND recipient_hash = $3 AND status = 'active' AND source IN ('inbound_stop_keyword', 'provider_error') AND COALESCE(stop_seq, 0) < $5
+          AND ($7::double precision <= 0 OR stop_db_at IS NULL OR stop_db_at < $6::timestamptz - ($7::double precision * interval '1 millisecond'))`,
+      [tenantId, input.channel, input.recipient_hash, this.clock(), recv.seq, recv.at, this.startTieMarginMs]
     );
     return res.rowCount ?? 0;
   }
 
   /**
-   * K2: persisterer FØRSTE mottak av en opt-in-/opt-out-hendelse i en EGEN, committet transaksjon FØR behandlingen. Returnerer plattformens mottakssekvens for hendelsen: den som ble tildelt ved første mottak, også når leverandøren
+   * K2: persisterer FØRSTE mottak av en opt-in-/opt-out-hendelse i en EGEN, committet transaksjon FØR behandlingen. Returnerer plattformens mottak for hendelsen (sekvens og databasetid): det som ble tildelt ved første mottak, også når leverandøren
    * leverer samme hendelse en gang til (retry etter en feil midtveis). Uten dette fikk en retry en NY, større sekvens og kunne løfte en STOP som ble registrert etter den opprinnelige START-en.
    */
-  async receiveOptEvent(tenantId: string, space: MemorySpace, input: { provider: InboundEventInput["provider"]; event_key: string; kind: "opt_in" | "opt_out"; ingest_id: string }, retentionDays: number): Promise<number> {
+  async receiveOptEvent(tenantId: string, space: MemorySpace, input: { provider: InboundEventInput["provider"]; event_key: string; kind: "opt_in" | "opt_out"; ingest_id: string }, retentionDays: number): Promise<OptReceipt> {
     return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
-      const seq = await this.nextSeq(client);
+      const { seq, at } = await this.nextSeq(client);
       const now = this.clock();
       const inserted = await client.query(
-        `INSERT INTO comms_inbound_receipts (tenant_id, memory_space_id, provider, event_key, kind, recv_seq, received_at, retention_until, source, ingest_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         ON CONFLICT (tenant_id, provider, event_key) DO NOTHING RETURNING recv_seq`,
-        [tenantId, space, input.provider, input.event_key, input.kind, seq, now, new Date(now.getTime() + retentionDays * 86_400_000), `webhook:${input.provider}`, input.ingest_id]
+        `INSERT INTO comms_inbound_receipts (tenant_id, memory_space_id, provider, event_key, kind, recv_seq, recv_db_at, received_at, retention_until, source, ingest_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (tenant_id, provider, event_key) DO NOTHING RETURNING recv_seq, recv_db_at`,
+        [tenantId, space, input.provider, input.event_key, input.kind, seq, at, now, new Date(now.getTime() + retentionDays * 86_400_000), `webhook:${input.provider}`, input.ingest_id]
       );
-      if (inserted.rowCount === 1) return Number((inserted.rows[0] as { recv_seq: string }).recv_seq);
-      const first = await client.query(`SELECT recv_seq FROM comms_inbound_receipts WHERE tenant_id = $1 AND provider = $2 AND event_key = $3`, [tenantId, input.provider, input.event_key]);
+      if (inserted.rowCount === 1) { const r = inserted.rows[0] as { recv_seq: string; recv_db_at: Date }; return { seq: Number(r.recv_seq), at: r.recv_db_at }; }
+      const first = await client.query(`SELECT recv_seq, recv_db_at FROM comms_inbound_receipts WHERE tenant_id = $1 AND provider = $2 AND event_key = $3`, [tenantId, input.provider, input.event_key]);
       if (first.rowCount !== 1) throw new Error("comms_receipt_conflict_without_row");
-      return Number((first.rows[0] as { recv_seq: string }).recv_seq);
+      const r = first.rows[0] as { recv_seq: string; recv_db_at: Date };
+      return { seq: Number(r.recv_seq), at: r.recv_db_at };
     });
   }
 
@@ -682,8 +720,8 @@ export class CommsStore {
   async recordInbound(tenantId: string, space: MemorySpace, input: InboundEventInput, retentionDays: number, effect?: OptEffect): Promise<{ inserted: boolean; event_id: string | null }> {
     // K2: en START får sin MOTTAKSSEKVENS persistert i en egen, committet transaksjon FØR behandlingen. Feiler behandlingen under og leverandøren prøver på nytt, bruker retry-en den OPPRINNELIGE sekvensen - en forsinket START kan
     // aldri løfte en STOP som ble registrert etter at den først ble mottatt.
-    const startSeq = effect?.kind === "start"
-      ? (effect.recv_seq ?? (await this.receiveOptEvent(tenantId, space, { provider: input.provider, event_key: input.event_key, kind: "opt_in", ingest_id: input.ingest_id }, retentionDays)))
+    const startRecv = effect?.kind === "start"
+      ? await this.receiveOptEvent(tenantId, space, { provider: input.provider, event_key: input.event_key, kind: "opt_in", ingest_id: input.ingest_id }, retentionDays)
       : undefined;
     // Alle comms-rom er synlige i transaksjonen: avmeldingen er tenant-bred (A-M3), så en eksisterende avmelding i et annet rom må sees (ingen duplikat) og START må kunne oppheve den. Hendelsen selv skrives i `space`.
     return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
@@ -706,7 +744,7 @@ export class CommsStore {
           channel: effect.channel, recipient_hash: effect.recipient_hash, recipient_hint: effect.recipient_hint, source: "inbound_stop_keyword", evidence_ref: effect.evidence_ref, recorded_by: "system", task_id: input.ingest_id
         });
       } else if (effect?.kind === "start") {
-        await this.liftIn(client, tenantId, { channel: effect.channel, recipient_hash: effect.recipient_hash }, startSeq as number);
+        await this.liftIn(client, tenantId, { channel: effect.channel, recipient_hash: effect.recipient_hash }, startRecv as OptReceipt);
       }
       return { inserted: true, event_id: id };
     });
