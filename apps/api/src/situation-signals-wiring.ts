@@ -3,7 +3,7 @@ import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { homeAssistantSituationReadTools, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
 import type { SituationSignalApiDeps } from "./situation-signal-routes.ts";
 import {
-  boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, MAX_OBSERVATIONS_PER_BATCH, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
+  boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, MAX_OBSERVATIONS_PER_BATCH, ModelSignalAssist, MorningSummaryService, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
   SituationSignalsTransport, SituationsTransport, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS, SOURCE_SPACES,
   type AssistModelGateway, type DailyPoint, type DomainPauseRegistry, type HealthObservation, type HealthSignalMetric, type HomeObservation, type IncidentObservation, type SignalSourceReaders,
   type SituationEngine, type SituationFlags, type VisionObservation
@@ -262,6 +262,8 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
     pool: deps.pool, bus, engine: deps.engine, gateway: deps.gateway, readers, subscriptions: (t, s) => registry.listEnabled(t, s), targets, retentionTargets, identityFor,
     guard: { blocked: async () => ((await deps.killSwitch.isActiveDurable()) ? "kill_switch_active" : null) },
     intervalMs: intervalSeconds * 1000, logRetentionDays: retentionDays, now,
+    // WP-G4b K5 (D-484): morgenoppsummering av nattlige kamerahendelser - kun når kamerakilden er på (ellers finnes ingen tjeneste og tikkresultatet er identisk med før).
+    ...(flags.vision ? { morningSummary: new MorningSummaryService(deps.pool) } : {}),
     // Signalsituasjonene (kamera/helse/hjem) rydder etter kildedataenes egen oppbevaring (G3/G2) når den finnes; ellers etter `logRetentionDays`.
     sourceRetention: {
       ...(deps.health.getRetentionPolicy ? { healthDays: async (tenantId: string) => (await deps.health.getRetentionPolicy!(tenantId))?.retention_days ?? null } : {}),

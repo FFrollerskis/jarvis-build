@@ -26,5 +26,7 @@ export * from "./anomaly-detectors.ts";
 export * from "./autonomy-guard.ts";
 // WP-G4b K2 (D-484): autonomi-binding per regel/kategori (skopnøkkel, presedens, tak).
 export * from "./autonomy-scope.ts";
+// WP-G4b K5 (D-484): morgenoppsummering av nattlige kamerahendelser (nøytral, idempotent).
+export * from "./morning-summary.ts";
 // WP-G4 fiks-runde (A-MEDIUM-4, B-MEDIUM-3): livssyklus for signalsituasjoner (sist sett, normalisering, daglig opprydding).
 export * from "./signal-retention.ts";

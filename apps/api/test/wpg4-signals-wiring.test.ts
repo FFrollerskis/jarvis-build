@@ -101,6 +101,19 @@ describe("A: flagg AV = ingenting bygges", () => {
     expect(gw.list().filter((d) => d.tool_id === "situations" && d.action === "clear_autonomy_policy")).toHaveLength(1);
   });
 
+  it("WP-G4b K5: morgenoppsummeringen kobles KUN med kamerakilden (hovedbryter + _VISION); uten den har tikkresultatet ikke feltet `morning_summaries` (identisk med før)", async () => {
+    const stopped = { killSwitch: { isActiveDurable: async () => true } }; // tikket stanses straks (kill switch): ingen database trengs, men resultatobjektet bygges
+    for (const env of [{ JARVIS_SITUATION_SIGNALS: "on" }, { JARVIS_SITUATION_SIGNALS: "on", JARVIS_SITUATION_HOME: "on", JARVIS_SITUATION_HEALTH: "on", JARVIS_SITUATION_INCIDENTS: "on" }]) {
+      const tick = await createSituationSignalsWiring(deps(env, stopped)).runner!.tick();
+      expect(tick).toMatchObject({ status: "blocked", reason: "kill_switch_active" });
+      expect("morning_summaries" in tick).toBe(false);
+    }
+    const withVision = await createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on", JARVIS_SITUATION_VISION: "on" }, stopped)).runner!.tick();
+    expect(withVision).toMatchObject({ status: "blocked", morning_summaries: 0 });
+    // underflagget alene (uten hovedbryter) bygger ingenting
+    expect(createSituationSignalsWiring(deps({ JARVIS_SITUATION_VISION: "on" })).runner).toBeNull();
+  });
+
   it("HA-lesehandlingen registreres KUN med JARVIS_SITUATION_HOME; rommene følger kildene; ugyldig tallkonfigurasjon gir standard", () => {
     const home = createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on", JARVIS_SITUATION_HOME: "on", JARVIS_SITUATION_BUS_INTERVAL_SECONDS: "5", JARVIS_SITUATION_LOG_RETENTION_DAYS: "abc" }));
     expect(home.tools.map((t) => `${t.tool_id}.${t.action}`)).toEqual(expect.arrayContaining(["home-assistant.read_state_detail", "home-assistant.read_states_detail"]));
