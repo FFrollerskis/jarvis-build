@@ -193,6 +193,22 @@ describe("B: failed - kun bevist; ellers forblir raden ukjent (med tidspunkt, an
     expect(ha.serviceCalls()).toHaveLength(1);
   });
 
+  it("fiks-runde 1: et TAPT svar (tilkoblingen kuttes etter at HA mottok kommandoen) gir en `outcome_unknown`-rad MED lagret før-tilstand, så `failed` fortsatt kan bevises når HA aldri utførte den (uendret, gammel `last_changed`)", async () => {
+    const rig = homeRig();
+    ha.set("lock.front_door", { state: "unlocked", last_changed: ago(2 * HOUR) });
+    ha.dropNextService = true;
+    const first = await rig.run("critical_lock", LOCK);
+    expect(first.outcome).toBe("UNKNOWN");
+    expect(first.action).toMatchObject({ status: "outcome_unknown", before_state: { state: "unlocked" }, request_params: LOCK });
+    expect(await rig.reconcile(first.action.action_id)).toMatchObject({ resolution: "failed", basis: "no_state_change_since_request", action: { status: "failed" } });
+    // og når HA FAKTISK utførte den (tilstanden er nå ønsket) blir det `applied`: det tapte svaret er ikke beviset, den leste tilstanden er det
+    ha.set("lock.front_door", { state: "unlocked", last_changed: ago(2 * HOUR) });
+    ha.dropNextService = true;
+    const second = await rig.run("critical_lock", LOCK);
+    ha.set("lock.front_door", { state: "locked", last_changed: ago(20_000) });
+    expect(await rig.reconcile(second.action.action_id)).toMatchObject({ resolution: "applied", action: { status: "applied" } });
+  });
+
   it("FOR TIDLIG (under 5 min etter at eksekutoren konkluderte): ukjent med `too_recent_for_failed_proof`; samme bevis 5 min senere gir `failed`", async () => {
     const rig = homeRig();
     const id = await unknownLock(rig);
