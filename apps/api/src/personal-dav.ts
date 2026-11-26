@@ -1,6 +1,5 @@
 import type { IdentityContext } from "@jarvis/contracts";
 import { DavError, type AppleDavClient, type DavErrorCode, type DavSendGuard } from "@jarvis/tool-gateway";
-import { RateLimiter } from "./http-guard.ts";
 import type { PersonalRouteContext } from "./personal-routes.ts";
 
 /**
@@ -16,7 +15,8 @@ import type { PersonalRouteContext } from "./personal-routes.ts";
  *  - utfallet er alltid `SUCCESS` | `REPLAYED` | `MISMATCH` | `UNKNOWN` fra readback (aldri «ok» uten bevis); `UNKNOWN` skal føre til en lesing (`get`), aldri en ny blind kommando.
  *  - GRENSE PER PRINSIPAL (WP-G2c, D-483, JARVIS-113 e/6): i tillegg til den globale grensen per IP og per enhet har DAV en EGEN grense per enhet og per person, og en strengere for mutasjoner (se `createDavRateLimit`): bak ruten står ÉN
  *    iCloud-konto med ETT app-passord, og en enhet/person som flommer kan ellers få kontoen sperret hos Apple. Over grensen: 429 `rate_limited` FØR stoppvakten, revisjon og klient (ingenting sendes, ingen rad skrives: en avvisning per
- *    forsøk ville latt en flom fylle revisjonssporet).
+ *    forsøk ville latt en flom fylle revisjonssporet). En AVVISNING bruker aldri budsjett (fiks-runde 1, LOW-3): step-up for mutasjoner sjekkes FØR grensen (en svak økt som blir avvist med 403 teller ikke), og grensene avgjøres samlet
+ *    (en forespørsel som avvises av én grense bruker ingenting på de andre) i et GLIDENDE vindu (aldri mer enn grensen innenfor noe intervall på 60 s).
  *  - REVISJONENS `decision` følger utfallet (se `davAuditDecision`): ALLOW kun for `requested`/`SUCCESS`/`REPLAYED`; avvist, uavklart og avvikende readback er ALDRI ALLOW.
  */
 export interface DavAuditEntry {
@@ -43,9 +43,9 @@ export function davAuditDecision(entry: Pick<DavAuditEntry, "outcome" | "decisio
 }
 
 /**
- * Per-prinsipal-grenser for DAV-rutene (per minutt; faste vinduer som `RateLimiter`). `perDevicePerMinute`: én enhet (tenant + enhet). `perPersonPerMinute`: alle enheter til én person i tenanten (en person med mange enheter kan ikke
- * gange grensen). `mutationsPerPersonPerMinute`: opprett/endre/slett, i tillegg til de to første (en mutasjon kan sende e-post til andre via iTIP og kan ikke trekkes tilbake, så den har en strengere grense). Lesing og mutasjon teller begge i de to første.
- * `collections` er lokal (sender ingenting) og er unntatt.
+ * Per-prinsipal-grenser for DAV-rutene (per minutt, GLIDENDE vindu: aldri mer enn grensen innenfor noe intervall på 60 s; et fast vindu slapp `2 x grensen` rundt vindusskiftet). `perDevicePerMinute`: én enhet (tenant + enhet).
+ * `perPersonPerMinute`: alle enheter til én person i tenanten (en person med mange enheter kan ikke gange grensen). `mutationsPerPersonPerMinute`: opprett/endre/slett, i tillegg til de to første (en mutasjon kan sende e-post til andre via
+ * iTIP og kan ikke trekkes tilbake, så den har en strengere grense). Lesing og mutasjon teller begge i de to første. `collections` er lokal (sender ingenting) og er unntatt.
  */
 export interface DavRateLimits { perDevicePerMinute: number; perPersonPerMinute: number; mutationsPerPersonPerMinute: number }
 export const DEFAULT_DAV_RATE_LIMITS: Readonly<DavRateLimits> = Object.freeze({ perDevicePerMinute: 30, perPersonPerMinute: 60, mutationsPerPersonPerMinute: 10 });
@@ -53,24 +53,71 @@ export const DEFAULT_DAV_RATE_LIMITS: Readonly<DavRateLimits> = Object.freeze({ 
 export type DavRateLimitScope = "device" | "person" | "mutation";
 export type DavRateLimitDecision = { ok: true } | { ok: false; scope: DavRateLimitScope; retry_after_seconds: number };
 export interface DavRateLimit {
-  /** `ok: false` = avvis med 429. En avvisning teller ALDRI mot en grense som ikke var nådd (en flommende enhet tømmer ikke personens budsjett for de andre enhetene). */
+  /**
+   * `ok: false` = avvis med 429. En avvisning bruker ALDRI budsjett på noen av grensene (hverken den som avviste eller de andre): en flommende enhet tømmer ikke personens budsjett, og avviste mutasjoner tømmer ikke lesebudsjettet.
+   * `retry_after_seconds` er den LENGSTE ventetiden blant grensene som avviste (da lykkes neste forsøk), og `scope` er den som avviste lengst.
+   */
   check(identity: Pick<IdentityContext, "tenant_id" | "person_id" | "device_id">, mutation: boolean): DavRateLimitDecision;
+}
+
+/**
+ * Glidende vindu over TILLATTE forespørsler: `blockedFor` endrer ingenting (kun opprydding av utløpte tidsstempler), `record` kalles først når ALLE grensene tillater - derfor bruker en avvisning ingenting. Minnet er begrenset: høyst `limit`
+ * tidsstempler per nøkkel og `maxKeys` nøkler (nye nøkler avvises over taket til vinduet har gått: fail closed, som `RateLimiter` i `http-guard.ts`).
+ */
+class SlidingWindow {
+  private readonly hits = new Map<string, number[]>();
+  constructor(private readonly limit: number, private readonly windowMs: number, private readonly now: () => number, private readonly maxKeys = 10_000) {}
+
+  /** Tidsstemplene innenfor vinduet (eldste først), eller `undefined` uten noen (nøkkelen fjernes). */
+  private live(key: string, t: number): number[] | undefined {
+    const list = this.hits.get(key);
+    if (list === undefined) return undefined;
+    let expired = 0;
+    while (expired < list.length && list[expired]! <= t - this.windowMs) expired += 1;
+    if (expired > 0) list.splice(0, expired);
+    if (list.length === 0) { this.hits.delete(key); return undefined; }
+    return list;
+  }
+
+  /** `null` = en forespørsel ville blitt tillatt nå; ellers sekunder til den kan bli det (1..vinduet). */
+  blockedFor(key: string): number | null {
+    const t = this.now();
+    const list = this.live(key, t);
+    if (list !== undefined) return list.length < this.limit ? null : Math.min(Math.ceil(this.windowMs / 1000), Math.max(1, Math.ceil((list[0]! + this.windowMs - t) / 1000)));
+    if (this.hits.size < this.maxKeys) return null;
+    for (const other of [...this.hits.keys()]) this.live(other, t); // opprydding: utløpte nøkler fjernes før en NY nøkkel avvises
+    return this.hits.size < this.maxKeys ? null : Math.ceil(this.windowMs / 1000);
+  }
+
+  /** Registrerer en TILLATT forespørsel (kall kun etter at `blockedFor` ga `null` for ALLE grensene). */
+  record(key: string): void {
+    const t = this.now();
+    const list = this.live(key, t);
+    if (list === undefined) this.hits.set(key, [t]);
+    else list.push(t);
+  }
 }
 
 /** Begrensere per prinsipal. Nøklene er JSON (aldri en tekstsammenslåing): en id med skilletegn kan ikke kollidere med en annen prinsipals nøkkel. Ugyldige grenser (ikke et positivt heltall) faller tilbake til standarden - aldri «ingen grense». */
 export function createDavRateLimit(limits: Partial<DavRateLimits> = {}, now: () => number = Date.now): DavRateLimit {
   const pick = (value: number | undefined, fallback: number): number => (typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : fallback);
   const minute = 60_000;
-  const device = new RateLimiter(pick(limits.perDevicePerMinute, DEFAULT_DAV_RATE_LIMITS.perDevicePerMinute), minute, now);
-  const person = new RateLimiter(pick(limits.perPersonPerMinute, DEFAULT_DAV_RATE_LIMITS.perPersonPerMinute), minute, now);
-  const mutation = new RateLimiter(pick(limits.mutationsPerPersonPerMinute, DEFAULT_DAV_RATE_LIMITS.mutationsPerPersonPerMinute), minute, now);
+  const device = new SlidingWindow(pick(limits.perDevicePerMinute, DEFAULT_DAV_RATE_LIMITS.perDevicePerMinute), minute, now);
+  const person = new SlidingWindow(pick(limits.perPersonPerMinute, DEFAULT_DAV_RATE_LIMITS.perPersonPerMinute), minute, now);
+  const mutation = new SlidingWindow(pick(limits.mutationsPerPersonPerMinute, DEFAULT_DAV_RATE_LIMITS.mutationsPerPersonPerMinute), minute, now);
   return {
     check(identity, isMutation) {
       const deviceKey = JSON.stringify([identity.tenant_id, identity.device_id]);
       const personKey = JSON.stringify([identity.tenant_id, identity.person_id]);
-      if (!device.take(deviceKey)) return { ok: false, scope: "device", retry_after_seconds: device.retryAfterSeconds(deviceKey) };
-      if (!person.take(personKey)) return { ok: false, scope: "person", retry_after_seconds: person.retryAfterSeconds(personKey) };
-      if (isMutation && !mutation.take(personKey)) return { ok: false, scope: "mutation", retry_after_seconds: mutation.retryAfterSeconds(personKey) };
+      const applicable: Array<[DavRateLimitScope, SlidingWindow, string]> = [["device", device, deviceKey], ["person", person, personKey], ...(isMutation ? [["mutation", mutation, personKey] as [DavRateLimitScope, SlidingWindow, string]] : [])];
+      // Alle grensene sjekkes FØR noe brukes: en avvisning (uansett hvilken grense) bruker ingenting. Ventetiden er den lengste av de blokkerte.
+      let worst: { scope: DavRateLimitScope; wait: number } | null = null;
+      for (const [scope, window, key] of applicable) {
+        const wait = window.blockedFor(key);
+        if (wait !== null && (worst === null || wait > worst.wait)) worst = { scope, wait };
+      }
+      if (worst !== null) return { ok: false, scope: worst.scope, retry_after_seconds: worst.wait };
+      for (const [, window, key] of applicable) window.record(key);
       return { ok: true };
     }
   };
@@ -80,7 +127,7 @@ export interface PersonalDavDeps {
   client: Pick<AppleDavClient, "listCollections" | "list" | "get" | "create" | "update" | "remove">;
   audit(identity: IdentityContext, entry: DavAuditEntry): Promise<void>;
   /**
-   * Grense per prinsipal (WP-G2c, JARVIS-113 e/6), sjekket etter eier-kontrollen og FØR step-up, stoppvakt, revisjon og klient. PÅKREVD som vakten: en wiring som glemte den ville latt en enhet flomme iCloud-kontoen uten at noe feilet;
+   * Grense per prinsipal (WP-G2c, JARVIS-113 e/6), sjekket etter eier-kontrollen og (for mutasjoner) step-up, og FØR stoppvakt, revisjon og klient (et step-up-avslag bruker aldri budsjett, fiks-runde 1). PÅKREVD som vakten: en wiring som glemte den ville latt en enhet flomme iCloud-kontoen uten at noe feilet;
    * en kaller uten typesjekk (cast/JS) uten grense får fail-closed 503 `dav_guard_unavailable` i stedet for ubegrenset trafikk.
    */
   rateLimit: DavRateLimit;
@@ -162,7 +209,7 @@ async function auditDenied(deps: PersonalDavDeps, identity: IdentityContext, act
   try { await deps.audit(identity, { action, collection, outcome: "blocked", decision: "DENY", reason }); } catch { return; }
 }
 
-/** `true` = ruten er håndtert. Rekkefølge: grant -> EIER -> (mutasjon: step-up) -> revisjon `requested` -> utførelse -> revisjon av utfallet. */
+/** `true` = ruten er håndtert. Rekkefølge: grant -> EIER -> (mutasjon: step-up) -> grense per prinsipal -> stoppvakt -> (mutasjon: revisjon `requested`) -> utførelse -> revisjon av utfallet. */
 export async function handleDavRoute(ctx: PersonalRouteContext, deps: PersonalDavDeps): Promise<boolean> {
   const route = DAV_ROUTES[ctx.url.pathname];
   if (route === undefined) return false;
@@ -170,6 +217,11 @@ export async function handleDavRoute(ctx: PersonalRouteContext, deps: PersonalDa
   if (!authed) return true;
   const { identity, body } = authed;
   if (!(await ctx.requireOwner(identity, { tool_id: "personal", action: `dav_${ctx.url.pathname.slice("/personal/dav/".length)}` }))) return true;
+  // Step-up FØR grensen (fiks-runde 1, LOW-3): en mutasjon fra en svak økt (kanal/styrke) avvises med 403 uten å bruke budsjett - ellers kunne en svak eier-økt tømme mutasjonsbudsjettet og sultet de signerte forespørslene.
+  if (route.mutation) {
+    const stepUp = ctx.stepUpDenial(identity, `personal_dav_${ctx.url.pathname.slice("/personal/dav/".length)}`);
+    if (stepUp) return ctx.json(403, { error: "step_up_required", reason: stepUp, request_id: ctx.requestId() }), true;
+  }
   // Grense per prinsipal (JARVIS-113 e/6): `collections` er lokal og unntatt. Ingen revisjonsrad per avvisning (en flom ville fylt sporet); begrenseren som mangler (cast/JS) eller kaster er fail closed.
   if (ctx.url.pathname !== "/personal/dav/collections") {
     let verdict: DavRateLimitDecision | null = null;
@@ -185,10 +237,6 @@ export async function handleDavRoute(ctx: PersonalRouteContext, deps: PersonalDa
       if (typeof ctx.res.setHeader === "function") ctx.res.setHeader("retry-after", String(verdict.retry_after_seconds));
       return ctx.json(429, { error: "rate_limited", scope: verdict.scope, retry_after_seconds: verdict.retry_after_seconds, request_id: ctx.requestId() }), true;
     }
-  }
-  if (route.mutation) {
-    const stepUp = ctx.stepUpDenial(identity, `personal_dav_${ctx.url.pathname.slice("/personal/dav/".length)}`);
-    if (stepUp) return ctx.json(403, { error: "step_up_required", reason: stepUp, request_id: ctx.requestId() }), true;
   }
   const action = ctx.url.pathname.slice("/personal/dav/".length);
   const collection = typeof body["collection"] === "string" ? (body["collection"] as string).slice(0, 40) : "";

@@ -94,6 +94,122 @@ describe("B: createDavRateLimit - grense per prinsipal (JARVIS-113 e/6)", () => 
     expect(rl.check(who("d-3"), true)).toMatchObject({ ok: false, scope: "person" });
   });
 
+  it("fiks-runde 1 (LOW-3): en avvisning bruker ALDRI budsjett, uansett hvilken grense som avviste - person-avvist bruker ikke enhetsbudsjettet, enhets-avvist bruker ikke person-/mutasjonsbudsjettet", () => {
+    const rl = createDavRateLimit({ perDevicePerMinute: 3, perPersonPerMinute: 2, mutationsPerPersonPerMinute: 5 }, clockAt().now);
+    expect(fill(rl, who("d-1", "p-1"), 2).every((r) => r.ok)).toBe(true); // enhet d-1: 2/3, person p-1: 2/2
+    expect(rl.check(who("d-1", "p-1"), false)).toMatchObject({ ok: false, scope: "person" });
+    expect(rl.check(who("d-1", "p-2"), false).ok, "avvisningen over brukte IKKE enhetens tredje plass").toBe(true);
+    expect(rl.check(who("d-1", "p-2"), false)).toMatchObject({ ok: false, scope: "device" }); // enhet d-1: 3/3
+    expect(rl.check(who("d-9", "p-2"), false).ok, "enhets-avvisningen over brukte IKKE p-2 sitt personbudsjett (1 av 2 brukt)").toBe(true);
+    expect(rl.check(who("d-9", "p-2"), false)).toMatchObject({ ok: false, scope: "person" });
+    // mutasjons-avvist (grensen 5) bruker verken enhet eller person
+    const m = createDavRateLimit({ perDevicePerMinute: 100, perPersonPerMinute: 100, mutationsPerPersonPerMinute: 2 }, clockAt().now);
+    expect(fill(m, who("d-1"), 2, true).every((r) => r.ok)).toBe(true);
+    for (let i = 0; i < 500; i += 1) expect(m.check(who("d-1"), true)).toMatchObject({ ok: false, scope: "mutation" });
+    expect(fill(m, who("d-1"), 98).every((r) => r.ok), "enheten har brukt 2 av 100, ikke 502").toBe(true);
+    expect(m.check(who("d-1"), false)).toMatchObject({ ok: false, scope: "device" });
+  });
+
+  it("fiks-runde 1 (LOW-3, A K3d): 10 tillatte + 50 avviste mutasjoner bruker 10 av enhets- og personbudsjettet (ikke 60) - lesingene etterpå får hele resten (20 på enheten, 50 på personen)", () => {
+    const rl = createDavRateLimit({}, clockAt().now);
+    expect(fill(rl, who("d-1"), 10, true).every((r) => r.ok)).toBe(true);
+    expect(fill(rl, who("d-1"), 50, true).every((r) => !r.ok && r.scope === "mutation")).toBe(true);
+    expect(fill(rl, who("d-1"), 20).every((r) => r.ok)).toBe(true); // 10 + 20 = 30 på enheten
+    expect(rl.check(who("d-1"), false)).toMatchObject({ ok: false, scope: "device" });
+    expect(fill(rl, who("d-2"), 30).every((r) => r.ok)).toBe(true); // personen: 30 + 30 = 60
+    expect(rl.check(who("d-3"), false)).toMatchObject({ ok: false, scope: "person" }); // en fersk enhet: kun personbudsjettet er brukt opp
+  });
+
+  it("fiks-runde 1: GLIDENDE vindu - aldri mer enn grensen innenfor noe intervall på 60 s (et fast vindu ga 2 x grensen rundt vindusskiftet); ventetiden er tiden til den eldste tillatte forespørselen forlater vinduet", () => {
+    const c = clockAt();
+    const rl = createDavRateLimit({}, c.now);
+    expect(rl.check(who("d-1"), false).ok).toBe(true); // t0
+    c.advance(59_000);
+    expect(fill(rl, who("d-1"), 29).every((r) => r.ok)).toBe(true); // 30 i vinduet
+    expect(rl.check(who("d-1"), false)).toMatchObject({ ok: false, scope: "device", retry_after_seconds: 1 }); // t0 forlater vinduet om 1 s
+    c.advance(1_000); // 60 s etter t0: KUN den ene plassen er ledig (fast vindu: 30 nye)
+    expect(rl.check(who("d-1"), false).ok).toBe(true);
+    expect(rl.check(who("d-1"), false)).toMatchObject({ ok: false, scope: "device", retry_after_seconds: 59 }); // neste å forlate vinduet er de 29 fra t0+59 s
+    c.advance(59_000);
+    expect(fill(rl, who("d-1"), 29).every((r) => r.ok)).toBe(true);
+    expect(rl.check(who("d-1"), false).ok).toBe(false);
+    // og et tomt vindu er åpent igjen: etter 60 s uten forespørsler er hele budsjettet fullt
+    c.advance(60_000);
+    expect(fill(rl, who("d-1"), 30).every((r) => r.ok)).toBe(true);
+  });
+
+  it("fiks-runde 1: ventetiden er den LENGSTE av de blokkerte grensene (klienten skal ikke få en ventetid som bare fører til en ny 429)", () => {
+    const c = clockAt();
+    const rl = createDavRateLimit({ perDevicePerMinute: 2, perPersonPerMinute: 2, mutationsPerPersonPerMinute: 5 }, c.now);
+    expect(rl.check(who("d-1", "p-2"), false).ok).toBe(true); // t0: d-1 (1/2), p-2
+    c.advance(5_000);
+    expect(rl.check(who("d-1", "p-1"), false).ok).toBe(true); // t0+5: d-1 (2/2: eldste t0), p-1 (1/2)
+    c.advance(25_000);
+    expect(rl.check(who("d-2", "p-1"), false).ok).toBe(true); // t0+30: p-1 (2/2: eldste t0+5)
+    c.advance(10_000); // t0+40
+    // d-1 er full (eldste t0 -> ledig om 20 s) og p-1 er full (eldste t0+5 -> ledig om 25 s): ventetiden er 25 s, scope person
+    expect(rl.check(who("d-1", "p-1"), false)).toEqual({ ok: false, scope: "person", retry_after_seconds: 25 });
+    c.advance(25_000);
+    expect(rl.check(who("d-1", "p-1"), false).ok).toBe(true);
+  });
+
+  it("fiks-runde 1: samme person- og enhets-id i to tenanter har hvert sitt budsjett (personnøkkel og mutasjonsnøkkel inneholder tenanten)", () => {
+    const rl = createDavRateLimit({ perPersonPerMinute: 2, perDevicePerMinute: 100, mutationsPerPersonPerMinute: 1 }, clockAt().now);
+    const a = { tenant_id: "t-a", person_id: "p", device_id: "d" };
+    const b = { tenant_id: "t-b", person_id: "p", device_id: "d" };
+    expect(fill(rl, a, 1, true).every((r) => r.ok)).toBe(true);
+    expect(rl.check(a, true)).toMatchObject({ ok: false, scope: "mutation" });
+    expect(rl.check(b, true).ok, "tenant B sin mutasjonsgrense er uberørt").toBe(true);
+    expect(rl.check(a, false).ok).toBe(true); // person t-a: 2/2
+    expect(rl.check(a, false)).toMatchObject({ ok: false, scope: "person" });
+    expect(rl.check(b, false).ok, "tenant B sin persongrense er uberørt (2 av 2 brukt av mutasjonen og denne)").toBe(true);
+    expect(rl.check(b, false)).toMatchObject({ ok: false, scope: "person" });
+  });
+
+  it("fiks-runde 1: nøkkeltaket - 10 001 forskjellige enheter fyller begrenseren, den neste NYE enheten avvises (fail closed, `device`) til vinduet har gått; kjente enheter berøres ikke", () => {
+    const c = clockAt();
+    const rl = createDavRateLimit({ perDevicePerMinute: 5, perPersonPerMinute: 1_000_000 }, c.now);
+    let allowed = 0;
+    for (let i = 0; i < 10_001; i += 1) if (rl.check(who(`d-${i}`), false).ok) allowed += 1;
+    expect(allowed).toBe(10_000);
+    expect(rl.check(who("d-new"), false)).toMatchObject({ ok: false, scope: "device", retry_after_seconds: 60 });
+    expect(rl.check(who("d-0"), false).ok, "en kjent enhet er upåvirket").toBe(true);
+    c.advance(60_001);
+    expect(rl.check(who("d-new"), false).ok).toBe(true);
+  });
+
+  it("fiks-runde 1: mot et uavhengig orakel (naiv glidende logg med atomisk avgjørelse) gir 4 000 tilfeldige forespørsler over flere enheter, personer og tenanter nøyaktig samme tillatt/avvist", () => {
+    let seed = 0x9e3779b9;
+    const rnd = (): number => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const limits = { perDevicePerMinute: 4, perPersonPerMinute: 6, mutationsPerPersonPerMinute: 2 };
+    const c = clockAt();
+    const rl = createDavRateLimit(limits, c.now);
+    const log: Record<"device" | "person" | "mutation", Map<string, number[]>> = { device: new Map(), person: new Map(), mutation: new Map() };
+    const recent = (scope: keyof typeof log, key: string): number[] => (log[scope].get(key) ?? []).filter((t) => t > c.now() - 60_000);
+    let allowedCount = 0;
+    let rejectedCount = 0;
+    for (let step = 0; step < 4_000; step += 1) {
+      c.advance(Math.floor(rnd() * 9_000));
+      const tenant = rnd() < 0.8 ? "t-1" : "t-2";
+      const person = `p-${Math.floor(rnd() * 2)}`;
+      const device = `d-${Math.floor(rnd() * 3)}`;
+      const isMutation = rnd() < 0.3;
+      const dk = JSON.stringify([tenant, device]);
+      const pk = JSON.stringify([tenant, person]);
+      const blocked: string[] = [];
+      if (recent("device", dk).length >= limits.perDevicePerMinute) blocked.push("device");
+      if (recent("person", pk).length >= limits.perPersonPerMinute) blocked.push("person");
+      if (isMutation && recent("mutation", pk).length >= limits.mutationsPerPersonPerMinute) blocked.push("mutation");
+      const got = rl.check({ tenant_id: tenant, person_id: person, device_id: device }, isMutation);
+      expect(got.ok, `steg ${step}`).toBe(blocked.length === 0);
+      if (!got.ok) { expect(blocked, `steg ${step}`).toContain(got.scope); rejectedCount += 1; continue; }
+      allowedCount += 1;
+      for (const [scope, key] of [["device", dk], ["person", pk], ...(isMutation ? [["mutation", pk] as const] : [])] as const) log[scope].set(key, [...recent(scope, key), c.now()]);
+    }
+    expect(allowedCount).toBeGreaterThan(300);
+    expect(rejectedCount).toBeGreaterThan(300); // sanity: begge utfall forekommer ofte
+  });
+
   it("tenant og prinsipal er adskilt, og nøklene kan ikke kollidere via skilletegn i id-er", () => {
     const rl = createDavRateLimit({ perDevicePerMinute: 2, perPersonPerMinute: 1000 }, clockAt().now);
     fill(rl, { tenant_id: "a|b", person_id: "p", device_id: "c" }, 2);
@@ -157,7 +273,7 @@ function davDeps(over: { rateLimit?: DavRateLimit; guard?: PersonalDavDeps["guar
 const LIST = { collection: "privat" };
 const CREATE = { collection: "privat", idempotency_key: "idem-key-0001", fields: { summary: "x" } };
 
-describe("C: ruten - 429 FØR step-up, stoppvakt, revisjon og klient (JARVIS-113 e/6)", () => {
+describe("C: ruten - step-up (mutasjoner), så 429 FØR stoppvakt, revisjon og klient (JARVIS-113 e/6, fiks-runde 1)", () => {
   it("over grensen: 429 `rate_limited` med scope og ventetid (også som `retry-after`), klienten nås ikke, ingen revisjonsrad, stoppvakten kalles ikke; før grensen er svaret som før", async () => {
     let t = 5_000_000;
     const d = davDeps({ rateLimit: createDavRateLimit({ perDevicePerMinute: 2 }, () => t) });
@@ -181,7 +297,7 @@ describe("C: ruten - 429 FØR step-up, stoppvakt, revisjon og klient (JARVIS-113
     expect(again.responses[0]?.status).toBe(200);
   });
 
-  it("rekkefølge: grant -> eier -> grense -> step-up -> ...; en ikke-eier bruker aldri budsjett, og over grensen vinner 429 over step-up-avslaget", async () => {
+  it("rekkefølge: grant -> eier -> (mutasjon: step-up) -> grense -> ...; en ikke-eier og et step-up-avslag bruker ALDRI budsjett, og step-up-avslaget vinner over grensen (fiks-runde 1, LOW-3)", async () => {
     const calls: string[] = [];
     const rateLimit: DavRateLimit = { check: (_i, mutation) => { calls.push(`rateLimit:${mutation ? "mutation" : "read"}`); return { ok: true }; } };
     const d = davDeps({ rateLimit });
@@ -189,16 +305,52 @@ describe("C: ruten - 429 FØR step-up, stoppvakt, revisjon og klient (JARVIS-113
     await handlePersonalRoute(notOwner.ctx);
     expect(notOwner.responses[0]?.status).toBe(403);
     expect(calls).toEqual([]); // grensen er ikke rørt
-    const mutation = routeCtx(d.dav, "/personal/dav/create", CREATE, { stepUp: "step_up_missing" });
-    await handlePersonalRoute(mutation.ctx);
-    expect(mutation.calls).toEqual(["authed", "requireOwner", "stepUp"]);
+    const weak = routeCtx(d.dav, "/personal/dav/create", CREATE, { stepUp: "step_up_missing" });
+    await handlePersonalRoute(weak.ctx);
+    expect(weak.calls).toEqual(["authed", "requireOwner", "stepUp"]);
+    expect(weak.responses[0]).toMatchObject({ status: 403, body: { error: "step_up_required" } });
+    expect(calls, "step-up-avslaget nådde aldri grensen").toEqual([]);
+    const signed = routeCtx(d.dav, "/personal/dav/create", CREATE);
+    await handlePersonalRoute(signed.ctx);
+    expect(signed.calls).toEqual(["authed", "requireOwner", "stepUp"]);
     expect(calls).toEqual(["rateLimit:mutation"]);
-    expect(mutation.responses[0]).toMatchObject({ status: 403, body: { error: "step_up_required" } });
+    const read = routeCtx(d.dav, "/personal/dav/list", LIST);
+    await handlePersonalRoute(read.ctx);
+    expect(read.calls, "lesing har ingen step-up").toEqual(["authed", "requireOwner"]);
+    expect(calls).toEqual(["rateLimit:mutation", "rateLimit:read"]);
+    // et step-up-avslag vinner over en grense som er nådd (avslaget er ikke en forespørsel som skulle telt)
     const blocked = davDeps({ rateLimit: { check: () => ({ ok: false, scope: "mutation", retry_after_seconds: 7 }) } });
-    const over = routeCtx(blocked.dav, "/personal/dav/create", CREATE, { stepUp: "step_up_missing" });
-    await handlePersonalRoute(over.ctx);
-    expect(over.calls).toEqual(["authed", "requireOwner"]); // step-up er ikke nådd
-    expect(over.responses[0]).toMatchObject({ status: 429, body: { error: "rate_limited", scope: "mutation", retry_after_seconds: 7 } });
+    const weakOver = routeCtx(blocked.dav, "/personal/dav/create", CREATE, { stepUp: "step_up_missing" });
+    await handlePersonalRoute(weakOver.ctx);
+    expect(weakOver.responses[0]).toMatchObject({ status: 403, body: { error: "step_up_required" } });
+    const signedOver = routeCtx(blocked.dav, "/personal/dav/create", CREATE);
+    await handlePersonalRoute(signedOver.ctx);
+    expect(signedOver.responses[0]).toMatchObject({ status: 429, body: { error: "rate_limited", scope: "mutation", retry_after_seconds: 7 } });
+  });
+
+  it("fiks-runde 1 (LOW-3, B DV3): 10 mutasjoner fra en SVAK økt (step-up avslått, 403) bruker ikke mutasjonsbudsjettet - eierens signerte opprettelse etterpå går gjennom; og 50 avviste mutasjoner tømmer ikke personbudsjettet for lesing", async () => {
+    const d = davDeps({ rateLimit: createDavRateLimit({}, () => 1) });
+    for (let i = 0; i < 60; i += 1) {
+      const weak = routeCtx(d.dav, "/personal/dav/create", CREATE, { stepUp: "step_up_missing" });
+      await handlePersonalRoute(weak.ctx);
+      expect(weak.responses[0]?.status).toBe(403);
+    }
+    const signed = routeCtx(d.dav, "/personal/dav/create", CREATE);
+    await handlePersonalRoute(signed.ctx);
+    expect(signed.responses[0]?.status, "den signerte opprettelsen er ikke sultet av de svake").toBe(200);
+    expect(d.clientCalls).toEqual(["create"]);
+    // og 10 godkjente + 50 avviste (429 mutation) tømmer ikke lese-budsjettet
+    for (let i = 0; i < 9; i += 1) await handlePersonalRoute(routeCtx(d.dav, "/personal/dav/create", CREATE).ctx);
+    for (let i = 0; i < 50; i += 1) {
+      const over = routeCtx(d.dav, "/personal/dav/create", CREATE);
+      await handlePersonalRoute(over.ctx);
+      expect(over.responses[0]).toMatchObject({ status: 429, body: { scope: "mutation" } });
+    }
+    for (let i = 0; i < 20; i += 1) {
+      const read = routeCtx(d.dav, "/personal/dav/list", LIST);
+      await handlePersonalRoute(read.ctx);
+      expect(read.responses[0]?.status, `lesing ${i + 1}`).toBe(200);
+    }
   });
 
   it("`collections` er lokal og unntatt: 200 kall går gjennom uten å røre grensen", async () => {
