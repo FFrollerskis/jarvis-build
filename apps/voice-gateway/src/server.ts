@@ -822,10 +822,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
     const frameBucket = new TokenBucket(limits.pingPongPerSecond, limits.pingPongBurst);
     let pingOutstanding = false;
     const terminateFrameFlood = (frame: "ping" | "pong"): void => {
-      if (closing) {
-        return; // en flom leverer mange rammer i samme tikk: kun den første logges og terminerer
-      }
-      closing = true;
+      closing = true; // en flom leverer mange rammer i samme tikk: handlerne under ignorerer alt etter den første (`closing`)
       console.error(JSON.stringify({ msg: "voice_control_frame_flood", frame }));
       session?.disconnect();
       ws.terminate();
