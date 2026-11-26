@@ -15,6 +15,8 @@ export interface LimitationInput {
   allModelCapabilities: readonly string[];
   /** WP-C2: sant når en backup-statusfil er montert og leses (`backup`-området har en leser). Da er «ingen heartbeat»-begrensningen byttet ut med en presis. */
   backupStatusReadable?: boolean;
+  /** WP-OPS2a K1: sant når vakthundens tikk registreres varig og leses (`watchdog`-leseren har en kilde, dvs. incident-produsentene er på). Da er «jeg ser ikke watchdogens status»-begrensningen byttet ut med en presis. */
+  watchdogStateReadable?: boolean;
 }
 
 const HAND_WRITTEN: readonly Limitation[] = [
@@ -76,8 +78,20 @@ const BACKUP_STATUS_READABLE: Limitation = {
   source_ref: "ops/backup/schedule.mjs (backup-status.json), apps/api/src/backup-status.ts"
 };
 
+/** WP-OPS2a K1: med registrerte tikk er den gamle påstanden usann - men det jeg ser er fortsatt kun siste registrerte tikk, og jeg kan verken starte vakthunden på nytt eller lese sjekkenes egne meldinger. */
+const WATCHDOG_STATE_READABLE: Limitation = {
+  id: "no_cross_process_watchdog_state",
+  statement: "Jeg ser vakthunden kun slik dens tikk er registrert varig; jeg kan ikke starte den på nytt. Det jeg ser er når den sist tikket og hvor mange sjekker som feilet - aldri sjekkenes egne meldinger.",
+  kind: "technical",
+  source_ref: "apps/api/src/watchdog-status.ts (incident_producer_runs, producer watchdog), modules/incidents/src/producers/run-store.ts"
+};
+
 export function buildLimitationRegistry(input: LimitationInput): Limitation[] {
-  const out: Limitation[] = HAND_WRITTEN.map((l) => (l.id === "no_backup_heartbeat" && input.backupStatusReadable === true ? BACKUP_STATUS_READABLE : l));
+  const out: Limitation[] = HAND_WRITTEN.map((l) => {
+    if (l.id === "no_backup_heartbeat" && input.backupStatusReadable === true) return BACKUP_STATUS_READABLE;
+    if (l.id === "no_cross_process_watchdog_state" && input.watchdogStateReadable === true) return WATCHDOG_STATE_READABLE;
+    return l;
+  });
 
   for (const toolId of [...input.forbiddenModelToolIds].sort()) {
     out.push({

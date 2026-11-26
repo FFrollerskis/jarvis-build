@@ -171,9 +171,10 @@ describe("B: jobber og verktøyfeil mot ekte Postgres (RLS, kun egen tenant)", (
     expect(lowDisk.status).toBe("DEGRADED");
   });
 
-  it("B4: ingen leser for backup og watchdog (bevisst UKJENT)", () => {
+  it("B4: ingen leser for backup uten statusfil (bevisst UKJENT); `watchdog` har en leser (WP-OPS2a K1) som uten registrerte tikk svarer UKJENT med årsaken - aldri OK", async () => {
     const readers = buildSelfModelReaders(baseDeps());
     expect(readers["backup"]).toBeUndefined();
-    expect(readers["watchdog"]).toBeUndefined();
+    expect(readers["watchdog"]).toBeDefined();
+    expect(await readers["watchdog"]!()).toMatchObject({ status: "UNKNOWN", observed_at: null, detail: "incident-produsentene er AV: vakthundens tikk registreres ikke varig" });
   });
 });

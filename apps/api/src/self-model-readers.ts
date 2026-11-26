@@ -5,10 +5,11 @@ import { withTenantTransaction } from "@jarvis/core";
 import type { Observation, ObservationReader } from "@jarvis/executive";
 import { describeSchedulerProblem, readSchedulerHealth } from "@jarvis/tool-gateway";
 import { observeBackupStatus, type BackupStatusRead } from "./backup-status.ts";
+import { readWatchdogObservation, type WatchdogRunSource } from "./watchdog-status.ts";
 
 /**
  * EV-1 (D-412): leserne selvmodellen komponerer selvdiagnosen av. Hver leser er smal og injisert, leser KUN sin egen kilde, og svarer med
- * `status`/`source`/`observed_at`. Det som ikke kan måles herfra (watchdog i worker, GPU/CPU på PC-en, og backup uten en montert statusfil) er bevisst UNKNOWN - aldri gjettet.
+ * `status`/`source`/`observed_at`. Det som ikke kan måles herfra (GPU/CPU på PC-en, backup uten en montert statusfil, og vakthunden uten at incident-produsentene registrerer dens tikk) er bevisst UNKNOWN - aldri gjettet.
  */
 export interface SelfModelReaderDeps {
   pool: Pick<pg.Pool, "query"> & Partial<Pick<pg.Pool, "connect">>;
@@ -31,6 +32,11 @@ export interface SelfModelReaderDeps {
    * `backup`-leser, og området er UKJENT i selvdiagnosen.
    */
   backupStatus?: (() => Promise<BackupStatusRead>) | undefined;
+  /**
+   * WP-OPS2a K1: vakthundens siste registrerte tikk (`incident_producer_runs`, producer `watchdog`) + produsent-intervallet grensen regnes av (`watchdogRunSource`). Sendes KUN når incident-produsentene er på; uten den svarer `watchdog`-leseren
+   * UKJENT med årsaken «incident-produsentene er AV» (vakthundens tikk registreres da ikke varig).
+   */
+  watchdogRuns?: WatchdogRunSource | undefined;
   now?: () => Date;
   /** Terskler (kan overstyres i tester). */
   limits?: { diskFreeWarnBytes?: number; memFreeWarnRatio?: number; toolErrorWarnRatio?: number; toolErrorMinSample?: number };
@@ -192,8 +198,12 @@ export function buildSelfModelReaders(deps: SelfModelReaderDeps): Record<string,
       return b.sha
         ? { status: "OK", source: "JARVIS_BUILD_SHA", observed_at: at, detail: `Bygg ${b.sha.slice(0, 7)}, versjon ${b.version}.`, data: { sha: b.sha, version: b.version } }
         : { status: "UNKNOWN", source: "JARVIS_BUILD_SHA", observed_at: null, detail: "Jeg vet ikke hvilken commit jeg er bygget fra (bygg-sha er ikke satt i miljøet)." };
+    },
+
+    // WP-OPS2a K1: vakthunden kjører i worker; det ENE varige sporet er raden `incident_producer_runs`/`watchdog` (kun når produsentene er på). Se `watchdog-status.ts`: UKJENT uten rad, ved lesefeil og ved klokkeavvik; aldri OK på en gjetning.
+    async watchdog(): Promise<Observation> {
+      return readWatchdogObservation(deps.watchdogRuns, now());
     }
-    // `watchdog` har BEVISST ingen leser (kjører i worker uten delt lagring - se Limitation Registry) og vises som UKJENT.
   };
   // WP-C2: `backup` leses kun når en statusfil er montert; ellers har området BEVISST ingen leser og vises som UKJENT.
   const readBackup = deps.backupStatus;

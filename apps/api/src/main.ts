@@ -11,6 +11,7 @@ import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, s
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { buildSelfModelReaders } from "./self-model-readers.ts";
 import { backupStatusSourceFromEnv } from "./backup-status.ts";
+import { watchdogRunSource } from "./watchdog-status.ts";
 import { startUptimeHeartbeat } from "./heartbeat-sender.ts";
 import {
   ChannelSessionAuthority,
@@ -40,7 +41,7 @@ import {
   writeAudit
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore, type AuthorityConfig } from "@jarvis/policy";
-import { DeploymentService, DiagnosisService, INCIDENT_PRODUCER_NAMES, IncidentService } from "@jarvis/incidents";
+import { DeploymentService, DiagnosisService, INCIDENT_PRODUCER_NAMES, IncidentService, ProducerRunStore } from "@jarvis/incidents";
 import { ClaimVerificationService, KnowledgeRetriever, createKnowledgeClaimsPort } from "@jarvis/knowledge";
 import {
   AiCouncil,
@@ -221,7 +222,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // EV-0 oppstartsresultat (konstitusjon + endringsregister); null til sjekken har kjørt -> UKJENT.
     ev0Status: () => getLastEv0BootStatus(),
     build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" }),
-    backupStatus: backupStatusSource
+    backupStatus: backupStatusSource,
+    // WP-OPS2a K1 (EV-1/H2): vakthundens siste registrerte tikk (incident_producer_runs, kun lesing) - kun når incident-produsentene er på; ellers er `watchdog` UKJENT med årsaken.
+    watchdogRuns: incidentProducerConfig.enabled ? watchdogRunSource(new ProducerRunStore(pool), owner.tenant_id, incidentProducerConfig.intervalMs) : undefined
   });
   await ownerControls.restore();
   // EV-2 (D-417): SLO/drift/dataskvalitet fra eksisterende observerbarhet (cost_events, tool_executions, tasks, memory_items) - ingen parallell telemetri.
@@ -1153,7 +1156,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             // WP-G3 (review A-L3): begrensningsregisteret (self-model) får `local_vision` KUN når adapteren er registrert - ellers er listen identisk med main.
             modelProfiles: visionAdapter !== null ? PROFILES_WITH_LOCAL_VISION : DEFAULT_PROFILES,
             allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"],
-            backupStatusReadable: backupStatusSource !== undefined
+            backupStatusReadable: backupStatusSource !== undefined,
+            // WP-OPS2a K1: samme bryter som leseren - uten registrerte tikk står den gamle begrensningen («jeg ser ikke watchdogens status»).
+            watchdogStateReadable: incidentProducerConfig.enabled
           }
         },
         slo: { report: sloReports },
