@@ -74,8 +74,8 @@ const sessionOptions = {
 const openAiStt = new OpenAiStt();
 const openAiTts = new OpenAiTts();
 // WP-V2 (K2): samtidige lokale prosesser er begrenset (CPU-tung whisper, lett piper) - se `VoiceLimits` og runbooken for begrunnelsen.
-const whisperSlots = new ProcessSlots(DEFAULT_VOICE_LIMITS.maxConcurrentWhisper, DEFAULT_VOICE_LIMITS.processQueueTimeoutMs);
-const piperSlots = new ProcessSlots(DEFAULT_VOICE_LIMITS.maxConcurrentPiper, DEFAULT_VOICE_LIMITS.processQueueTimeoutMs);
+const whisperSlots = new ProcessSlots(DEFAULT_VOICE_LIMITS.maxConcurrentWhisper, DEFAULT_VOICE_LIMITS.processQueueTimeoutMs, DEFAULT_VOICE_LIMITS.reservedProvenSlots);
+const piperSlots = new ProcessSlots(DEFAULT_VOICE_LIMITS.maxConcurrentPiper, DEFAULT_VOICE_LIMITS.processQueueTimeoutMs, DEFAULT_VOICE_LIMITS.reservedProvenSlots);
 const localWhisperStt = new LocalWhisperStt(
   undefined, undefined, undefined, undefined, undefined, undefined, whisperSlots
 );

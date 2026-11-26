@@ -75,6 +75,12 @@ export interface VoiceLimits {
   maxConcurrentWhisper: number;
   maxConcurrentPiper: number;
   processQueueTimeoutMs: number;
+  /**
+   * FIX-4 (F4): plasser i whisper-/piper-semaforene som er FORBEHOLDT bevisste sesjoner (`SERVER_VERIFIED`). Semaforene er globale, så en ubevist
+   * klient kunne før holde alle plasser og sulte eierens STT (målt: seks klienter ga fire plasser og to `voice_busy`). Ubeviste får høyst
+   * `max - reservedProvenSlots` samtidig. Prisen er ledig kapasitet når kun ubeviste kjører (whisper: 1 av 2) - bevisst: eierens tur må alltid komme igjennom.
+   */
+  reservedProvenSlots: number;
 }
 
 export const DEFAULT_VOICE_LIMITS: Readonly<VoiceLimits> = Object.freeze({
@@ -104,7 +110,8 @@ export const DEFAULT_VOICE_LIMITS: Readonly<VoiceLimits> = Object.freeze({
   maxReplayTextChars: 4_000,
   maxConcurrentWhisper: 2,
   maxConcurrentPiper: 4,
-  processQueueTimeoutMs: 8_000
+  processQueueTimeoutMs: 8_000,
+  reservedProvenSlots: 1
 });
 
 export function resolveLimits(overrides?: Partial<VoiceLimits>): VoiceLimits {
@@ -296,13 +303,40 @@ export class VoiceBusyError extends Error {
  * Semafor for samtidige lokale whisper-/piper-prosesser. Køen har en FRIST (`queueTimeoutMs`): en forespørsel som ikke får plass
  * innen den avvises med `VoiceBusyError` i stedet for å vente uendelig. En vent kan også avbrytes (`signal`: barge-in/frakobling).
  */
+/** Valg ved `ProcessSlots.acquire`. */
+export interface SlotRequestOptions {
+  /**
+   * Ubevist forespørsel (sesjonen er ikke `SERVER_VERIFIED`): kan ikke ta de reserverte plassene. Standard `false` = bevist (bakoverkompatibelt for
+   * kallere som ikke vet) - adapterne sender selv `true` med mindre konteksten er `SERVER_VERIFIED` (fail-closed).
+   */
+  unproven?: boolean;
+}
+
+interface Waiter {
+  readonly unproven: boolean;
+  readonly grant: () => void;
+}
+
+/**
+ * Semafor for samtidige lokale whisper-/piper-prosesser. Køen har en FRIST (`queueTimeoutMs`): en forespørsel som ikke får plass
+ * innen den avvises med `VoiceBusyError` i stedet for å vente uendelig. En vent kan også avbrytes (`signal`: barge-in/frakobling).
+ *
+ * FIX-4: `reservedForProven` plasser er forbeholdt bevisste forespørsler (klemt til `max - 1`, så ubeviste alltid kan bruke minst én plass).
+ * Frigjøres en plass, går den til den FØRSTE ventende som faktisk kan få den - en ubevist som har nådd taket hoder ikke køen foran en bevist.
+ */
 export class ProcessSlots {
   private active = 0;
-  private readonly waiters = new Set<() => void>();
+  private activeUnproven = 0;
+  private readonly waiters = new Set<Waiter>();
+  readonly reservedForProven: number;
   constructor(
     readonly max: number,
-    private readonly queueTimeoutMs: number = DEFAULT_VOICE_LIMITS.processQueueTimeoutMs
-  ) {}
+    private readonly queueTimeoutMs: number = DEFAULT_VOICE_LIMITS.processQueueTimeoutMs,
+    reservedForProven = 0
+  ) {
+    const wanted = Number.isFinite(reservedForProven) ? Math.floor(reservedForProven) : 0;
+    this.reservedForProven = Math.max(0, Math.min(wanted, max - 1));
+  }
 
   get inUse(): number {
     return this.active;
@@ -313,25 +347,29 @@ export class ProcessSlots {
   }
 
   /** Resolverer med en `release`-funksjon (idempotent). */
-  acquire(signal?: AbortSignal): Promise<() => void> {
+  acquire(signal?: AbortSignal, options: SlotRequestOptions = {}): Promise<() => void> {
+    const unproven = options.unproven === true;
     if (signal?.aborted) {
       return Promise.reject(abortError());
     }
-    if (this.active < this.max) {
-      this.active += 1;
-      return Promise.resolve(this.releaser());
+    if (this.canGrant(unproven)) {
+      this.take(unproven);
+      return Promise.resolve(this.releaser(unproven));
     }
     return new Promise<() => void>((resolve, reject) => {
       const handle: { timer?: ReturnType<typeof setTimeout> } = {};
+      const waiter: Waiter = {
+        unproven,
+        grant: (): void => {
+          cleanup();
+          this.take(unproven);
+          resolve(this.releaser(unproven));
+        }
+      };
       const cleanup = (): void => {
         if (handle.timer !== undefined) clearTimeout(handle.timer);
         signal?.removeEventListener("abort", onAbort);
-        this.waiters.delete(grant);
-      };
-      const grant = (): void => {
-        cleanup();
-        this.active += 1;
-        resolve(this.releaser());
+        this.waiters.delete(waiter);
       };
       const onAbort = (): void => {
         cleanup();
@@ -342,11 +380,26 @@ export class ProcessSlots {
         reject(new VoiceBusyError());
       }, this.queueTimeoutMs);
       signal?.addEventListener("abort", onAbort, { once: true });
-      this.waiters.add(grant);
+      this.waiters.add(waiter);
     });
   }
 
-  private releaser(): () => void {
+  /** Ledig plass finnes, og en ubevist forespørsel kan ikke ta de reserverte. */
+  private canGrant(unproven: boolean): boolean {
+    if (this.active >= this.max) {
+      return false;
+    }
+    return !unproven || this.activeUnproven < this.max - this.reservedForProven;
+  }
+
+  private take(unproven: boolean): void {
+    this.active += 1;
+    if (unproven) {
+      this.activeUnproven += 1;
+    }
+  }
+
+  private releaser(unproven: boolean): () => void {
     let released = false;
     return () => {
       if (released) {
@@ -354,17 +407,21 @@ export class ProcessSlots {
       }
       released = true;
       this.active -= 1;
+      if (unproven) {
+        this.activeUnproven -= 1;
+      }
       this.drain();
     };
   }
 
   private drain(): void {
-    while (this.active < this.max && this.waiters.size > 0) {
-      const next = this.waiters.values().next().value as (() => void) | undefined;
-      if (next === undefined) {
+    for (const waiter of [...this.waiters]) {
+      if (this.active >= this.max) {
         return;
       }
-      next();
+      if (this.canGrant(waiter.unproven)) {
+        waiter.grant();
+      }
     }
   }
 }

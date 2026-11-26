@@ -8,7 +8,7 @@ import { WebSocket as WsClient } from "ws";
 import { maybeDumpAudioForDebug } from "./debug-audio-dump.ts";
 import { deadlineSignal } from "./deadline.ts";
 import { killProcessGroup, probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
-import { ProcessSlots } from "./limits.ts";
+import { DEFAULT_VOICE_LIMITS, ProcessSlots } from "./limits.ts";
 import type { SpeechCallContext } from "./speech-context.ts";
 
 /** WP-V2 (K4): standard totalfrist (ms) for ett batch-STT-kall til en skyleverandør (en tur er maks ca. 30 s lyd). */
@@ -16,7 +16,7 @@ export const DEFAULT_STT_HTTP_TIMEOUT_MS = 20_000;
 /** WP-V2 (K4): standard maksvarighet (ms) for én lokal whisper-prosess. */
 export const DEFAULT_WHISPER_TIMEOUT_MS = 60_000;
 /** Prosess-delt standardsemafor for whisper (CPU-tung). `main.ts` injiserer et eget med grensen fra `VoiceLimits`. */
-const DEFAULT_WHISPER_SLOTS = new ProcessSlots(2);
+const DEFAULT_WHISPER_SLOTS = new ProcessSlots(2, DEFAULT_VOICE_LIMITS.processQueueTimeoutMs, DEFAULT_VOICE_LIMITS.reservedProvenSlots);
 
 /**
  * SpeechAdapter (STT): streaming-kontrakt bak adapter - ingen leverandørkode
@@ -254,7 +254,8 @@ export class RemoteWhisperStt implements SttAdapter {
     return (this.options.now ?? Date.now)();
   }
 
-  startStream(): SttStream {
+  /** `context` (FIX-4): gis videre til den lokale reserven, så en BEVIST sesjon ikke mister sin reserverte prosessplass ved fallback. */
+  startStream(context?: SpeechCallContext): SttStream {
     const baseUrl = this.baseUrl;
     if (!baseUrl) throw new Error("remote_whisper_not_configured");
     const chunks: Buffer[] = [];
@@ -268,7 +269,7 @@ export class RemoteWhisperStt implements SttAdapter {
         const runFallback = async (reason: string): Promise<string> => {
           if (!fallback?.available()) throw new Error(`remote_whisper_failed_no_fallback:${reason}`);
           console.warn(JSON.stringify({ msg: "stt_remote_whisper_fallback_local", reason }));
-          const stream = fallback.startStream();
+          const stream = fallback.startStream(context);
           for (const c of chunks) stream.pushAudio(c);
           return stream.end();
         };
@@ -706,14 +707,16 @@ export class LocalWhisperStt implements SttAdapter {
     const reason = this.unavailableReason();
     return {
       ...(reason !== undefined ? { unavailable_reason: reason } : {}),
-      process_slots: { max: this.slots.max, in_use: this.slots.inUse, queued: this.slots.queued }
+      process_slots: { max: this.slots.max, in_use: this.slots.inUse, queued: this.slots.queued, reserved_for_proven: this.slots.reservedForProven }
     };
   }
 
-  startStream(): SttStream {
+  /** `context` (FIX-4): kun `SERVER_VERIFIED` får de reserverte prosessplassene; manglende kontekst regnes som ubevist (fail-closed). */
+  startStream(context?: SpeechCallContext): SttStream {
     if (!this.binPath || !this.modelPath) {
       throw new Error("local_whisper_not_configured");
     }
+    const unproven = context?.authority !== "SERVER_VERIFIED";
     const { binPath, sampleRate, slots, timeoutMs } = this;
     const cliArgs = (tmpOutBase: string): string[] => this.cliArgs(tmpOutBase);
     const chunks: Buffer[] = [];
@@ -985,7 +988,7 @@ export class LocalWhisperStt implements SttAdapter {
       },
       async end(): Promise<string> {
         // WP-V2 (K2): samtidige whisper-prosesser er begrenset; køen har en frist og avvises med `VoiceBusyError` ("voice_busy").
-        const release = await slots.acquire();
+        const release = await slots.acquire(undefined, { unproven });
         try {
           return await runWhisper();
         } finally {

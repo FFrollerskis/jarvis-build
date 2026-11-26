@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
 import { deadlineSignal } from "./deadline.ts";
 import { killProcessGroup, probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
-import { ProcessSlots, VoiceBusyError } from "./limits.ts";
+import { DEFAULT_VOICE_LIMITS, ProcessSlots, VoiceBusyError } from "./limits.ts";
 import type { SpeechCallContext } from "./speech-context.ts";
 
 /**
@@ -458,7 +458,7 @@ export function resolvePiperSampleRate(
 export const DEFAULT_PIPER_CHUNK_TIMEOUT_MS = 60_000;
 
 /** Prosess-delt standardsemafor (brukes når ingen injiseres). `main.ts` injiserer et eget med grensen fra `VoiceLimits`. */
-const DEFAULT_PIPER_SLOTS = new ProcessSlots(4);
+const DEFAULT_PIPER_SLOTS = new ProcessSlots(4, DEFAULT_VOICE_LIMITS.processQueueTimeoutMs, DEFAULT_VOICE_LIMITS.reservedProvenSlots);
 
 export class LocalPiperTts implements TtsAdapter {
   readonly name = "local-piper";
@@ -519,18 +519,20 @@ export class LocalPiperTts implements TtsAdapter {
       sample_rate_source: this.sampleRateSource,
       ...(this.sampleRateMismatch ? { sample_rate_mismatch: this.sampleRateMismatch } : {}),
       ...(reason !== undefined ? { unavailable_reason: reason } : {}),
-      process_slots: { max: this.slots.max, in_use: this.slots.inUse, queued: this.slots.queued }
+      process_slots: { max: this.slots.max, in_use: this.slots.inUse, queued: this.slots.queued, reserved_for_proven: this.slots.reservedForProven }
     };
   }
 
   /** D-405: piper kan justere hastighet (length_scale), uttrykk (noise_scale/noise_w) og setningspause (sentence_silence). */
   readonly voiceCapabilities: VoiceCapabilities = { speed: true, expressiveness: true, pause: true };
 
-  synthesize(text: string, options?: TtsOptions): TtsPlayback {
+  /** `context` (FIX-4): kun `SERVER_VERIFIED` får de reserverte prosessplassene; manglende kontekst regnes som ubevist (fail-closed). */
+  synthesize(text: string, options?: TtsOptions, context?: SpeechCallContext): TtsPlayback {
     if (!this.binPath || !this.modelPath) {
       throw new Error("local_piper_not_configured");
     }
     const { binPath, modelPath, slots, chunkTimeoutMs } = this;
+    const unproven = context?.authority !== "SERVER_VERIFIED";
     const extraArgs = piperArgsFor(options);
     let cancelled = false;
     let child: ReturnType<typeof spawn> | undefined;
@@ -639,7 +641,7 @@ export class LocalPiperTts implements TtsAdapter {
       // WP-V2 (K2): samtidige piper-prosesser er begrenset (delt semafor). Køen har en frist -> `VoiceBusyError` ("voice_busy").
       let release: () => void;
       try {
-        release = await slots.acquire(cancelController.signal);
+        release = await slots.acquire(cancelController.signal, { unproven });
       } catch (err) {
         if (cancelled) {
           return;
