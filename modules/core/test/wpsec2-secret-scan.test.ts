@@ -23,6 +23,8 @@ describe("K1: skjulte tegn, fullbredde og kombinerende merker unngår ikke skann
     ["variantvelger og CGJ i kroppen", insertAt(insertAt(github, 7, HIDDEN.vs16), 14, HIDDEN.cgj)],
     ["kontrolltegn (NUL, ESC) i kroppen", insertAt(insertAt(github, 10, HIDDEN.nul), 17, HIDDEN.esc)],
     ["Hangul-fyller (default ignorable) i kroppen", insertAt(github, 11, HIDDEN.hangulFiller)],
+    ["arabisk tallskilt (Cf, men ikke default ignorable) i kroppen", insertAt(github, 10, HIDDEN.arabicNumberSign)],
+    ["DEL (0x7F) i kroppen", insertAt(github, 13, HIDDEN.del)],
     ["kombinerende aksent etter prefiksbokstaver", insertAt(insertAt(github, 1, HIDDEN.acute), 3, HIDDEN.ring)],
     ["kombinerende aksent etter hver bokstav i prefikset", [...github.slice(0, 4)].map((c) => c + HIDDEN.acute).join("") + github.slice(4)],
     ["matematiske fete bokstaver og sifre (astrale kodepunkt som NFKC gjør om til ASCII)", [...github].map((c) => (/[a-z]/.test(c) ? String.fromCodePoint(0x1d41a + c.charCodeAt(0) - 97) : /[A-Z]/.test(c) ? String.fromCodePoint(0x1d400 + c.charCodeAt(0) - 65) : /[0-9]/.test(c) ? String.fromCodePoint(0x1d7ce + c.charCodeAt(0) - 48) : c)).join("")],
@@ -39,6 +41,11 @@ describe("K1: skjulte tegn, fullbredde og kombinerende merker unngår ikke skann
       expect(containsSecret(evaded)).toBe(true);
     });
   }
+
+  it("\\v og \\f er blanke (ordgrense), ikke usynlige: et token etter dem fanges, og blanke beholdes", () => {
+    const r = scanForSecrets(`bruk${HIDDEN.ff}${github}${HIDDEN.vt}slutt`);
+    expect(r.text).toBe(`bruk${HIDDEN.ff}${redacted("github_token")}${HIDDEN.vt}slutt`);
+  });
 
   it("skjulte tegn UTENFOR hemmeligheten (før/etter) beholdes - kun selve spennet erstattes", () => {
     const r = scanForSecrets(`${HIDDEN.zwsp}${github}${HIDDEN.rlo}`);
@@ -184,6 +191,12 @@ describe("K2a: en hemmelighet delt over mellomrom/linjeskift fanges (klemt visni
     }
   });
 
+  it("et prefiks som henger sammen med et ord foran seg er ikke et prefiks (ordgrense), og et token på 30 tegn med prosa etter får ikke prosaen spist", () => {
+    for (const text of [`Risk- ${body(30)}`, `Husk- ${body(30, 2)}`, `xghp_ ${body(36)}`, `Task-force ${body(30)}`]) expect(scanForSecrets(text), text).toEqual({ text, findings: [] });
+    const short = ["gh", "p_"].join("") + "x".repeat(30);
+    expect(scanForSecrets(`bruk ${short} og den virker`).text).toBe(`bruk ${redacted("github_token")} og den virker`);
+  });
+
   it("et prefiks nevnt i prosa (uten selve hemmeligheten) er ikke en hemmelighet - heller ikke med kortere ord etterpå", () => {
     for (const text of [
       "Tokens starter med ghp_ og er 40 tegn lange, så de kan ikke gjettes.",
@@ -226,8 +239,13 @@ describe("K3: nøkkelnavn-bevisst tekstform - JSON, Authorization og Cookie", ()
       `{"password_policy":"strong","password_min_length":12,"secret_name":"JARVIS_GITHUB_TOKEN","api_key_id":"abc-123"}`,
       `{"auth":"none","token":"[REDACTED:named_secret]","description":"passord kreves ikke"}`,
       `{"user":"kari","email":"kari@example.no","active":true,"password_set":"ja"}`,
-      `{"mode":"sovereign","credential_binding":"owner_bound","secret_manager":"infisical","token_endpoint":"https://auth.example.com/token"}`
+      `{"mode":"sovereign","credential_binding":"owner_bound","secret_manager":"infisical","token_endpoint":"https://auth.example.com/token"}`,
+      `{"auth":"basic","token":"x1","description":"kort verdi under en ikke-sterk nøkkel"}`
     ]) expect(scanForSecrets(input), input).toEqual({ text: input, findings: [] });
+  });
+
+  it("et passord av enhver lengde i JSON-tekst redigeres (sterk nøkkel), også ett tegn", () => {
+    expect(scanForSecrets(`{"password":"q","pin":"4"}`).text).toBe(`{"password":"${redacted("named_secret")}","pin":"${redacted("named_secret")}"}`);
   });
 
   it("Authorization: <skjema> <credential> for ALLE skjemaer redigerer credential, ikke skjemaordet (og feilen med «Bearer» er fikset)", () => {
@@ -385,6 +403,21 @@ describe("K6: ytelse og vinduer - hver adversarielle inndata tar under 2 s, og e
       const r = scanForSecrets(text);
       expect(r.findings, `offset ${offset}`).toEqual([{ kind: "github_token", count: 1 }]);
       expect(r.text.length, `offset ${offset}`).toBe(text.length - token.length + redacted("github_token").length);
+    }
+    // et token med ikke-ASCII i vinduet (indekskartets vei, ikke identitet) og vindusstart > 0
+    for (const offset of [-30, -1, 5]) {
+      const wide = fullwidth(token); // ikke-ASCII INNI treffet: spennet må gjennom indekskartet i et vindu med start > 0
+      const at = SCAN_WINDOW_CHARS + offset;
+      const text = `${"æ ".repeat(Math.ceil(at / 2)).slice(0, at)}${wide}${"ø ".repeat(SCAN_WINDOW_CHARS)}`;
+      const r = scanForSecrets(text);
+      expect(r.findings, `æ-filler offset ${offset}`).toEqual([{ kind: "github_token", count: 1 }]);
+      expect(r.text === text.replace(wide, redacted("github_token"))).toBe(true); // nøyaktig riktig sted (indekskart i vindu > 0), ikke bare riktig lengde
+    }
+    // et LENGRE treff (JWT ~110 tegn, lengre enn ordgrense-justeringen på 64) som krysser vindusgrensen
+    const jwt = tok.jwt();
+    for (const inside of [20, 50, 80, 100]) {
+      const text = `${" ".repeat(SCAN_WINDOW_CHARS - inside)}${jwt}${" ".repeat(SCAN_WINDOW_CHARS)}`;
+      expect(scanForSecrets(text).findings, `jwt ${inside} tegn inn`).toEqual([{ kind: "jwt", count: 1 }]);
     }
     // også i andre vinduskifter
     for (const k of [2, 3]) {

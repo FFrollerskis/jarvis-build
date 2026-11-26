@@ -6,7 +6,7 @@ const cp = (n: number): string => String.fromCodePoint(n);
 
 export const HIDDEN = {
   zwsp: cp(0x200b), zwnj: cp(0x200c), zwj: cp(0x200d), wordJoiner: cp(0x2060), bom: cp(0xfeff), softHyphen: cp(0x00ad), rlo: cp(0x202e), lro: cp(0x202d), pdf: cp(0x202c), lri: cp(0x2066), pdi: cp(0x2069),
-  tagA: cp(0xe0041), vs16: cp(0xfe0f), cgj: cp(0x034f), nul: cp(0), esc: cp(0x1b), acute: cp(0x0301), ring: cp(0x030a), nbsp: cp(0x00a0), ideographicSpace: cp(0x3000), nonBreakingHyphen: cp(0x2011), hangulFiller: cp(0x3164)
+  tagA: cp(0xe0041), vs16: cp(0xfe0f), cgj: cp(0x034f), nul: cp(0), esc: cp(0x1b), acute: cp(0x0301), ring: cp(0x030a), nbsp: cp(0x00a0), ideographicSpace: cp(0x3000), nonBreakingHyphen: cp(0x2011), hangulFiller: cp(0x3164), arabicNumberSign: cp(0x0600), del: cp(0x7f), vt: cp(0x0b), ff: cp(0x0c)
 } as const;
 
 /** Blandet base62-kropp av ønsket lengde (deterministisk; store/små bokstaver og sifre, som en ekte tilfeldig kropp). */
