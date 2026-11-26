@@ -17,6 +17,7 @@ export default defineConfig({
       "@jarvis/tool-gateway": fileURLToPath(new URL("./modules/tool-gateway/src/index.ts", import.meta.url)),
       "@jarvis/memory": fileURLToPath(new URL("./modules/memory/src/index.ts", import.meta.url)),
       "@jarvis/knowledge": fileURLToPath(new URL("./modules/knowledge/src/index.ts", import.meta.url)),
+      "@jarvis/empire": fileURLToPath(new URL("./modules/empire/src/index.ts", import.meta.url)),
       "@jarvis/watchdog": fileURLToPath(new URL("./modules/watchdog/src/index.ts", import.meta.url)),
       "@jarvis/erasure": fileURLToPath(new URL("./modules/erasure/src/index.ts", import.meta.url)),
       "@jarvis/business": fileURLToPath(new URL("./modules/business/src/index.ts", import.meta.url)),

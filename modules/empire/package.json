@@ -1,0 +1,21 @@
+{
+  "name": "@jarvis/empire",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WP-MCE0 (HF4 Empire, rene deler): tier-gulvalgebra, EmpireGrant-kontrakt og -verifikasjon, epoketeller og aggregat-cache-regler. Rent bibliotek: ingen DB, ingen nøkkelhåndtering, ingen runtime-kobling (DORMANT).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@jarvis/policy": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*"
+  }
+}
