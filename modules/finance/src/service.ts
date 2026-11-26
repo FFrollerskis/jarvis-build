@@ -2678,10 +2678,13 @@ export class FinanceService {
       for (const row of duplicateObject.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "PROVIDER_REFERENCE_CONFLICT");
 
       // D) UNKNOWN_PROVIDER_OUTCOME / EXPIRED_PAYMENT_WITH_ACTIVE_INTENT - Vipps anerkjente opprettelsen, men fortsatt CREATED (venter bruker) langt utover et rimelig vindu (24t) - brukeren fullførte trolig ALDRI i appen, men Jarvis sin egen state henger fortsatt i provider_acknowledged.
+      // Fiks-runde 2 (FIX-A): etter `createPayment` i dokumentert form (`{ reference, redirectUrl }`) er `provider_status` og `provider_status_updated_at` begge NULL (ingen observasjon ennå), og et strengt
+      // `= 'CREATED'`/`< now() - 24 t` fanget dem aldri før en oppfrisking hadde fylt dem. Ingen observasjon = fortsatt CREATED, og klokka er da innsendingen (`submitted_at` settes når Vipps' svar lagres og
+      // endres ikke etter det for en `provider_acknowledged` intensjon; `created_at` er utkastets alder og er feil klokke). En lagret observasjon (`provider_status_updated_at`) har forrang som før.
       const staleAwaitingUser = await client.query(
         `SELECT payment_intent_id FROM payment_intents
          WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'vipps' AND state = 'provider_acknowledged'
-           AND provider_status = 'CREATED' AND provider_status_updated_at < now() - interval '24 hours'`,
+           AND COALESCE(provider_status, 'CREATED') = 'CREATED' AND COALESCE(provider_status_updated_at, submitted_at) < now() - interval '24 hours'`,
         [tenantId, memorySpace]
       );
       for (const row of staleAwaitingUser.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "EXPIRED_PAYMENT_WITH_ACTIVE_INTENT");

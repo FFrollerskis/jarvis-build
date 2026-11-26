@@ -20,6 +20,8 @@ import { Gate, StripeFake, VippsFake } from "./wpf1-fakes.ts";
  *   FIX-7  konflikthendelsen skrives også når flagget `PROVIDER_STATE_CONFLICT` står fra en annen årsak.
  *   FIX-9  capture-reservasjonen tar intensjonen i `FOR SHARE` (lås-rekkefølge intensjon -> capture): aldri `cancelled` med oppgjort capture under samtidighet, ingen deadlock.
  *   FIX-10 testhull: Vipps-refusjonens nøkkel avgjøres FØR tilstand; `apply` tar intensjonslåsen FØRST; kjøretidsprobe (ingen tx/radlås under credential-oppslag og leverandørkall) for Vipps-cancel/capture/refund og Stripe-refusjon.
+ * WP-FIN2 fiks-runde 2 (samme fil, nederst):
+ *   FIX-A  stale-CREATED-sveipet fanger en intensjon fra `createPayment` i dokumentert minimalform (status og statustidspunkt = NULL) når innsendingen er eldre enn 24 t, og ikke før.
  * Ingen nettverk: `fetch` er stubbet, resten er testdobler.
  */
 let stop: (() => Promise<void>) | undefined;
@@ -579,5 +581,62 @@ describe("FIX-10 / kjøretidsprobe: credential-oppslag og leverandørkall holder
     for (const op of ["vipps.getCredentials", "vipps.cancelPayment", "vipps.capturePayment", "vipps.refundPayment", "stripe.getCredentials", "stripe.createRefund"]) expect(ops, op).toContain(op);
     expect(ops.filter((o) => o === "vipps.getCredentials").length).toBeGreaterThanOrEqual(3); // cancel, capture, refund
     for (const o of observed) expect(o.probe, o.op).toEqual(CLEAN);
+  });
+});
+
+// === Fiks-runde 2 / FIX-A: stale-CREATED-sveipet for en intensjon fra `createPayment` i dokumentert minimalform ====================================
+describe("FIX-A (fiks-runde 2): EXPIRED_PAYMENT_WITH_ACTIVE_INTENT for en intensjon fra createPayment i dokumentert form (provider_status og statustidspunkt = NULL)", () => {
+  const FLAG = "EXPIRED_PAYMENT_WITH_ACTIVE_INTENT";
+  /** Innsendt gjennom den EKTE transporten med dokumentert svar `{reference, redirectUrl}`: status/beløp/statustidspunkt lagres NULL; `submitted_at` er innsendingstidspunktet. */
+  async function submittedMinimal(svc: FinanceService): Promise<PaymentIntent> {
+    const intent = await newIntent(svc, "vipps");
+    stubProvider(() => json({ reference: intent.payment_intent_id, redirectUrl: "https://example.invalid/r" }, 201));
+    await svc.submitPaymentIntent(TENANT, "business", intent.payment_intent_id, { getCredentials: async () => null });
+    // forutsetningen for hele blokken (ellers er testene tomme): ingen observasjon er lagret
+    expect(await intentRow(intent.payment_intent_id)).toMatchObject({ state: "provider_acknowledged", provider_status: null, provider_status_updated_at: null });
+    return intent;
+  }
+  /** Flytter hele innsendingstidslinjen `hours` timer tilbake (som om innsendingen skjedde da); utkastets `created_at` flyttes minst like langt. */
+  const ageSubmission = (id: string, hours: number) => adminPool.query(
+    `UPDATE payment_intents SET submitted_at = now() - make_interval(hours => $2), first_submit_attempt_at = now() - make_interval(hours => $2),
+       created_at = LEAST(created_at, now() - make_interval(hours => $2)) WHERE payment_intent_id = $1`,
+    [id, hours]
+  );
+  /** Kjører sveipet og sjekker om intensjonen står flagget (meldingen viser alle flaggene ved feil). */
+  const expectFlagAfterSweep = async (svc: FinanceService, id: string, flagged: boolean): Promise<void> => {
+    await svc.runVippsProviderAnomalyDetection(TENANT, "business");
+    const flags = (await intentRow(id)).anomaly_flags;
+    expect(flags.includes(FLAG), `flagg etter sveip: [${flags.join(", ")}]`).toBe(flagged);
+  };
+
+  it("ikke flagget rett etter innsending eller etter 23 t; flagget etter 25 t - uten at noen oppfrisking eller webhook har fylt statusen", async () => {
+    const svc = realService();
+    const intent = await submittedMinimal(svc);
+    await expectFlagAfterSweep(svc, intent.payment_intent_id, false);
+    await ageSubmission(intent.payment_intent_id, 23);
+    await expectFlagAfterSweep(svc, intent.payment_intent_id, false);
+    await ageSubmission(intent.payment_intent_id, 25);
+    await expectFlagAfterSweep(svc, intent.payment_intent_id, true);
+    expect(await intentRow(intent.payment_intent_id)).toMatchObject({ state: "provider_acknowledged", provider_status: null, provider_status_updated_at: null }); // sveipet observerer ikke selv
+  });
+
+  it("24 t telles fra innsendingen, ikke fra utkastet: opprettet for 48 t siden men innsendt nå gir ikke flagget", async () => {
+    const svc = realService();
+    const intent = await submittedMinimal(svc);
+    await adminPool.query("UPDATE payment_intents SET created_at = now() - interval '48 hours' WHERE payment_intent_id = $1", [intent.payment_intent_id]);
+    await expectFlagAfterSweep(svc, intent.payment_intent_id, false);
+  });
+
+  it("en lagret observasjon har forrang over innsendingstidspunktet: 25 t gammel innsending + CREATED observert nå = ikke flagget (selv-korrigerende); observasjonen selv 25 t gammel = flagget", async () => {
+    const svc = realService();
+    const intent = await submittedMinimal(svc);
+    await ageSubmission(intent.payment_intent_id, 25);
+    await expectFlagAfterSweep(svc, intent.payment_intent_id, true);
+    stubProvider(() => json({ reference: intent.payment_intent_id, state: "CREATED", amount: { currency: "NOK", value: 10_000 } }));
+    await svc.refreshVippsPaymentState(TENANT, "business", intent.payment_intent_id);
+    expect(await intentRow(intent.payment_intent_id)).toMatchObject({ provider_status: "CREATED" });
+    await expectFlagAfterSweep(svc, intent.payment_intent_id, false);
+    await adminPool.query("UPDATE payment_intents SET provider_status_updated_at = now() - interval '25 hours' WHERE payment_intent_id = $1", [intent.payment_intent_id]);
+    await expectFlagAfterSweep(svc, intent.payment_intent_id, true);
   });
 });
