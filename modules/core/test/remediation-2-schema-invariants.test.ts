@@ -7,7 +7,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { serializeMemorySpaces } from "@jarvis/contracts";
 import { runMigrations } from "@jarvis/core";
-import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
+import { analyzeMigrations, definerAllowlist, loadManifest, readMigrationFiles, resolveClasses, rlsExemptTables, startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 
 /**
  * Remediering del 2 (JARVIS-073/076) - SCHEMA-INVARIANTER mot ekte Postgres:
@@ -19,6 +19,11 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
  */
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BASELINE = join(HERE, "fixtures", "scope-fk-baseline.json");
+// WP-MC8a (K3): DEFINER-allowlisten og listen over tabeller uten RLS-plikt kommer fra ÉN kilde - baseline-manifestet (`src/db/schema-classes.baseline.json`) pluss
+// `-- jarvis-class:`/`-- jarvis-definer:`-annotasjonene i nye migrasjoner - i stedet for to håndholdte lister.
+const MANIFEST = loadManifest();
+const ANALYSIS = analyzeMigrations(readMigrationFiles(fileURLToPath(new URL("../src/db/migrations", import.meta.url))), MANIFEST);
+const CLASSES = resolveClasses(MANIFEST, ANALYSIS, null).classes;
 
 let stop: (() => Promise<void>) | undefined;
 let admin: pg.Pool;
@@ -64,16 +69,9 @@ describe("A: SECURITY DEFINER med minste privilegium (JARVIS-073)", () => {
              has_function_privilege('jarvis_app', p.oid, 'EXECUTE') AS app_exec
         FROM pg_proc p JOIN pg_roles o ON o.oid = p.proowner
        WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef ORDER BY 1`);
-    expect(r.rows.map((x: { fn: string }) => x.fn)).toEqual([
-      "claim_next_task(text,integer,text[])",
-      "jarvis_list_all_tenant_ids(integer)",
-      "jarvis_list_business_tenant_ids(integer)",
-      "jarvis_session_grant_tenant(text)",
-      // D-395 (JARVIS-074): oppbevaringsfunksjonen (073) - samme invarianter (eid av jarvis_definer, låst search_path, ingen PUBLIC-EXECUTE).
-      "prune_operational_data(integer,integer,integer,integer,integer,integer)",
-      // WP-K (D-471, JARVIS-053): policy-journalens oppbevaring (108) - samme invarianter (eid av jarvis_definer, låst search_path, ingen PUBLIC-EXECUTE).
-      "prune_policy_decisions(integer,integer)"
-    ]);
+    // Allowlisten (default deny): de 6 eksisterende funksjonene står i manifestet med begrunnelse (claim_next_task 007/035/083/084, katalogfunksjonene 023/052/053, retensjon 073 og 108);
+    // nye DEFINER-funksjoner krever `-- jarvis-definer: <signatur> reason="..."` i migrasjonen som lager dem.
+    expect(r.rows.map((x: { fn: string }) => x.fn)).toEqual([...definerAllowlist(MANIFEST, ANALYSIS)].sort());
     for (const row of r.rows as Array<{ fn: string; owner: string; rolsuper: boolean; rolbypassrls: boolean; proconfig: string[]; public_exec: boolean; app_exec: boolean }>) {
       expect(row.owner, row.fn).toBe("jarvis_definer");
       expect(row.rolsuper, row.fn).toBe(false);
@@ -162,18 +160,8 @@ describe("A: SECURITY DEFINER med minste privilegium (JARVIS-073)", () => {
 });
 
 describe("B/C: RLS-dekning og policyer (JARVIS-076)", () => {
-  /** Tabeller uten RLS - hver med begrunnelse. Ingen bærer en `tenant_id`-kolonne (tenant-eide rader MÅ ha RLS). */
-  const RLS_EXEMPT: Record<string, string> = {
-    capabilities: "global kapabilitetsregister (tool_id/action -> klasse), ingen tenant-data; jarvis_app har kun SELECT",
-    evolution_change_ledger: "globalt append-only endringsregister for selvendring (EV-0, D-408); hash-kjede + trigger, jarvis_app har kun SELECT/INSERT",
-    github_rate_limit_state: "global state per GitHub-credential_ref (infrastruktur), ikke tenant-data",
-    owner_control_state: "global eier-kontroll (kill switch/frys/tilbakekalling, D-164) - eierens egen autoritetstilstand, ikke tenant-data",
-    scheduler_state: "global jobb-claim per (job_name, run_date) for flere instanser",
-    schema_migrations: "migrasjonsregister; jarvis_app har kun SELECT",
-    self_modification_requests: "globale selvendringsforespørsler (eier-autorisert PR-flyt); `coding_tenant_id` er en peker, ikke tenant-eierskap",
-    situation_domain_pauses: "global domene-pause satt av eier (D-163)",
-    telegram_poll_state: "global holdbar getUpdates-offset per bot (infrastruktur, D-374), ikke tenant-data"
-  };
+  /** Tabeller uten RLS-plikt - hver med begrunnelse: GLOBAL/PLATFORM i klassifiseringen (WP-MC8a). Ingen bærer en `tenant_id`-kolonne (tenant-eide rader MÅ ha RLS). */
+  const RLS_EXEMPT: Record<string, string> = rlsExemptTables(MANIFEST, CLASSES);
 
   it("hver tabell i public har FORCE RLS eller står i den begrunnede unntakslisten - og unntakene bærer ingen tenant_id", async () => {
     const r = await admin.query(`
@@ -181,7 +169,8 @@ describe("B/C: RLS-dekning og policyer (JARVIS-076)", () => {
              EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped) AS has_tenant
         FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' ORDER BY 1`);
     const unprotected = (r.rows as Array<{ relname: string; forced: boolean; has_tenant: boolean }>).filter((x) => !x.forced);
-    expect(unprotected.map((x) => x.relname).sort()).toEqual(Object.keys(RLS_EXEMPT).sort());
+    // Hver tabell uten FORCE RLS er klassifisert GLOBAL/PLATFORM (aldri ORG_OWNED/USER_OWNED). En GLOBAL/PLATFORM-tabell MED RLS er lov (ekstra vern).
+    expect(unprotected.map((x) => x.relname).filter((t) => RLS_EXEMPT[t] === undefined)).toEqual([]);
     for (const row of unprotected) expect(row.has_tenant, `${row.relname} har tenant_id uten RLS`).toBe(false);
   });
 

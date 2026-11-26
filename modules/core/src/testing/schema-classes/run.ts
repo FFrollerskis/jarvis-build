@@ -73,6 +73,19 @@ export async function runSchemaClassChecks(options: CheckOptions): Promise<Check
   return { failures, known, classes: resolved.classes, counts, analysis, catalog, mode: catalog === null ? "static" : "static+catalog" };
 }
 
+/**
+ * Tabellene som IKKE har en RLS-plikt: GLOBAL og PLATFORM (runtime-rollen har ikke tilgang, eller kun lesing av referansedata). Begrunnelsen er klassenotatet i baseline-manifestet
+ * (frosne tabeller) eller en henvisning til annotasjonen (nye tabeller). Én kilde for `remediation-2-schema-invariants` B og klassifiseringen.
+ */
+export function rlsExemptTables(manifest: Manifest, classes: ReadonlyMap<string, ClassInfo>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [table, info] of [...classes].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    if (info.class !== "GLOBAL" && info.class !== "PLATFORM") continue;
+    out[table] = manifest.class_notes[table] ?? `annotert ${info.class} i en ny migrasjon`;
+  }
+  return out;
+}
+
 export function formatFailures(failures: readonly Violation[]): string {
   if (failures.length === 0) return "(ingen)";
   return failures.map((f) => `[${f.rule}]${f.table === null ? "" : ` ${f.table}`}: ${f.message}`).join("\n");
