@@ -1,0 +1,87 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.product",
+  "title": "Product Core",
+  "summary": "Produkttilbakemeldinger og veikart uten ekstern analyse- eller sakssporingstjeneste.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-3 Business",
+    "d_refs": [
+      "D-128"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/product/src/index.ts"
+    ],
+    "fingerprint": "sha256:50ed824a1e57d6c649b04797ba717ac726f6a506dd4b1164e00addabc4d9c27b",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/product"
+  ],
+  "state_store": {
+    "tables": [
+      "product_item_events",
+      "product_items"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "047_product.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "BUSINESS_CONFIDENTIAL",
+    "memory_spaces": [
+      "business"
+    ],
+    "max_action_class": "B",
+    "authority_domain": "business"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "orl",
+  "id": "ORL1",
+  "level": 1,
+  "title": "Bygget",
+  "bound_components": [],
+  "external": false,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": [],
+  "exit_criterion": "Planlagte komponenter finnes og lokale enhets- og kontrakttester er grønne; bygg, skjema og runbooks foreligger, men det gis ingen produksjonspåstand.",
+  "requires_orl": "ORL0",
+  "requires_gates": [
+    "G03"
+  ]
+}

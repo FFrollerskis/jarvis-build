@@ -1,0 +1,84 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.consent",
+  "title": "Samtykke- og behandlingsstyring",
+  "summary": "Deterministisk motor for samtykke og dataprosessering i markedsføring; ingen modellkall.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-4 Growth",
+    "d_refs": [
+      "D-91"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/consent/src/index.ts"
+    ],
+    "fingerprint": "sha256:51f7f704cda406e02d7754e8a52ca3d8b40d8f3103850e19af4cab1646dc0a5d",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/consent"
+  ],
+  "state_store": {
+    "tables": [
+      "consent_decisions",
+      "consent_enforcement_events",
+      "consent_enforcement_policies"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "032_consent_governance.sql",
+      "033_consent_enforcement.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "policy"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

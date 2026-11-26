@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.control-center",
+  "title": "Kontrollsentre",
+  "summary": "Eierens kontrollsentre (økonomi, minne, agent, drift, verdi, personvern, sikkerhet, evolusjon) som lesende seksjoner og eier-handlinger bak flagg.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-11 Executive",
+    "d_refs": []
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "apps/api/src/control-center",
+    "modules/executive/src/control-center"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "guest",
+      "health",
+      "home",
+      "personal",
+      "project",
+      "shared"
+    ],
+    "max_action_class": "D",
+    "authority_domain": "policy"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPH0_CONTROL_CENTER.md"
+  },
+  "pending_work": [
+    {
+      "wp": "WP-SEC2",
+      "note": "Berører personvernsenteret (privacy.ts).",
+      "reserved_migrations": []
+    }
+  ],
+  "notes": []
+}

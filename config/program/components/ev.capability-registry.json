@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ev.capability-registry",
+  "title": "Register for lærte evner",
+  "summary": "Planlagt eneste register for oppdagede og lærte evner med livssyklus og eval-krav; bygger på connector-registeret og SDK-et.",
+  "kind": "planned",
+  "canonical_owner": {
+    "plan": "HF2",
+    "subsystem": "EV-18",
+    "d_refs": []
+  },
+  "runtime_state": "planned",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": null,
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": null
+  },
+  "code_paths": [],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "CapabilityStateChanged",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    }
+  ],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.connector-registry",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.connector-sdk",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "self_change"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": [
+    "Lukkingsmatrisen og beredskapskoden bruker i dag navnet EV-18 om connector-fabrikken; navnet er uavklart."
+  ]
+}

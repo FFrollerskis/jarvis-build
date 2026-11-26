@@ -1,0 +1,87 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.support",
+  "title": "Support Core",
+  "summary": "Support- og ticketdomene med hendelser, uten ekstern supportleverandør.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-3 Business",
+    "d_refs": [
+      "D-66"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/support/src/index.ts"
+    ],
+    "fingerprint": "sha256:e65a47ed7e422829da8d042b0782934c3460cf646dc1d52c295eadd18d834e71",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/support"
+  ],
+  "state_store": {
+    "tables": [
+      "support_ticket_events",
+      "support_tickets"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "024_support.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "BUSINESS_CONFIDENTIAL",
+    "memory_spaces": [
+      "business"
+    ],
+    "max_action_class": "B",
+    "authority_domain": "business"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

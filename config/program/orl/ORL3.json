@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "orl",
+  "id": "ORL3",
+  "level": 3,
+  "title": "Brenntest",
+  "bound_components": [],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": [],
+  "exit_criterion": "Minst 30 døgn stabil bruk i eierens egen tenant med feilinjeksjon og reelle utfall, uten uløste P0/P1 eller brudd på tenant- og sikkerhetsinvarianter, og med målte SLO og kostnad.",
+  "requires_orl": "ORL2",
+  "requires_gates": [
+    "G13"
+  ]
+}

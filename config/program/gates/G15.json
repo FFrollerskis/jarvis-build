@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "program_gate",
+  "id": "G15",
+  "number": 15,
+  "title": "Økonomi",
+  "pass_criterion": "Løpende kostnad (AI, API, tale, sky, lagring, sikkerhet, læring), vedlikeholdstid og eiertid er synlig og akseptert av eieren.",
+  "bound_components": [
+    "core.model-gateway",
+    "ua.executive"
+  ],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": []
+}

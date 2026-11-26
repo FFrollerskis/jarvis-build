@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ci.human-knowledge",
+  "title": "Menneskelig kunnskap og konflikter",
+  "summary": "Planlagt innsamling av menneskelig kunnskap med rettigheter og verifisering, og en konfliktstige uten stille overskriving.",
+  "kind": "planned",
+  "canonical_owner": {
+    "plan": "HF6",
+    "subsystem": "CI-2",
+    "d_refs": []
+  },
+  "runtime_state": "planned",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": null,
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": null
+  },
+  "code_paths": [],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [
+      "ci_conflicts",
+      "ci_human_knowledge"
+    ],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "KnowledgeNeeded",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    }
+  ],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "ci.experience-ledger",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "personal",
+      "project"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "learning"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

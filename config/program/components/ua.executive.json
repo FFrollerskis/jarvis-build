@@ -1,0 +1,91 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.executive",
+  "title": "Executive Mode",
+  "summary": "Oppmerksomhetsrangering og samlet eierflate avledet av eksisterende situasjonstilstand, uten egne tabeller; inkluderer selvmodellen og verdirapporter som lesere.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-11 Executive",
+    "d_refs": []
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [
+      "modules/executive/src/index.ts"
+    ],
+    "fingerprint": "sha256:a551f310695803dc7a81c697bbbb8d6cb37f4c4a7ee30ed7a1826910c90520c6",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/executive"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.owner-controls",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.finance",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.situations",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "guest",
+      "health",
+      "home",
+      "personal",
+      "project",
+      "shared"
+    ],
+    "max_action_class": "A",
+    "authority_domain": "policy"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPC4_VALUE_CENTER.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

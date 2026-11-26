@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "orl",
+  "id": "ORL2",
+  "level": 2,
+  "title": "Integrert",
+  "bound_components": [],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": [],
+  "exit_criterion": "Ende-til-ende-flyter virker på ekte eller representativ infrastruktur med logging, autoritet og gjenoppretting, og diagnosekjeden er komplett.",
+  "requires_orl": "ORL1",
+  "requires_gates": [
+    "G04",
+    "G05",
+    "G10"
+  ]
+}

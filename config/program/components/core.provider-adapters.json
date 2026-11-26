@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.provider-adapters",
+  "title": "Modellleverandør-adaptere",
+  "summary": "Adaptere som skjuler modellleverandørene (sky og lokal) bak ett felles grensesnitt; ingen annen kode importerer en leverandør direkte.",
+  "kind": "package",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core modelladaptere",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "packages/provider-adapters"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "SECRET_RESTRICTED",
+    "memory_spaces": [
+      "business",
+      "guest",
+      "health",
+      "home",
+      "personal",
+      "project",
+      "shared"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "models"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

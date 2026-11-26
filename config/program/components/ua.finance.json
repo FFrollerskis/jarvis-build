@@ -1,0 +1,122 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.finance",
+  "title": "Finance & Spend Integrity Gateway",
+  "summary": "Betalings- og utgiftsintensjoner med idempotens, avviksdeteksjon, avstemming, kort, bank og leverandørregister; alle pengehandlinger via klasse D-kjeden.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-6 Finance",
+    "d_refs": [
+      "D-107"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/finance/src/index.ts"
+    ],
+    "fingerprint": "sha256:9994031d6d9dc344159456878c9dec4bfc24a2367212440e5f28a83f7dc715ca",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/finance"
+  ],
+  "state_store": {
+    "tables": [
+      "bank_account_balances",
+      "bank_accounts",
+      "bank_consents",
+      "bank_transactions",
+      "card_authorizations",
+      "card_events",
+      "card_spend_policies",
+      "card_transactions",
+      "finance_kill_switch",
+      "finance_procurement_items",
+      "finance_reconciliation_findings",
+      "finance_reconciliation_runs",
+      "finance_recurring_commitments",
+      "finance_spend_records",
+      "finance_spend_sync_cursors",
+      "finance_vendor_provider_bindings",
+      "finance_vendors",
+      "neonomics_webhook_events",
+      "payment_intent_events",
+      "payment_intents",
+      "provider_cards",
+      "stripe_refunds",
+      "stripe_webhook_events",
+      "vipps_captures",
+      "vipps_refunds",
+      "vipps_webhook_events",
+      "wallester_webhook_events"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "038_finance.sql",
+      "039_finance_spend_integrity.sql",
+      "040_stripe.sql",
+      "041_vipps.sql",
+      "042_neonomics.sql",
+      "043_wallester.sql",
+      "045_finance_vendor_registry.sql",
+      "099_finance_d_chain.sql",
+      "100_finance_reconciliation.sql",
+      "101_finance_money_columns_immutable.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "SECRET_RESTRICTED",
+    "memory_spaces": [
+      "business",
+      "personal"
+    ],
+    "max_action_class": "D",
+    "authority_domain": "finance"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/FINANCE_D_CHAIN.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

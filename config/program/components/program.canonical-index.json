@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "program.canonical-index",
+  "title": "Maskinlesbar programindeks",
+  "summary": "Sharda indeks over komponenter, eierskap, kontrakter, hendelser og avhengigheter, med duplicate-owner-skanning, fingeravtrykk og baseline-ratchet; ren verktøymodul uten kjøretidsimport.",
+  "kind": "tool",
+  "canonical_owner": {
+    "plan": "HF6",
+    "subsystem": "Program PG1",
+    "d_refs": []
+  },
+  "runtime_state": "built_unwired",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [
+      "packages/contracts/src/program/ids.ts",
+      "packages/contracts/src/program/schema.ts"
+    ],
+    "fingerprint": "sha256:8ae70360a5463584cf7d0bfe402c12889dac36af19412b0a7d3452aedf6a4ca7",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "config/program",
+    "packages/contracts/scripts",
+    "packages/contracts/src/program"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PUBLIC_OR_LOW_SENSITIVITY",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "program"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPPGA_PROGRAM_INDEX.md"
+  },
+  "pending_work": [],
+  "notes": [
+    "Prosa-spesifikasjonen docs/CANONICAL_SPEC.md er uendret og gjelder videre etter ADR-001; denne indeksen er et nytt, adskilt dokument uten autoritet før en navngitt beslutning (rapportmodus)."
+  ]
+}

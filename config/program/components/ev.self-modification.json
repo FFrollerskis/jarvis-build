@@ -1,0 +1,89 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ev.self-modification",
+  "title": "Selvendringstjeneste",
+  "summary": "To-lags selvendringsmodell med forespørselsregister og godkjenningskanal; frosset av eierbeslutning og aldri aktiv uten navngitt beslutning.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF2",
+    "subsystem": "EV Selvendring",
+    "d_refs": [
+      "D-214",
+      "D-397"
+    ]
+  },
+  "runtime_state": "frozen",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/self-modification/src/index.ts"
+    ],
+    "fingerprint": "sha256:1f8de4ca925e6a5edcda87e8faa370ee41324e10c41e8da5d23ed8fa77706bbe",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/self-modification"
+  ],
+  "state_store": {
+    "tables": [
+      "self_modification_requests"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "060_self_modification.sql",
+      "061_self_modification_code_change.sql",
+      "069_self_modification_sha_binding.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tasks",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "project"
+    ],
+    "max_action_class": "D",
+    "authority_domain": "self_change"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

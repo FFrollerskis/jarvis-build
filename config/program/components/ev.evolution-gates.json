@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ev.evolution-gates",
+  "title": "Evolusjonens beslutningsporter",
+  "summary": "Rene beslutningsfunksjoner for forslag, radar, avhengighetsport, utrulling, selvhelbredelse, minnevedlikehold, modellruting, personlighet, ressurs og sikkerhetstilpasning; ingen utførelse.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF2",
+    "subsystem": "EV-3 til EV-21",
+    "d_refs": [
+      "D-418",
+      "D-419"
+    ]
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "apps/api/src/evolution-source.ts",
+    "modules/self-modification/src/evolution"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "PersonalityProposalDisposition",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    },
+    {
+      "type": "RuntimeBaselineChanged",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    }
+  ],
+  "events_in": [
+    {
+      "type": "DiagnosticBundleReady"
+    },
+    {
+      "type": "FaultFingerprintMatched"
+    },
+    {
+      "type": "ProgramContractMismatch"
+    }
+  ],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "self_change"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPB3_EVOLUTION_CENTERS.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

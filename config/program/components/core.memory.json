@@ -1,0 +1,106 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.memory",
+  "title": "Hybridminne",
+  "summary": "Skriveflyt med karantene, hybrid gjenfinning, sammendrag, vektorer og eksport over minnetabellene.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core minne",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/memory/src/index.ts"
+    ],
+    "fingerprint": "sha256:7f2e23d9a9e8221b254dcc345e4f2f60e8ede7efc46457ada37e765848633590",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/memory",
+    "ops/memory"
+  ],
+  "state_store": {
+    "tables": [
+      "commitments",
+      "deadlines",
+      "decisions",
+      "embeddings",
+      "entities",
+      "memory_episodes",
+      "memory_item_entities",
+      "memory_items",
+      "memory_links",
+      "memory_profiles",
+      "memory_sources",
+      "memory_vectors",
+      "memory_versions",
+      "relations",
+      "summaries"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "008_memory.sql",
+      "014_embeddings_pgvector.sql",
+      "062_memory_erasure_bypass.sql",
+      "068_memory_v2.sql",
+      "135_vision_embeddings_inventory.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.model-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.policy",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "SECRET_RESTRICTED",
+    "memory_spaces": [
+      "business",
+      "guest",
+      "health",
+      "home",
+      "personal",
+      "project",
+      "shared"
+    ],
+    "max_action_class": "B",
+    "authority_domain": "memory"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": [
+    "Tabellen commitments (008) er minnedomenets egen og er ikke forpliktelsessannheten i den planlagte kontinuitetskomponenten (jx.commitments): mulig programkonflikt når den bygges."
+  ]
+}

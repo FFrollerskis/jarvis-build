@@ -1,0 +1,99 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.knowledge",
+  "title": "Universal Knowledge Layer",
+  "summary": "Kilde-uavhengig innhenting med synk, dedupe, proveniens, FTS og vektorsøk, entitetsgraf og påstandsverifisering.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-2 Knowledge",
+    "d_refs": []
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/knowledge/src/index.ts"
+    ],
+    "fingerprint": "sha256:c796705af3361ca0c99289a62e287e9f9185be5987247dcc04d670c14a28e56e",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/knowledge"
+  ],
+  "state_store": {
+    "tables": [
+      "claim_evidence",
+      "claim_verifications",
+      "knowledge_documents",
+      "knowledge_embeddings",
+      "knowledge_entities",
+      "knowledge_links"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "017_knowledge.sql",
+      "086_knowledge_space_aware.sql",
+      "087_knowledge_entity_graph.sql",
+      "088_claim_verifications.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.model-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tasks",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "SECRET_RESTRICTED",
+    "memory_spaces": [
+      "business",
+      "personal",
+      "project"
+    ],
+    "max_action_class": "A",
+    "authority_domain": "knowledge"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/KNOWLEDGE_SOURCES.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

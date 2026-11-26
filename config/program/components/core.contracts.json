@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.contracts",
+  "title": "Delte kjernekontrakter",
+  "summary": "Typede kontrakter (identitet, evner, godkjenninger, jobber, modellvalg, konfig) som alle andre komponenter bygger på; ingen kjøretidslogikk utover validering.",
+  "kind": "package",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core-kontrakter",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [
+      "packages/contracts/src/approval.ts",
+      "packages/contracts/src/canonical.ts",
+      "packages/contracts/src/capability.ts",
+      "packages/contracts/src/env.ts",
+      "packages/contracts/src/git-credential.ts",
+      "packages/contracts/src/github-repo.ts",
+      "packages/contracts/src/identity.ts",
+      "packages/contracts/src/index.ts",
+      "packages/contracts/src/job.ts",
+      "packages/contracts/src/mobility.ts",
+      "packages/contracts/src/model.ts",
+      "packages/contracts/src/owner-config.ts",
+      "packages/contracts/src/session-grant.ts",
+      "packages/contracts/src/speech.ts",
+      "packages/contracts/src/sweep-failures.ts",
+      "packages/contracts/src/voice-authority.ts"
+    ],
+    "fingerprint": "sha256:29fd82825c37384bdfb8e6e7badb452144a5a50cb7e7ed09a55c24f649b16a00",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "packages/contracts"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PUBLIC_OR_LOW_SENSITIVITY",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "none"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": [
+    "Hendelseskonvolutt og korrelasjon ligger i core.event-contracts, feilkoder i dx.error-codes og programindeksen i program.canonical-index (alle i samme pakke)."
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ev.self-model",
+  "title": "Selvmodell og telemetri",
+  "summary": "Selvdiagnose, begrensningsregister, SLO-er, drift og datakvalitet som kildebelagte observasjoner (ukjent vises som ukjent).",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF2",
+    "subsystem": "EV-1 og EV-2",
+    "d_refs": [
+      "D-412",
+      "D-417"
+    ]
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "apps/api/src/self-model-readers.ts",
+    "apps/api/src/slo-source.ts",
+    "modules/executive/src/self-model",
+    "modules/executive/src/slo"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [],
+    "max_action_class": "A",
+    "authority_domain": "diagnostics"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [
+    {
+      "wp": "WP-OPS2a",
+      "note": "Kobler watchdog-signaler inn i selvmodellen.",
+      "reserved_migrations": []
+    }
+  ],
+  "notes": []
+}

@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.connector-sdk",
+  "title": "Connector SDK og CI-vakt",
+  "summary": "Manifestskjema for connectorer, avledning av skjelettmanifester, CI-vakt og connector-gjeld; ren verktøymodul uten kjøretidseffekt.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core connectorer",
+    "d_refs": [
+      "D-472"
+    ]
+  },
+  "runtime_state": "built_unwired",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [
+      "modules/connector-sdk/src/manifest.ts"
+    ],
+    "fingerprint": "sha256:0b3851b40a4f727d736bd70872235a11e3b56410ce817403da93b1b99fbfe65f",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/connector-sdk",
+    "ops/connector"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PUBLIC_OR_LOW_SENSITIVITY",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "tools"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPI_CONNECTOR_SDK.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

@@ -1,0 +1,105 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.identity",
+  "title": "Identitet, enheter og sesjoner",
+  "summary": "Tenant, person, enhet, sesjon og sesjonstilgang (grants) med serverstyrt enhetsregistrering og tilbakekall; kilden til hvem som handler.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core identitet",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/core/src/services/business-tenant-provisioning.ts",
+    "modules/core/src/services/channel-session-authority.ts",
+    "modules/core/src/services/device-authority.ts",
+    "modules/core/src/services/device-enrollment-service.ts",
+    "modules/core/src/services/device-service.ts",
+    "modules/core/src/services/identity-service.ts",
+    "modules/core/src/services/session-grant-service.ts",
+    "modules/core/src/services/session-service.ts",
+    "modules/core/src/services/telegram-owner-authority.ts",
+    "modules/core/src/services/tenant-catalog.ts",
+    "modules/core/src/services/voice-session-authority.ts"
+  ],
+  "state_store": {
+    "tables": [
+      "device_enrollment_tickets",
+      "devices",
+      "memory_spaces",
+      "organizations",
+      "people",
+      "person_tenants",
+      "projects",
+      "revoked_device_keys",
+      "rooms",
+      "session_grants",
+      "sessions",
+      "sites",
+      "tenants"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "001_identity.sql",
+      "002_sessions_events.sql",
+      "005_rls.sql",
+      "023_business_tenant_catalog.sql",
+      "052_tenant_catalog_all.sql",
+      "053_session_grants.sql",
+      "063_device_revocation_approval_binding.sql",
+      "064_definer_least_privilege.sql",
+      "074_erasure_session_grants_cascade.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "guest",
+      "health",
+      "home",
+      "personal",
+      "project",
+      "shared"
+    ],
+    "max_action_class": "D",
+    "authority_domain": "identity"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [
+    {
+      "wp": "WP-S1",
+      "note": "Server-side kanalbinding for step-up (JARVIS-111) er under bygging; migrasjon 149 er tildelt og 150-152 er reservert.",
+      "reserved_migrations": [
+        "149",
+        "150",
+        "151",
+        "152"
+      ]
+    }
+  ],
+  "notes": [
+    "Tabellen organizations er en under-entitet i en tenant (ikke et eget juridisk skille); navnet kolliderer med planens org-begrep, som svarer til tenant her."
+  ]
+}

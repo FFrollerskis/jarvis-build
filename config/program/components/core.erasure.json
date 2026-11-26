@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.erasure",
+  "title": "Dataerasure-fundament",
+  "summary": "Teknisk hard sletting med blokkering av gjenoppliving og sporbar slettelogg; planene dekker tenant-tabellene (dekningsvakt i testene). Tjenesten er ikke koblet i produksjon.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core personvern",
+    "d_refs": []
+  },
+  "runtime_state": "built_unwired",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/erasure/src/index.ts"
+    ],
+    "fingerprint": "sha256:134bb2c76624fd56cda51075624d018a781ebde6ebd6e44d43338bafa042ec74",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/core/src/services/erasure-ledger.ts",
+    "modules/erasure"
+  ],
+  "state_store": {
+    "tables": [
+      "erasure_fingerprints",
+      "erasure_requests"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "018_erasure.sql",
+      "062_memory_erasure_bypass.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.policy",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.knowledge",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "guest",
+      "health",
+      "home",
+      "personal",
+      "project",
+      "shared"
+    ],
+    "max_action_class": "D",
+    "authority_domain": "memory"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/DATA_ERASURE.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

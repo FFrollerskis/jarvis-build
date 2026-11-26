@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ci.skill-learning",
+  "title": "Metodelæring og evidens",
+  "summary": "Planlagt læring av metoder med evidens, importkarantene og promoteringsevidens; aktivering avgjøres alltid av evneregisteret og autoriteten.",
+  "kind": "planned",
+  "canonical_owner": {
+    "plan": "HF6",
+    "subsystem": "CI-3 og CI-6",
+    "d_refs": []
+  },
+  "runtime_state": "planned",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": null,
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": null
+  },
+  "code_paths": [],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [
+      "ci_import_quarantine",
+      "ci_skill_evidence",
+      "ci_skill_learning"
+    ],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "EvalRequested",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    }
+  ],
+  "events_in": [
+    {
+      "type": "CapabilityStateChanged"
+    },
+    {
+      "type": "EvaluationCompleted"
+    }
+  ],
+  "dependencies": [
+    {
+      "component_id": "ev.capability-registry",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ev.eval-lab",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "personal",
+      "project"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "learning"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

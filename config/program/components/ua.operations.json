@@ -1,0 +1,84 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.operations",
+  "title": "Operations Core",
+  "summary": "Driftsdomene for leverandører, oppgaver, runbooks og eskalering uten ekstern driftsplattform.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-3 Business",
+    "d_refs": [
+      "D-129"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/operations/src/index.ts"
+    ],
+    "fingerprint": "sha256:fa2817bf58dd90759b417c6c4d08e8071291e15c750f5b45cdf990a033ba9ebb",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/operations"
+  ],
+  "state_store": {
+    "tables": [
+      "operations_runbooks",
+      "operations_task_events",
+      "operations_tasks",
+      "operations_vendors"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "048_operations.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "BUSINESS_CONFIDENTIAL",
+    "memory_spaces": [
+      "business"
+    ],
+    "max_action_class": "B",
+    "authority_domain": "business"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

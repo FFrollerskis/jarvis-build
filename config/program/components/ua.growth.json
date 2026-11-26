@@ -1,0 +1,111 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.growth",
+  "title": "Growth Core",
+  "summary": "Kampanjeregister, utgiftsledger, attribusjon, eksperimenter og skrivekjede mot annonse- og analyseplattformer med før/etter-journal.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-4 Growth",
+    "d_refs": [
+      "D-74"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/growth/src/index.ts"
+    ],
+    "fingerprint": "sha256:d00f85cb4273556c0f60393bae562cf1f64c2f1ba49ff394a11aabd04c42a41f",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/growth"
+  ],
+  "state_store": {
+    "tables": [
+      "growth_write_journal",
+      "marketing_attributions",
+      "marketing_campaign_action_recommendations",
+      "marketing_campaign_events",
+      "marketing_campaign_execution_commands",
+      "marketing_campaign_observations",
+      "marketing_campaign_tracking_tags",
+      "marketing_campaigns",
+      "marketing_experiment_observations",
+      "marketing_experiment_outcomes",
+      "marketing_experiment_plans",
+      "marketing_experiment_variants",
+      "marketing_experiments",
+      "marketing_spend_events"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "027_growth.sql",
+      "028_growth_attribution_tracking.sql",
+      "029_growth_action_recommendations.sql",
+      "030_growth_execution_commands.sql",
+      "031_growth_marketing_observations.sql",
+      "112_growth_experiment_registry.sql",
+      "113_growth_outcomes_and_write_journal.sql",
+      "114_growth_execution_commands_executed.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.consent",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "BUSINESS_CONFIDENTIAL",
+    "memory_spaces": [
+      "business"
+    ],
+    "max_action_class": "D",
+    "authority_domain": "business"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPD3_GROWTH_WRITES.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

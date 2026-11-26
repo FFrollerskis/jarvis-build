@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "program_gate",
+  "id": "G05",
+  "number": 5,
+  "title": "Autonomi",
+  "pass_criterion": "Eierens autoritet, pause og tilbakekall, og forhåndskontroll og gjenoppretting for klasse D og høy risiko fungerer i ekte kjøretid.",
+  "bound_components": [
+    "core.policy",
+    "core.owner-controls",
+    "core.tool-gateway"
+  ],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": []
+}

@@ -186,7 +186,7 @@ describe("OperationalGateChanged (hendelseskontrakten: kun type og skjema, ingen
     expect(bad({ gate_kind: "orl" })).toBe(false);
     expect(bad({ gate_kind: "orl", gate_id: "ORL2" })).toBe(true);
     expect(bad({ gate_kind: "program_gate", gate_id: "ORL2" })).toBe(false);
-    expect(bad({ owner: "tobias" })).toBe(false);
+    expect(bad({ owner: "en-person" })).toBe(false);
     expect(bad({ reason: "" })).toBe(false);
     expect(bad({ extra: 1 })).toBe(false);
   });

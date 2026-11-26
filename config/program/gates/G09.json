@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "program_gate",
+  "id": "G09",
+  "number": 9,
+  "title": "Kontinuerlig intelligens",
+  "pass_criterion": "Læring fra erfaring, unnlatelser, korreksjoner, menneskelig kunnskap og relasjoner, samt øving, evaluering, tilbakekall og benchmark, er bevist.",
+  "bound_components": [
+    "ci.experience-ledger",
+    "ci.human-knowledge",
+    "ci.skill-learning",
+    "ci.consolidation",
+    "ci.practice",
+    "ci.recall-unlearning",
+    "ci.relational-learning"
+  ],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": []
+}

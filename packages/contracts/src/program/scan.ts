@@ -259,11 +259,11 @@ export function scanProgramIndex(input: ScanInput): Finding[] {
     const re = new RegExp(rule.pattern);
     const allowed = rule.allowed_owner_patterns.map((p) => new RegExp(p));
     const ownerAllowed = (owner: string | null): boolean => owner !== null && allowed.some((r) => r.test(owner));
-    for (const [table, info] of repo.tables) {
+    for (const table of repo.tables.keys()) {
       const owner = ownerOfTable(table);
       if (ownerAllowed(owner)) continue;
+      // Kun TABELLNAVN (og planlagte tabeller under): et `*_id`-felt i en annen tabell er normalt en REFERANSE til sannhetskilden, og det skal programmet oppmuntre, ikke flagge (D-PROG-09).
       if (re.test(table)) add("exclusive_name_violation", owner, `${rule.id}:${table}`, `${table} bærer et eksklusivt navn (${rule.id}) men eies ikke av en tillatt komponent: ${rule.reason}`);
-      for (const col of info.columns) if (re.test(col)) add("exclusive_name_violation", owner, `${rule.id}:${table}.${col}`, `${table}.${col} bærer et eksklusivt navn (${rule.id}) men tabellen eies ikke av en tillatt komponent: ${rule.reason}`);
     }
     for (const c of components) {
       if (ownerAllowed(c.component_id)) continue;

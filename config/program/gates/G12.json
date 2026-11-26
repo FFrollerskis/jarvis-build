@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "program_gate",
+  "id": "G12",
+  "number": 12,
+  "title": "Sikkerhet",
+  "pass_criterion": "Prompt-injeksjon, forgiftet læring og ekspertise, forsyningskjede, hemmelighetslekkasje, manipulering av revisjon og mistenkelig selvendring er testet og består.",
+  "bound_components": [
+    "core.tool-gateway",
+    "core.policy",
+    "ev.safety-constitution",
+    "ev.evolution-gates",
+    "ev.eval-lab"
+  ],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": []
+}

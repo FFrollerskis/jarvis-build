@@ -1,0 +1,113 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.situations",
+  "title": "Proaktiv situasjonsmotor",
+  "summary": "Tilstandsmaskin for situasjoner med dedupe, undertrykking og stille timer; hendelsesabonnementet, signalloggen og tilbakemeldingslæringen ligger her.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-10 Situation Engine",
+    "d_refs": [
+      "D-64"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/situations/src/signal-types.ts"
+    ],
+    "fingerprint": "sha256:72da01f2eab323069d77fe4c23ee2090ac5d8e169a27ce567cd76ac2ea292d58",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/situations"
+  ],
+  "state_store": {
+    "tables": [
+      "situation_assessments",
+      "situation_autonomy_policies",
+      "situation_domain_pauses",
+      "situation_feedback",
+      "situation_notification_policies",
+      "situation_rule_tuning",
+      "situation_signal_log",
+      "situation_subscriptions",
+      "situations"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "056_situations.sql",
+      "057_situations_activation.sql",
+      "059_governance.sql",
+      "139_situation_signals.sql",
+      "148_situation_autonomy_scope.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "ObservationDeferred",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    }
+  ],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.incidents",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "SECRET_RESTRICTED",
+    "memory_spaces": [
+      "health",
+      "home",
+      "personal"
+    ],
+    "max_action_class": "C",
+    "authority_domain": "policy"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPG4_SITUATION_BRIDGES.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

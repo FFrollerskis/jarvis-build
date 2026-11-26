@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.worker",
+  "title": "Arbeiderprosess",
+  "summary": "Bakgrunnsprosessen som kjører planlagte jobber, watchdog og køen; egen prosess i compose.",
+  "kind": "service",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core arbeider",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "apps/api/src/worker-main.ts"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [
+      "worker"
+    ],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "personal",
+      "project"
+    ],
+    "max_action_class": "C",
+    "authority_domain": "tools"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "program_gate",
+  "id": "G01",
+  "number": 1,
+  "title": "Planverk",
+  "pass_criterion": "Det styrende planverket er registrert med eksakte versjoner og eierens navngitte adopsjon; eldre versjoner står som historikk.",
+  "bound_components": [
+    "program.canonical-index"
+  ],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": []
+}

@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "dx.error-codes",
+  "title": "Feilkode-register",
+  "summary": "Stabile feilkoder i elleve navnerom med eier, alvor og retryability, og oppslag fra eksisterende årsaksstrenger uten atferdsendring.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF6",
+    "subsystem": "Diagnostikk DX0",
+    "d_refs": []
+  },
+  "runtime_state": "built_unwired",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [
+      "packages/contracts/src/error-codes.ts"
+    ],
+    "fingerprint": "sha256:811830f40696364c14f0e58f2b60e9547bc2d5a44f9cd37047147689fc2034f5",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "packages/contracts/src/error-codes.ts"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PUBLIC_OR_LOW_SENSITIVITY",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "diagnostics"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPPGA_PROGRAM_INDEX.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

@@ -1,0 +1,76 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.event-transport",
+  "title": "Felles hendelsestransport",
+  "summary": "Planlagt eier av felles hendelsestransport og utvidet konvolutt (korrelasjon, sporing); i dag finnes bare hendelseslogg og konvolutt, brukt av to skrivere.",
+  "kind": "planned",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core hendelser",
+    "d_refs": []
+  },
+  "runtime_state": "planned",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": null,
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": null
+  },
+  "code_paths": [],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "CorrectionReceived",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    },
+    {
+      "type": "TaskCompleted",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    }
+  ],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.event-contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.ledgers",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "tools"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": [
+    "Eierskapet til felles transport er ikke avklart i noen pakke ennå; til da poller prosjektorene kildetabellene."
+  ]
+}

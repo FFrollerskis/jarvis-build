@@ -1,0 +1,88 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.vision",
+  "title": "Vision & Physical World",
+  "summary": "Leverandørnøytral kontrakt for kamerahendelser, øyeblikksbilder, rom og inventar med håndhevet oppbevaring; bilder går aldri til sky.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-9 Vision",
+    "d_refs": [
+      "D-153"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/vision/src/index.ts"
+    ],
+    "fingerprint": "sha256:10ca3632a6aadd215e0b82581e12ebd8273dbd65ee973f40eec0cebaa1ecfbb4",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/vision"
+  ],
+  "state_store": {
+    "tables": [
+      "vision_cameras",
+      "vision_capture_requests",
+      "vision_event_observations",
+      "vision_inventory_items",
+      "vision_retention_policies",
+      "vision_rooms",
+      "vision_snapshot_tombstones",
+      "vision_snapshots"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "055_vision.sql",
+      "133_vision_cameras.sql",
+      "134_vision_snapshots.sql",
+      "135_vision_embeddings_inventory.sql",
+      "136_vision_capture_requests.sql",
+      "137_vision_opening_event.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "SECRET_RESTRICTED",
+    "memory_spaces": [
+      "home"
+    ],
+    "max_action_class": "B",
+    "authority_domain": "personal"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPG3_VISION.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

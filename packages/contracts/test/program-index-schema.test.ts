@@ -77,7 +77,7 @@ describe("ComponentShardSchema: strenghet", () => {
     expect(ok(mut(base, (c) => (c["risk"]["memory_spaces"] = ["work"])))).toBe(false);
     expect(ok(mut(base, (c) => (c["risk"]["max_action_class"] = "E")))).toBe(false);
     expect(ok(mut(base, (c) => (c["risk"]["authority_domain"] = "everything")))).toBe(false);
-    expect(ok(mut(base, (c) => (c["owner"]["role"] = "tobias")))).toBe(false);
+    expect(ok(mut(base, (c) => (c["owner"]["role"] = "en-person")))).toBe(false);
     expect(ok(mut(base, (c) => (c["runtime_state"] = "running")))).toBe(false);
     expect(ok(mut(base, (c) => (c["verification"] = "DONE")))).toBe(false);
   });

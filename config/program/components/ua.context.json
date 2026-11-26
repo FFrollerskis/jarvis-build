@@ -1,0 +1,87 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.context",
+  "title": "Personlig kontekst og familiekrets",
+  "summary": "Kildeforankret kontekstmotor (sted, enhet, møte, aktivitet) og familiekretsens delte lister, hendelser og delegeringer.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-8 Personal",
+    "d_refs": [
+      "D-464"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/context/src/index.ts"
+    ],
+    "fingerprint": "sha256:3fad1d6f31abe1f768b8b7ec53b1c575228cbf7fa945cc5cc7ddb6949f05c60e",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/context"
+  ],
+  "state_store": {
+    "tables": [
+      "context_observations",
+      "family_delegations",
+      "family_events",
+      "family_invitations",
+      "family_list_items",
+      "family_lists",
+      "family_members",
+      "family_shares"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "049_context_engine.sql",
+      "126_family_circle.sql",
+      "127_family_shared_content.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "SECRET_RESTRICTED",
+    "memory_spaces": [
+      "home",
+      "personal",
+      "shared"
+    ],
+    "max_action_class": "B",
+    "authority_domain": "personal"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPG2_PERSONAL.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

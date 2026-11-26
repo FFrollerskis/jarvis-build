@@ -1,0 +1,108 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.incidents",
+  "title": "Production Operations Control Plane",
+  "summary": "Hendelser, utrullinger, gjenoppretting og infrastrukturutførelser med sannhetsregime for evidens; produsentene som fyller domenet er av som standard.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-5 Production Operations",
+    "d_refs": [
+      "D-104"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/incidents/src/types.ts"
+    ],
+    "fingerprint": "sha256:6d18ec0f8964edbff49483411182543c5d8cd1ca499be9735210dd1be1b87356",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/incidents"
+  ],
+  "state_store": {
+    "tables": [
+      "deployments",
+      "incident_diagnoses",
+      "incident_diagnosis_evidence",
+      "incident_evidence",
+      "incident_producer_runs",
+      "incident_repair_tasks",
+      "incident_transitions",
+      "incidents",
+      "infra_executions",
+      "infra_recovery_actions"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "036_incidents.sql",
+      "037_infra_ops_v2.sql",
+      "081_tenant_scope_fk_incident_evidence.sql",
+      "096_incident_lifecycle.sql",
+      "097_incident_truth_regime.sql",
+      "098_incident_producer_runs.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "IncidentOpened",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    }
+  ],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tasks",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "project"
+    ],
+    "max_action_class": "D",
+    "authority_domain": "infra"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/INCIDENT_LIFECYCLE.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

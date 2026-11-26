@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.voice-gateway",
+  "title": "Voice Gateway",
+  "summary": "Egen sanntidsprosess for full-duplex tale (VAD, barge-in, STT/TTS-adaptere) som kobler talesesjoner mot Core.",
+  "kind": "app",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core tale",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "apps/voice-gateway"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [
+      "voice-gateway"
+    ],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "personal"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "identity"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPV2_VOICE_ROBUSTNESS.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

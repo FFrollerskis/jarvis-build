@@ -1,0 +1,91 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.governance",
+  "title": "Styringsjournal",
+  "summary": "Beslutningslogg, scenarier, risikoregister og mål med nøkkelresultater; ren tilstands- og historikkføring.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-11 Executive",
+    "d_refs": [
+      "D-64"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/governance/src/index.ts"
+    ],
+    "fingerprint": "sha256:2966e47d28570e38496b8288e741ed38d1cb18209fb45a4056d74f6378e60a21",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/governance"
+  ],
+  "state_store": {
+    "tables": [
+      "decision_log",
+      "goal_key_results",
+      "goals",
+      "risks",
+      "scenarios"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "059_governance.sql",
+      "102_governance_provenance.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "BUSINESS_CONFIDENTIAL",
+    "memory_spaces": [
+      "business"
+    ],
+    "max_action_class": "B",
+    "authority_domain": "business"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "program_gate",
+  "id": "G04",
+  "number": 4,
+  "title": "Identitet, tenant og autoritet",
+  "pass_criterion": "Negative tester for isolasjon mellom tenanter og enheter, leverandørgrenser, hemmeligheter og revisjonsintegritet består.",
+  "bound_components": [
+    "core.identity",
+    "core.policy",
+    "core.ledgers",
+    "mc.org-authority",
+    "mc.security-ledger"
+  ],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": []
+}

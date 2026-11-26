@@ -2,7 +2,7 @@ import { z } from "zod";
 import { compareFindings, type Finding } from "./findings.ts";
 import { canonicalJson } from "./hash.ts";
 import { GATE_ID_PATTERN, GateIdSchema, GateStatusSchema, OperationalGateChangedPayloadSchema, ORL_ID_PATTERN, OrlIdSchema, type GateStatus } from "./gate-events.ts";
-import { ComponentIdSchema, EvidenceRefSchema, type EvidenceRef } from "./schema.ts";
+import { ComponentIdSchema, EvidenceRefSchema, type ComponentShard, type EvidenceRef } from "./schema.ts";
 
 /**
  * WP-PGA / PG3 (HF6 §26-27, D-PROG-08, H6-PG10/OR01): Program Completion-portene (17) og Operational Readiness Levels (ORL0-5) som DATA. Alle står OPEN i dag; en port kan bare stå PASS med en
@@ -107,6 +107,18 @@ export interface GateContext {
   component: (id: string) => { contract_fingerprint: string | null; changed_at: string | null } | undefined;
   /** sha256 (hex) av evidensfilen slik den ligger nå; null hvis den ikke finnes. */
   evidence_sha256: (path: string) => string | null;
+}
+
+/** Bygger `GateContext` fra komponentene (kontraktfingeravtrykk og siste kontraktendring) og en leser av evidensfilenes sha256. Felles for orkestratoren og registreringsverktøyet. */
+export function makeGateContext(components: ReadonlyArray<Pick<ComponentShard, "component_id" | "contract">>, evidenceSha256: (path: string) => string | null): GateContext {
+  const byId = new Map(components.map((c) => [c.component_id, c]));
+  return {
+    component: (id) => {
+      const c = byId.get(id);
+      return c === undefined ? undefined : { contract_fingerprint: c.contract.fingerprint, changed_at: c.contract.changed_at };
+    },
+    evidence_sha256: evidenceSha256
+  };
 }
 
 export type GateReason =

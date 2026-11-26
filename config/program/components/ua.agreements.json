@@ -1,0 +1,89 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.agreements",
+  "title": "Kontraktdomene",
+  "summary": "Eget kontrakt-domene (versjoner, forpliktelser, hendelser) uten ekstern e-signaturleverandør.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-3 Business",
+    "d_refs": [
+      "D-71"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/agreements/src/index.ts"
+    ],
+    "fingerprint": "sha256:30637099e3cba930c8c57e975193979f7a188a70ac197cd8438239a7fe4da60a",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/agreements"
+  ],
+  "state_store": {
+    "tables": [
+      "contract_events",
+      "contract_obligations",
+      "contract_versions",
+      "contracts"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "026_contracts.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "BUSINESS_CONFIDENTIAL",
+    "memory_spaces": [
+      "business"
+    ],
+    "max_action_class": "B",
+    "authority_domain": "business"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

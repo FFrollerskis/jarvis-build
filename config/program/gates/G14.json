@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "program_gate",
+  "id": "G14",
+  "number": 14,
+  "title": "Multi-tenant i praksis",
+  "pass_criterion": "En ekstern pilot med separat juridisk tenant har bevist onboarding, isolasjon, tilbakekall, eksport, sletting og hendelseshåndtering.",
+  "bound_components": [
+    "mc.org-authority"
+  ],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": []
+}

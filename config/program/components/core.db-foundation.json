@@ -1,0 +1,89 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.db-foundation",
+  "title": "Datafundament, migrasjoner og RLS",
+  "summary": "Migrasjonskjøreren, tilkoblingspoolen, rolle- og radnivåsikkerhet og felles tjenester (hemmelighetsskanning) som all databasetilgang går gjennom; eier også databasetjenestene i compose.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core data",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/core/src/index.ts"
+    ],
+    "fingerprint": "sha256:770f2f16d36acb60ab3130f7bbf33407631448a28604b73df0f6bdf82f8107f8",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "infra/local",
+    "modules/core"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [
+      "schema_migrations"
+    ],
+    "migrations": [
+      "005_rls.sql",
+      "078_tenant_scope_fk_identity.sql",
+      "079_tenant_scope_fk_money.sql",
+      "080_tenant_scope_fk_rest.sql"
+    ],
+    "services": [
+      "db-bootstrap",
+      "migrate",
+      "postgres"
+    ],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.policy",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "SECRET_RESTRICTED",
+    "memory_spaces": [
+      "business",
+      "guest",
+      "health",
+      "home",
+      "personal",
+      "project",
+      "shared"
+    ],
+    "max_action_class": "B",
+    "authority_domain": "none"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/POSTGRES_OPS.md"
+  },
+  "pending_work": [
+    {
+      "wp": "WP-SEC2",
+      "note": "Endrer hemmelighetsskanneren i modulen (secret-scan.ts) og berører delte tjenester.",
+      "reserved_migrations": []
+    }
+  ],
+  "notes": []
+}

@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.conversation-graph",
+  "title": "Samtalegraf og identitetsoppløsning",
+  "summary": "Samtalegraf og reversibel identitetsoppløsning på tvers av kanaler, med oppfølging (V2).",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-7 Communications",
+    "d_refs": [
+      "D-119"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/conversation-graph/src/index.ts"
+    ],
+    "fingerprint": "sha256:1232dd09aae18317166bc9a7d927e444402d2ce60ecfa201d61e71735ebb92d4",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/conversation-graph"
+  ],
+  "state_store": {
+    "tables": [
+      "conversation_channel_links",
+      "conversation_identities",
+      "conversation_identity_merges"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "046_conversation_graph.sql",
+      "117_conversation_channels_expand.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "personal"
+    ],
+    "max_action_class": "B",
+    "authority_domain": "comms"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": [
+    "Pull-delen av oppfølgingen er koblet; push-delen er av som standard."
+  ]
+}

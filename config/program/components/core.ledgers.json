@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.ledgers",
+  "title": "Hendelses-, revisjons- og godkjenningslogger",
+  "summary": "Append-only logger: idempotente hendelser, revisjonsrader, policy-avgjørelser, engangsgodkjenninger og bundne bekreftelser.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core logger",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/core/src/services/approval-store.ts",
+    "modules/core/src/services/audit-writer.ts",
+    "modules/core/src/services/confirmation-store.ts",
+    "modules/core/src/services/event-writer.ts",
+    "modules/core/src/services/operational-retention.ts",
+    "modules/core/src/services/policy-audit-sink.ts"
+  ],
+  "state_store": {
+    "tables": [
+      "action_confirmations",
+      "approvals",
+      "audit_events",
+      "events",
+      "policy_decisions"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "002_sessions_events.sql",
+      "003_tasks_capabilities_approvals.sql",
+      "004_audit_cost.sql",
+      "063_device_revocation_approval_binding.sql",
+      "066_action_confirmations.sql",
+      "067_action_confirmations_execute.sql",
+      "072_audit_correlation.sql",
+      "073_operational_retention.sql",
+      "108_policy_decision_journal.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "guest",
+      "health",
+      "home",
+      "personal",
+      "project",
+      "shared"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "policy"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

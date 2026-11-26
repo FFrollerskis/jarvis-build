@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "program_gate",
+  "id": "G11",
+  "number": 11,
+  "title": "Gjenoppretting",
+  "pass_criterion": "Kald oppstart, restore fra off-site, tenantisolasjon etter restore, kontinuitet ved eierens bortfall og siste-kjente-gode er bevist.",
+  "bound_components": [
+    "core.watchdog",
+    "core.db-foundation"
+  ],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": []
+}

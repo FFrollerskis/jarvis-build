@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "program_gate",
+  "id": "G10",
+  "number": 10,
+  "title": "Diagnostikk",
+  "pass_criterion": "Et ende-til-ende spor med versjoner og utfall, en automatisk diagnosepakke, et feilbibliotek og selvdiagnose som spørring er bevist.",
+  "bound_components": [
+    "dx.error-codes",
+    "dx.correlation",
+    "dx.logging",
+    "dx.diagnostic-index",
+    "ev.self-model"
+  ],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": []
+}

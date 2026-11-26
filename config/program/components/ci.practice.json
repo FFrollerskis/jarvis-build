@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ci.practice",
+  "title": "Øving og læringsøkonomi",
+  "summary": "Planlagt sandkasse-øving med separate tak, stopp ved budsjett og måling av læringsverdi.",
+  "kind": "planned",
+  "canonical_owner": {
+    "plan": "HF6",
+    "subsystem": "CI-5",
+    "d_refs": []
+  },
+  "runtime_state": "planned",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": null,
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": null
+  },
+  "code_paths": [],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [
+      "ci_learning_economics",
+      "ci_learning_runs"
+    ],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "ci.skill-learning",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ev.eval-lab",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "personal",
+      "project"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "learning"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

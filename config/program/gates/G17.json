@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "program_gate",
+  "id": "G17",
+  "number": 17,
+  "title": "Operativ avgangsprøve",
+  "pass_criterion": "Eierens signoff (ORL5) registrerer målte begrensninger, gjenstående risiko, tak og kontaktpunkter for gjenoppretting.",
+  "bound_components": [],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": []
+}

@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "program.contract-compat",
+  "title": "Kontraktkompatibilitet ved oppstart og utrulling",
+  "summary": "Planlagt annonsering av bygg og kontraktversjoner ved oppstart og en utrullingssjekk som degraderer kun berørt evne ved avvik.",
+  "kind": "planned",
+  "canonical_owner": {
+    "plan": "HF6",
+    "subsystem": "Program PG2",
+    "d_refs": []
+  },
+  "runtime_state": "planned",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": null,
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": null
+  },
+  "code_paths": [],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [
+      "program_components",
+      "program_conflicts"
+    ],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "ProgramContractMismatch",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    }
+  ],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "program.canonical-index",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "program"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

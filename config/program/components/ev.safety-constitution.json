@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ev.safety-constitution",
+  "title": "Safety Constitution og endringsregister",
+  "summary": "Signert sikkerhetskonstitusjon med endringsklasser, hash-kjedet endringsregister, budsjettlåser og break-glass; selvendring er frosset.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF2",
+    "subsystem": "EV-0 Sikkerhetsgrunnlag",
+    "d_refs": [
+      "D-406",
+      "D-408",
+      "D-409",
+      "D-410",
+      "D-411"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "config/evolution/constitution.v1.json",
+      "modules/self-modification/src/constitution.ts"
+    ],
+    "fingerprint": "sha256:8ee47c3a831fbef3856ddb971fa80a0b957b00f684b80ed0cf624b506bbb5d62",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "apps/api/src/ev0-boot.ts",
+    "config/evolution",
+    "modules/self-modification/src/budget-lock.ts",
+    "modules/self-modification/src/change-ledger.ts",
+    "modules/self-modification/src/constitution.ts",
+    "ops/break-glass"
+  ],
+  "state_store": {
+    "tables": [
+      "evolution_change_ledger"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "075_evolution_change_ledger.sql"
+    ],
+    "services": [],
+    "files": [
+      "config/evolution/constitution.v1.json"
+    ]
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "self_change"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/EV0_CONSTITUTION_SIGNING.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.conversation",
+  "title": "Samtalelager, kontekstbygger og hurtigbane",
+  "summary": "Meldingslageret, kontekstbyggeren som setter sammen modellens kontekst, og hurtigbanen som hopper over modellen men aldri over policy.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core samtale",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/core/src/services/context-builder.ts",
+    "modules/core/src/services/display-text.ts",
+    "modules/core/src/services/fast-router.ts",
+    "modules/core/src/services/message-store.ts"
+  ],
+  "state_store": {
+    "tables": [
+      "messages"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "002_sessions_events.sql",
+      "140_messages_restricted.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "SECRET_RESTRICTED",
+    "memory_spaces": [
+      "business",
+      "guest",
+      "health",
+      "home",
+      "personal",
+      "project",
+      "shared"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "memory"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "client.mobile",
+  "title": "Mobilklient (iOS)",
+  "summary": "Swift-klient for iPhone og Watch; bygget i kilde, men ikke levert (krever signering og enhet).",
+  "kind": "app",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Klienter",
+    "d_refs": []
+  },
+  "runtime_state": "built_unwired",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "apps/mobile"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "personal"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "none"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

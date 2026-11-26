@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "orl",
+  "id": "ORL4",
+  "level": 4,
+  "title": "Ekstern pilot",
+  "bound_components": [],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": [],
+  "exit_criterion": "En isolert pilot med minst én separat juridisk tenant har bevist eksport, tilbakekall, onboarding, isolasjon og gjenoppretting.",
+  "requires_orl": "ORL3",
+  "requires_gates": [
+    "G14"
+  ]
+}

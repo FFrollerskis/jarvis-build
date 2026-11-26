@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.event-contracts",
+  "title": "Hendelseskonvolutt og korrelasjon",
+  "summary": "Konvolutten for idempotente hendelser (EventEnvelope) og korrelasjons-ID-ene for planlagte kjøringer; felles kontrakt for alle hendelsesskrivere.",
+  "kind": "package",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core-hendelser og korrelasjon",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [
+      "packages/contracts/src/event.ts",
+      "packages/contracts/src/run-correlation.ts"
+    ],
+    "fingerprint": "sha256:16622b8b6ccacb6d700d00a49a0f8849beb640f0dc99f5f22b34d2ce464b99be",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "packages/contracts/src/event.ts",
+    "packages/contracts/src/run-correlation.ts"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PUBLIC_OR_LOW_SENSITIVITY",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "tools"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": [
+    "Kontraktene utvides additivt av en senere korrelasjonspakke (span, årsakskjede); en endring av filene krever oppdatert fingeravtrykk her."
+  ]
+}

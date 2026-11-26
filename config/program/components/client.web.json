@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "client.web",
+  "title": "Webklient",
+  "summary": "Statiske sider for dashbord, kommandosentral, kontroll og stemme som snakker mot Core API.",
+  "kind": "app",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Klienter",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "apps/web"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "personal"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "none"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

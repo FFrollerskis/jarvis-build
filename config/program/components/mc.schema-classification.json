@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "mc.schema-classification",
+  "title": "Skjemaklassifisering og migrasjonslint",
+  "summary": "Under bygging: klassifisering av alle tabeller (global, bruker-, org-eid, plattform) med lint for nye migrasjoner og negativ org-A/B-fixtur; ren verktøypakke.",
+  "kind": "planned",
+  "canonical_owner": {
+    "plan": "HF3",
+    "subsystem": "MC-8 Skjemakontrakt",
+    "d_refs": []
+  },
+  "runtime_state": "planned",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": null,
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": null
+  },
+  "code_paths": [],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PUBLIC_OR_LOW_SENSITIVITY",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "program"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [
+    {
+      "wp": "WP-MC8a",
+      "note": "Klassifiseringsmanifest og migrasjonslint er under bygging; ingen migrasjon.",
+      "reserved_migrations": []
+    }
+  ],
+  "notes": [
+    "Skiller seg fra denne indeksen: dette er klassifisering av tabeller (tilgangsmodell), indeksen er eierskap."
+  ]
+}

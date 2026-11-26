@@ -1,0 +1,109 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ua.comms",
+  "title": "Communications Hub",
+  "summary": "Felles utgående kommunikasjonspolicy, opt-out, innkommende hendelser, møtetranskripsjon og kontaktkonflikter på tvers av kanaler.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "UA-7 Communications",
+    "d_refs": [
+      "D-463"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/comms/src/index.ts"
+    ],
+    "fingerprint": "sha256:602c0eedbc6dbd39fa469b05aa9d8b0ff15a3ab7027782746e2d8f36cd2b06cf",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/comms"
+  ],
+  "state_store": {
+    "tables": [
+      "comms_authorized_accounts",
+      "comms_contact_conflicts",
+      "comms_inbound_events",
+      "comms_inbound_receipts",
+      "comms_meeting_commitments",
+      "comms_meeting_participants",
+      "comms_meetings",
+      "comms_outbound_log",
+      "comms_recipient_opt_outs"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "118_comms_outbound_policy.sql",
+      "119_comms_meetings.sql",
+      "141_comms_optout_lifecycle.sql",
+      "142_comms_journal_integrity.sql",
+      "143_comms_contact_conflicts.sql"
+    ],
+    "services": [],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.memory",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.tool-gateway",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.business",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.conversation-graph",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "ua.knowledge",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "business",
+      "personal"
+    ],
+    "max_action_class": "D",
+    "authority_domain": "comms"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPG1_COMMS.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

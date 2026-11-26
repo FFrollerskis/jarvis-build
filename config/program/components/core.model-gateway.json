@@ -1,0 +1,143 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.model-gateway",
+  "title": "Model Gateway",
+  "summary": "Modellruting med reservekjede, kostnadssporing og håndhevede budsjettgrenser; sensitivitetsrutingen holder begrensede data på lokal modell. Eier også sporingstjenesten i compose.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core modeller",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": "0.1.0",
+    "files": [
+      "modules/model-gateway/src/index.ts"
+    ],
+    "fingerprint": "sha256:c90be450fbbb275e995a10563935da0be040f83d30976c493f686824410b2de5",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "modules/model-gateway"
+  ],
+  "state_store": {
+    "tables": [
+      "cost_events"
+    ],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [
+      "004_audit_cost.sql",
+      "011_runrate_evidence.sql",
+      "015_cost_events_mesh.sql",
+      "016_cost_events_stream_metrics.sql",
+      "115_cost_events_provider_at_idx.sql"
+    ],
+    "services": [
+      "langfuse"
+    ],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "collaboration_contributions",
+      "schema_version": "1.0.0",
+      "status": "active",
+      "idempotency": "<collaboration_id>:<type> (EventWriter: samme tenant og nøkkel gir én rad)",
+      "contract_ref": "modules/model-gateway/src/collaboration.ts"
+    },
+    {
+      "type": "collaboration_result",
+      "schema_version": "1.0.0",
+      "status": "active",
+      "idempotency": "<collaboration_id>:<type> (EventWriter: samme tenant og nøkkel gir én rad)",
+      "contract_ref": "modules/model-gateway/src/collaboration.ts"
+    },
+    {
+      "type": "collaboration_role_assignment",
+      "schema_version": "1.0.0",
+      "status": "active",
+      "idempotency": "<collaboration_id>:<type> (EventWriter: samme tenant og nøkkel gir én rad)",
+      "contract_ref": "modules/model-gateway/src/collaboration.ts"
+    },
+    {
+      "type": "council_incomplete",
+      "schema_version": "1.0.0",
+      "status": "active",
+      "idempotency": "<council_id>:<type> (EventWriter: samme tenant og nøkkel gir én rad)",
+      "contract_ref": "modules/model-gateway/src/council.ts"
+    },
+    {
+      "type": "council_result",
+      "schema_version": "1.0.0",
+      "status": "active",
+      "idempotency": "<council_id>:<type> (EventWriter: samme tenant og nøkkel gir én rad)",
+      "contract_ref": "modules/model-gateway/src/council.ts"
+    },
+    {
+      "type": "council_round_1",
+      "schema_version": "1.0.0",
+      "status": "active",
+      "idempotency": "<council_id>:<type> (EventWriter: samme tenant og nøkkel gir én rad)",
+      "contract_ref": "modules/model-gateway/src/council.ts"
+    },
+    {
+      "type": "council_round_2",
+      "schema_version": "1.0.0",
+      "status": "active",
+      "idempotency": "<council_id>:<type> (EventWriter: samme tenant og nøkkel gir én rad)",
+      "contract_ref": "modules/model-gateway/src/council.ts"
+    },
+    {
+      "type": "council_round_3",
+      "schema_version": "1.0.0",
+      "status": "active",
+      "idempotency": "<council_id>:<type> (EventWriter: samme tenant og nøkkel gir én rad)",
+      "contract_ref": "modules/model-gateway/src/council.ts"
+    }
+  ],
+  "events_in": [],
+  "dependencies": [
+    {
+      "component_id": "core.contracts",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.db-foundation",
+      "min": "0.1.0",
+      "max": "0.x"
+    },
+    {
+      "component_id": "core.provider-adapters",
+      "min": "0.1.0",
+      "max": "0.x"
+    }
+  ],
+  "risk": {
+    "data_sensitivity": "SECRET_RESTRICTED",
+    "memory_spaces": [
+      "business",
+      "guest",
+      "health",
+      "home",
+      "personal",
+      "project",
+      "shared"
+    ],
+    "max_action_class": "none",
+    "authority_domain": "models"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

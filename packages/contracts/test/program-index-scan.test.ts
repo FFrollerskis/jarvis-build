@@ -261,8 +261,8 @@ describe("HF6-negative regler", () => {
     only(withTable("skillregistry", "core.alpha"), []);
   });
 
-  it("konkurrerende registernavn som KOLONNE fanges også (også lagt til via ALTER)", () => {
-    only(edit((w) => w.repo.tables.get("t_a")!.columns.push("capability_registry_id")), ["exclusive_name_violation:single-capability-registry:t_a.capability_registry_id"]);
+  it("et KOLONNENAVN flagges ikke (D-PROG-09): `*_id` er normalt en referanse til sannhetskilden, og det skal programmet oppmuntre", () => {
+    only(edit((w) => w.repo.tables.get("t_a")!.columns.push("capability_registry_id", "commitment_id", "commitment_text")), []);
   });
 
   it("planlagt tabell med et eksklusivt navn utenfor eieren fanges også", () => {

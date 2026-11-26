@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "program.operational-gates",
+  "title": "Programporter og ORL",
+  "summary": "De 17 Program Completion-portene og Operational Readiness-nivåene som data, med gjenverifiserbar evidens, foreldelsesregel og hendelseskontrakten OperationalGateChanged (kun type og skjema).",
+  "kind": "tool",
+  "canonical_owner": {
+    "plan": "HF6",
+    "subsystem": "Program PG3",
+    "d_refs": []
+  },
+  "runtime_state": "built_unwired",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [
+      "packages/contracts/src/program/gate-events.ts"
+    ],
+    "fingerprint": "sha256:44133af272561a5b1dbd97f93ee4327cb7aa1b97b85f5eb1a3f7250b508ab1c9",
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "config/program/gates",
+    "config/program/orl",
+    "ops/acceptance",
+    "packages/contracts/src/program/gate-events.ts",
+    "packages/contracts/src/program/gates.ts"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "OperationalGateChanged",
+      "schema_version": "1.0.0",
+      "status": "contract_only",
+      "idempotency": "<gate_id>:<changed_at>",
+      "contract_ref": "packages/contracts/src/program/gate-events.ts"
+    }
+  ],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PUBLIC_OR_LOW_SENSITIVITY",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "program"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier (se runbook)",
+    "runbook": "docs/runbooks/WPPGA_PROGRAM_INDEX.md"
+  },
+  "pending_work": [],
+  "notes": []
+}

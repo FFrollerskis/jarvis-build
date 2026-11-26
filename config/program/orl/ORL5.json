@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "orl",
+  "id": "ORL5",
+  "level": 5,
+  "title": "Fullt operativ",
+  "bound_components": [],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": [],
+  "exit_criterion": "Alle programporter er PASS, og eieren har signert for målte begrensninger og kostnad over tid.",
+  "requires_orl": "ORL4",
+  "requires_gates": [
+    "G01",
+    "G02",
+    "G03",
+    "G04",
+    "G05",
+    "G06",
+    "G07",
+    "G08",
+    "G09",
+    "G10",
+    "G11",
+    "G12",
+    "G13",
+    "G14",
+    "G15",
+    "G16",
+    "G17"
+  ]
+}

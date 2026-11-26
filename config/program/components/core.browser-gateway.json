@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "core.browser-gateway",
+  "title": "Browser Gateway",
+  "summary": "Egen prosess for lokal, selv-hostet nettleserautomasjon med egress-policy og tjenestetoken.",
+  "kind": "app",
+  "canonical_owner": {
+    "plan": "HF1",
+    "subsystem": "Core nettleser",
+    "d_refs": [
+      "D-339"
+    ]
+  },
+  "runtime_state": "dormant",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "apps/browser-gateway"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [
+      "browser-gateway"
+    ],
+    "files": []
+  },
+  "events_out": [],
+  "events_in": [],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [
+      "project"
+    ],
+    "max_action_class": "C",
+    "authority_domain": "tools"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "orl",
+  "id": "ORL0",
+  "level": 0,
+  "title": "Spesifikasjon komplett",
+  "bound_components": [],
+  "external": true,
+  "status": "OPEN",
+  "evidence_ref": null,
+  "history": [],
+  "exit_criterion": "Alle planer og kontrakter er registrert og aktive i programindeksen, uten uavklart eier eller styrende versjon.",
+  "requires_orl": null,
+  "requires_gates": [
+    "G01",
+    "G02"
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0.0",
+  "component_id": "ev.eval-lab",
+  "title": "Eval-laboratorium (gylden suite)",
+  "summary": "Regresjonsport med deterministiske oppgaver og suite-digest, sammenlikning av kjøringer og blind tilordning; ingen holdout-sett ennå.",
+  "kind": "module",
+  "canonical_owner": {
+    "plan": "HF2",
+    "subsystem": "EV-4 Evaluering",
+    "d_refs": []
+  },
+  "runtime_state": "active",
+  "verification": "NOT_VERIFIED",
+  "last_verified": null,
+  "evidence_ref": null,
+  "contract": {
+    "version": "0.1.0",
+    "schema_version": null,
+    "files": [],
+    "fingerprint": null,
+    "changed_at": "2026-11-26T19:45:00.000Z"
+  },
+  "code_paths": [
+    "apps/api/src/golden-suite-runner.ts",
+    "apps/api/src/golden-suite.ts",
+    "modules/self-modification/src/evolution/evals.ts"
+  ],
+  "state_store": {
+    "tables": [],
+    "planned_tables": [],
+    "runtime_tables": [],
+    "migrations": [],
+    "services": [],
+    "files": []
+  },
+  "events_out": [
+    {
+      "type": "EvaluationCompleted",
+      "schema_version": null,
+      "status": "planned",
+      "idempotency": null,
+      "contract_ref": null
+    }
+  ],
+  "events_in": [
+    {
+      "type": "EvalRequested"
+    }
+  ],
+  "dependencies": [],
+  "risk": {
+    "data_sensitivity": "PRIVATE",
+    "memory_spaces": [],
+    "max_action_class": "none",
+    "authority_domain": "self_change"
+  },
+  "owner": {
+    "role": "owner",
+    "escalation": "eier",
+    "runbook": null
+  },
+  "pending_work": [],
+  "notes": []
+}
