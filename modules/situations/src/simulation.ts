@@ -3,6 +3,7 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import { autonomyBindabilityOf } from "@jarvis/tool-gateway";
 import { autonomyActionBlocker } from "./autonomy-guard.ts";
+import { pickEffectiveBinding, type EffectivePolicyRow } from "./autonomy-scope.ts";
 import { NEVER_ACT_DOMAINS, ruleByKey } from "./signal-types.ts";
 import type { Situation, SituationAutonomyPolicy } from "./types.ts";
 
@@ -212,11 +213,13 @@ export class SimulationService {
         );
         similar = rows as SimilarSituation[];
       }
+      // WP-G4b K2: den EFFEKTIVE bindingen for denne situasjonen (regel > kategori > domene, tak) - samme avgjørelse som motoren (`pickEffectiveBinding`).
       const { rows: polRows } = await client.query(
-        `SELECT tool_id, action FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND enabled = true AND (expires_at IS NULL OR expires_at > now())`,
+        `SELECT scope_key, tool_id, action, parameters, (enabled AND (expires_at IS NULL OR expires_at > now())) AS active FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3`,
         [tenantId, memorySpace, situation.domain]
       );
-      const pol = polRows[0] as Pick<SituationAutonomyPolicy, "tool_id" | "action"> | undefined;
+      const effective = pickEffectiveBinding(polRows as EffectivePolicyRow[], situation.rule_key ?? null);
+      const pol: Pick<SituationAutonomyPolicy, "tool_id" | "action"> | undefined = effective.kind === "binding" ? { tool_id: effective.row.tool_id, action: effective.row.action } : undefined;
       return { situation, ruleKey, similar, pol };
     });
     let binding: SimulationBinding;

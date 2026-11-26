@@ -59,14 +59,14 @@ export async function readDevices(pool: ControlCenterPool, tenantId: string, now
   }));
 }
 
-export interface AutonomyRow { memory_space_id: string; domain: string; tool_id: string; action: string; enabled: boolean; updated_at: string | null }
+export interface AutonomyRow { memory_space_id: string; domain: string; /** WP-G4b K2: `*` = hele domenet (alle eldre bindinger), `rule:<kilde>:<type>` eller `category:<navn>`. Utelatt = `*`. */ scope_key?: string; tool_id: string; action: string; enabled: boolean; updated_at: string | null }
 export interface AutonomyRead { rows: AutonomyRow[]; health_count: number; situation_domains: string[] }
 
 /** Autonomi-policyer (kun handlingens NAVN, aldri parametrene) og domenene situasjoner finnes i. `health` leses kun som antall (isolert rom). */
 export async function readAutonomy(pool: ControlCenterPool, tenantId: string): Promise<AutonomyRead> {
   const main = await tenantSpaceRead(pool, tenantId, NON_HEALTH_SPACES, async (query) => ({
     policies: await query(
-      `SELECT memory_space_id, domain, tool_id, action, enabled, updated_at FROM situation_autonomy_policies WHERE tenant_id = $1 ORDER BY domain, memory_space_id LIMIT 100`, [tenantId]
+      `SELECT memory_space_id, domain, scope_key, tool_id, action, enabled, updated_at FROM situation_autonomy_policies WHERE tenant_id = $1 ORDER BY domain, memory_space_id, scope_key LIMIT 100`, [tenantId]
     ),
     domains: await query(`SELECT DISTINCT domain FROM situations WHERE tenant_id = $1 ORDER BY domain LIMIT 60`, [tenantId])
   }));
@@ -283,10 +283,14 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
           // Gjennomgang av PR #316 (M-1): kan domene-pausene ikke leses, VET vi ikke om en aktiv binding er stanset - da er den ukjent (aldri «i orden»), og faktaet sier null i stedet for «ikke pauset».
           const pauseUnknown = !pausesR.ok && p.enabled;
           const ownSpace = p.memory_space_id === ctx.identity.memory_space_id;
+          // WP-G4b K2: en regel-/kategoribinding har egen rad (og egen id); tilbakekall herfra (`revoke_autonomy_binding`) fjerner kun den DOMENEBREDE bindingen, så knappen tilbys ikke for et smalt skop (DEFERRED: bruk situations.clear_autonomy_policy med rule/category).
+          const scopeKey = p.scope_key ?? "*";
+          const scoped = scopeKey !== "*";
+          const itemId = scoped ? `${p.memory_space_id}:${p.domain}:${scopeKey}` : `${p.memory_space_id}:${p.domain}`;
           // WP-G4b K1 (D-484): en lagret binding til en handling som ikke (lenger) er bindbar til autonom ACT (fysisk, eller definisjonen erklærer ikke `autonomy_bindable`) utføres ALDRI og slettes aldri; den vises her så eieren ser
           // at den ikke virker. Kun når definisjonen er kjent i registeret (eller handlingen er fysisk): en ukjent handling i en ren test-/delvis-oppsett gir ingen påstand.
           const notBindable = deps.toolGateway.get(p.tool_id, p.action) !== undefined || autonomyActionBlocker(p.tool_id, p.action) !== null ? autonomyBindBlocker(p.tool_id, p.action, (t, a) => deps.toolGateway.get(t, a)) : null;
-          if (deps.autonomyRevoke === true && ownSpace) {
+          if (deps.autonomyRevoke === true && ownSpace && !scoped) {
             actions.push(controlAction({
               id: `authority.revoke_autonomy:${p.memory_space_id}:${p.domain}`, label: `Tilbakekall autonomi: ${p.domain}`, endpoint: "/executive/mutate",
               body: { action: "revoke_autonomy_binding", parameters: { domain: p.domain } },
@@ -297,9 +301,9 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
             }));
           }
           return controlItem({
-            id: `${p.memory_space_id}:${p.domain}`, label: `${p.domain} (${p.memory_space_id})`, status: pauseUnknown ? "UNKNOWN" : p.enabled && (paused || notBindable !== null) ? "WARN" : "OK", observed_at: p.updated_at,
-            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${notBindable !== null ? ` · UTFØRES IKKE autonomt (${notBindable.code === "physical_action_not_bindable" ? "fysisk/kritisk handling" : "definisjonen erklærer ikke handlingen bindbar til autonom ACT"}); bindingen er ikke slettet - fjern eller erstatt den` : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
-            facts: { tool: p.tool_id, action: p.action, risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id, ...(notBindable !== null ? { not_bindable: notBindable.code } : {}) }
+            id: itemId, label: `${p.domain} (${p.memory_space_id})${scoped ? ` · ${scopeKey}` : ""}`, status: pauseUnknown ? "UNKNOWN" : p.enabled && (paused || notBindable !== null) ? "WARN" : "OK", observed_at: p.updated_at,
+            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${scoped ? ` · gjelder KUN skopet ${scopeKey} (resten av domenet er uberørt; fjernes med situations.clear_autonomy_policy)` : ""}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${notBindable !== null ? ` · UTFØRES IKKE autonomt (${notBindable.code === "physical_action_not_bindable" ? "fysisk/kritisk handling" : "definisjonen erklærer ikke handlingen bindbar til autonom ACT"}); bindingen er ikke slettet - fjern eller erstatt den` : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}${deps.autonomyRevoke === true && !ownSpace ? ` · tilbakekall krever en økt i rommet «${p.memory_space_id}» (kontrollsenteret tilbakekaller kun bindinger i økta sitt eget rom: ${ctx.identity.memory_space_id})` : ""}`,
+            facts: { tool: p.tool_id, action: p.action, ...(scoped ? { scope: scopeKey } : {}), risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id, ...(notBindable !== null ? { not_bindable: notBindable.code } : {}) }
           });
         });
         items.sort(bySeverityThenLabel);

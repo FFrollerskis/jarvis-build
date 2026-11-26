@@ -26,6 +26,7 @@ import { DomainLockBusyError, withDomainAdvisoryLocks } from "./advisory-lock.ts
 import { ALL_DOMAINS, type DomainPauseRegistry } from "./domain-pause.ts";
 import { NEVER_ACT_DOMAINS } from "./signal-types.ts";
 import { autonomyActionBlocker, autonomyBindBlocker, SituationActActionForbiddenError, type AutonomyActionBlock, type AutonomyDefinitionLookup } from "./autonomy-guard.ts";
+import { DOMAIN_WIDE_SCOPE, pickEffectiveBinding, scopeKeyFor, type AutonomyScopeInput, type EffectiveBinding, type EffectivePolicyRow } from "./autonomy-scope.ts";
 
 /**
  * UA-10 Proactive Situation Engine: JARVIS_CANONICAL hendelses-/situasjons-
@@ -726,8 +727,8 @@ export class SituationEngine {
       const newlyActionableOnInsert = computedStage === "inform" || computedStage === "suggest";
       const { rows: insertedRows } = await client.query(
         `INSERT INTO situations
-           (situation_id, tenant_id, memory_space_id, domain, owner_person_id, source_open_loop_id, detection_key, stage, priority, confidence, reason, last_notified_at, inform_message)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           (situation_id, tenant_id, memory_space_id, domain, owner_person_id, source_open_loop_id, detection_key, stage, priority, confidence, reason, last_notified_at, inform_message, rule_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (tenant_id, memory_space_id, detection_key) DO NOTHING
          RETURNING *`,
         [
@@ -747,7 +748,9 @@ export class SituationEngine {
           // ankeret `last_notified_at` - SAMME lærdom som `act_notify_message`
           // (runde 9): en varsel-nøkkel avledet av den MUTERBARE `reason`
           // mister sitt eget bevis ved re-deteksjon og dupliserer.
-          newlyActionableOnInsert ? buildInformMessage(value.domain, value.priority, computedStage, value.reason) : null
+          newlyActionableOnInsert ? buildInformMessage(value.domain, value.priority, computedStage, value.reason) : null,
+          // WP-G4b K2: regelen som VANT (kun inntaksbussen setter den; de eldre sveipene gir `null` = uendret).
+          value.rule_key ?? null
         ]
       );
       if (insertedRows[0]) {
@@ -802,6 +805,7 @@ export class SituationEngine {
              status = 'open', resolved_at = NULL,
              last_notified_at = CASE WHEN $8 THEN $9 ELSE last_notified_at END,
              inform_message = CASE WHEN $8 THEN $10 ELSE inform_message END,
+             rule_key = CASE WHEN $11::text IS NOT NULL THEN $11::text ELSE rule_key END,
              updated_at = now()
          WHERE tenant_id = $1 AND memory_space_id = $2 AND detection_key = $3
          RETURNING *`,
@@ -816,7 +820,9 @@ export class SituationEngine {
           newlyActionable,
           new Date(now).toISOString(),
           // D-160: ny syklus (nytt anker) => ny frosset tekst fra DENNE syklusens reason/stadium (A-LOW-6: fra VINNERENS prioritet og begrunnelse).
-          buildInformMessage(value.domain, winnerPriority, nextStage, winnerReason)
+          buildInformMessage(value.domain, winnerPriority, nextStage, winnerReason),
+          // WP-G4b K2: regelen følger VINNEREN (samme semantikk som prioritet og begrunnelse): vinner den eksisterende (`no_downgrade`) beholdes dens regel; ellers settes kandidatens regel når den er oppgitt.
+          keepExisting ? null : (value.rule_key ?? null)
         ]
       );
       return { situation: rows[0] as Situation, newly_actionable: newlyActionable };
@@ -1052,12 +1058,9 @@ export class SituationEngine {
           // Utvalget (`autoActPending`) er bare et forslag; en binding som er tilbakekalt/utløpt/endret eller en situasjon som er løst/gammel mellom utvalg og claim gir INGEN claim og INGET kall.
           if (options.autoActGuard !== undefined) {
             if (locked.status !== "open" || locked.stage !== "suggest") throw new SituationActStaleError(situationId, "not_open_suggest");
-            const { rows: liveRows } = await client.query(
-              `SELECT tool_id, action, parameters FROM situation_autonomy_policies
-               WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND enabled = true AND (expires_at IS NULL OR expires_at > now())`,
-              [tenantId, memorySpace, locked.domain]
-            );
-            const live = liveRows[0] as { tool_id: string; action: string; parameters: Record<string, JsonValue> } | undefined;
+            // WP-G4b K2: den EFFEKTIVE bindingen for DENNE situasjonen (regel > kategori > domene, tak), lest i claim-transaksjonen under domenelåsen - samme avgjørelse som utvalget og re-verifiseringen.
+            const effective = await this.effectiveBindingWith(client, tenantId, memorySpace, locked.domain, locked.rule_key ?? null);
+            const live = effective.kind === "binding" ? { tool_id: effective.row.tool_id, action: effective.row.action, parameters: effective.row.parameters } : undefined;
             const rendered = live === undefined ? null : renderAutonomyParameters(live.parameters, locked);
             if (live === undefined || rendered === null || computeActOperationFingerprint(situationId, live.tool_id, live.action, rendered) !== operationFingerprint) {
               throw new SituationAutonomyBindingChangedError(locked.domain);
@@ -1578,7 +1581,7 @@ export class SituationEngine {
   async listAutonomyPolicies(tenantId: string, memorySpace: MemorySpace): Promise<SituationAutonomyPolicy[]> {
     const rows = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows: found } = await client.query(
-        `SELECT * FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 ORDER BY domain ASC`,
+        `SELECT * FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 ORDER BY domain ASC, scope_key ASC`,
         [tenantId, memorySpace]
       );
       return found as SituationAutonomyPolicy[];
@@ -1591,14 +1594,32 @@ export class SituationEngine {
     });
   }
 
-  async getAutonomyPolicy(tenantId: string, memorySpace: MemorySpace, domain: string): Promise<SituationAutonomyPolicy | null> {
+  /** Den DOMENEBREDE bindingen (`scope_key = '*'`, alle eldre bindinger) for domenet, eller (med `scopeKey`) en bestemt regel-/kategoribinding. */
+  async getAutonomyPolicy(tenantId: string, memorySpace: MemorySpace, domain: string, scopeKey: string = DOMAIN_WIDE_SCOPE): Promise<SituationAutonomyPolicy | null> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
-        `SELECT * FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3`,
-        [tenantId, memorySpace, domain]
+        `SELECT * FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND scope_key = $4`,
+        [tenantId, memorySpace, domain, scopeKey]
       );
       return (rows[0] as SituationAutonomyPolicy | undefined) ?? null;
     });
+  }
+
+  /**
+   * WP-G4b K2 (D-484): den EFFEKTIVE bindingen for en situasjon i domenet (regel > kategori > domene, med taket «smalere gir aldri mer enn den brede», `autonomy-scope.ts`), målt av DATABASEKLOKKEN innenfor den GITTE
+   * transaksjonen (claim-vakten bruker samme klient, under domenelåsen). ÉN lesing av alle bindingsrader for (tenant, rom, domene).
+   */
+  private async effectiveBindingWith(client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, domain: string, ruleKey: string | null): Promise<EffectiveBinding> {
+    const { rows } = await client.query(
+      `SELECT scope_key, tool_id, action, parameters, (enabled AND (expires_at IS NULL OR expires_at > now())) AS active
+       FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3`,
+      [tenantId, memorySpace, domain]
+    );
+    return pickEffectiveBinding(rows as EffectivePolicyRow[], ruleKey);
+  }
+
+  private async effectiveBinding(tenantId: string, memorySpace: MemorySpace, domain: string, ruleKey: string | null): Promise<EffectiveBinding> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => this.effectiveBindingWith(client, tenantId, memorySpace, domain, ruleKey));
   }
 
   /** Opprett/erstatt eierens binding for ett domene. Tar SAMME advisory-lås som `actOn()`/pause for domenet, så en policy-endring aldri kappløper med et auto-ACT i flukt for samme domene. */
@@ -1621,6 +1642,8 @@ export class SituationEngine {
     // `autonomy_bindable` (DEFAULT-DENY) avvises ved BINDING med en stabil årsakskode. Ingen oppslagsfunksjon = ingenting er bindbart (fail-closed).
     const bindBlock = autonomyBindBlocker(value.tool_id, value.action, this.definitionLookup);
     if (bindBlock !== null) throw new SituationActActionForbiddenError(bindBlock.tool_id, bindBlock.action, bindBlock.code);
+    // WP-G4b K2 (D-484): valgfritt skop (én regel eller én lukket kategori i bindingens EGET domene); utelatt = hele domenet (som før). Ugyldig/ukjent/feil domene avvises ved binding.
+    const scopeKey = scopeKeyFor(value.domain, { rule: value.rule, category: value.category });
     // WP-G4: valgfri utløpstid. Må være en gyldig tid i fremtiden, høyst 365 dager frem (aldri en bakdatert eller «evig» verdi gjennom feltet).
     let expiresAtIso: string | null = null;
     if (value.expires_at !== undefined) {
@@ -1641,26 +1664,28 @@ export class SituationEngine {
     return withDomainAdvisoryLocks(this.pool, [value.domain], () =>
       withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
         const { rows } = await client.query(
-          `INSERT INTO situation_autonomy_policies (tenant_id, memory_space_id, domain, tool_id, action, parameters, enabled, actor_person_id, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
-           ON CONFLICT (tenant_id, memory_space_id, domain) DO UPDATE
+          `INSERT INTO situation_autonomy_policies (tenant_id, memory_space_id, domain, tool_id, action, parameters, enabled, actor_person_id, expires_at, scope_key)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10)
+           ON CONFLICT (tenant_id, memory_space_id, domain, scope_key) DO UPDATE
              SET tool_id = EXCLUDED.tool_id, action = EXCLUDED.action, parameters = EXCLUDED.parameters,
                  enabled = EXCLUDED.enabled, actor_person_id = EXCLUDED.actor_person_id, expires_at = EXCLUDED.expires_at, updated_at = now()
            RETURNING *`,
-          [tenantId, memorySpace, value.domain, value.tool_id, value.action, JSON.stringify(value.parameters ?? {}), value.enabled ?? true, actorPersonId, expiresAtIso]
+          [tenantId, memorySpace, value.domain, value.tool_id, value.action, JSON.stringify(value.parameters ?? {}), value.enabled ?? true, actorPersonId, expiresAtIso, scopeKey]
         );
         return rows[0] as SituationAutonomyPolicy;
       })
     );
   }
 
-  async clearAutonomyPolicy(tenantId: string, memorySpace: MemorySpace, domain: string, actorPersonId: string | undefined): Promise<boolean> {
+  /** Fjerner bindingen for domenet. UTEN `scope` fjernes den DOMENEBREDE raden (som før; regel-/kategoribindinger røres ikke); MED `scope` fjernes akkurat den regel-/kategoribindingen (WP-G4b K2). */
+  async clearAutonomyPolicy(tenantId: string, memorySpace: MemorySpace, domain: string, actorPersonId: string | undefined, scope?: AutonomyScopeInput): Promise<boolean> {
     this.assertAutonomyAuthority(actorPersonId);
+    const scopeKey = scopeKeyFor(domain, scope);
     return withDomainAdvisoryLocks(this.pool, [domain], () =>
       withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
         const { rowCount } = await client.query(
-          `DELETE FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3`,
-          [tenantId, memorySpace, domain]
+          `DELETE FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND scope_key = $4`,
+          [tenantId, memorySpace, domain, scopeKey]
         );
         return rowCount === 1;
       })
@@ -1692,37 +1717,35 @@ export class SituationEngine {
     const result: AutoActResult = { attempted: 0, succeeded: 0, denied: 0, skipped: 0 };
     // WP-G4 fiks-runde (A-MEDIUM-4): FERSKHETSVINDU - kun situasjoner som er evaluert/observert innen vinduet er kandidater (standard 1 time; en gammel `suggest` utføres aldri når eieren senere binder domenet).
     const maxAgeSeconds = Math.max(1, (options.maxAgeMs ?? DEFAULT_AUTO_ACT_MAX_AGE_MS) / 1000);
-    const candidates = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+    const situationsInReach = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
-        `SELECT s.*, p.tool_id AS policy_tool_id, p.action AS policy_action, p.parameters AS policy_parameters
-         FROM situations s
-         JOIN situation_autonomy_policies p
-           ON p.tenant_id = s.tenant_id AND p.memory_space_id = s.memory_space_id AND p.domain = s.domain AND p.enabled = true
-              AND (p.expires_at IS NULL OR p.expires_at > now())
+        `SELECT s.* FROM situations s
          WHERE s.tenant_id = $1 AND s.memory_space_id = $2 AND s.status = 'open'
            AND s.stage = 'suggest' AND s.act_idempotency_key IS NULL
            AND NOT (s.domain = ANY($3::text[]))
            AND s.updated_at >= now() - make_interval(secs => $4::double precision)
+           AND EXISTS (SELECT 1 FROM situation_autonomy_policies p WHERE p.tenant_id = s.tenant_id AND p.memory_space_id = s.memory_space_id AND p.domain = s.domain)
          ORDER BY s.opened_at ASC`,
         [tenantId, memorySpace, [...NEVER_ACT_DOMAINS], maxAgeSeconds]
       );
-      return rows as Array<Situation & { policy_tool_id: string; policy_action: string; policy_parameters: Record<string, JsonValue> }>;
+      return rows as Situation[];
     });
-    for (const candidate of candidates) {
+    // WP-G4b K2 (D-484): UTVALGET løser den EFFEKTIVE bindingen per situasjon (regel > kategori > domene; en smalere binding gir aldri mer enn den brede). En situasjon uten aktiv, gjeldende binding er ikke en kandidat
+    // (ikke talt, som før). Alle utvalgene gjøres FØR noe utføres, slik at «eieren endrer bindingen midt i løpet» fortsatt oppdages av re-verifiseringen under.
+    const candidates: Array<{ situation: Situation; policy_tool_id: string; policy_action: string }> = [];
+    for (const situation of situationsInReach) {
+      const selected = await this.effectiveBinding(tenantId, memorySpace, situation.domain, situation.rule_key ?? null);
+      if (selected.kind === "binding") candidates.push({ situation, policy_tool_id: selected.row.tool_id, policy_action: selected.row.action });
+    }
+    for (const entry of candidates) {
+      const candidate = entry.situation;
       // WP-G4: bindingen re-verifiseres RETT FØR hvert kall (ikke bare ved utvalget): en binding som er tilbakekalt, deaktivert, utløpt eller endret i mellomtiden gir INGEN ACT for denne situasjonen.
-      const live = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-        const { rows } = await client.query(
-          `SELECT tool_id, action, parameters FROM situation_autonomy_policies
-           WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND enabled = true AND (expires_at IS NULL OR expires_at > now())`,
-          [tenantId, memorySpace, candidate.domain]
-        );
-        return rows[0] as { tool_id: string; action: string; parameters: Record<string, JsonValue> } | undefined;
-      });
-      if (live === undefined || live.tool_id !== candidate.policy_tool_id || live.action !== candidate.policy_action) {
+      const resolved = await this.effectiveBinding(tenantId, memorySpace, candidate.domain, candidate.rule_key ?? null);
+      const live = resolved.kind === "binding" ? { tool_id: resolved.row.tool_id, action: resolved.row.action, parameters: resolved.row.parameters } : undefined;
+      if (live === undefined || live.tool_id !== entry.policy_tool_id || live.action !== entry.policy_action) {
         result.skipped += 1;
         continue;
       }
-      // WP-G4 fiks-runde (A-HIGH-1): en binding som finnes fra FØR regelen (eller er skrevet direkte i databasen) til en fysisk/kritisk handling utføres aldri - FØR lås, claim og gateway-kall. Synlig i loggen (én gang per binding og prosess).
       // WP-G4b K1 (D-484): samme vakt + default-deny (`autonomy_bindable` på definisjonen i registeret som faktisk utfører handlingen). En lagret binding til en handling som ikke (lenger) er bindbar feiler LUKKET: ingen lås,
       // ingen claim, ingen gateway-kall, og bindingen SLETTES ALDRI (den vises til eieren med `blocked_code` i `listAutonomyPolicies`); én logglinje per binding og prosess.
       const physical = autonomyBindBlocker(live.tool_id, live.action, (t, a) => gateway.get(t, a));
@@ -1745,7 +1768,7 @@ export class SituationEngine {
           tenantId,
           memorySpace,
           candidate.situation_id,
-          { tool_id: candidate.policy_tool_id, action: candidate.policy_action, parameters, idempotency_key: "auto-act" },
+          { tool_id: entry.policy_tool_id, action: entry.policy_action, parameters, idempotency_key: "auto-act" },
           gateway,
           identity,
           { autoActGuard: { max_age_seconds: maxAgeSeconds } }

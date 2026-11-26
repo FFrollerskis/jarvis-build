@@ -104,6 +104,29 @@ export const RULES: readonly RuleDefinition[] = Object.freeze([
   rule("incident", "incident_active", "infra", { urgent: false, assist: true, tunable: null })
 ]);
 
+/**
+ * WP-G4b K2 (D-484, Q-75 pkt 7): LUKKET kategori per regel - nivået mellom «én regel» og «hele domenet» eieren kan skope en autonomi-binding til (`category:<navn>`). Eksempel: kategorien `opening` er «dør/port åpen for lenge»
+ * og kameraets åpningshendelse (samme fysiske hendelse), men ikke lekkasje (`leak`) eller alarm (`alarm`). Dekningen er pinnet av en test: hver regel i `RULES` har nøyaktig én kategori.
+ */
+export const RULE_CATEGORY: Readonly<Record<string, string>> = Object.freeze({
+  "home_assistant:door_open_too_long": "opening",
+  "vision:opening_detected": "opening",
+  "home_assistant:water_leak": "leak",
+  "home_assistant:alarm_triggered": "alarm",
+  "home_assistant:power_over_limit": "power",
+  "vision:motion_detected": "camera_activity",
+  "vision:person_present": "camera_activity",
+  "vision:package_detected": "camera_activity",
+  "vision:doorbell_event": "doorbell",
+  "vision:security_alert": "camera_security",
+  "health:resting_heart_rate_deviation": "health_deviation",
+  "health:sleep_duration_deviation": "health_deviation",
+  "health:activity_deviation": "health_deviation",
+  "incident:incident_active": "incident"
+});
+/** De lukkede kategoriene (sortert). */
+export const SCOPE_CATEGORIES: readonly string[] = Object.freeze([...new Set(Object.values(RULE_CATEGORY))].sort());
+
 const RULE_INDEX: ReadonlyMap<string, RuleDefinition> = new Map(RULES.map((r) => [r.rule_key, r]));
 
 export function ruleFor(source: SignalSource, eventType: string): RuleDefinition | undefined {

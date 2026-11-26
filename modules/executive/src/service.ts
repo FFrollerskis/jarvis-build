@@ -247,7 +247,8 @@ export class ExecutiveService {
     const listed = await this.gateway.execute({ identity, tool_id: "situations", action: "list_autonomy_policies", parameters: {} });
     if (!listed.ok) return { ok: false, reason: `before_image_unreadable:${listed.reason.slice(0, 60)}` };
     if (!Array.isArray(listed.data)) return { ok: false, reason: "before_image_unreadable:unexpected_shape" };
-    const row = (listed.data as unknown[]).find((r) => typeof r === "object" && r !== null && (r as { domain?: unknown }).domain === domain) as Record<string, unknown> | undefined;
+    // WP-G4b K2: `clear_autonomy_policy` uten skop fjerner KUN den domenebrede bindingen (`scope_key = '*'`); før-bildet er derfor den raden (regel-/kategoribindinger i samme domene røres ikke og gjenopprettes ikke her). Eldre svar uten `scope_key` er domenebrede.
+    const row = (listed.data as unknown[]).find((r) => typeof r === "object" && r !== null && (r as { domain?: unknown }).domain === domain && ((r as { scope_key?: unknown }).scope_key ?? "*") === "*") as Record<string, unknown> | undefined;
     const before = row === undefined
       ? null
       : {

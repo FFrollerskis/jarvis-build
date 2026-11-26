@@ -38,10 +38,10 @@ describe("A: flagg AV = ingenting bygges", () => {
     }
   });
 
-  it("hovedbryter alene: kun kontroll- og lesehandlingene (9 nye verktøy + `set_autonomy_policy` med `expires_at`, INGEN tilbakemelding) og en løper uten leser; INGEN HA-lesehandling og ingen kildelesing; startloggen sier hva som er på", () => {
+  it("hovedbryter alene: kun kontroll- og lesehandlingene (9 nye verktøy + `set_autonomy_policy` og `clear_autonomy_policy` med skop/`expires_at`, INGEN tilbakemelding) og en løper uten leser; INGEN HA-lesehandling og ingen kildelesing; startloggen sier hva som er på", () => {
     const w = createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on" }));
     expect(w.tools.map((t) => `${t.tool_id}.${t.action}`).sort()).toEqual([
-      "situations.get_signal_status", "situations.get_situation_simulation", "situations.list_assessments", "situations.list_signals", "situations.list_subscriptions", "situations.remove_subscription",
+      "situations.clear_autonomy_policy", "situations.get_signal_status", "situations.get_situation_simulation", "situations.list_assessments", "situations.list_signals", "situations.list_subscriptions", "situations.remove_subscription",
       "situations.set_autonomy_policy", "situations.set_critical_quiet_bypass", "situations.set_subscription_enabled", "situations.subscribe"
     ]);
     expect(w.runner).not.toBeNull();
@@ -52,7 +52,7 @@ describe("A: flagg AV = ingenting bygges", () => {
     const w = createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on", JARVIS_SITUATION_FEEDBACK: "on" }));
     const actions = w.tools.map((t) => t.action);
     for (const a of ["record_feedback", "get_rule_tuning", "reset_rule_tuning"]) expect(actions).toContain(a);
-    expect(w.tools).toHaveLength(13);
+    expect(w.tools).toHaveLength(14);
     expect(createSituationSignalsWiring(deps({ JARVIS_SITUATION_FEEDBACK: "on" })).tools).toEqual([]);
   });
 
@@ -75,6 +75,30 @@ describe("A: flagg AV = ingenting bygges", () => {
     expect([merged.capability_class, merged.scopes, merged.reversible, merged.rollback_procedure]).toEqual([original.capability_class, original.scopes, original.reversible, original.rollback_procedure]);
     // listen til main.ts har nøyaktig ÉN definisjon per handling etter registrering
     expect(gw.list().filter((d) => d.tool_id === "situations" && d.action === "set_autonomy_policy")).toHaveLength(1);
+  });
+
+  it("WP-G4b K2: `rule`/`category` (skop for autonomi-bindingen) finnes i skjemaene til set_/clear_autonomy_policy KUN med hovedbryteren; flagg AV er identisk med main", () => {
+    const gw = new ToolGateway({} as never, {} as never, { name: "t", get: async () => null });
+    for (const d of situationsToolDefinitions(new SituationsTransport({} as never, {} as never))) gw.register(d);
+    const setBase = { domain: "home", tool_id: "test_actuator", action: "close" };
+    const accepts = (action: string, params: Record<string, unknown>): boolean => gw.get("situations", action)!.input_schema.safeParse(params).success;
+    const scoped = [{ rule: "home_assistant:door_open_too_long" }, { category: "opening" }];
+    for (const scope of scoped) {
+      expect(accepts("set_autonomy_policy", { ...setBase, ...scope })).toBe(false);
+      expect(accepts("clear_autonomy_policy", { domain: "home", ...scope })).toBe(false);
+    }
+    for (const d of createSituationSignalsWiring(deps({})).tools) gw.register(d);
+    for (const scope of scoped) expect(accepts("clear_autonomy_policy", { domain: "home", ...scope })).toBe(false); // flagg AV: uendret
+    for (const d of createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on" })).tools) gw.register(d);
+    for (const scope of scoped) {
+      expect(accepts("set_autonomy_policy", { ...setBase, ...scope })).toBe(true);
+      expect(accepts("clear_autonomy_policy", { domain: "home", ...scope })).toBe(true);
+    }
+    // uten skop og med `expires_at` som før; ukjente felt avvises fortsatt (strict)
+    expect(accepts("clear_autonomy_policy", { domain: "home" })).toBe(true);
+    expect(accepts("set_autonomy_policy", { ...setBase, expires_at: "2027-01-01T00:00:00Z", rule: "home_assistant:water_leak" })).toBe(true);
+    expect(accepts("clear_autonomy_policy", { domain: "home", actor_person_id: "x" })).toBe(false);
+    expect(gw.list().filter((d) => d.tool_id === "situations" && d.action === "clear_autonomy_policy")).toHaveLength(1);
   });
 
   it("HA-lesehandlingen registreres KUN med JARVIS_SITUATION_HOME; rommene følger kildene; ugyldig tallkonfigurasjon gir standard", () => {

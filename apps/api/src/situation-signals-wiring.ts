@@ -271,7 +271,8 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
 
   // `set_autonomy_policy` får et valgfritt `expires_at` KUN med hovedbryteren på. Definisjonen (samme tool_id/action) ERSTATTER den eksisterende ved registrering (`ToolGateway.register` er en `Map.set`, siste vinner);
   // `main.ts` legger denne listen ETTER `situationsToolDefinitions(...)`, hvis linje står uendret slik at flagg AV er byte-identisk med main (kildevakten i `executive-wiring.test.ts`).
-  const autonomyWithExpiry = situationsToolDefinitions(new SituationsTransport(deps.engine, deps.domainPauses), { autonomyExpiry: true }).filter((d) => d.action === "set_autonomy_policy");
+  // WP-G4b K2: `set_autonomy_policy` OG `clear_autonomy_policy` får i tillegg valgfrie `rule`/`category` (skop) - samme gating, samme erstatningsmekanisme.
+  const autonomyWithExpiry = situationsToolDefinitions(new SituationsTransport(deps.engine, deps.domainPauses), { autonomyExpiry: true, autonomyScope: true }).filter((d) => d.action === "set_autonomy_policy" || d.action === "clear_autonomy_policy");
   const tools: ToolDefinition[] = [
     ...autonomyWithExpiry,
     ...situationSignalsToolDefinitions(new SituationSignalsTransport({ registry, engine: deps.engine, logs, runner, simulation, ...(feedback ? { feedback } : {}) }), { feedback: flags.feedback }),

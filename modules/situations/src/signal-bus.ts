@@ -371,7 +371,7 @@ export class SituationSignalBus {
       const before = await this.deps.engine.findByDetectionKey(tenantId, memorySpace, candidate.detection_key);
       // A-LOW-6: `no_downgrade` - en senere, lavere prioritet fra en annen kilde (eller et senere svakere nivå) overskriver aldri en høyere prioritet på den åpne situasjonen (begrunnelsen følger vinneren).
       const evaluated = await this.deps.engine.evaluateCandidate(
-        tenantId, memorySpace, { ...candidate, no_downgrade: true, ...(bridge.urgent ? { urgent: true } : {}) }, this.now()
+        tenantId, memorySpace, { ...candidate, no_downgrade: true, rule_key: bridge.rule_key, ...(bridge.urgent ? { urgent: true } : {}) }, this.now()
       );
       const created = ctx.createdHint ?? before === null;
       const held = heldByQuietHours(evaluated, candidate.priority);
