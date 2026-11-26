@@ -235,3 +235,110 @@ describe("FIX-5: replay_final etter Core-feil", () => {
     client.close();
   });
 });
+
+/** Core-stub som svarer ALLE forespørsler med en redirect til `location`, og noterer det den mottok (url og kropp). */
+async function redirectingCore(port: number, status: 307 | 308, location: string, hits: Array<{ url: string; body: string }>): Promise<void> {
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      hits.push({ url: req.url ?? "", body: Buffer.concat(chunks).toString("utf8") });
+      res.writeHead(status, { location });
+      res.end();
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+}
+
+/** En levende «annen vert» som svarer 200 på alt og noterer hva den får (kroppen kan inneholde grant_token/enhetsbevis hvis noen videresender den). */
+async function recordingTarget(hits: Array<{ url: string; body: string }>): Promise<number> {
+  const port = await closedPort();
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      hits.push({ url: req.url ?? "", body: Buffer.concat(chunks).toString("utf8") });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ reply: "skal-aldri-hentes", routed: "fast", session_id: "s" }));
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+  return port;
+}
+
+describe("FIX-3 (runde 2, F12): en redirect fra Core er et UKJENT utfall - aldri «ikke sendt», og kroppen videresendes aldri til en annen vert", () => {
+  // Før fiksen fulgte `fetch` redirect: ved 307/308 (metode og kropp bevares) til en vert som ga ECONNREFUSED/ENOTFOUND ble feilen klassifisert «ikke sendt»
+  // (syscall connect/getaddrinfo) selv om det redirectende leddet HADDE mottatt hele forespørselen (målt 100 %) - og `grant_token` ble sendt videre til en annen vert.
+  const REDIRECT_STATUSES = [307, 308] as const;
+
+  it.each(REDIRECT_STATUSES)("%i til en DØD vert (ECONNREFUSED): chat() og chatStream() kaster en feil som IKKE er «ikke sendt» (claimen skal beholdes), og forespørselen mottas nøyaktig én gang", async (status) => {
+    const deadPort = await closedPort();
+    const port = await closedPort();
+    const hits: Array<{ url: string; body: string }> = [];
+    await redirectingCore(port, status, `http://127.0.0.1:${deadPort}/chat`, hits);
+    const client = new HttpCoreClient(`http://127.0.0.1:${port}`);
+    for (const call of [() => client.chat(PROVEN_ID, "hei"), () => client.chatStream(PROVEN_ID, "hei", () => undefined)]) {
+      const err = await call().then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(CoreRequestNotSentError);
+      expect(isRequestNotSent(err)).toBe(false);
+    }
+    expect(hits).toHaveLength(2); // ÉN forespørsel per kall - redirecten ble aldri fulgt
+  });
+
+  it("307/308 til et vertsnavn som ikke finnes (ENOTFOUND): også ukjent utfall (ikke bevist ikke-sendt)", async () => {
+    for (const status of REDIRECT_STATUSES) {
+      const port = await closedPort();
+      const hits: Array<{ url: string; body: string }> = [];
+      await redirectingCore(port, status, "http://wpv2-redirect-target.invalid:8123/chat" /* IKKE port 9: fetch-spesifikasjonen blokkerer den («bad port») uten nettverksforsøk */, hits);
+      const client = new HttpCoreClient(`http://127.0.0.1:${port}`);
+      for (const call of [() => client.chat(PROVEN_ID, "hei"), () => client.chatStream(PROVEN_ID, "hei", () => undefined)]) {
+        const err = await call().then(() => undefined, (e: unknown) => e);
+        expect(isRequestNotSent(err)).toBe(false);
+      }
+      expect(hits).toHaveLength(2);
+    }
+  });
+
+  it.each(REDIRECT_STATUSES)("%i til en LEVENDE annen vert: ingen forespørsel når målet - verken chat, chatStream eller authorize (grant_token og enhetsbevis forlater aldri Core-verten)", async (status) => {
+    const targetHits: Array<{ url: string; body: string }> = [];
+    const targetPort = await recordingTarget(targetHits);
+    const port = await closedPort();
+    const hits: Array<{ url: string; body: string }> = [];
+    await redirectingCore(port, status, `http://127.0.0.1:${targetPort}/redirected`, hits);
+    const client = new HttpCoreClient(`http://127.0.0.1:${port}`);
+    await expect(client.chat(PROVEN_ID, "hei")).rejects.toThrow();
+    await expect(client.chatStream(PROVEN_ID, "hei", () => undefined)).rejects.toThrow();
+    await expect(client.authorizeVoiceSession({ device_id: "d", device_proof: { challenge: "c", signature: "s" } })).rejects.toThrow();
+    expect(hits.map((h) => h.url)).toEqual(["/chat", "/chat", "/voice/session/authorize"]); // Core-verten fikk dem alle
+    expect(targetHits).toEqual([]); // ... men den andre verten fikk INGENTING (ingen kropp med grant_token eller device_proof)
+  });
+
+  it("gjennom gatewayen: replay_final mot en redirectende Core gir core_error, claimen BEHOLDES (samme id nektes), og Core mottar turen kun én gang", async () => {
+    const deadPort = await closedPort();
+    const port = await closedPort();
+    const hits: Array<{ url: string; body: string }> = [];
+    await redirectingCore(port, 307, `http://127.0.0.1:${deadPort}/chat`, hits);
+    const logs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(" "));
+    });
+    gateway = await startGateway({ core: splitCore(`http://127.0.0.1:${port}`) });
+    const client = await new TestClient(gateway.url).connect();
+    await client.startProven({ ...IDENTITY });
+    const errorsAfter = async (count: number): Promise<string[]> => {
+      const started = Date.now();
+      while (client.errors().length < count && Date.now() - started < 4000) await sleep(10);
+      return client.errors();
+    };
+    client.send({ type: "replay_final", utterance_id: "u-redirect", text: "betal 5000 kr" });
+    expect(await errorsAfter(1)).toEqual(["core_error"]);
+    expect(logs.filter((l) => l.includes("voice_core_error"))[0]).toContain('"request_not_sent":false');
+    client.send({ type: "replay_final", utterance_id: "u-redirect", text: "betal 5000 kr" });
+    expect(await errorsAfter(2)).toEqual(["core_error", "utterance_already_completed:u-redirect"]);
+    expect(hits).toHaveLength(1); // aldri en ny forespørsel
+    client.close();
+  });
+});
