@@ -104,7 +104,12 @@ try {
   failStartup(err);
 }
 // WP-G4b K4 (D-484, JARVIS-115 d): samme oppstartsvakt for lokale modell-URL-er som i apps/api/src/main.ts (workeren kjører også begrenset innhold gjennom ModelGateway: minneuttrekk, sammendrag, delegerte jobber). Flagg AV = ingenting skjer.
-await enforceLocalModelEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
+// FIX-1: en ikke-lokal embedding-URL for minnet KASTER (`memory_embedding_must_be_local:<kode>`, aldri URL i meldingen) og stopper oppstarten som øvrige konfigurasjonsfeil.
+try {
+  await enforceLocalModelEndpoints(process.env, { lookup: (host) => dnsLookup(host, { all: true, verbatim: true }) });
+} catch (err) {
+  failStartup(err);
+}
 const workerTrace = traceSinkFromEnv("var/worker-traces.jsonl");
 const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace: workerTrace, actor_person_id: owner.owner_person_id, owner_tenant_id: owner.tenant_id });
 const gateway = new ModelGateway({
