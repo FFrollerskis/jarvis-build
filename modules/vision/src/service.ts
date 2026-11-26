@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import { writeVisionAudit, type VisionChangeProvenance } from "./audit.ts";
 import {
   CreateVisionRoomInputSchema,
   VisionObservationInputSchema,
@@ -118,6 +119,111 @@ export const DEFAULT_RETENTION_DAYS = 30;
  */
 export const DEFAULT_SNAPSHOT_RETENTION_DAYS = 7;
 
+/** Det effektive bildevinduet: `min(snapshot_retention_days ?? 7, retention_days)` - aldri lengre enn hendelsene. Én definisjon for skriving (`snapshotRetentionDaysInTransaction`) og for visning (`describeRetention`). */
+export function effectiveSnapshotRetentionDays(retentionDays: number, snapshotRetentionDays: number | null | undefined): number {
+  return Math.min(snapshotRetentionDays ?? DEFAULT_SNAPSHOT_RETENTION_DAYS, retentionDays);
+}
+
+// ---------------------------------------------------------------------
+// WP-G3b (D-485), K1: eierens retensjonsrute (`/vision/retention/get|set`, apps/api/src/vision-routes.ts)
+// ---------------------------------------------------------------------
+//
+// Grensene gjelder KUN det eieren kan sette gjennom ruten (`parseRetentionRequest`/`applyRetentionPolicy`); `setRetentionPolicy` under er uendret (databasen krever bare > 0).
+//  - Nedre grense 1 dag (databasens CHECK er > 0).
+//  - Hendelsesvinduet maks 365 dager: «fravær av konfigurasjon betyr aldri behold for alltid» gjelder også en konfigurasjon - en vilkårlig lang verdi (30 år) er i praksis «for alltid» for rader som viser tilstedeværelse og aktivitet.
+//  - Bildevinduet maks 90 dager (og aldri lengre enn hendelsesvinduet): et bilde er mer sensitivt enn det strukturerte resultatet, og lagringstaket (`JARVIS_VISION_MAX_STORED_MB`, standard 2 GiB per space) gjør lengre vinduer uansett
+//    ubrukelige - når taket er nådd lagres ikke nye bilder.
+// Å heve en grense er en kodeendring med en beslutning (D-41 gjelder kapabilitet, ikke fravær av validering).
+export const MIN_RETENTION_DAYS = 1;
+export const MAX_RETENTION_DAYS = 365;
+export const MAX_SNAPSHOT_RETENTION_DAYS = 90;
+
+/** Det eieren ser: kun dager og tidspunkt - aldri `tenant_id`, `actor_person_id` eller andre kolonner fra raden. */
+export interface VisionRetentionView {
+  /** `false` = ingen rad for dette spacet: standardvinduene (30 og 7 dager) gjelder. */
+  configured: boolean;
+  /** Hendelsesvinduet (konfigurert eller standard). */
+  retention_days: number;
+  /** Konfigurert bildevindu; `null` = standard (7 dager, aldri lengre enn hendelsesvinduet). */
+  snapshot_retention_days: number | null;
+  /** Det bildevinduet som faktisk brukes ved neste lagring. */
+  effective_snapshot_retention_days: number;
+  updated_at: string | null;
+}
+
+export function describeRetention(row: { retention_days: number; snapshot_retention_days: number | null; updated_at?: unknown } | null): VisionRetentionView {
+  const retention = row?.retention_days ?? DEFAULT_RETENTION_DAYS;
+  const snapshot = row?.snapshot_retention_days ?? null;
+  const at = row === null || row.updated_at === undefined || row.updated_at === null ? Number.NaN : new Date(row.updated_at as string | number | Date).getTime();
+  return {
+    configured: row !== null,
+    retention_days: retention,
+    snapshot_retention_days: snapshot,
+    effective_snapshot_retention_days: effectiveSnapshotRetentionDays(retention, snapshot),
+    updated_at: Number.isNaN(at) ? null : new Date(at).toISOString()
+  };
+}
+
+export interface VisionRetentionRequest {
+  retention_days: number;
+  snapshot_retention_days: number | null;
+}
+
+function boundedDays(field: "retention_days" | "snapshot_retention_days", value: unknown, max: number): number {
+  if (value === undefined) throw new VisionObservationValidationError(field, "required");
+  if (typeof value !== "number" || !Number.isInteger(value)) throw new VisionObservationValidationError(field, "not_integer");
+  if (value < MIN_RETENTION_DAYS) throw new VisionObservationValidationError(field, "below_min");
+  if (value > max) throw new VisionObservationValidationError(field, "above_max");
+  return value;
+}
+
+/**
+ * Ren validering av eierens forespørsel (stabile `detail`-koder, aldri frie tekster): begge feltene MÅ oppgis (PUT med absolutte verdier - ingenting nullstilles stille av et utelatt felt), `snapshot_retention_days: null` betyr eksplisitt
+ * «standard». Heltall 1..365 / 1..90, og et oppgitt bildevindu er aldri lengre enn hendelsesvinduet (`exceeds_retention_days`) - ingen stille klemming.
+ */
+export function parseRetentionRequest(input: { retention_days?: unknown; snapshot_retention_days?: unknown }): VisionRetentionRequest {
+  const retention = boundedDays("retention_days", input.retention_days, MAX_RETENTION_DAYS);
+  const snapshot = input.snapshot_retention_days === null ? null : boundedDays("snapshot_retention_days", input.snapshot_retention_days, MAX_SNAPSHOT_RETENTION_DAYS);
+  if (snapshot !== null && snapshot > retention) throw new VisionObservationValidationError("snapshot_retention_days", "exceeds_retention_days");
+  return { retention_days: retention, snapshot_retention_days: snapshot };
+}
+
+export interface RetentionShortening {
+  retention_days: boolean;
+  snapshot_retention_days: boolean;
+}
+
+/** Blir noen av de EFFEKTIVE vinduene kortere enn de gjeldende (konfigurert eller standard)? Sammenlignes på effektive verdier, så en forkortet `retention_days` som klemmer bildevinduet også teller som forkorting av bildene. */
+export function retentionShortening(previous: VisionRetentionView, next: VisionRetentionRequest): RetentionShortening {
+  return {
+    retention_days: next.retention_days < previous.retention_days,
+    snapshot_retention_days: effectiveSnapshotRetentionDays(next.retention_days, next.snapshot_retention_days) < previous.effective_snapshot_retention_days
+  };
+}
+
+/** En forkorting kom uten bekreftelse. Kastes INNE i den låste transaksjonen FØR noe skrives; ruten gjør den til 409 `confirmation_required`. */
+export class VisionRetentionConfirmationRequiredError extends Error {
+  constructor(public readonly shortened: ReadonlyArray<"retention_days" | "snapshot_retention_days">) {
+    super(`vision_retention_confirmation_required:${shortened.join(",")}`);
+    this.name = "VisionRetentionConfirmationRequiredError";
+  }
+}
+
+export interface ApplyRetentionOptions extends VisionChangeProvenance {
+  /** Personen som setter vinduet (grantets person): lagres som `actor_person_id` og er aktør i revisjonsraden. */
+  actor_person_id: string;
+  /** `true` = eieren har bekreftet en FORKORTING (den typede bekreftelsen sjekkes av kalleren, ruten). Uten den kastes `VisionRetentionConfirmationRequiredError` ved en forkorting. */
+  confirm_shortening?: boolean | undefined;
+}
+
+export interface VisionRetentionChange {
+  /** `false` = forespørselen er allerede gjeldende tilstand (gjenspilling): ingenting skrevet, ingen revisjonsrad. */
+  changed: boolean;
+  shortened: RetentionShortening;
+  previous: VisionRetentionView;
+  current: VisionRetentionView;
+}
+
 export class VisionService {
   constructor(private readonly pool: pg.Pool) {}
 
@@ -147,17 +253,73 @@ export class VisionService {
     if (input.snapshot_retention_days !== undefined && (!Number.isInteger(input.snapshot_retention_days) || input.snapshot_retention_days <= 0)) {
       throw new VisionObservationValidationError("snapshot_retention_days", "must_be_positive_integer");
     }
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) =>
+      this.upsertRetention(client, tenantId, memorySpace, { retention_days: input.retention_days, snapshot_retention_days: input.snapshot_retention_days ?? null, actor_person_id: input.actor_person_id ?? null })
+    );
+  }
+
+  /** Selve upserten (felles for `setRetentionPolicy` og `applyRetentionPolicy`): full erstatning av begge vinduene, `NULL` = standard bildevindu. Kallerens transaksjon. */
+  private async upsertRetention(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    value: { retention_days: number; snapshot_retention_days: number | null; actor_person_id: string | null }
+  ): Promise<VisionRetentionPolicy> {
+    const { rows } = await client.query(
+      `INSERT INTO vision_retention_policies (tenant_id, memory_space_id, retention_days, snapshot_retention_days, actor_person_id, updated_at)
+       VALUES ($1, $2, $3, $5, $4, now())
+       ON CONFLICT (tenant_id, memory_space_id)
+       DO UPDATE SET retention_days = EXCLUDED.retention_days, snapshot_retention_days = EXCLUDED.snapshot_retention_days,
+                     actor_person_id = EXCLUDED.actor_person_id, updated_at = now()
+       RETURNING *`,
+      [tenantId, memorySpace, value.retention_days, value.actor_person_id, value.snapshot_retention_days]
+    );
+    return rows[0] as VisionRetentionPolicy;
+  }
+
+  /** WP-G3b: det eieren ser (kun dager og tidspunkt) for ett (tenant, space) - standardvinduene når det ikke finnes en rad. Bruker den eksisterende lesingen `getRetentionPolicy`. */
+  async getRetentionView(tenantId: string, memorySpace: MemorySpace): Promise<VisionRetentionView> {
+    return describeRetention(await this.getRetentionPolicy(tenantId, memorySpace));
+  }
+
+  /**
+   * WP-G3b (D-485), K1: eierens SETTING av vinduene. Alt skjer i ÉN transaksjon under en advisory-lås per (tenant, space), slik at to samtidige forespørsler serialiseres og «forkorting?» avgjøres mot den tilstanden som faktisk
+   * overskrives (ingen sjekk-så-skriv-glipp):
+   *  1. validering (`parseRetentionRequest`, stabile koder) FØR noe leses;
+   *  2. IDEMPOTENS: er forespørselen allerede gjeldende rad, gjøres ingenting (`changed: false`, ingen skriving, ingen revisjonsrad) - en gjenspilling er ufarlig og en omkringflytende kopi av samme forespørsel støyer ikke i revisjonen;
+   *  3. en FORKORTING (effektivt hendelses- eller bildevindu blir kortere, se `retentionShortening`) krever `confirm_shortening` - ellers kastes `VisionRetentionConfirmationRequiredError` og ingenting skrives;
+   *  4. upsert via samme SQL som `setRetentionPolicy` + revisjonsrad (`vision.retention_set`, kun tall/enums) i SAMME transaksjon (`audit: true`): en endring uten revisjonsrad kan ikke committes.
+   * Vinduene er FORANKRET VED SKRIVING (`retention_expires_at` settes ved innsetting): en endring gjelder rader som skrives ETTER den, og sletter ikke eksisterende hendelser, bilder eller inventar (bevist i wpg3b-vision-retention-db.test.ts).
+   */
+  async applyRetentionPolicy(tenantId: string, memorySpace: MemorySpace, input: { retention_days?: unknown; snapshot_retention_days?: unknown }, options: ApplyRetentionOptions): Promise<VisionRetentionChange> {
+    const next = parseRetentionRequest(input);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const { rows } = await client.query(
-        `INSERT INTO vision_retention_policies (tenant_id, memory_space_id, retention_days, snapshot_retention_days, actor_person_id, updated_at)
-         VALUES ($1, $2, $3, $5, $4, now())
-         ON CONFLICT (tenant_id, memory_space_id)
-         DO UPDATE SET retention_days = EXCLUDED.retention_days, snapshot_retention_days = EXCLUDED.snapshot_retention_days,
-                       actor_person_id = EXCLUDED.actor_person_id, updated_at = now()
-         RETURNING *`,
-        [tenantId, memorySpace, input.retention_days, input.actor_person_id ?? null, input.snapshot_retention_days ?? null]
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`vision-retention:${tenantId}:${memorySpace}`]);
+      const found = await client.query(
+        `SELECT retention_days, snapshot_retention_days, updated_at FROM vision_retention_policies WHERE tenant_id = $1 AND memory_space_id = $2`,
+        [tenantId, memorySpace]
       );
-      return rows[0] as VisionRetentionPolicy;
+      const row = found.rows[0] as { retention_days: number; snapshot_retention_days: number | null; updated_at: unknown } | undefined;
+      const previous = describeRetention(row ?? null);
+      if (row !== undefined && row.retention_days === next.retention_days && row.snapshot_retention_days === next.snapshot_retention_days) {
+        return { changed: false, shortened: { retention_days: false, snapshot_retention_days: false }, previous, current: previous };
+      }
+      const shortened = retentionShortening(previous, next);
+      const shortenedFields = (["retention_days", "snapshot_retention_days"] as const).filter((field) => shortened[field]);
+      if (shortenedFields.length > 0 && options.confirm_shortening !== true) throw new VisionRetentionConfirmationRequiredError(shortenedFields);
+      const saved = await this.upsertRetention(client, tenantId, memorySpace, { ...next, actor_person_id: options.actor_person_id });
+      const current = describeRetention(saved);
+      await writeVisionAudit(client, tenantId, options.actor_person_id, options, {
+        type: "vision.retention_set", action: "retention_set",
+        payload: {
+          memory_space: memorySpace, previous_configured: previous.configured,
+          previous_retention_days: previous.retention_days, previous_snapshot_retention_days: previous.snapshot_retention_days,
+          retention_days: current.retention_days, snapshot_retention_days: current.snapshot_retention_days,
+          effective_snapshot_retention_days: current.effective_snapshot_retention_days,
+          shortened: shortenedFields, confirmed: shortenedFields.length > 0
+        }
+      });
+      return { changed: true, shortened, previous, current };
     });
   }
 
@@ -177,8 +339,7 @@ export class VisionService {
       [tenantId, memorySpace]
     );
     const row = rows[0] as { retention_days: number; snapshot_retention_days: number | null } | undefined;
-    const eventDays = row?.retention_days ?? DEFAULT_RETENTION_DAYS;
-    return Math.min(row?.snapshot_retention_days ?? DEFAULT_SNAPSHOT_RETENTION_DAYS, eventDays);
+    return effectiveSnapshotRetentionDays(row?.retention_days ?? DEFAULT_RETENTION_DAYS, row?.snapshot_retention_days);
   }
 
   // ---------------------------------------------------------------------

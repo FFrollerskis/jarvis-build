@@ -392,7 +392,8 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   return {
     flags,
     // Review B-L4: egen strenge per-IP-grense for opplastingsruten (kroppen er opptil ca. 7 MB og leses FØR grantet verifiseres): 20 opplastinger per minutt per IP er rause rom for én iPhone (ETT opptak per forespørsel).
-    api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024, uploadLimiter: new RateLimiter(VISION_UPLOADS_PER_IP_PER_MINUTE, 60_000), status },
+    // WP-G3b (D-485): retensjonsvinduene (`/vision/retention/get|set`) går mot den EKSISTERENDE VisionService (samme instans som pipeline og sveip bruker) - ingen ny tjeneste, ingen ny tabell, ingen ny pool.
+    api: { cameras, capture, lastSeen, inventory, maxUploadBytes: 5 * 1024 * 1024, uploadLimiter: new RateLimiter(VISION_UPLOADS_PER_IP_PER_MINUTE, 60_000), status, retention: deps.vision },
     pipeline,
     classifier,
     poller,

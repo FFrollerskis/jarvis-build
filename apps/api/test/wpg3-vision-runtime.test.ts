@@ -394,6 +394,14 @@ describe("buildVisionRuntime", () => {
     runtime?.stop();
   });
 
+  it("WP-G3b (D-485): `/vision/retention/*` får den EKSISTERENDE VisionService (samme instans som pipelinen bruker) - ingen ny tjeneste, tabell eller pool; uten hovedbryter bygges ingenting", () => {
+    const service = {} as VisionService;
+    const runtime = buildVisionRuntime(stubs({ JARVIS_VISION_ENABLED: "on" }, { vision: service }));
+    expect(runtime?.api.retention).toBe(service);
+    runtime?.stop();
+    expect(buildVisionRuntime(stubs({}, { vision: service }))).toBeNull();
+  });
+
   it("kun hovedbryter: rutene kan bygges, men ingen poller, ingen klassifisering og ingen bildelagring (hver del må slås på for seg)", () => {
     const runtime = buildVisionRuntime(stubs({ JARVIS_VISION_ENABLED: "on" }));
     expect(runtime).not.toBeNull();

@@ -2,7 +2,11 @@ import type { IncomingMessage } from "node:http";
 import type { IdentityContext } from "@jarvis/contracts";
 import { ownerStepUpDenial } from "@jarvis/tool-gateway";
 import { clientKey, type RateLimiter } from "./http-guard.ts";
-import { VisionCameraValidationError, VisionCaptureError, type CaptureRequest, type SignedCaptureUpload, type VisionCameraService, type VisionCaptureService, type VisionInventoryService, type VisionLastSeenService } from "@jarvis/vision";
+import {
+  DEFAULT_RETENTION_DAYS, DEFAULT_SNAPSHOT_RETENTION_DAYS, MAX_RETENTION_DAYS, MAX_SNAPSHOT_RETENTION_DAYS, MIN_RETENTION_DAYS, VisionCameraValidationError, VisionCaptureError, VisionObservationValidationError,
+  VisionRetentionConfirmationRequiredError, type CaptureRequest, type SignedCaptureUpload, type VisionCameraService, type VisionCaptureService, type VisionInventoryService, type VisionLastSeenService,
+  type VisionRetentionView, type VisionService
+} from "@jarvis/vision";
 
 /**
  * WP-G3 (D-465): `/vision/*` - eierens kamera-/«sist sett»-flate og SERVERKONTRAKTEN for iPhone-opptak på forespørsel. DORMANT: uten `deps.vision` (satt av main.ts KUN når `JARVIS_VISION_ENABLED=on`)
@@ -10,9 +14,10 @@ import { VisionCameraValidationError, VisionCaptureError, type CaptureRequest, t
  *
  * Alle ruter er `POST` med JSON-kropp og `grant_token` (som resten av kontrollrutene): identitet, tenant, person, space og enhet kommer UTELUKKENDE fra det verifiserte grantet - kroppen kan aldri
  * bære dem (`authed` avviser identitetsfelt og ukjente felt FØR grantet løses). Tre klasser:
- *   - eier-LES (`cameras/list`, `status`, `last-seen`, `inventory`): grant + eier-port (`deps.ownerGate`).
- *   - eier-SKRIV (`cameras/register|update|remove`, `capture/request`): grant + eier-port + STEP-UP (enhetssignert økt fra en eier-kanal, samme regel som øvrige kontrollhandlinger).
+ *   - eier-LES (`cameras/list`, `status`, `last-seen`, `inventory`, `retention/get`): grant + eier-port (`deps.ownerGate`).
+ *   - eier-SKRIV (`cameras/register|update|remove`, `capture/request`, `retention/set`): grant + eier-port + STEP-UP (enhetssignert økt fra en eier-kanal, samme regel som øvrige kontrollhandlinger).
  *     `remove` krever i tillegg TYPET bekreftelse (`confirm: true` + `confirm_camera_id` = kameraets id; ingen destruktiv handling uten eksplisitt bekreftelse, CLAUDE.md regel 8).
+ *     `retention/set` (WP-G3b, D-485) krever TYPET bekreftelse (`confirm: true` + `confirm_memory_space` = grantets space) KUN når et effektivt vindu blir KORTERE; å forlenge eller gjenspille krever den ikke. Se `retentionData` og runbook §4.
  *   - ENHET (`capture/pending`, `capture/upload`): grant der `device_id` KOMMER FRA GRANTET (aldri fra kroppen). Opplastingen er i tillegg enhetssignert (Ed25519 over request_id/tenant/person/enhet/hash/
  *     lengde/type/tid, se `captureSigningBytes`) og engangs - se modules/vision/src/capture.ts. Enhetens økt må ha SAMME memory space som kameraet (grantets scope).
  * Svar inneholder aldri bildebytes, modellens rå tekst eller hemmeligheter; opplastingssvaret har kun utfallskoder og antall.
@@ -66,6 +71,12 @@ export interface VisionApiDeps {
   uploadLimiter?: RateLimiter;
   /** Helsebilde for `/vision/status` (satt av kjøretiden). Utelatt = ruten gir `status_unavailable`. */
   status?: () => VisionStatusReport;
+  /**
+   * WP-G3b (D-485): retensjonsvinduene (`/vision/retention/get|set`): den EKSISTERENDE `VisionService` (lesing via `getRetentionPolicy`, setting i én transaksjon med revisjonsrad). Utelatt = rutene gir `503 retention_unavailable`
+   * (aldri en stille standard). DEFERRED (D-41): lagringstaket per space (`JARVIS_VISION_MAX_STORED_MB`, standard 2 GiB) er en prosess-konfigurasjon i `VisionSnapshotService`, ikke en per-space-innstilling - å gjøre det eier-styrt krever en ny
+   * kolonne og omkobling av kvotesjekken (ny lagringslogikk), og er ikke bygget her.
+   */
+  retention?: Pick<VisionService, "getRetentionView" | "applyRetentionPolicy">;
 }
 
 export interface VisionRouteHelpers {
@@ -92,10 +103,12 @@ const ROUTES: Readonly<Record<string, RouteSpec>> = {
   "/vision/status": { access: "owner_read", action: "status", keys: [] },
   "/vision/last-seen": { access: "owner_read", action: "last_seen", keys: ["query"] },
   "/vision/inventory": { access: "owner_read", action: "inventory", keys: ["room_id"] },
+  "/vision/retention/get": { access: "owner_read", action: "retention_get", keys: [] },
   "/vision/cameras/register": { access: "owner_write", action: "camera_register", keys: ["label", "source_type", "source_ref", "trigger_entities", "room_id", "zone_kind", "route_policy", "cooldown_seconds", "enabled"] },
   "/vision/cameras/update": { access: "owner_write", action: "camera_update", keys: ["camera_id", "label", "zone_kind", "route_policy", "cooldown_seconds", "enabled", "trigger_entities"] },
   "/vision/cameras/remove": { access: "owner_write", action: "camera_remove", keys: ["camera_id", "confirm", "confirm_camera_id"] },
   "/vision/capture/request": { access: "owner_write", action: "capture_request", keys: ["camera_id", "idempotency_key", "ttl_seconds"] },
+  "/vision/retention/set": { access: "owner_write", action: "retention_set", keys: ["retention_days", "snapshot_retention_days", "confirm", "confirm_memory_space"] },
   "/vision/capture/pending": { access: "device", action: "capture_pending", keys: [] },
   "/vision/capture/upload": { access: "device", action: "capture_upload", keys: ["request_id", "media_type", "byte_length", "sha256", "issued_at", "signature", "data_base64"], upload: true }
 };
@@ -133,6 +146,24 @@ function pick(body: Record<string, unknown>, keys: readonly string[]): Record<st
 
 function publicRequest(request: CaptureRequest): Record<string, unknown> {
   return { request_id: request.request_id, camera_id: request.camera_id, device_id: request.device_id, state: request.state, requested_at: request.requested_at, expires_at: request.expires_at, resolved_at: request.resolved_at };
+}
+
+/**
+ * Retensjonssvaret (get og set): KUN dager og tidspunkt (aldri tenant, aktør eller andre kolonner), pluss de faste standardene og grensene slik at klienten ikke trenger å gjette dem. Feltene bygges eksplisitt (ingen spread), så en
+ * utvidet rad aldri kan lekke ut. `applies_to: "new_records"`: vinduene er forankret VED SKRIVING (`retention_expires_at` settes ved innsetting) - en endring gjelder rader som skrives etter den og sletter ikke lagrede hendelser, bilder eller
+ * inventar. Unntak (egen, avledet tabell): signalsituasjoner i domenet `vision` ryddes mot hendelsesvinduet slik det er ved sveipet (G4, kun med JARVIS_SITUATION_SIGNALS=on), så en forkorting kan fjerne eldre avledede situasjoner - derfor typet bekreftelse.
+ */
+function retentionData(view: VisionRetentionView): Record<string, unknown> {
+  return {
+    configured: view.configured,
+    retention_days: view.retention_days,
+    snapshot_retention_days: view.snapshot_retention_days,
+    effective_snapshot_retention_days: view.effective_snapshot_retention_days,
+    updated_at: view.updated_at,
+    defaults: { retention_days: DEFAULT_RETENTION_DAYS, snapshot_retention_days: DEFAULT_SNAPSHOT_RETENTION_DAYS },
+    limits: { retention_days: { min: MIN_RETENTION_DAYS, max: MAX_RETENTION_DAYS }, snapshot_retention_days: { min: MIN_RETENTION_DAYS, max: MAX_SNAPSHOT_RETENTION_DAYS } },
+    applies_to: "new_records"
+  };
 }
 
 /** Returnerer `true` når ruten er håndtert (svar sendt), `false` når stien/metoden ikke er en visjonsrute (serveren faller da til sin vanlige 404). */
@@ -247,6 +278,33 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
         h.json(200, { ok: true, data: { items: await deps.inventory.list(tenant, space, person, room === undefined ? {} : { roomId: room as string }) } });
         return true;
       }
+      case "/vision/retention/get": {
+        if (deps.retention === undefined) {
+          h.json(503, { error: "retention_unavailable", request_id: requestId });
+          return true;
+        }
+        h.json(200, { ok: true, data: { retention: retentionData(await deps.retention.getRetentionView(tenant, space)) } });
+        return true;
+      }
+      case "/vision/retention/set": {
+        if (deps.retention === undefined) {
+          h.json(503, { error: "retention_unavailable", request_id: requestId });
+          return true;
+        }
+        // TYPET bekreftelse KUN for en forkorting (avgjøres av tjenesten mot raden den overskriver, inne i den låste transaksjonen): `confirm: true` OG `confirm_memory_space` lik grantets space. Overflødig bekreftelse er ufarlig (ignoreres).
+        const confirmed = body["confirm"] === true && body["confirm_memory_space"] === space;
+        try {
+          const result = await deps.retention.applyRetentionPolicy(
+            tenant, space, { retention_days: body["retention_days"], snapshot_retention_days: body["snapshot_retention_days"] },
+            { actor_person_id: person, confirm_shortening: confirmed, task_id: "vision-api:retention_set", session_id: identity.session_id, device_id: identity.device_id, audit: true }
+          );
+          h.json(200, { ok: true, data: { changed: result.changed, shortened: result.shortened, retention: retentionData(result.current) } });
+        } catch (err) {
+          if (!(err instanceof VisionRetentionConfirmationRequiredError)) throw err;
+          h.json(409, { error: "confirmation_required", reason: "confirm_true_and_confirm_memory_space_required", shortened: err.shortened, confirm_memory_space_required: space, request_id: requestId });
+        }
+        return true;
+      }
       case "/vision/capture/pending": {
         // `device_id` kommer fra GRANTET - en enhet ser kun forespørsler adressert til seg selv.
         const pending = await deps.capture.listPending(tenant, space, person, identity.device_id);
@@ -286,6 +344,10 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
     }
   } catch (err) {
     if (err instanceof VisionCameraValidationError) {
+      h.json(400, { error: "vision_validation", field: err.field, detail: err.detail, request_id: requestId });
+      return true;
+    }
+    if (err instanceof VisionObservationValidationError) {
       h.json(400, { error: "vision_validation", field: err.field, detail: err.detail, request_id: requestId });
       return true;
     }
