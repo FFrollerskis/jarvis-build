@@ -332,6 +332,17 @@ describe("E: vakt AV (ingen lås) er identisk med main", () => {
       expect(currentServingModel()).toBeUndefined();
     }
   });
+
+  it("FIX-9: en løsrevet `execute` (uten `this`) AVVISES med et løfte - den kaster ikke synkront (som før N1b, da `execute` var `async`) - både uten og med lås", async () => {
+    for (const [label, options] of [["vakt AV", {}], ["vakt PÅ", { lock: LOCK }]] as const) {
+      const { gateway } = rig(options);
+      const detached = gateway.execute as unknown as (request: unknown) => Promise<unknown>;
+      let returned: Promise<unknown> | undefined;
+      expect(() => { returned = detached({ identity, tool_id: "probe", action: "read", parameters: {}, idempotency_key: `k-${randomUUID()}` }); }, `${label}: kastet synkront`).not.toThrow();
+      expect(returned, label).toBeInstanceOf(Promise);
+      await expect(returned, label).rejects.toBeInstanceOf(TypeError);
+    }
+  });
 });
 
 describe("F: den ekte MeshToolExecutor (adapter-stemplet leverandør) gir skopet", () => {
