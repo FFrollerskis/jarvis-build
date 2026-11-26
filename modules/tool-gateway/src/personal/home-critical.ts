@@ -3,7 +3,7 @@ import type { JsonValue } from "@jarvis/contracts";
 import type { ToolDefinition, ToolTransport } from "../gateway.ts";
 import { PERSONAL_CONFIG_NAMES, boundedInt } from "./flags.ts";
 import {
-  buildCriticalToolDefinitions, cleanToken, parseIsoInstant, type CriticalAuthorization, type CriticalOpSpec, type Params, type RiskDirection
+  ISO_INSTANT, buildCriticalToolDefinitions, cleanToken, parseIsoInstant, type CriticalAuthorization, type CriticalOpSpec, type Params, type RiskDirection
 } from "./critical-ops.ts";
 
 /**
@@ -198,7 +198,13 @@ export function normalizeHomeCriticalState(entity: RawHomeEntity): Params {
 // ---------------------------------------------------------------------------------------------------------------------
 
 const entityOf = (domain: HomeCriticalDomain) => z.string().regex(new RegExp(`^${domain}\\.[a-z0-9_]{1,100}$`));
-const expectedState = z.string().min(1).max(40).optional();
+/**
+ * `expected_state` lagres i KLARTEKST i handlingsjournalen (`request_params`, migrasjon 144, også på `failed`-rader) og må derfor ikke kunne bære en kode, et token eller fritekst (fiks-runde 1, LOW-4): kun små bokstaver og understrek, 1-40 tegn
+ * (HA-tilstandsord som `locked`, `armed_away`, `heat_cool`). Verdien sammenlignes med den NORMALISERTE tilstanden (alltid et slikt ord), så en forutsetning som ikke ser slik ut kunne aldri stemt uansett.
+ */
+const expectedState = z.string().max(40).regex(/^[a-z_]{1,40}$/).optional();
+/** Scene-/skript-markøren (`expected_last_*`) lagres likedan: kun et ISO-tidsstempel (HAs eget format passerer) eller `null` = aldri aktivert/startet. */
+const markerParam = z.union([z.string().max(64).regex(ISO_INSTANT), z.null()]);
 
 function baseValidation(before: Params, p: Params, opts: { requireSettled?: boolean } = {}): string | null {
   if (before["usable"] !== true) return before["state"] === "unavailable" ? "entity_unavailable" : "entity_state_unknown";
@@ -267,7 +273,7 @@ export const HOME_CRITICAL_OPS: readonly CriticalOpSpec[] = [
   },
   {
     action: "critical_scene", label: "scene", description: "Aktiver en scene (KRITISK, klasse D): kun eierens egne scene-entiteter, step-up. Scenens tilstand ER tidspunktet for siste aktivering, så `expected_last_activated` (fra forhåndsvisningen) MÅ oppgis og readback krever et nyere tidspunkt",
-    shape: { entity: entityOf("scene"), expected_last_activated: z.union([z.string().min(1).max(64), z.null()]) }, targetParam: "entity",
+    shape: { entity: entityOf("scene"), expected_last_activated: markerParam }, targetParam: "entity",
     direction: () => "neutral",
     validate: (before, p) => {
       if (before["usable"] !== true) return "entity_unavailable";
@@ -280,7 +286,7 @@ export const HOME_CRITICAL_OPS: readonly CriticalOpSpec[] = [
   },
   {
     action: "critical_script", label: "skript", description: "Start et skript (KRITISK, klasse D): kun eierens egne script-entiteter, step-up, uten variabler. Verifiserer KUN at skriptet STARTET (`last_triggered` er nyere enn `expected_last_triggered` fra forhåndsvisningen), ikke effekten av skriptet (PARTIAL)",
-    shape: { entity: entityOf("script"), expected_last_triggered: z.union([z.string().min(1).max(64), z.null()]) }, targetParam: "entity",
+    shape: { entity: entityOf("script"), expected_last_triggered: markerParam }, targetParam: "entity",
     direction: () => "neutral",
     validate: (before, p) => {
       if (before["usable"] !== true) return "entity_unavailable";
