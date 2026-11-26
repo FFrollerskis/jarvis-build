@@ -754,4 +754,19 @@ describe("I: WP-FIN2 fiks-runde 1 (FIX-5) - transaksjoner med ukjent/manglende l
     expect(row).toMatchObject({ status: "booked", anomaly_flags: [FLAG] });
     expect(Number(row.amount_ore)).toBe(12_345);
   });
+
+  it("avviksveipen (runBankAnomalyDetection) eier IKKE karantene-flagget: det står uendret etter hvert sveip og fjernes kun av syncTransactions når banken sender en kjent status", async () => {
+    freshServices();
+    const { bankAccountId } = await syncedAccountId();
+    const tx = providerTx({ status: "unknown", amountOre: 4_200 });
+    gateway.onListTransactions = async () => ({ transactions: [tx], nextPageToken: null });
+    await banking.syncTransactions(TENANT_A, "business", bankAccountId);
+    expect((await rowOf(bankAccountId, tx.id)).anomaly_flags).toContain(FLAG);
+    await banking.runBankAnomalyDetection(TENANT_A, "business");
+    await banking.runBankAnomalyDetection(TENANT_A, "business");
+    expect((await rowOf(bankAccountId, tx.id)).anomaly_flags).toContain(FLAG); // sveipet har ikke fjernet synligheten
+    gateway.onListTransactions = async () => ({ transactions: [{ ...tx, status: "booked" }], nextPageToken: null });
+    await banking.syncTransactions(TENANT_A, "business", bankAccountId);
+    expect((await rowOf(bankAccountId, tx.id)).anomaly_flags).not.toContain(FLAG); // kjent status: selv-korrigerende
+  });
 });
