@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConnectionTracker, DEFAULT_VOICE_LIMITS, ProcessSlots, TokenBucket, VoiceBusyError, peerKey, resolveLimits } from "../src/limits.ts";
 import type { TtsAdapter, TtsPlayback } from "../src/tts.ts";
+import { LocalWhisperStt } from "../src/stt.ts";
 import { LocalPiperTts } from "../src/tts.ts";
 import { LOCAL, TestClient, sleep, speechFrame, startGateway, trackUncaught, type RunningGateway } from "./wpv2-harness.ts";
 
@@ -23,6 +24,7 @@ afterEach(async () => {
   gateway = undefined;
   tracker = trackUncaught();
   expect(tracker.errors).toEqual([]);
+  vi.restoreAllMocks();
 });
 
 async function expectBystanderAlive(client: TestClient): Promise<void> {
@@ -164,6 +166,30 @@ describe("ProcessSlots (semafor for lokale prosesser)", () => {
     ac.abort();
     expect(((await waiting) as Error).name).toBe("AbortError");
     holder();
+    expect(slots.inUse).toBe(0);
+    expect(slots.queued).toBe(0);
+  });
+
+  it("whisper: plassen frigjøres etter suksess, feil og timeout (ingen lekkasje: seks turer gjennom to plasser, aldri voice_busy)", async () => {
+    const slots = new ProcessSlots(2, 200);
+    const whisperModel = `${FIXTURES}/fake-model.bin`;
+    const run = async (bin: string, timeoutMs: number): Promise<unknown> => {
+      const stream = new LocalWhisperStt(`${FIXTURES}/${bin}`, whisperModel, 16000, "no", 1, undefined, slots, timeoutMs).startStream();
+      stream.pushAudio(Buffer.alloc(3200));
+      return stream.end().then(
+        () => "ok",
+        (err: Error) => err.message
+      );
+    };
+    for (let i = 0; i < 3; i++) {
+      expect(await run("mock-whisper-ok.sh", 5000)).toBe("ok");
+      expect(slots.inUse).toBe(0);
+    }
+    for (let i = 0; i < 2; i++) {
+      expect(String(await run("mock-whisper-fail.sh", 5000))).toContain("local_whisper_process_failed");
+      expect(slots.inUse).toBe(0);
+    }
+    expect(await run("mock-whisper-hang.sh", 300)).toBe("local_whisper_timeout");
     expect(slots.inUse).toBe(0);
     expect(slots.queued).toBe(0);
   });
@@ -438,7 +464,11 @@ describe("FIX-1 (F1): kontrollramme-flom (ping/pong) - ws svarer ikke lenger aut
     client.close();
   });
 
-  it("ping-flom fra en klient som LESER: kun bøtta besvares (aldri alle), tilkoblingen termineres, og en annen økt er upåvirket", async () => {
+  it("ping-flom fra en klient som LESER: kun bøtta besvares (aldri alle), tilkoblingen termineres, flommen logges ÉN gang, og en annen økt er upåvirket", async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(" "));
+    });
     gateway = await startGateway();
     const bystander = await new TestClient(gateway.url).connect();
     await bystander.startUnproven();
@@ -452,6 +482,8 @@ describe("FIX-1 (F1): kontrollramme-flom (ping/pong) - ws svarer ikke lenger aut
     const closed = await flood.waitClosed(6000);
     expect(closed.code).toBe(1006); // terminert uten høflig lukking: en flom får ikke 5 s ekstra parsing
     expect(pongs).toBeLessThanOrEqual(DEFAULT_VOICE_LIMITS.pingPongBurst + 2);
+    // Tusenvis av rammer kan leveres i samme tikk etter at bøtta er tom: kun den første logges (ikke én loggline per ramme).
+    expect(logs.filter((l) => l.includes("voice_control_frame_flood"))).toEqual(['{"msg":"voice_control_frame_flood","frame":"ping"}']);
     await expectBystanderAlive(bystander);
     bystander.close();
   }, 20_000);

@@ -4,12 +4,12 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { VoiceHealth } from "../src/health.ts";
 import { VoiceSession, type SessionEvents, type VoiceIdentity } from "../src/session.ts";
-import { LocalWhisperStt } from "../src/stt.ts";
+import { LocalWhisperStt, MarkerStt } from "../src/stt.ts";
 import { LocalPiperTts } from "../src/tts.ts";
-import { ScriptedCore, TestClient, sleep, startGateway, trackUncaught, type RunningGateway } from "./wpv2-harness.ts";
+import { IDENTITY, PROOF, ScriptedCore, TestClient, sleep, startGateway, trackUncaught, type RunningGateway } from "./wpv2-harness.ts";
 
 /**
  * WP-V2 K1 (P1, krasjvern). Alle tester asserterer eksplisitt at INGEN uncaughtException/unhandledRejection oppstod - på `main` krasjet
@@ -30,6 +30,7 @@ afterEach(async () => {
   await gateway?.close();
   gateway = undefined;
   tracker = trackUncaught();
+  vi.restoreAllMocks();
 });
 
 async function collect(iterable: AsyncIterable<Buffer>): Promise<Buffer[]> {
@@ -131,7 +132,11 @@ describe("K1a: ugyldige WebSocket-rammer krasjer aldri gatewayen", () => {
     expect(tracker.errors).toEqual([]);
   }, 20_000);
 
-  it("ødelagt HTTP-forespørsel (clientError): 400 og prosessen overlever", async () => {
+  it("ødelagt HTTP-forespørsel (clientError): 400, kodet loggline (aldri innhold) og prosessen overlever", async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(" "));
+    });
     gateway = await startGateway();
     const response = await new Promise<string>((resolve) => {
       const socket = createConnection({ host: "127.0.0.1", port: gateway!.port }, () => {
@@ -144,10 +149,64 @@ describe("K1a: ugyldige WebSocket-rammer krasjer aldri gatewayen", () => {
     });
     expect(response).toContain("400");
     await sleep(50);
+    // Node svarer 400 også uten vår `clientError`-handler - det er LOGGEN som viser at handleren finnes (kun parser-kode, aldri forespørselsinnhold).
+    const logged = logs.filter((l) => l.includes("voice_client_error"));
+    expect(logged.length).toBeGreaterThanOrEqual(1);
+    expect(logged[0]).toMatch(/"code":"HPE_[A-Z_]+"/);
+    expect(logged.join("")).not.toContain("GARBAGE");
     expect(tracker.errors).toEqual([]);
     const next = await new TestClient(gateway.url).connect();
     await next.startUnproven();
     next.close();
+  });
+
+  it("feil på selve HTTP-serveren (error-hendelse, f.eks. EMFILE) logges som kode og krasjer aldri: wss har en error-lytter", async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(" "));
+    });
+    gateway = await startGateway();
+    // `ws` videresender serverens `error` til WebSocketServer; uten lytter ville dette vært en uhåndtert `error`-hendelse (= uncaughtException).
+    expect(() => gateway!.server.emit("error", Object.assign(new Error("simulated listen/accept failure with secret-looking text"), { code: "EMFILE" }))).not.toThrow();
+    const logged = logs.filter((l) => l.includes("voice_wss_error"));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('"code":"EMFILE"');
+    expect(logged[0]).not.toContain("secret-looking"); // kun koden, aldri meldingsteksten
+    expect(tracker.errors).toEqual([]);
+  });
+
+  it("socket lukket mens Core autoriserer: INGEN sesjon opprettes for en død tilkobling (ingen zombie-sesjon, ingen tur)", async () => {
+    // VoiceSession-konstruktøren leser `stt.processor` (rutingporten) - en teller på getteren viser nøyaktig når en sesjon blir laget.
+    const stt = new MarkerStt();
+    const processor = stt.processor;
+    let sessionsConstructed = 0;
+    Object.defineProperty(stt, "processor", {
+      get: () => {
+        sessionsConstructed += 1;
+        return processor;
+      }
+    });
+    const core = new ScriptedCore();
+    const authorize = core.authorizeVoiceSession.bind(core);
+    core.authorizeVoiceSession = async (evidence) => {
+      await sleep(300);
+      return authorize(evidence);
+    };
+    gateway = await startGateway({ core, stt });
+    const before = sessionsConstructed;
+    const client = await new TestClient(gateway.url).connect();
+    client.send({ type: "start", identity: IDENTITY, device_proof: PROOF });
+    await sleep(80);
+    client.ws.terminate(); // klienten er borte mens Core ennå vurderer beviset
+    await sleep(600); // Core svarer (ok) etter 300 ms
+    expect(core.authorizeCalls).toHaveLength(1); // beviset ble vurdert...
+    expect(sessionsConstructed - before).toBe(0); // ...men ingen sesjon ble startet for den døde tilkoblingen
+    expect(tracker.errors).toEqual([]);
+    // Kontroll: en levende tilkobling får fortsatt sin sesjon (testen kan ikke bestå ved at ingen sesjon noensinne opprettes).
+    const alive = await new TestClient(gateway.url).connect();
+    await alive.startProven();
+    expect(sessionsConstructed - before).toBeGreaterThanOrEqual(1);
+    alive.close();
   });
 });
 
@@ -201,6 +260,20 @@ describe("K1c: available() sjekker at binær og modell faktisk finnes", () => {
     expect(new LocalPiperTts(undefined, MODEL).status?.()["unavailable_reason"]).toBe("not_configured");
     expect(new LocalPiperTts(OK_BIN, MODEL).available()).toBe(true);
     expect(new LocalPiperTts(OK_BIN, MODEL).status?.()["unavailable_reason"]).toBeUndefined();
+  });
+
+  it("en fil UTEN kjørerett (execute-bit) er ikke en kjørbar binær; med kjørerett er den det (piper og whisper)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wpv2-noexec-"));
+    const bin = join(dir, "fake-binary");
+    await writeFile(bin, "#!/bin/sh\nexit 0\n");
+    await chmod(bin, 0o644);
+    expect(new LocalPiperTts(bin, MODEL).available()).toBe(false);
+    expect(new LocalPiperTts(bin, MODEL).status?.()["unavailable_reason"]).toBe("binary_not_executable");
+    expect(new LocalWhisperStt(bin, WHISPER_MODEL).available()).toBe(false);
+    expect(new LocalWhisperStt(bin, WHISPER_MODEL).status?.()["unavailable_reason"]).toBe("binary_not_executable");
+    await chmod(bin, 0o755);
+    expect(new LocalPiperTts(bin, MODEL).available()).toBe(true);
+    expect(new LocalWhisperStt(bin, WHISPER_MODEL).available()).toBe(true);
   });
 
   it("piper: en mappe er ikke en kjørbar binær; et rent kommandonavn søkes i PATH", () => {

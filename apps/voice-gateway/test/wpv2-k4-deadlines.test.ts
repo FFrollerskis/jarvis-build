@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { errorCode } from "../src/deadline.ts";
 import { VoiceHealth } from "../src/health.ts";
 import { ProcessSlots } from "../src/limits.ts";
 import { HttpCoreClient } from "../src/server.ts";
@@ -367,5 +368,40 @@ describe("ingen uncaught/unhandled i hele filen", () => {
     await sleep(50);
     tracker.stop();
     expect(tracker.errors).toEqual([]);
+  });
+});
+
+describe("logghygiene: feilkoder i logg og helse er korte koder - aldri fritekst, stier eller leverandør-stderr", () => {
+  it("errorCode: kode med høyst to kolon-segmenter og 60 tegn; alt med mellomrom/stier blir «error»", () => {
+    expect(errorCode(new Error("local_piper_process_failed:2:simulated failure"))).toBe("local_piper_process_failed:2");
+    expect(errorCode(new Error("tts_stall_timeout"))).toBe("tts_stall_timeout");
+    expect(errorCode(new Error("a:b:c:d"))).toBe("a:b");
+    expect(errorCode(new Error("local_whisper_spawn_failed:spawn /opt/whisper/whisper-cli ENOENT"))).toBe("error"); // sti (og mellomrom) etter første kolon
+    expect(errorCode(new Error("Noe gikk galt med sti /home/tobias/.config"))).toBe("error");
+    expect(errorCode("rå streng med mellomrom")).toBe("error");
+    expect(errorCode(new Error("x".repeat(500)))).toHaveLength(60);
+  });
+
+  it("en piper-feil med stderr-tekst når loggen og helsen KUN som kode (ingen stderr, ingen sti)", async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(" "));
+    });
+    const tts = new LocalPiperTts(`${FIXTURES}/mock-piper-fail.sh`, MODEL, undefined, new ProcessSlots(2, 500), 5000);
+    const events = spyEvents();
+    const health = new VoiceHealth();
+    const session = new VoiceSession(ID, new ScriptedCore(), new MarkerStt(), tts, events, undefined, undefined, undefined, undefined, undefined, health, "CLIENT_ASSERTED", {});
+    session.speakSample("hei");
+    const started = Date.now();
+    while (!events.errors.includes("tts_error") && Date.now() - started < 4000) await sleep(20);
+    expect(events.errors).toContain("tts_error");
+    const ttsLog = logs.filter((l) => l.includes("voice_tts_error"));
+    expect(ttsLog).toHaveLength(1);
+    expect(ttsLog[0]).toContain('"code":"local_piper_process_failed:2"');
+    const everything = logs.join("\n") + JSON.stringify(health.snapshot({ stt: true, tts: true }));
+    expect(everything).not.toContain("simulated piper failure"); // stderr fra prosessen
+    expect(everything).not.toContain("voice_model_load_error");
+    expect(everything).not.toContain(FIXTURES); // aldri en sti
+    session.disconnect();
   });
 });

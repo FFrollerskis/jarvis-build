@@ -1,11 +1,13 @@
+import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { journalKey, UtteranceJournal as SharedJournal } from "../src/journal.ts";
 import { UtteranceJournal } from "../src/session.ts";
 import { VoiceSession, type CoreReply, type SessionEvents, type VoiceIdentity } from "../src/session.ts";
+import { HttpCoreClient } from "../src/server.ts";
 import { MarkerStt } from "../src/stt.ts";
 import { FakeTts } from "../src/tts.ts";
 import { EnergyVad, type VadAdapter, type VadEvent } from "../src/vad.ts";
-import { IDENTITY, ScriptedCore, TestClient, sleep, speechFrame, startGateway, trackUncaught, type RunningGateway } from "./wpv2-harness.ts";
+import { IDENTITY, ScriptedCore, TestClient, grantFor, sleep, speechFrame, startGateway, trackUncaught, type RunningGateway } from "./wpv2-harness.ts";
 
 /**
  * WP-V2 K5 (v2.1 §14): failover uten doble verktøyhandlinger. På `main` ble journalen laget PER SESJON (`options.journal ?? new
@@ -100,6 +102,22 @@ describe("UtteranceJournal: atomisk claim, begrenset (LRU + TTL)", () => {
     expect(j.claim("c")).toBe("claimed"); // completed-TTL utløpt
   });
 
+  it("isCompleted respekterer TTL (replay_final bruker den som tidlig, billig sjekk): ukjent/claimed er ikke completed, fullført er det til TTL er over", () => {
+    let t = 1000;
+    const journal = new SharedJournal({ now: () => t, completedTtlMs: 5000 });
+    const key = journalKey("SERVER_VERIFIED", "T", "D", "u");
+    expect(journal.isCompleted(key)).toBe(false); // ukjent
+    expect(journal.claim(key)).toBe("claimed");
+    expect(journal.isCompleted(key)).toBe(false); // pågående er ikke fullført
+    journal.complete(key);
+    expect(journal.isCompleted(key)).toBe(true);
+    t += 4999;
+    expect(journal.isCompleted(key)).toBe(true);
+    t += 2; // TTL (5000 ms) er over
+    expect(journal.isCompleted(key)).toBe(false);
+    expect(journal.claim(key)).toBe("claimed"); // og claim() er enig: nøkkelen er glemt
+  });
+
   it("LRU: et treff holder nøkkelen ferskere i kapasitetsrekkefølgen", () => {
     const j = new SharedJournal({ maxEntries: 3 });
     for (const k of ["a", "b", "c"]) {
@@ -181,6 +199,24 @@ describe("K5 målt funn: standardoppsettet delte IKKE journal mellom tilkoblinge
     await a.waitFor((m) => m.type === "reply");
     await b.waitFor((m) => m.type === "reply");
     expect(core.chatCalls).toHaveLength(2);
+    a.close();
+    b.close();
+  });
+
+  it("samme id og SAMME enhet, men ULIKE tenanter, er ulike nøkler (to Core-kall): tenant er med i sesjonens journalnøkkel", async () => {
+    const core = new ScriptedCore();
+    gateway = await startGateway({ core });
+    const a = await new TestClient(gateway.url).connect();
+    const b = await new TestClient(gateway.url).connect();
+    await a.startProven({ ...IDENTITY, tenant_id: "tenant-a" });
+    await b.startProven({ ...IDENTITY, tenant_id: "tenant-b" });
+    a.send({ type: "replay_final", utterance_id: "utt-tenant", text: "hei" });
+    b.send({ type: "replay_final", utterance_id: "utt-tenant", text: "hei" });
+    await a.waitFor((m) => m.type === "reply");
+    await b.waitFor((m) => m.type === "reply");
+    expect(core.chatCalls.map((c) => c.identity.tenant_id).sort()).toEqual(["tenant-a", "tenant-b"]);
+    expect(a.errors()).toEqual([]);
+    expect(b.errors()).toEqual([]);
     a.close();
     b.close();
   });
@@ -357,5 +393,80 @@ describe("JARVIS-079 regresjonslås (var utestet: grep «vad:» i testene ga 0 t
     await sleep(350);
     expect(events.tools.length).toBe(toolsAtBargeIn); // epoch-vernet forkaster sene verktøyhendelser
     expect(emittedAfterAbort).toBeGreaterThan(0); // (Core-fakens sene hendelser kom, men ble ikke videresendt)
+  });
+});
+
+describe("K5: idempotens gjennom ekte HttpCoreClient mot en HTTP-stub for Core (ikke bare ScriptedCore)", () => {
+  let coreServer: Server | undefined;
+  afterEach(async () => {
+    coreServer?.closeAllConnections();
+    await new Promise<void>((resolve) => (coreServer ? coreServer.close(() => resolve()) : resolve()));
+    coreServer = undefined;
+  });
+
+  it("ubevist: ingen /chat (voice_session_required -> claim frigjort); bevist: nøyaktig ÉN /chat per (tenant, enhet, id) og kroppen er kun grant_token+message", async () => {
+    const chats: Array<{ keys: string; message: string }> = [];
+    coreServer = createServer((req, res) => {
+      let body = "";
+      req.on("data", (d: Buffer) => (body += d.toString("utf8")));
+      req.on("end", () => {
+        if (req.url === "/voice/session/authorize") {
+          const evidence = JSON.parse(body) as Record<string, unknown>;
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true, grant: grantFor(evidence) }));
+        } else if (req.url === "/chat") {
+          const parsed = JSON.parse(body) as Record<string, unknown>;
+          chats.push({ keys: Object.keys(parsed).sort().join(","), message: String(parsed["message"]) });
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.end('event: done\ndata: {"reply":"ok","routed":"fast","session_id":"s"}\n\n');
+        } else {
+          res.writeHead(404);
+          res.end();
+        }
+      });
+    });
+    await new Promise<void>((resolve) => coreServer!.listen(0, "127.0.0.1", resolve));
+    const corePort = (coreServer.address() as { port: number }).port;
+    gateway = await startGateway({ core: new HttpCoreClient(`http://127.0.0.1:${corePort}`), limits: { maxConnectionsPerPeer: 10 } }); // fem tilkoblinger fra samme loopback-peer
+    const replay = (c: TestClient, id: string): void => c.send({ type: "replay_final", utterance_id: id, text: "betal 5000 kr" });
+    const settle = (): Promise<void> => sleep(350);
+
+    // A: ubevist - Core nås aldri, og claimen frigjøres (en ny replay gir core_error igjen, ikke «already completed»)
+    const unproven = await new TestClient(gateway.url).connect();
+    await unproven.startUnproven({ ...IDENTITY, tenant_id: "T1", device_id: "D1" });
+    replay(unproven, "u-x");
+    await settle();
+    replay(unproven, "u-x");
+    await settle();
+    expect(chats).toHaveLength(0);
+    expect(unproven.errors()).toEqual(["core_error", "core_error"]);
+
+    // B: bevist (T1, D1) med SAMME id: den ubevistes forhåndsclaim blokkerer ikke, og kroppen er kun grant_token+message (D-131)
+    const t1d1 = await new TestClient(gateway.url).connect();
+    await t1d1.startProven({ ...IDENTITY, tenant_id: "T1", device_id: "D1" });
+    replay(t1d1, "u-x");
+    await settle();
+    expect(chats).toHaveLength(1);
+    expect(chats[0]?.keys).toBe("grant_token,message");
+
+    // C: annen tenant og annen enhet: hver sin utførelse (ingen kryss-blokkering)
+    const t2d1 = await new TestClient(gateway.url).connect();
+    const t1d2 = await new TestClient(gateway.url).connect();
+    await t2d1.startProven({ ...IDENTITY, tenant_id: "T2", device_id: "D1" });
+    await t1d2.startProven({ ...IDENTITY, tenant_id: "T1", device_id: "D2" });
+    replay(t2d1, "u-x");
+    replay(t1d2, "u-x");
+    await settle();
+    expect(chats).toHaveLength(3);
+
+    // D: to tilkoblinger for samme (T1, D1) som replayer samme NYE id samtidig: kun ÉN utførelse
+    const t1d1b = await new TestClient(gateway.url).connect();
+    await t1d1b.startProven({ ...IDENTITY, tenant_id: "T1", device_id: "D1" });
+    replay(t1d1, "u-y");
+    replay(t1d1b, "u-y");
+    await settle();
+    expect(chats).toHaveLength(4);
+    expect([...t1d1.errors(), ...t1d1b.errors()].filter((e) => e.startsWith("utterance_"))).toHaveLength(1);
+    for (const c of [unproven, t1d1, t2d1, t1d2, t1d1b]) c.close();
   });
 });
