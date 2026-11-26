@@ -14,7 +14,14 @@
     "modify_approval_verifier",
     "modify_audit_integrity",
     "read_break_glass_key",
-    "grant_self_root"
+    "grant_self_root",
+    "rotate_break_glass_key",
+    "export_break_glass_key",
+    "disable_security_alarm",
+    "self_approve_change",
+    "push_to_protected_branch",
+    "raise_autonomy_level",
+    "modify_protected_path_manifest"
   ],
   "protected_paths": [
     {
@@ -88,6 +95,90 @@
     {
       "kind": "prefix",
       "value": "ops/break-glass/"
+    },
+    {
+      "kind": "prefix",
+      "value": "config/program/"
+    },
+    {
+      "kind": "prefix",
+      "value": "ops/job-runner/"
+    },
+    {
+      "kind": "prefix",
+      "value": "ops/claude-worker/"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/class-d-pipeline.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/finance-class-d.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/model-tool-surface.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "apps/api/src/step-up.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/audit-writer.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/policy-audit-sink.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/approval-store.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/identity-service.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/session-grant-service.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/device-authority.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/channel-session-authority.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/voice-session-authority.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/telegram-owner-authority.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/runtime-role.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/db/pool.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/executive/src/self-model/confidence-gate.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "docs/SECURITY_MODEL.md"
+    },
+    {
+      "kind": "exact",
+      "value": "docs/CANONICAL_SPEC.md"
     }
   ],
   "budget_caps": {

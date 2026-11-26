@@ -150,6 +150,13 @@ describe("C: klassifisering E1/E2/E3 - aldri svakere enn policy.ts", () => {
       "modules/tool-gateway/src/gateway.ts", "modules/tool-gateway/src/other.ts", "modules/memory/src/x.ts", "README.md",
       "./config/charlie-personality.json", "/abs/path", "a/../b"
     ];
+    // WP-EV0: utvidet korpus (de 21 opprinnelige står uendret over) - nye beskyttede filer og forkledde skrivemåter. Paritetsregelen er den samme: aldri svakere enn policy.ts.
+    corpus.push(
+      "modules/tool-gateway/src/class-d-pipeline.ts", "apps/api/src/step-up.ts", "modules/core/src/services/audit-writer.ts", "modules/core/src/db/pool.ts",
+      "modules/executive/src/self-model/confidence-gate.ts", "config/program/index.json", "ops/job-runner/egress-proxy.mjs", "docs/CANONICAL_SPEC.md",
+      "Modules/Policy/src/x.ts", "modules/./policy/x.ts", "modules/policy/x.ts.", "CONFIG/EVOLUTION/constitution.v1.json", "a:b", "x\u0000y", "~/x",
+      "modules/tool-gateway/src/live-transports.ts", "apps/api/src/server.ts", "config/charlie-personality.json."
+    );
     for (const a of corpus) {
       for (const b of [undefined, ...corpus]) {
         const paths = b === undefined ? [a] : [a, b];
