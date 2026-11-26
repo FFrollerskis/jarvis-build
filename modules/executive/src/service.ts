@@ -20,7 +20,8 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import { listConnectorStatus, ownerStepUpDenial, type ConnectorAuthInfo, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { financeWithheldMarker, isCloudWithheldAttentionDomain, listConnectorStatus, ownerStepUpDenial, withholdFinanceFromCurrentModel, type ConnectorAuthInfo, type FinanceWithheldMarker, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { shapeAutonomyPoliciesForCloud, shapeOwnerControlForCloud, shapePausedDomainsForCloud } from "./finance-withheld.ts";
 import { rankAttentionQueue } from "./ranking.ts";
 import type {
   AttentionItem, AttentionItemDetail, CapabilityStatus, ConnectorStatusReport, ControlSurfaceStatus, DelegationBoard
@@ -184,14 +185,20 @@ export class ExecutiveService {
    */
   private async rankedQueueWithSource(
     identity: IdentityContext,
-    filter: AttentionQueueFilter = {}
-  ): Promise<{ items: AttentionItem[]; situationsById: Map<string, Situation> }> {
-    const [situations, pauseState, autonomyPolicies, notificationPolicy] = await Promise.all([
+    filter: AttentionQueueFilter = {},
+    options: { withholdFinance?: boolean } = {}
+  ): Promise<{ items: AttentionItem[]; situationsById: Map<string, Situation>; financeSituationIds: Set<string> }> {
+    const [allSituations, pauseState, autonomyPolicies, notificationPolicy] = await Promise.all([
       requireData<Situation[]>(this.gateway, identity, "situations", "get_queue", filter.domain ? { domain: filter.domain } : {}),
       requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state"),
       requireData<SituationAutonomyPolicy[]>(this.gateway, identity, "situations", "list_autonomy_policies"),
       requireData<SituationNotificationPolicy | null>(this.gateway, identity, "situations", "get_notification_policy")
     ]);
+    // WP-N1b (K2): situasjoner i det finansavledede `spend`-domenet (begrunnelsen er løkkens tekst: beløp, leverandør, AI-kost) holdes ute FØR rangeringen - så heller ikke plassering (`rank`) eller antall røper dem.
+    // FIX-2 (fiks-runde 1): også `infra`-domenet (hendelsestitler fra produsentene navngir finanskoblinger/-jobber og kan ikke bevises ufarlige strukturelt): `isCloudWithheldAttentionDomain` = `spend` + `infra`.
+    const withholdFinance = options.withholdFinance === true;
+    const financeSituationIds = new Set(withholdFinance ? allSituations.filter((s) => isCloudWithheldAttentionDomain(s.domain)).map((s) => s.situation_id) : []);
+    const situations = withholdFinance ? allSituations.filter((s) => !financeSituationIds.has(s.situation_id)) : allSituations;
     const pausedDomains = new Set(pauseState.paused);
     const autonomyBoundDomains = new Set(autonomyPolicies.map((p) => p.domain));
     const autonomyEnabledDomains = new Set(autonomyPolicies.filter((p) => p.enabled).map((p) => p.domain));
@@ -202,11 +209,12 @@ export class ExecutiveService {
       autonomyBoundDomains,
       autonomyEnabledDomains
     });
-    return { items, situationsById: new Map(situations.map((s) => [s.situation_id, s])) };
+    return { items, situationsById: new Map(situations.map((s) => [s.situation_id, s])), financeSituationIds };
   }
 
-  async getAttentionQueue(identity: IdentityContext, filter: AttentionQueueFilter = {}): Promise<AttentionItem[]> {
-    return (await this.rankedQueueWithSource(identity, filter)).items;
+  /** `options.withholdFinance` (WP-N1b): uten situasjoner i det finansavledede domenet. Utelatt = som før. */
+  async getAttentionQueue(identity: IdentityContext, filter: AttentionQueueFilter = {}, options: { withholdFinance?: boolean } = {}): Promise<AttentionItem[]> {
+    return (await this.rankedQueueWithSource(identity, filter, options)).items;
   }
 
   /**
@@ -214,8 +222,12 @@ export class ExecutiveService {
    * rangerte posten er allerede fullt forklart (`explanation`/
    * `recommended_next_action`), pluss selve kilde-`Situation`-raden.
    */
-  async getAttentionItem(identity: IdentityContext, situationId: string): Promise<AttentionItemDetail | null> {
-    const { items, situationsById } = await this.rankedQueueWithSource(identity);
+  getAttentionItem(identity: IdentityContext, situationId: string): Promise<AttentionItemDetail | null>;
+  /** WP-N1b (K2): med `withholdFinance` svarer en finansavledet situasjon med KUN det nøytrale merket (aldri begrunnelse, id eller felt); alt annet som før. */
+  getAttentionItem(identity: IdentityContext, situationId: string, options: { withholdFinance?: boolean }): Promise<AttentionItemDetail | FinanceWithheldMarker | null>;
+  async getAttentionItem(identity: IdentityContext, situationId: string, options: { withholdFinance?: boolean } = {}): Promise<AttentionItemDetail | FinanceWithheldMarker | null> {
+    const { items, situationsById, financeSituationIds } = await this.rankedQueueWithSource(identity, {}, options);
+    if (financeSituationIds.has(situationId)) return financeWithheldMarker();
     const item = items.find((i) => i.situation_id === situationId);
     const situation = situationsById.get(situationId);
     if (!item || !situation) return null;
@@ -233,13 +245,18 @@ export class ExecutiveService {
   }
 
   /**
-   * WP-H2: tilbakekall av eierens autonomi-binding (D-160, `situation_autonomy_policies`) for ÉTT domene. Slettingen er et gjennomslag til `situations.clear_autonomy_policy` med den UENDREDE identiteten (D-68): motoren
+   * WP-H2: tilbakekall av eierens autonomi-bindinger (D-160, `situation_autonomy_policies`) for ÉTT domene. Slettingen er et gjennomslag til `situations.clear_autonomy_policy` med den UENDREDE identiteten (D-68): motoren
    * velger rommet fra identiteten (kun kallerens eget minnerom), og dens EGEN sovereign-eier-port (`assertAutonomyAuthority`) gjelder i tillegg til policyen. Ingen egen slettelogikk her.
    *
-   * Gjennomgang L1: SLETTINGEN KAN IKKE ANGRES (parametrene til bindingen lagres ellers ingen steder), så FØR DELETE leses bindingen (`situations.list_autonomy_policies`, kallerens eget rom) og en
+   * WP-G4b fiks-runde 1 (FIX-2/2b, Q-G4-15): dette er et DOMENEBREDT tilbakekall: `clear_autonomy_policy` uten skop fjerner ALLE bindingsrader i (tenant, rom, domene) - den domenebrede OG alle regel-/kategoribindinger - i
+   * samme transaksjon under domenelåsen. Etterpå kan ingen binding i domenet utføre noe før eieren eksplisitt har gitt en ny. FØR-BILDET omfatter derfor ALLE radene i domenet: den domenebrede som `before` (uendret form) og hver
+   * regel-/kategoribinding som et element i `before_scoped` (med `scope_key`).
+   *
+   * Gjennomgang L1: SLETTINGEN KAN IKKE ANGRES (parametrene til bindingene lagres ellers ingen steder), så FØR DELETE leses bindingene (`situations.list_autonomy_policies`, kallerens eget rom) og en
    * revisjonsrad med FØR-BILDET (domene, verktøy, handling, aktiv/av, parametre, hvem som satte den) skrives og COMMITTES (`autonomyAudit`, injisert fra apps/api: `writeAudit` i egen transaksjon). FAIL-CLOSED i alle
-   * tre ledd: kan bindingen ikke leses, kan revisjonsraden ikke skrives, eller mangler `autonomyAudit`, utføres INGEN sletting. Mangler bindingen (`existed: false`) skrives raden likevel (forsøket er revisjonsverdig) og
-   * slettingen er idempotent (`removed: false`).
+   * tre ledd: kan bindingene ikke leses, kan revisjonsraden ikke skrives, eller mangler `autonomyAudit`, utføres INGEN sletting. Mangler bindinger (`existed: false`) skrives raden likevel (forsøket er revisjonsverdig) og
+   * slettingen er idempotent (`removed: false`). Kjent begrensning: legger eieren selv til en NY smal binding i millisekundene mellom lesingen og slettingen, fjernes den også (trygg retning) men står ikke i før-bildet;
+   * svarets `removed_scopes` (fra motoren) viser nøyaktig hva som ble fjernet.
    */
   async revokeAutonomyBinding(identity: IdentityContext, domain: string): Promise<ToolResult> {
     const audit = this.options.autonomyAudit;
@@ -247,20 +264,25 @@ export class ExecutiveService {
     const listed = await this.gateway.execute({ identity, tool_id: "situations", action: "list_autonomy_policies", parameters: {} });
     if (!listed.ok) return { ok: false, reason: `before_image_unreadable:${listed.reason.slice(0, 60)}` };
     if (!Array.isArray(listed.data)) return { ok: false, reason: "before_image_unreadable:unexpected_shape" };
-    const row = (listed.data as unknown[]).find((r) => typeof r === "object" && r !== null && (r as { domain?: unknown }).domain === domain) as Record<string, unknown> | undefined;
-    const before = row === undefined
-      ? null
-      : {
-        domain, tool_id: String(row["tool_id"] ?? ""), action: String(row["action"] ?? ""), enabled: row["enabled"] === true,
-        parameters: (row["parameters"] ?? null) as JsonValue, actor_person_id: row["actor_person_id"] === undefined || row["actor_person_id"] === null ? null : String(row["actor_person_id"]),
-        updated_at: row["updated_at"] === undefined || row["updated_at"] === null ? null : String(row["updated_at"])
-      };
+    // Alle radene i domenet (kallerens eget rom: `list_autonomy_policies` leser kun der). Eldre svar uten `scope_key` er domenebrede.
+    const domainRows = (listed.data as unknown[]).filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null && (r as { domain?: unknown }).domain === domain);
+    const image = (r: Record<string, unknown>) => ({
+      domain, tool_id: String(r["tool_id"] ?? ""), action: String(r["action"] ?? ""), enabled: r["enabled"] === true,
+      parameters: (r["parameters"] ?? null) as JsonValue, actor_person_id: r["actor_person_id"] === undefined || r["actor_person_id"] === null ? null : String(r["actor_person_id"]),
+      updated_at: r["updated_at"] === undefined || r["updated_at"] === null ? null : String(r["updated_at"])
+    });
+    const scopeOf = (r: Record<string, unknown>): string => (typeof r["scope_key"] === "string" ? r["scope_key"] : "*");
+    const broad = domainRows.find((r) => scopeOf(r) === "*");
+    const before = broad === undefined ? null : image(broad);
+    const beforeScoped = domainRows.filter((r) => scopeOf(r) !== "*").sort((a, b) => scopeOf(a).localeCompare(scopeOf(b), "en")).map((r) => ({ scope_key: scopeOf(r), ...image(r) }));
     try {
       await audit(identity, {
         type: "autonomy_binding.revoke_requested", tool_id: "executive", action: "revoke_autonomy_binding",
         payload: {
-          domain, memory_space: identity.memory_space_id, existed: before !== null, before,
-          recovery: before === null ? "ingen binding å gjenopprette" : "set_autonomy_policy med verdiene i `before` (domene, tool_id, action, enabled, parameters)"
+          domain, memory_space: identity.memory_space_id, existed: before !== null || beforeScoped.length > 0, before, before_scoped: beforeScoped,
+          recovery: before === null && beforeScoped.length === 0
+            ? "ingen binding å gjenopprette"
+            : "set_autonomy_policy med verdiene i `before` (domenebredt: domene, tool_id, action, enabled, parameters) og for hvert element i `before_scoped` de samme verdiene med `rule` (scope_key `rule:<regel>`) eller `category` (scope_key `category:<kategori>`)"
         }
       });
     } catch {
@@ -418,15 +440,24 @@ export class ExecutiveService {
    * fabrikkerer/eskalerer ALDRI identiteten den fikk fra kalleren.
    */
   async getControlSurfaceStatus(identity: IdentityContext, options: { withholdFinance?: boolean } = {}): Promise<ControlSurfaceStatus> {
-    // WP-N1 (review B, F-B1): nøstet finansavlesning - ToolGateway-låsen ser den ikke (ingen servingModel på nøstede kall), så den hoppes over HER for en skymodell (kallet gjøres ikke i det hele tatt).
-    const withholdFinance = options.withholdFinance === true;
+    // WP-N1 (review B, F-B1): nøstet finansavlesning - ToolGateway-låsen så den ikke (ingen servingModel på nøstede kall), så den hoppes over HER for en skymodell (kallet gjøres ikke i det hele tatt).
+    // WP-N1b (K1): med begrenset-vakten på arver nøstede kall nå modellen (`model-scope.ts`), så gatewayen nekter et nøstet `finance*`-kall sentralt - og denne tjenesten leser den SENTRALE avgjørelsen i stedet for å vente på at
+    // transporten sender et valg: enten det eksplisitte valget (dybdeforsvar, direkte kall) ELLER det sentrale skopet (samme resultat som før, men uten et nektet nøstet kall og uten at hver kaller må huske det).
+    const withholdFinance = options.withholdFinance === true || withholdFinanceFromCurrentModel();
     const [ownerControl, pauseState, financeKillSwitch] = await Promise.all([
       requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
       requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state"),
       withholdFinance ? Promise.resolve(null) : requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
     ]);
     // `null` betyr ellers «aldri en rad» (se `ControlSurfaceStatus`): en holdt-tilbake avlesning får derfor et eksplisitt merke, slik at modellen aldri leser `null` som «ingen nødbryter».
-    return { owner_control: ownerControl, situation_domain_pauses: pauseState, finance_kill_switch: financeKillSwitch, ...(withholdFinance ? { finance_kill_switch_withheld: true as const } : {}) };
+    // WP-N1b (K2): i tillegg formes `owner_control` (finanskoblinger/-legitimasjon ut, fritekst-begrunnelser holdt tilbake) og pausene (`spend` ut) når finans holdes tilbake; svaret får det nøytrale merket.
+    if (withholdFinance) {
+      return {
+        owner_control: shapeOwnerControlForCloud(ownerControl), situation_domain_pauses: { ...pauseState, paused: shapePausedDomainsForCloud(pauseState.paused) },
+        finance_kill_switch: financeKillSwitch, finance_kill_switch_withheld: true as const, ...financeWithheldMarker()
+      };
+    }
+    return { owner_control: ownerControl, situation_domain_pauses: pauseState, finance_kill_switch: financeKillSwitch };
   }
 
   /**
@@ -437,18 +468,24 @@ export class ExecutiveService {
    * `OwnerControls`-tilgang fra denne pakken.
    */
   async getDelegationBoard(identity: IdentityContext, options: { withholdFinance?: boolean } = {}): Promise<DelegationBoard> {
-    const withholdFinance = options.withholdFinance === true; // WP-N1 (review B, F-B1): se `getControlSurfaceStatus`.
+    const withholdFinance = options.withholdFinance === true || withholdFinanceFromCurrentModel(); // WP-N1 (review B, F-B1) + WP-N1b (K1): se `getControlSurfaceStatus`.
     const [autonomyDomains, ownerControl, financeKillSwitch] = await Promise.all([
       requireData<SituationAutonomyPolicy[]>(this.gateway, identity, "situations", "list_autonomy_policies"),
       requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
       withholdFinance ? Promise.resolve(null) : requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
     ]);
+    if (withholdFinance) {
+      const shaped = shapeOwnerControlForCloud(ownerControl);
+      return {
+        autonomy_domains: shapeAutonomyPoliciesForCloud(autonomyDomains), frozen_connectors: shaped.frozen_connectors, revoked_credentials: shaped.revoked_credentials,
+        finance_kill_switch: financeKillSwitch, finance_kill_switch_withheld: true as const, ...financeWithheldMarker()
+      };
+    }
     return {
       autonomy_domains: autonomyDomains,
       frozen_connectors: ownerControl.frozen_connectors,
       revoked_credentials: ownerControl.revoked_credentials,
-      finance_kill_switch: financeKillSwitch,
-      ...(withholdFinance ? { finance_kill_switch_withheld: true as const } : {})
+      finance_kill_switch: financeKillSwitch
     };
   }
 

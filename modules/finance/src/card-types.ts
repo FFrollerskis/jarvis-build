@@ -149,6 +149,12 @@ export interface CardTransaction {
  * korttransaksjon, autorisasjon eller kortet selv.
  */
 export type CardAnomalyType =
+  /**
+   * WP-FIN2 (D-486, K8): innsendingen av kortet (`submit_card`) endte uten et entydig leverandørsvar (tidsavbrudd/5xx/uklassifisert, eller leverandøren HAR opprettet kortet men
+   * lagringen feilet). Wallesters idempotens-oppførsel er `unverified`, så en ny innsending kan duplisere kortet: den blokkeres (`submit_outcome_unknown_reconcile_required`) til eieren
+   * har sjekket hos Wallester. Settes og fjernes IKKE av avviksveipen (kun av innsendingen selv).
+   */
+  | "CARD_SUBMIT_OUTCOME_UNKNOWN"
   | "UNEXPECTED_CARD_SPEND"
   | "CARD_AMOUNT_LIMIT_BREACH"
   | "CARD_PURPOSE_MISMATCH"

@@ -252,7 +252,8 @@ describe("visionAdapterFromEnv", () => {
 describe("main.ts: flagg-av-identitet i selve koblingen", () => {
   it("adapteren registreres kun via visionAdapterFromEnv (betinget spredning), kjøretiden kun når den ikke er null, og ruten/jobbene finnes ikke uten den", () => {
     expect(MAIN_SRC).toMatch(/const visionAdapter = visionAdapterFromEnv\(process\.env\);/);
-    expect(MAIN_SRC).toMatch(/new OllamaAdapter\(\),\n\s*\.\.\.\(visionAdapter !== null \? \[visionAdapter\] : \[\]\)/);
+    // (WP-G4b FIX-5: `new OllamaAdapter(undefined, undefined, undefined, { noRedirect })`; opsjonen er av når K4-vakten er AV)
+    expect(MAIN_SRC).toMatch(/new OllamaAdapter\((undefined, undefined, undefined, \{ noRedirect \})?\),\n\s*\.\.\.\(visionAdapter !== null \? \[visionAdapter\] : \[\]\)/);
     expect(MAIN_SRC).toMatch(/\.\.\.\(visionRuntime !== null \? \{ vision: visionRuntime\.api \} : \{\}\),/);
     expect(MAIN_SRC).toMatch(/if \(visionRuntime !== null\) \{\n\s*new DailyScheduler\(\n\s*pool, "vision-maintenance-sweep"/);
     // ingen annen kobling: `vision`-avhengigheten settes ikke andre steder, og ingen vision-adapter registreres ubetinget
@@ -392,6 +393,14 @@ describe("buildVisionRuntime", () => {
     expect(runtime?.api.status).toBe(runtime?.status);
     expect(runtime?.api.status?.()).toMatchObject({ poller: { enabled: false }, maintenance: { light: null, full: null }, storage: { maintenance_enabled: false, writing_enabled: false }, classifier: false });
     runtime?.stop();
+  });
+
+  it("WP-G3b (D-485): `/vision/retention/*` får den EKSISTERENDE VisionService (samme instans som pipelinen bruker) - ingen ny tjeneste, tabell eller pool; uten hovedbryter bygges ingenting", () => {
+    const service = {} as VisionService;
+    const runtime = buildVisionRuntime(stubs({ JARVIS_VISION_ENABLED: "on" }, { vision: service }));
+    expect(runtime?.api.retention).toBe(service);
+    runtime?.stop();
+    expect(buildVisionRuntime(stubs({}, { vision: service }))).toBeNull();
   });
 
   it("kun hovedbryter: rutene kan bygges, men ingen poller, ingen klassifisering og ingen bildelagring (hver del må slås på for seg)", () => {

@@ -1,5 +1,5 @@
 import { openingDetectionKey } from "./home-bridge.ts";
-import { assertMinimalFacts, parseIsoMs, ruleFor, type BridgeContext, type BridgeResult, type VisionFilter } from "./signal-types.ts";
+import { assertMinimalFacts, episodeKeyFor, parseIsoMs, ruleFor, type BridgeContext, type BridgeResult, type EpisodeWindow, type VisionFilter } from "./signal-types.ts";
 
 /**
  * WP-G4 (D-466), UA-10 P1b: den REN broen fra en MINIMERT kamerahendelse (rad fra `vision_event_observations`, WP-G3) til en situasjonskandidat. Ingen I/O, ingen klokke (`ctx.nowMs`), ingen modell.
@@ -12,8 +12,12 @@ import { assertMinimalFacts, parseIsoMs, ruleFor, type BridgeContext, type Bridg
  *  3. INGEN ansiktsidentifikasjon, ingen personnavn: hendelsessettet er lukket og kategoriene er fast kodet. Motoren kan ikke utføre ACT i domenet (`NEVER_ACT_DOMAINS`), og konfidens utelates alltid slik at
  *     stadiet aldri går forbi `inform` (`computeTargetStage` gir `suggest` kun med oppgitt konfidens >= 0,75).
  *
- * Idempotens/dedupe: hendelser av samme type fra samme kilde slås sammen i et tidsvindu (`cooldown_minutes`, tunbar innenfor harde grenser): nøkkelen er `vision:<type>:<kilde>:<vindu>` - en flom av bevegelse gir
- * ÉN situasjon, ikke ett varsel per hendelse. `opening_detected` bruker SAMME nøkkel som Home Assistant-broen (`openingDetectionKey`): samme åpning via to kilder er én situasjon og ett varsel.
+ * Idempotens/dedupe (WP-G4b K3, D-484): hendelser av samme type fra samme kamera slås sammen i et GLIDENDE vindu (`cooldown_minutes`, tunbar innenfor harde grenser): en ny hendelse mindre enn vinduet etter ANKERET til forrige episode
+ * (hendelsen som åpnet episoden og dermed utløste varselet) er en duplikat; en hendelse akkurat på eller etter grensen starter en ny episode. Nøkkelen er `vision:<type>:<kilde>:<anker-ms>`; broen er ren og foreslår «ny episode som
+ * starter nå» (`episode`), og inntaksbussen finner den eksisterende episoden (ankeret ligger i situasjonens nøkkel, så det overlever omstart). Før K3 var vinduet en FAST bøtte (`floor(tid / vindu)`): to hendelser like over en
+ * bøttegrense ga to varsler, selv med sekunder imellom. HASTE-signalet `security_alert` beholder den faste bøtten (et glidende vindu kunne skjult et andre sikkerhetsvarsel som tidligere ble varslet; haste dempes aldri, Q-75 pkt 9).
+ * En flom av bevegelse gir ÉN situasjon, ikke ett varsel per hendelse. `opening_detected` bruker SAMME nøkkel som Home Assistant-broen (`openingDetectionKey`): samme åpning via to kilder er én situasjon og ett varsel.
+ * Ingen delt alarmnøkkel mellom kamera og Home Assistant (Q-75 pkt 10): kameraet ville blitt et ACT-domene.
  */
 export interface VisionObservation {
   source: "vision";
@@ -86,24 +90,33 @@ export function bridgeVisionObservation(obs: VisionObservation, filter: VisionFi
   }
 
   const cooldown = Math.max(1, ctx.threshold(rule) ?? 10);
-  const bucket = Math.floor(observedMs / (cooldown * 60_000));
-  const key = `vision:${eventType}:${obs.source_instance_id}:${bucket}`;
+  // K3: glidende vindu for alt unntatt haste (se filhodet). Haste beholder den faste bøtten (uendret nøkkelformat).
+  let key: string;
+  let episode: EpisodeWindow | undefined;
+  if (rule.urgent) {
+    key = `vision:${eventType}:${obs.source_instance_id}:${Math.floor(observedMs / (cooldown * 60_000))}`;
+  } else {
+    const keyPrefix = `vision:${eventType}:${obs.source_instance_id}:`;
+    key = episodeKeyFor(keyPrefix, observedMs);
+    episode = { key_prefix: keyPrefix, anchor_ms: observedMs, window_ms: cooldown * 60_000 };
+  }
+  const windowed = episode === undefined ? {} : { episode };
   const facts = { event_type: eventType, night, classified, ...(eventType === "package_detected" || eventType === "person_present" ? { category: eventType === "package_detected" ? "package" : "person" } : {}) };
   assertMinimalFacts(facts);
   const common = { domain: rule.domain, detection_key: key };
   const ref = `vision:${obs.source_instance_id}:${obs.observation_id}`;
   switch (eventType) {
     case "doorbell_event":
-      return { ...base, candidate: { ...common, priority: "normal", reason: "Dørklokkehendelse registrert" }, source_ref: ref, facts };
+      return { ...base, candidate: { ...common, priority: "normal", reason: "Dørklokkehendelse registrert" }, source_ref: ref, facts, ...windowed };
     case "security_alert":
       // Høy prioritet, men aldri konfidens: stadiet blir `inform` (ingen forslag/ACT i dette domenet).
-      return { ...base, candidate: { ...common, priority: "high", reason: "Sikkerhetsvarsel fra en sensor" }, source_ref: ref, facts };
+      return { ...base, candidate: { ...common, priority: "high", reason: "Sikkerhetsvarsel fra en sensor" }, source_ref: ref, facts, ...windowed };
     case "motion_detected":
-      return { ...base, candidate: { ...common, priority: night ? "normal" : "low", reason: night ? "Bevegelse registrert utenfor forventet tid" : "Bevegelse registrert" }, source_ref: ref, facts };
+      return { ...base, candidate: { ...common, priority: night ? "normal" : "low", reason: night ? "Bevegelse registrert utenfor forventet tid" : "Bevegelse registrert" }, source_ref: ref, facts, ...windowed };
     case "person_present":
-      return { ...base, candidate: { ...common, priority: night ? "normal" : "low", reason: NOTHING_TO_SAY }, source_ref: ref, facts };
+      return { ...base, candidate: { ...common, priority: night ? "normal" : "low", reason: NOTHING_TO_SAY }, source_ref: ref, facts, ...windowed };
     case "package_detected":
-      return { ...base, candidate: { ...common, priority: "normal", reason: NOTHING_TO_SAY }, source_ref: ref, facts };
+      return { ...base, candidate: { ...common, priority: "normal", reason: NOTHING_TO_SAY }, source_ref: ref, facts, ...windowed };
     default:
       return null;
   }

@@ -95,7 +95,12 @@ export const SituationCandidateInputSchema = z
      * WP-G4 fiks-runde (A-LOW-6): en signalkandidat (inntaksbussen) kan aldri SENKE en åpen situasjon som allerede bærer en høyere prioritet. Flere kilder for samme nøkkel (HA og kamera for samme åpning) ga «siste vinner» som overskrev
      * prioritet, konfidens og begrunnelse. Med flagget vinner den høyeste prioriteten, og konfidens og begrunnelse følger vinneren. Uten flagget (alle eksisterende kallere: sveipene) er oppførselen uendret.
      */
-    no_downgrade: z.boolean().optional()
+    no_downgrade: z.boolean().optional(),
+    /**
+     * WP-G4b K2 (D-484): regelen (`kilde:type`, det lukkede regelregisteret) kandidaten kommer fra. Settes KUN av inntaksbussen; følger vinneren på samme måte som prioritet og begrunnelse. Brukes av autonomi-bindingen til å skille
+     * regel-/kategoribindinger (`autonomy-scope.ts`). Utelatt (alle eldre kallere, sveipene) = situasjonen har ingen regel, og kun en domenebred binding gjelder.
+     */
+    rule_key: z.string().regex(/^[a-z_]{3,30}:[a-z_]{3,60}$/).optional()
   })
   .strict();
 export type SituationCandidateInput = z.infer<typeof SituationCandidateInputSchema>;
@@ -126,6 +131,8 @@ export interface Situation {
   inform_message: string | null;
   /** D-160: settes KUN etter BEKREFTET leveranse, alltid til det eksakte `last_notified_at`-ankeret leveransen gjaldt. */
   inform_delivered_at: string | null;
+  /** WP-G4b K2 (148): regelen som VANT for situasjonen (inntaksbussen); `null` for situasjoner fra de eldre sveipene. Valgfri i typen (rader fra databasen har den alltid; eldre kode og fikstur som bygger en `Situation` uten den er uendret). */
+  rule_key?: string | null;
   opened_at: string;
   resolved_at: string | null;
   created_at: string;
@@ -177,6 +184,16 @@ export interface SituationAutonomyPolicy {
   actor_person_id: string;
   created_at: string;
   updated_at: string;
+  /**
+   * WP-G4b K1 (D-484): KUN satt av `listAutonomyPolicies` når den lagrede handlingen ikke (lenger) er bindbar til autonom ACT (`physical_action_not_bindable` eller `action_not_bindable`: definisjonen sier ikke
+   * `autonomy_bindable`). Bindingen utføres da ALDRI (feiler lukket ved utførelse), og den slettes aldri stille: eieren ser den her og kan fjerne eller erstatte den selv.
+   */
+  blocked_code?: "physical_action_not_bindable" | "action_not_bindable";
+  /**
+   * WP-G4b K2 (148): hva bindingen gjelder. `*` = hele domenet (alle regler; ALLE eldre bindinger), `rule:<kilde>:<type>` = én regel, `category:<navn>` = én lukket kategori. Regel > kategori > domene; en smalere binding gir aldri mer enn
+   * den domenebrede (`autonomy-scope.ts`).
+   */
+  scope_key: string;
 }
 
 const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
@@ -192,7 +209,10 @@ export const SetSituationAutonomyPolicyInputSchema = z
     parameters: z.record(JsonValueSchema).optional(),
     enabled: z.boolean().optional(),
     /** WP-G4: valgfri utløpstid (ISO 8601). Må ligge i fremtiden og høyst 365 dager frem (håndheves ved binding). */
-    expires_at: z.string().min(10).max(40).optional()
+    expires_at: z.string().min(10).max(40).optional(),
+    /** WP-G4b K2: skop bindingen til EN regel i det lukkede regelregisteret (f.eks. `home_assistant:door_open_too_long`) eller EN lukket kategori; utelatt = hele domenet (som før). De to utelukker hverandre. Valideres mot domenet ved binding. */
+    rule: z.string().min(3).max(100).optional(),
+    category: z.string().min(1).max(60).optional()
   })
   .strict();
 export type SetSituationAutonomyPolicyInput = z.infer<typeof SetSituationAutonomyPolicyInputSchema>;

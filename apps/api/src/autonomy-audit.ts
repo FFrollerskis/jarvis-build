@@ -29,16 +29,21 @@ export function redactAuditValue(value: unknown, depth = 0): unknown {
   return null;
 }
 
-/** Hvert objekt-/liste-felt i `payload.before` større enn grensen (serialisert) erstattes av en størrelsesmerknad; resten redigeres. */
+/** Et før-bilde (`before`, og hvert element i `before_scoped`) med et for stort parameterobjekt (serialisert) får det erstattet av en størrelsesmerknad. */
+function capBeforeImage(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const image = value as Record<string, unknown>;
+  const serializedParameters = JSON.stringify(image["parameters"] ?? null);
+  return serializedParameters.length > AUTONOMY_AUDIT_MAX_VALUE_CHARS ? { ...image, parameters: null, parameters_omitted: `for stort (${serializedParameters.length} tegn)` } : image;
+}
+
+/** Hvert objekt-/liste-felt i `payload.before` og hvert element i `payload.before_scoped` (WP-G4b: regel-/kategoribindinger i samme domene) større enn grensen (serialisert) erstattes av en størrelsesmerknad; resten redigeres. */
 export function redactAuditPayload(payload: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, raw] of Object.entries(payload)) {
     let value = redactAuditValue(raw);
-    if (key === "before" && value !== null && typeof value === "object") {
-      const before = value as Record<string, unknown>;
-      const serializedParameters = JSON.stringify(before["parameters"] ?? null);
-      if (serializedParameters.length > AUTONOMY_AUDIT_MAX_VALUE_CHARS) value = { ...before, parameters: null, parameters_omitted: `for stort (${serializedParameters.length} tegn)` };
-    }
+    if (key === "before") value = capBeforeImage(value);
+    else if (key === "before_scoped" && Array.isArray(value)) value = value.map(capBeforeImage);
     out[key] = value;
   }
   return out;

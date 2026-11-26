@@ -7,11 +7,12 @@ import { buildSubmitChildCheck, buildSubmitIntentCheck, lockAndFindUnacknowledge
 import { providerAmountEchoMatches, toOreInteger } from "./ore.ts";
 import { malformedWebhookKey, rejectionCode } from "./webhook-guard.ts";
 import { fikenPostingDescription } from "./reconciliation.ts";
+import { ProviderResponseInvalidError } from "./provider-response.ts";
 import { assertValidPaymentIntentTransition, canTransitionPaymentIntent, isTerminalPaymentIntentState } from "./state-machine.ts";
 import { FikenTransport, type FikenGeneralJournalEntryInput, type FikenJournalEntry } from "./fiken-transport.ts";
 import { StripeTransport, type StripeBalanceObject, type StripePaymentIntentObject, type StripeRefundObject } from "./stripe-transport.ts";
 import { verifyStripeWebhookSignature, parseStripeEventEnvelope } from "./stripe-webhook.ts";
-import { VippsTransport, type VippsPaymentObject, type VippsPaymentWriter } from "./vipps-transport.ts";
+import { VippsTransport, type VippsCreatedPayment, type VippsPaymentWriter } from "./vipps-transport.ts";
 import { verifyVippsWebhookSignature, parseVippsEventEnvelope, type VippsWebhookRequestHeaders } from "./vipps-webhook.ts";
 import { NeonomicsTransport, NeonomicsPaymentAuthorizationRequiredError, type NeonomicsGateway, type NeonomicsPaymentObject } from "./neonomics-transport.ts";
 import { verifyNeonomicsWebhookApiKey, parseNeonomicsEventEnvelope } from "./neonomics-webhook.ts";
@@ -67,6 +68,7 @@ import {
   SubmitInFlightError,
   ProviderOutcomeUnknownError,
   PossibleDuplicatePaymentError,
+  CancelBlockedByCapturesError,
   VIPPS_STATUS_TO_JARVIS_STATE,
   VIPPS_MODIFICATION_EVENTS
 } from "./types.ts";
@@ -286,8 +288,35 @@ async function readForUpdate(client: pg.PoolClient, tenantId: string, paymentInt
   return (rows[0] as PaymentIntent | undefined) ?? null;
 }
 
+/** WP-FIN2 (K7): detaljen i en `ProviderOutcomeUnknownError` uten et ledende `outcome_unknown:` (en transport kan allerede ha kastet `outcome_unknown:...`) - aldri dobbelt prefiks. */
+function unknownDetail(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).replace(/^outcome_unknown:/, "").slice(0, 110);
+}
+
+/**
+ * WP-FIN2 (D-486, K4; JARVIS-072-resten): barne-idempotens. Samme `(tenant, idempotency_key)` med en ANNEN forespørsel er en NY handling, aldri en retry - den eksisterende raden returneres
+ * bare når forespørselen er identisk i det som utgjør handlingen: intensjon, beløp, valuta og (kun Stripe-refusjon) `reason`. Samme regel som `createPaymentIntent`
+ * (`IdempotencyKeyConflictError`): feilen lister FELTNAVN, aldri verdier. Brukes av begge baner (SELECT før INSERT og `ON CONFLICT DO NOTHING`) i `createStripeRefund`,
+ * `createVippsCapture` og `createVippsRefund`. Rekkefølgen på feltene er fast (`payment_intent_id`, `amount_ore`, `currency`, `reason`).
+ */
+function resolveChildIdempotency<T extends { payment_intent_id: string; amount_ore: number | string; currency: string; reason?: string | null }>(
+  existing: T, requested: { payment_intent_id: string; amount_ore: number; currency: string; reason?: string | null }, idempotencyKey: string
+): T {
+  const mismatched = [
+    existing.payment_intent_id !== requested.payment_intent_id ? "payment_intent_id" : null,
+    Number(existing.amount_ore) !== requested.amount_ore ? "amount_ore" : null,
+    existing.currency !== requested.currency ? "currency" : null,
+    "reason" in requested && (existing.reason ?? null) !== (requested.reason ?? null) ? "reason" : null
+  ].filter((field): field is string => field !== null);
+  if (mismatched.length > 0) throw new IdempotencyKeyConflictError(idempotencyKey, mismatched);
+  return existing;
+}
+
 /** WP-F1: SQL-fragment som fjerner ett avviksflagg fra en jsonb-liste (strenger) - brukes når en innsending ENDELIG fikk et leverandørsvar. */
 const CLEAR_SUBMIT_UNKNOWN_FLAG = "anomaly_flags = anomaly_flags - 'SUBMIT_OUTCOME_UNKNOWN'";
+
+/** WP-FIN2 (K6): årsakskoden i `anomaly_flagged`-hendelsen når Stripe melder `succeeded` for en intensjon Jarvis har som `failed` (kun én gang pr. intensjon). */
+const SUCCEEDED_AFTER_LOCAL_FAILED = "provider_succeeded_after_local_failed";
 
 /**
  * WP-F1 (review M-F1): valg for `submitPaymentIntent`. `duplicateGuard` slår på duplikatvakten INNE i reservasjonstransaksjonen (advisory-lås + ny kandidatspørring, se
@@ -664,24 +693,26 @@ export class FinanceService {
         return this.submitPlan(true, () => transport.createPayment({
           amountOre, currency: current.currency, reference: paymentIntentId,
           paymentDescription: current.purpose.slice(0, 100), returnUrl: VIPPS_PLACEHOLDER_RETURN_URL, idempotencyKey
-        }), async (client: pg.PoolClient, vippsPayment: VippsPaymentObject) => {
+        }), async (client: pg.PoolClient, vippsPayment: VippsCreatedPayment) => {
+        // WP-FIN2 fiks-runde 1 (FIX-2): dokumentert opprett-svar er `{ reference, redirectUrl }` (`unverified`) - `state`/`amount` er `null` når Vipps ikke sendte dem. Da lagres NULL (kolonnene er
+        // nullable; aldri Jarvis' egne verdier utgitt som leverandørens) og `provider_status_updated_at` står NULL (ingen observasjon å beskytte mot eldre hendelser); første webhook/oppfrisking fyller dem.
         const { rows } = await client.query(
           `UPDATE payment_intents
-             SET state = 'provider_acknowledged', provider_ref = $3, provider_status = $4,
+             SET state = 'provider_acknowledged', provider_ref = $3, provider_status = $4::text,
                  provider_reported_amount_ore = $5, provider_reported_currency = $6,
-                 provider_status_updated_at = now(), submitted_at = now(), updated_at = now()
+                 provider_status_updated_at = CASE WHEN $4::text IS NULL THEN NULL ELSE now() END, submitted_at = now(), updated_at = now()
            WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
-          [tenantId, paymentIntentId, vippsPayment.reference, vippsPayment.state, vippsPayment.amount.value, vippsPayment.amount.currency.toUpperCase()]
+          [tenantId, paymentIntentId, vippsPayment.reference, vippsPayment.state, vippsPayment.amount?.value ?? null, vippsPayment.amount?.currency.toUpperCase() ?? null]
         );
         const updated = rows[0] as PaymentIntent;
         await insertEvent(client, tenantId, memorySpace, {
           payment_intent_id: paymentIntentId, event_type: "submitted",
-          summary: `Sendt til Vipps - betaling ${vippsPayment.reference} (state=${vippsPayment.state})`,
+          summary: `Sendt til Vipps - betaling ${vippsPayment.reference} (state=${vippsPayment.state ?? "ikke oppgitt"})`,
           actor_person_id: actorPersonId ?? null, metadata: { provider_ref: vippsPayment.reference, provider_status: vippsPayment.state }
         });
         await insertEvent(client, tenantId, memorySpace, {
           payment_intent_id: paymentIntentId, event_type: "provider_acknowledged",
-          summary: "Vipps bekreftet opprettelsen - VENTER på brukerbekreftelse i Vipps-appen (state=CREATED)",
+          summary: `Vipps bekreftet opprettelsen - VENTER på brukerbekreftelse i Vipps-appen (state=${vippsPayment.state ?? "ikke oppgitt ennå; hentes av første webhook/oppfrisking"})`,
           actor_person_id: actorPersonId ?? null, metadata: {}
         });
         return updated;
@@ -863,7 +894,7 @@ export class FinanceService {
         await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.onCallError!(client, prepared.plan, failureClass, err)).catch((cleanupErr) => {
           console.error(JSON.stringify({ msg: "finance_submit_cleanup_failed", subject_id: steps.subjectId ?? null, error: (cleanupErr as Error).message.slice(0, 120) }));
         });
-        if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", `${err instanceof Error ? err.message : String(err)}`.slice(0, 110), err);
+        if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", unknownDetail(err), err);
       }
       throw err;
     }
@@ -931,15 +962,16 @@ export class FinanceService {
       [tenantId, id, `outcome_unknown:${reason}`.slice(0, 200)]
     );
     // Flagges kun når raden FAKTISK var uferdig: er leverandørsvaret allerede lagret (samtidig gjenopptakelse) finnes det intet ukjent utfall å varsle om.
-    if ((reverted.rowCount ?? 0) === 1) await this.appendChainAnomalyFlags(client, table, idColumn, id, ["SUBMIT_OUTCOME_UNKNOWN"]);
+    if ((reverted.rowCount ?? 0) === 1) await this.appendChainAnomalyFlags(client, tenantId, table, idColumn, id, ["SUBMIT_OUTCOME_UNKNOWN"]);
   }
 
-  private async appendChainAnomalyFlags(client: pg.PoolClient, table: SubmitTable, idColumn: string, id: string, flags: readonly FinanceChainAnomalyType[]): Promise<void> {
+  /** WP-FIN2 (D-486, K9b): alle tre avviksflagg-hjelperne låser raden til `tenantId` (tidligere kun `WHERE <id> = $1` - en rad i en annen tenant kunne flagges ved id-treff når RLS ikke var i veien). */
+  private async appendChainAnomalyFlags(client: pg.PoolClient, tenantId: string, table: SubmitTable, idColumn: string, id: string, flags: readonly FinanceChainAnomalyType[]): Promise<void> {
     await client.query(
       `UPDATE ${table} SET anomaly_flags = (
          SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(anomaly_flags || $2::jsonb) AS v
-       ), updated_at = now() WHERE ${idColumn} = $1`,
-      [id, JSON.stringify(flags)]
+       ), updated_at = now() WHERE tenant_id = $3 AND ${idColumn} = $1`,
+      [id, JSON.stringify(flags), tenantId]
     );
   }
 
@@ -981,7 +1013,7 @@ export class FinanceService {
         throw err;
       }
       await this.recordUnknownSubmitOutcome(tenantId, memorySpace, paymentIntentId, plan.idempotentAtProvider, "call");
-      throw new ProviderOutcomeUnknownError(paymentIntentId, (err instanceof Error ? err.message : String(err)).slice(0, 110), err);
+      throw new ProviderOutcomeUnknownError(paymentIntentId, unknownDetail(err), err);
     }
     try {
       return await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
@@ -1027,7 +1059,7 @@ export class FinanceService {
         [tenantId, paymentIntentId]
       );
       if ((reverted.rowCount ?? 0) !== 1) return;
-      await this.appendChainAnomalyFlags(client, "payment_intents", "payment_intent_id", paymentIntentId, ["SUBMIT_OUTCOME_UNKNOWN"]);
+      await this.appendChainAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", paymentIntentId, ["SUBMIT_OUTCOME_UNKNOWN"]);
       const what = cause === "call"
         ? "utfall hos leverandøren er UKJENT (tidsavbrudd/nettverk)"
         : "leverandøren HAR svart, men lagringen av svaret feilet - utfallet er UKJENT lokalt";
@@ -1242,7 +1274,8 @@ export class FinanceService {
         // F.eks. en sen/duplisert hendelse som rapporterer "canceled" ETTER
         // at raden allerede er `settled` - fail-closed: FLAGG, ALDRI
         // overskriv en allerede etablert terminal-tilstand.
-        await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", current.payment_intent_id, ["WEBHOOK_STATE_CONFLICT"]);
+        await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", current.payment_intent_id, ["WEBHOOK_STATE_CONFLICT"]);
+        if (current.state === "failed" && targetState === "settled") await this.recordSucceededAfterLocalFailed(client, tenantId, memorySpace, current, outcome, actorPersonId);
         const { rows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, current.payment_intent_id]);
         return { applied: false, reason: "terminal_state_conflict", intent: rows[0] as PaymentIntent };
       }
@@ -1272,12 +1305,35 @@ export class FinanceService {
     return { applied: true, intent: updated };
   }
 
-  private async appendAnomalyFlags(client: pg.PoolClient, table: "payment_intents" | "stripe_refunds", idColumn: string, id: string, flags: readonly (StripeAnomalyType | VippsAnomalyType)[]): Promise<void> {
+  /**
+   * WP-FIN2 (D-486, K6): `payment_intent.payment_failed` gjør intensjonen terminal (`failed`), men Stripe lar objektet stå i `requires_payment_method`, så et senere `succeeded` er normalt - og
+   * da står en BETALT betaling som `failed`. Tilstandsmaskinen er IKKE endret (eierens valg, se Q-forslaget i rapporten/runbooken); her skrives bare en `anomaly_flagged`-hendelse i tillegg til
+   * flagget `WEBHOOK_STATE_CONFLICT`, så avviket synes i betalingens historikk. KUN første gang pr. intensjon (gjentatte hendelser/oppfriskinger støyer ikke), og kun leverandørstatus og
+   * kilde-hendelsens id - aldri beløp, valuta eller feiltekst.
+   */
+  private async recordSucceededAfterLocalFailed(
+    client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, current: PaymentIntent,
+    outcome: { stripeStatus: string; sourceEventId: string | null }, actorPersonId: string | null
+  ): Promise<void> {
+    const { rows } = await client.query(
+      `SELECT 1 FROM payment_intent_events WHERE tenant_id = $1 AND payment_intent_id = $2 AND event_type = 'anomaly_flagged' AND metadata->>'reason' = $3 LIMIT 1`,
+      [tenantId, current.payment_intent_id, SUCCEEDED_AFTER_LOCAL_FAILED]
+    );
+    if (rows.length > 0) return;
+    await insertEvent(client, tenantId, memorySpace, {
+      payment_intent_id: current.payment_intent_id, event_type: "anomaly_flagged",
+      summary: "Stripe melder betalingen som gjennomført, men Jarvis har den som mislykket etter en tidligere payment_failed-hendelse. Tilstanden er IKKE endret (WEBHOOK_STATE_CONFLICT): sjekk Stripe og følg FINANCE_D_CHAIN §11",
+      actor_person_id: actorPersonId,
+      metadata: { anomaly_flags: ["WEBHOOK_STATE_CONFLICT"], reason: SUCCEEDED_AFTER_LOCAL_FAILED, provider_status: outcome.stripeStatus, source_event_id: outcome.sourceEventId }
+    });
+  }
+
+  private async appendAnomalyFlags(client: pg.PoolClient, tenantId: string, table: "payment_intents" | "stripe_refunds", idColumn: string, id: string, flags: readonly (StripeAnomalyType | VippsAnomalyType)[]): Promise<void> {
     await client.query(
       `UPDATE ${table} SET anomaly_flags = (
          SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(anomaly_flags || $2::jsonb) AS v
-       ), updated_at = now() WHERE ${idColumn} = $1`,
-      [id, JSON.stringify(flags)]
+       ), updated_at = now() WHERE tenant_id = $3 AND ${idColumn} = $1`,
+      [id, JSON.stringify(flags), tenantId]
     );
   }
 
@@ -1487,7 +1543,7 @@ export class FinanceService {
         if (intentRow.tenant_id !== stripeTenantId) {
           // Fail-closed (byggeordrens §12) - flagg og NEKT å behandle,
           // ALDRI stille rute til feil tenant.
-          await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", intentRow.payment_intent_id, ["PROVIDER_OBJECT_TENANT_CONFLICT"]);
+          await this.appendAnomalyFlags(client, intentRow.tenant_id, "payment_intents", "payment_intent_id", intentRow.payment_intent_id, ["PROVIDER_OBJECT_TENANT_CONFLICT"]);
           await client.query(`UPDATE stripe_webhook_events SET status = 'failed_retryable', payment_intent_id = $2, error_message = $3, processed_at = now() WHERE stripe_event_id = $1`, [
             envelope.id, intentRow.payment_intent_id, new ProviderObjectTenantConflictError(providerRef, stripeTenantId, intentRow.tenant_id).message
           ]);
@@ -1548,11 +1604,13 @@ export class FinanceService {
     this.validateRefundInput(input);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const intent = await this.requireStripePaymentIntent(client, tenantId, input.payment_intent_id, true);
-      if (intent.state !== "settled") throw new PaymentIntentNotSettledError(input.payment_intent_id, intent.state);
+      // WP-FIN2 (K4): nøkkelen avgjøres FØR tilstandssjekken - en nøkkel som tilhører en annen betaling er en idempotens-konflikt uavhengig av hvilken tilstand denne intensjonen står i.
+      const requested = { payment_intent_id: input.payment_intent_id, amount_ore: input.amount_ore, currency: intent.currency, reason: input.reason ?? null };
 
       const refundId = `fin-rf-${randomUUID()}`;
       const { rows: existingByKey } = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-      if (existingByKey.length > 0) return existingByKey[0] as StripeRefund; // idempotent no-op - SAMME mønster som createPaymentIntent.
+      if (existingByKey.length > 0) return resolveChildIdempotency(existingByKey[0] as StripeRefund, requested, input.idempotency_key); // idempotent no-op KUN for en identisk forespørsel.
+      if (intent.state !== "settled") throw new PaymentIntentNotSettledError(input.payment_intent_id, intent.state);
 
       // Postgres tillater IKKE `FOR UPDATE` sammen med en aggregatfunksjon
       // (`SUM`) - MEN TOCTOU-vinduet er allerede lukket av radlåsen
@@ -1580,8 +1638,9 @@ export class FinanceService {
         [refundId, tenantId, memorySpace, input.payment_intent_id, input.idempotency_key, input.amount_ore, intent.currency, input.reason ?? null, input.owner_person_id ?? null]
       );
       if (rows.length === 0) {
+        // `ON CONFLICT`-banen: et samtidig kall tok nøkkelen mellom SELECT og INSERT - samme sammenligning som over.
         const existing = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-        return existing.rows[0] as StripeRefund;
+        return resolveChildIdempotency(existing.rows[0] as StripeRefund, requested, input.idempotency_key);
       }
       return rows[0] as StripeRefund;
     });
@@ -1644,7 +1703,7 @@ export class FinanceService {
         const locked = lockedRows[0] as StripeRefund | undefined;
         // En samtidig innsending (samme Idempotency-Key) har allerede lagret utfallet, eller raden er avsluttet på annen måte -> aldri skriv på nytt.
         if (locked && (isAckOrDone(locked.state) || locked.provider_ref || (locked.state !== "submitted" && locked.state !== "draft"))) return locked;
-        const targetState: StripeRefundState = STRIPE_REFUND_STATUS_TO_STATE[stripeRefund.status] ?? "provider_acknowledged";
+        const targetState: StripeRefundState = STRIPE_REFUND_STATUS_TO_STATE[stripeRefund.status ?? ""] ?? "provider_acknowledged"; // FIX-2: `status` kan være null (nullbarhet `unverified`)
         const timestampColumn = targetState === "settled" ? "settled_at" : targetState === "failed" ? "failed_at" : targetState === "cancelled" ? "cancelled_at" : null;
         const { rows } = await client.query(
           `UPDATE stripe_refunds SET state = $3, provider_ref = $4${timestampColumn ? `, ${timestampColumn} = now()` : ""}, failure_reason = NULL,
@@ -1654,13 +1713,47 @@ export class FinanceService {
         );
         // Leverandørens ekko av beløp/valuta MÅ stemme med det vi ba om - ellers er refusjonen utført med feil beløp (synlig avvik, aldri stille).
         if (!providerAmountEchoMatches(stripeRefund.amount, toOreInteger(current.amount_ore)) || String(stripeRefund.currency).toUpperCase() !== current.currency) {
-          await this.appendAnomalyFlags(client, "stripe_refunds", "refund_id", refundId, ["REFUND_AMOUNT_CONFLICT"]);
-          await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", current.payment_intent_id, ["REFUND_AMOUNT_CONFLICT"]);
+          await this.appendAnomalyFlags(client, tenantId, "stripe_refunds", "refund_id", refundId, ["REFUND_AMOUNT_CONFLICT"]);
+          await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", current.payment_intent_id, ["REFUND_AMOUNT_CONFLICT"]);
         }
         return rows[0] as StripeRefund;
       },
       onCallError: (client, _plan, failureClass, err) =>
         this.releaseChildReservation(client, "stripe_refunds", tenantId, refundId, failureClass, err instanceof Error ? err.message : String(err))
+    });
+  }
+
+  /**
+   * WP-FIN2 (D-486, K9c; JARVIS-072-resten): en Stripe-refusjon hadde INGEN oppfriskingssti (`getRefund` ble aldri kalt) - en `pending`-refusjon ble stående som `provider_acknowledged` til en
+   * `refund.*`-webhook kom, og en tapt webhook betydde for alltid. Tre faser som `refreshStripePaymentState`: (1) kort lese-transaksjon uten lås, (2) credential og `getRefund` UTENFOR transaksjon,
+   * (3) kort transaksjon som låser raden på nytt og anvender utfallet via den EKSISTERENDE `applyStripeRefundOutcome` (samme tilstandsmaskin- og konfliktregler som webhooken) + ekkosjekken av
+   * beløp/valuta (som innsendingen). Svar for et annet objekt enn det vi spurte om anvendes aldri.
+   */
+  async refreshStripeRefundState(tenantId: string, memorySpace: MemorySpace, refundId: string): Promise<StripeRefund> {
+    const snapshot = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND refund_id = $2`, [tenantId, refundId]);
+      const row = rows[0] as StripeRefund | undefined;
+      if (!row) throw new RefundNotFoundError(refundId);
+      return row;
+    });
+    if (!snapshot.provider_ref) return snapshot; // aldri innsendt (eller utfallet er ukjent) - intet å hente.
+    const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
+    const providerRef = snapshot.provider_ref;
+    const stripeRefund = await this.stripeTransportFactory(credentials).getRefund(providerRef);
+    if (stripeRefund.id !== providerRef) throw new ProviderResponseInvalidError("stripe.getRefund", "id_mismatch", false);
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
+      const current = rows[0] as StripeRefund | undefined;
+      if (!current) throw new RefundNotFoundError(refundId);
+      if (current.provider_ref !== providerRef) return current; // referansen endret seg mellom lesing og skriving: aldri anvend et svar for en annen refusjon.
+      await this.applyStripeRefundOutcome(client, tenantId, memorySpace, providerRef, stripeRefund.status, Math.floor(Date.now() / 1000));
+      if (!providerAmountEchoMatches(stripeRefund.amount, toOreInteger(current.amount_ore)) || String(stripeRefund.currency).toUpperCase() !== current.currency) {
+        await this.appendAnomalyFlags(client, tenantId, "stripe_refunds", "refund_id", refundId, ["REFUND_AMOUNT_CONFLICT"]);
+        await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", current.payment_intent_id, ["REFUND_AMOUNT_CONFLICT"]);
+      }
+      const reread = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND refund_id = $2`, [tenantId, refundId]);
+      return reread.rows[0] as StripeRefund;
     });
   }
 
@@ -1674,7 +1767,7 @@ export class FinanceService {
     const targetState = STRIPE_REFUND_STATUS_TO_STATE[stripeStatus];
     if (targetState === undefined || targetState === null || targetState === current.state) return;
     if (!canTransitionPaymentIntent(current.state, targetState)) {
-      await this.appendAnomalyFlags(client, "stripe_refunds", "refund_id", current.refund_id, ["WEBHOOK_STATE_CONFLICT"]);
+      await this.appendAnomalyFlags(client, tenantId, "stripe_refunds", "refund_id", current.refund_id, ["WEBHOOK_STATE_CONFLICT"]);
       return;
     }
     const timestampColumn = targetState === "settled" ? "settled_at" : targetState === "failed" ? "failed_at" : targetState === "cancelled" ? "cancelled_at" : null;
@@ -1812,9 +1905,9 @@ export class FinanceService {
       );
       let refundFlagsAdded = 0;
       for (const row of refundConflicts.rows as Array<{ payment_intent_id: string; refund_ids: string[] }>) {
-        await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", row.payment_intent_id, ["REFUND_AMOUNT_CONFLICT"]);
+        await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", row.payment_intent_id, ["REFUND_AMOUNT_CONFLICT"]);
         for (const refundId of row.refund_ids) {
-          await this.appendAnomalyFlags(client, "stripe_refunds", "refund_id", refundId, ["REFUND_AMOUNT_CONFLICT"]);
+          await this.appendAnomalyFlags(client, tenantId, "stripe_refunds", "refund_id", refundId, ["REFUND_AMOUNT_CONFLICT"]);
         }
         refundFlagsAdded++;
       }
@@ -1825,7 +1918,7 @@ export class FinanceService {
 
   /**
    * Worker-sveip (byggeordrens §15): synker alle ikke-terminale Stripe-
-   * `payment_intents` for en tenant. Retry-/krasj-trygg (hver
+   * `payment_intents` (og, fra WP-FIN2 K9c, ventende `stripe_refunds`) for en tenant. Retry-/krasj-trygg (hver
    * `refreshStripePaymentState()`-kjøring er sin egen transaksjon,
    * feil på ÉN rad velter ALDRI resten - samme feilisolasjons-prinsipp som
    * `runFullSweep()`/`syncTenant()`-mønstrene ellers i workspacet).
@@ -1854,6 +1947,26 @@ export class FinanceService {
         failed++;
       }
     }
+    // WP-FIN2 (K9c): refusjoner som venter på leverandøren (`provider_acknowledged` med leverandørreferanse) oppfriskes i samme sveip, med samme feilisolasjon.
+    const pendingRefunds = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT refund_id FROM stripe_refunds WHERE tenant_id = $1 AND memory_space_id = $2 AND state = 'provider_acknowledged' AND provider_ref IS NOT NULL ORDER BY created_at`,
+        [tenantId, memorySpace]
+      );
+      return (rows as Array<{ refund_id: string }>).map((r) => r.refund_id);
+    });
+    for (const refundId of pendingRefunds) {
+      try {
+        await this.refreshStripeRefundState(tenantId, memorySpace, refundId);
+        synced++;
+      } catch (err) {
+        console.error(JSON.stringify({
+          msg: "stripe_refund_sync_failed", tenant_id: tenantId, refund_id: refundId,
+          error: err instanceof Error ? err.message : String(err)
+        }));
+        failed++;
+      }
+    }
     return { synced, failed };
   }
 
@@ -1865,6 +1978,46 @@ export class FinanceService {
   // force a Stripe pattern"), se vipps-transport.ts/vipps-webhook.ts sine
   // toppkommentarer for hvor og hvorfor.
   // ======================================================================
+
+  /**
+   * WP-FIN2 (D-486, K5b): har intensjonen oppgjorte eller uavklarte Vipps-captures? Kalles med intensjonsraden låst. `settled_captures` = minst én capture er `settled` (pengene er tatt);
+   * `capture_outcome_unresolved` = en capture står `submitted`/`provider_acknowledged` (i flukt eller ukjent) eller er et `draft` flagget `SUBMIT_OUTCOME_UNKNOWN` (kallet er sendt, svaret kjent
+   * ikke) - leverandøren kan ha tatt pengene uten at Jarvis vet det. En ren `draft` uten flagg, og `failed`/`cancelled`, regnes ikke.
+   */
+  private async capturedFundsStatus(client: pg.PoolClient, tenantId: string, paymentIntentId: string): Promise<"none" | "settled_captures" | "capture_outcome_unresolved"> {
+    const { rows } = await client.query(
+      `SELECT COALESCE(SUM(amount_ore) FILTER (WHERE state = 'settled'), 0)::bigint AS settled_ore,
+              count(*) FILTER (WHERE state IN ('submitted', 'provider_acknowledged')
+                                  OR (state = 'draft' AND anomaly_flags @> '["SUBMIT_OUTCOME_UNKNOWN"]'::jsonb))::int AS unresolved
+         FROM vipps_captures WHERE tenant_id = $1 AND payment_intent_id = $2`,
+      [tenantId, paymentIntentId]
+    );
+    const row = rows[0] as { settled_ore: string; unresolved: number };
+    if (Number(row.settled_ore) > 0) return "settled_captures";
+    return row.unresolved > 0 ? "capture_outcome_unresolved" : "none";
+  }
+
+  /**
+   * WP-FIN2 (D-486, K5b): leverandøren (webhook/oppfrisking) eller et gjennomført cancel-kall sier «avsluttet», men intensjonen har oppgjorte/uavklarte captures. Intensjonen avsluttes ikke;
+   * `PROVIDER_STATE_CONFLICT` settes og en `anomaly_flagged`-hendelse skrives KUN første gang pr. årsak (`metadata.reason`; gjentatte webhooks/oppfriskinger støyer ikke). Hendelsen bærer kun kode, aldri beløp.
+   */
+  private async flagCancelConflict(
+    client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, intent: PaymentIntent, funds: "settled_captures" | "capture_outcome_unresolved", cause: string, actorPersonId: string | null
+  ): Promise<void> {
+    await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", intent.payment_intent_id, ["PROVIDER_STATE_CONFLICT"]);
+    // Fiks-runde 1 (FIX-7): «første gang» avgjøres av HENDELSEN (årsaken), ikke av flagget. Flagget `PROVIDER_STATE_CONFLICT` kan stå fra en ANNEN årsak (f.eks. `terminal_state_conflict` i
+    // `applyVippsPaymentOutcome`), og da ble `anomaly_flagged`-hendelsen med `captures`-metadata aldri skrevet. Som `recordSucceededAfterLocalFailed`: en hendelse pr. (intensjon, årsak).
+    const { rows: written } = await client.query(
+      `SELECT 1 FROM payment_intent_events WHERE tenant_id = $1 AND payment_intent_id = $2 AND event_type = 'anomaly_flagged' AND metadata->>'reason' = $3 LIMIT 1`,
+      [tenantId, intent.payment_intent_id, cause]
+    );
+    if (written.length > 0) return;
+    await insertEvent(client, tenantId, memorySpace, {
+      payment_intent_id: intent.payment_intent_id, event_type: "anomaly_flagged",
+      summary: `Vipps meldte at betalingen er avsluttet, men intensjonen har ${funds === "settled_captures" ? "oppgjorte" : "uavklarte"} captures - intensjonen beholdes (PROVIDER_STATE_CONFLICT)`,
+      actor_person_id: actorPersonId, metadata: { anomaly_flags: ["PROVIDER_STATE_CONFLICT"], reason: cause, captures: funds }
+    });
+  }
 
   private async requireVippsPaymentIntent(client: pg.PoolClient, tenantId: string, paymentIntentId: string, forUpdate: boolean): Promise<PaymentIntent> {
     const current = await readForUpdate(client, tenantId, paymentIntentId, forUpdate);
@@ -1911,12 +2064,25 @@ export class FinanceService {
       new Date(outcome.sourceEventEpochMs).toISOString(), outcome.sourceEventKey
     ];
 
+    if (targetState === "cancelled" && !isTerminalPaymentIntentState(current.state)) {
+      // WP-FIN2 (D-486, K5b): ALDRI `cancelled` med oppgjorte/uavklarte captures - da er intensjonen terminal mens penger er tatt, og `createVippsRefund` (krever `settled`)
+      // kan aldri betale dem tilbake. Fail-closed på samme måte som konflikten under: FLAGG (én hendelse første gang), la intensjonen stå, ALDRI overskriv.
+      // Intensjonsraden er låst av kalleren (`FOR UPDATE`), så captures kan ikke endre seg mellom sjekken og skrivingen: en capture-reservasjon (`submitVippsCapture.prepare`) tar intensjonen i `FOR SHARE`
+      // (fiks-runde 1, FIX-9) og en oppgjørsskriving (`apply`) tar den i `FOR UPDATE`; begge konflikter med kallerens lås.
+      const funds = await this.capturedFundsStatus(client, tenantId, current.payment_intent_id);
+      if (funds !== "none") {
+        await this.flagCancelConflict(client, tenantId, memorySpace, current, funds, `provider_reported_${outcome.vippsState.slice(0, 20)}`, actorPersonId);
+        const { rows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, current.payment_intent_id]);
+        return { applied: false, reason: "terminal_state_conflict", intent: rows[0] as PaymentIntent };
+      }
+    }
+
     if (targetState !== null && targetState !== current.state) {
       if (!canTransitionPaymentIntent(current.state, targetState)) {
         // F.eks. en sen/duplisert hendelse som rapporterer TERMINATED ETTER
         // at raden allerede er `settled` - fail-closed: FLAGG, ALDRI
         // overskriv en allerede etablert terminal-tilstand.
-        await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", current.payment_intent_id, ["PROVIDER_STATE_CONFLICT"]);
+        await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", current.payment_intent_id, ["PROVIDER_STATE_CONFLICT"]);
         const { rows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, current.payment_intent_id]);
         return { applied: false, reason: "terminal_state_conflict", intent: rows[0] as PaymentIntent };
       }
@@ -2060,7 +2226,7 @@ export class FinanceService {
           return { status: "unsupported" as const, eventId: envelope.dedupeKey };
         }
         if (intentRow.tenant_id !== vippsTenantId) {
-          await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", intentRow.payment_intent_id, ["PROVIDER_OBJECT_TENANT_CONFLICT"]);
+          await this.appendAnomalyFlags(client, intentRow.tenant_id, "payment_intents", "payment_intent_id", intentRow.payment_intent_id, ["PROVIDER_OBJECT_TENANT_CONFLICT"]);
           await client.query(`UPDATE vipps_webhook_events SET status = 'failed_retryable', payment_intent_id = $2, error_message = $3, processed_at = now() WHERE dedupe_key = $1`, [
             envelope.dedupeKey, intentRow.payment_intent_id, new ProviderObjectTenantConflictError(envelope.reference, vippsTenantId, intentRow.tenant_id).message
           ]);
@@ -2116,10 +2282,11 @@ export class FinanceService {
     if (!Number.isInteger(input.amount_ore) || input.amount_ore <= 0) throw new InvalidAmountError(input.amount_ore);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const intent = await this.requireVippsPaymentIntent(client, tenantId, input.payment_intent_id, true);
+      const requested = { payment_intent_id: input.payment_intent_id, amount_ore: input.amount_ore, currency: intent.currency };
 
       const captureId = `fin-vc-${randomUUID()}`;
       const { rows: existingByKey } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-      if (existingByKey.length > 0) return existingByKey[0] as VippsCapture;
+      if (existingByKey.length > 0) return resolveChildIdempotency(existingByKey[0] as VippsCapture, requested, input.idempotency_key); // WP-FIN2 (K4)
 
       // Radlåsen over (`requireVippsPaymentIntent(..., forUpdate=true)`)
       // lukker TOCTOU-vinduet - Postgres tillater IKKE `FOR UPDATE` sammen
@@ -2144,7 +2311,7 @@ export class FinanceService {
       );
       if (rows.length === 0) {
         const existing = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-        return existing.rows[0] as VippsCapture;
+        return resolveChildIdempotency(existing.rows[0] as VippsCapture, requested, input.idempotency_key); // WP-FIN2 (K4): `ON CONFLICT`-banen
       }
       return rows[0] as VippsCapture;
     });
@@ -2170,6 +2337,14 @@ export class FinanceService {
     >(tenantId, memorySpace, {
       subjectId: captureId,
       prepare: async (client) => {
+        // Fiks-runde 1 (FIX-9): en capture-RESERVASJON kunne skje uten intensjonslås, så en samtidig `cancelVippsPayment` kunne passere `capturedFundsStatus` (ingen captures ennå), commite, og
+        // capturen reservere og gjennomføres mot en betaling som var avbrutt (stress 60 runder: 10-18 endte `cancelled` med oppgjort capture; flagget `PROVIDER_STATE_CONFLICT`, aldri stille). Nå tas
+        // intensjonen i `FOR SHARE` FØR capture-låsen (samme rekkefølge som `apply`: intensjon -> capture, så ingen deadlock), og holdes til reservasjonen er committet: `cancelVippsPayment`/
+        // webhook/`apply` (`FOR UPDATE`) venter, og ser capturen som `submitted` (blokkert) - eller `prepare` ser at intensjonen allerede er avbrutt (`provider_status` != AUTHORIZED, ingen reservasjon).
+        // Flere samtidige reservasjoner av ulike captures deler `FOR SHARE` og blokkerer ikke hverandre.
+        const { rows: parentRows } = await client.query(`SELECT payment_intent_id FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2`, [tenantId, captureId]);
+        const parentIntentId = (parentRows[0] as { payment_intent_id: string } | undefined)?.payment_intent_id;
+        if (parentIntentId !== undefined) await client.query(`SELECT 1 FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2 FOR SHARE`, [tenantId, parentIntentId]);
         const { rows: captureRows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2 FOR UPDATE`, [tenantId, captureId]);
         const current = captureRows[0] as VippsCapture | undefined;
         if (!current) throw new CaptureNotFoundError(captureId);
@@ -2187,6 +2362,10 @@ export class FinanceService {
 
         const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
         if (!intent.provider_ref) throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
+        // Fiks-runde 2 (FIX-B, forsvar i dybden): `provider_status` er en OBSERVASJON og kan stå AUTHORIZED mens intensjonen er avsluttet lokalt - en oppfrisking som melder AUTHORIZED etter en lokal cancel
+        // skriver den tilbake (AUTHORIZED har ingen tilstandsovergang i `applyVippsPaymentOutcome`). Capture er kun mulig fra `provider_acknowledged` (`PAYMENT_INTENT_TRANSITIONS`: eneste tilstand med vei til
+        // `settled`); `cancelled`/`failed`/`settled` avvises FØR reservasjon, credential-krav og leverandørkall. Sjekken leser raden etter `FOR SHARE`-låsen over, så en cancel som commitet først sees her.
+        if (intent.state !== "provider_acknowledged") throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status, intent.state);
         if (intent.provider_status !== "AUTHORIZED") throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
         if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
         const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering FØR reservasjon (ugyldig beløp reserverer aldri)
@@ -2199,7 +2378,12 @@ export class FinanceService {
         // SAMME dobbel-idempotens-begrunnelse som Stripe: avledet FRA capture_id, ALDRI random per forsøk.
         idempotencyKey: `vipps-capture:${captureId}`
       }),
-      apply: async (client) => {
+      apply: async (client, { current }) => {
+        // WP-FIN2 (D-486, K5a): lås INTENSJONEN før capturen (samme rekkefølge som `createVippsCapture`, webhook-innhentingen og `checkVippsFullSettlement`), og skriv capture-oppgjøret,
+        // `captured`-hendelsen og full-oppgjør-sjekken i SAMME transaksjon. Tidligere gikk hendelsen og sjekken i en ANDRE transaksjon etter at capturen var `settled`: feilet den, sto
+        // intensjonen i `provider_acknowledged` til en `CAPTURED`-webhook, og en retry så `done`. Feiler noe her nå, ruller alt tilbake og feilen går i M-F2-stien (ukjent utfall, retry
+        // med samme Idempotency-Key).
+        await client.query(`SELECT 1 FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2 FOR UPDATE`, [tenantId, current.payment_intent_id]);
         const { rows: lockedRows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2 FOR UPDATE`, [tenantId, captureId]);
         const locked = lockedRows[0] as VippsCapture | undefined;
         // En samtidig capture (samme Idempotency-Key) har allerede lagret utfallet, eller raden er avsluttet på annen måte -> aldri skriv på nytt.
@@ -2209,22 +2393,19 @@ export class FinanceService {
            WHERE tenant_id = $1 AND capture_id = $2 RETURNING *`,
           [tenantId, captureId]
         );
-        return { capture: rows[0] as VippsCapture, performed: true };
+        const settled = rows[0] as VippsCapture;
+        await insertEvent(client, tenantId, memorySpace, {
+          payment_intent_id: settled.payment_intent_id, event_type: "captured",
+          summary: `Vipps-capture ${captureId} fullført (${settled.amount_ore} øre)`, actor_person_id: actorPersonId ?? null,
+          metadata: { capture_id: captureId, amount_ore: settled.amount_ore }
+        });
+        await this.checkVippsFullSettlement(client, tenantId, memorySpace, settled.payment_intent_id, actorPersonId ?? null);
+        return { capture: settled, performed: true };
       },
       onCallError: (client, _plan, failureClass, err) =>
         this.releaseChildReservation(client, "vipps_captures", tenantId, captureId, failureClass, err instanceof Error ? err.message : String(err))
     });
 
-    if (outcome.performed) {
-      await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-        await insertEvent(client, tenantId, memorySpace, {
-          payment_intent_id: outcome.capture.payment_intent_id, event_type: "captured",
-          summary: `Vipps-capture ${captureId} fullført (${outcome.capture.amount_ore} øre)`, actor_person_id: actorPersonId ?? null,
-          metadata: { capture_id: captureId, amount_ore: outcome.capture.amount_ore }
-        });
-        await this.checkVippsFullSettlement(client, tenantId, memorySpace, outcome.capture.payment_intent_id, actorPersonId ?? null);
-      });
-    }
     return outcome.capture;
   }
 
@@ -2241,7 +2422,14 @@ export class FinanceService {
   private async checkVippsFullSettlement(client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId: string | null): Promise<void> {
     const { rows: intentRows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2 FOR UPDATE`, [tenantId, paymentIntentId]);
     const intent = intentRows[0] as PaymentIntent | undefined;
-    if (!intent || intent.state !== "provider_acknowledged") return; // allerede terminal, eller ikke funnet - intet å oppgjøre.
+    if (!intent) return; // ikke funnet - intet å oppgjøre.
+    if (intent.state !== "provider_acknowledged") {
+      // WP-FIN2 (D-486, K5b): en capture er oppgjort på en intensjon som allerede er avsluttet uten penger (`cancelled`/`failed`) - den omvendte kappløpsveien av cancel-vernet. Flagg, aldri stille.
+      if ((intent.state === "cancelled" || intent.state === "failed") && (await this.capturedFundsStatus(client, tenantId, paymentIntentId)) === "settled_captures") {
+        await this.flagCancelConflict(client, tenantId, memorySpace, intent, "settled_captures", "capture_settled_after_intent_ended", actorPersonId);
+      }
+      return; // allerede terminal - intet å oppgjøre.
+    }
 
     const { rows: aggregateRows } = await client.query(
       `SELECT COALESCE(SUM(amount_ore), 0)::bigint AS total FROM vipps_captures WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'settled'`,
@@ -2252,7 +2440,7 @@ export class FinanceService {
     if (capturedOre > Number(intent.amount_ore)) {
       // Bør være strukturelt umulig (createVippsCapture() forhindrer det
       // deterministisk FØR opprettelse) - defensivt bevist likevel, ALDRI antatt.
-      await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", paymentIntentId, ["CAPTURE_AMOUNT_CONFLICT"]);
+      await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", paymentIntentId, ["CAPTURE_AMOUNT_CONFLICT"]);
       return;
     }
     if (!canTransitionPaymentIntent(intent.state, "settled")) return;
@@ -2290,6 +2478,13 @@ export class FinanceService {
    * IDENTISK semantikk, ALDRI en ny state-maskin-endring for D-110).
    */
   async cancelVippsPayment(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    // WP-FIN2 (D-486, K1a): credential-oppslaget (kan være et nettverkskall mot Infisical) skjer FØR transaksjonen med `FOR UPDATE`-låsen - tidligere sto det inne i `prepare`, under radlåsen
+    // (funnet av kildevakten `fin2-no-provider-io-in-tx.test.ts`). Manglende credential kastes fortsatt på samme sted som før (etter tilstands-/capture-/nødbryter-sjekkene).
+    // Fiks-runde 1 (FIX-4): oppslaget var UBETINGET, så et credential-avbrudd (`infisical_down`) feilet også rent lokale baner som `main` lot lykkes (lokal avbrytelse av en aldri innsendt intensjon,
+    // no-op på en terminal intensjon). Som `prefetchCredentialsFor`: les intensjonen først (kort lesetransaksjon uten lås) og hent credentials KUN når intensjonen finnes hos Vipps (`provider_ref`)
+    // og ikke er terminal. Endrer intensjonen seg mellom lesingen og låsen (innsendt/avsluttet av en samtidig kall), gjelder dagens fail-lukkede regler i `prepare` (manglende credential kastes der).
+    const preview = await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, false));
+    const credentials = preview.provider_ref !== null && !isTerminalPaymentIntentState(preview.state) ? await this.vippsCredentialsProvider.getCredentials(tenantId) : null;
     return this.providerCallOutsideLock<{ providerRef: string; transport: VippsPaymentWriter }, unknown, PaymentIntent>(tenantId, memorySpace, {
       prepare: async (client) => {
         const current = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
@@ -2307,13 +2502,16 @@ export class FinanceService {
           return { kind: "done", out: rows[0] as PaymentIntent };
         }
 
+        // WP-FIN2 (D-486, K5b): oppgjorte/uavklarte captures -> typet feil FØR kill switch, credential og leverandørkall (intensjonsraden er låst over).
+        const funds = await this.capturedFundsStatus(client, tenantId, paymentIntentId);
+        if (funds !== "none") throw new CancelBlockedByCapturesError(paymentIntentId, funds);
+
         const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
         if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
           return { kind: "blocked", error: new FinanceKillSwitchActiveError(tenantId) };
         }
 
         assertValidPaymentIntentTransition(current.state, "cancelled");
-        const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
         if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
         return { kind: "call", plan: { providerRef: current.provider_ref, transport: this.vippsTransportFactory(credentials) } };
       },
@@ -2321,6 +2519,13 @@ export class FinanceService {
       apply: async (client) => {
         const locked = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
         if (isTerminalPaymentIntentState(locked.state)) return locked; // en samtidig annullering/webhook har allerede ferdigstilt den.
+        // WP-FIN2 (D-486, K5b): en capture kan ha blitt oppgjort/uavklart MENS cancel-kallet pågikk (leverandøren har utført cancel). Intensjonen avsluttes da ikke - flagg i stedet.
+        const funds = await this.capturedFundsStatus(client, tenantId, paymentIntentId);
+        if (funds !== "none") {
+          await this.flagCancelConflict(client, tenantId, memorySpace, locked, funds, "cancel_executed_while_capture_changed", actorPersonId ?? null);
+          const { rows: kept } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, paymentIntentId]);
+          return kept[0] as PaymentIntent;
+        }
         const { rows } = await client.query(
           `UPDATE payment_intents SET state = 'cancelled', provider_status = 'CANCELLED', provider_status_updated_at = now(), cancelled_at = now(), updated_at = now()
            WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
@@ -2339,11 +2544,12 @@ export class FinanceService {
     if (!Number.isInteger(input.amount_ore) || input.amount_ore <= 0) throw new InvalidAmountError(input.amount_ore);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const intent = await this.requireVippsPaymentIntent(client, tenantId, input.payment_intent_id, true);
-      if (intent.state !== "settled") throw new PaymentIntentNotSettledError(input.payment_intent_id, intent.state);
+      const requested = { payment_intent_id: input.payment_intent_id, amount_ore: input.amount_ore, currency: intent.currency };
 
       const refundId = `fin-vr-${randomUUID()}`;
       const { rows: existingByKey } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-      if (existingByKey.length > 0) return existingByKey[0] as VippsRefund;
+      if (existingByKey.length > 0) return resolveChildIdempotency(existingByKey[0] as VippsRefund, requested, input.idempotency_key); // WP-FIN2 (K4)
+      if (intent.state !== "settled") throw new PaymentIntentNotSettledError(input.payment_intent_id, intent.state);
 
       const { rows: aggregateRows } = await client.query(
         `SELECT COALESCE(SUM(amount_ore), 0)::bigint AS total FROM vipps_refunds
@@ -2365,7 +2571,7 @@ export class FinanceService {
       );
       if (rows.length === 0) {
         const existing = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-        return existing.rows[0] as VippsRefund;
+        return resolveChildIdempotency(existing.rows[0] as VippsRefund, requested, input.idempotency_key); // WP-FIN2 (K4): `ON CONFLICT`-banen
       }
       return rows[0] as VippsRefund;
     });
@@ -2476,10 +2682,13 @@ export class FinanceService {
       for (const row of duplicateObject.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "PROVIDER_REFERENCE_CONFLICT");
 
       // D) UNKNOWN_PROVIDER_OUTCOME / EXPIRED_PAYMENT_WITH_ACTIVE_INTENT - Vipps anerkjente opprettelsen, men fortsatt CREATED (venter bruker) langt utover et rimelig vindu (24t) - brukeren fullførte trolig ALDRI i appen, men Jarvis sin egen state henger fortsatt i provider_acknowledged.
+      // Fiks-runde 2 (FIX-A): etter `createPayment` i dokumentert form (`{ reference, redirectUrl }`) er `provider_status` og `provider_status_updated_at` begge NULL (ingen observasjon ennå), og et strengt
+      // `= 'CREATED'`/`< now() - 24 t` fanget dem aldri før en oppfrisking hadde fylt dem. Ingen observasjon = fortsatt CREATED, og klokka er da innsendingen (`submitted_at` settes når Vipps' svar lagres og
+      // endres ikke etter det for en `provider_acknowledged` intensjon; `created_at` er utkastets alder og er feil klokke). En lagret observasjon (`provider_status_updated_at`) har forrang som før.
       const staleAwaitingUser = await client.query(
         `SELECT payment_intent_id FROM payment_intents
          WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'vipps' AND state = 'provider_acknowledged'
-           AND provider_status = 'CREATED' AND provider_status_updated_at < now() - interval '24 hours'`,
+           AND COALESCE(provider_status, 'CREATED') = 'CREATED' AND COALESCE(provider_status_updated_at, submitted_at) < now() - interval '24 hours'`,
         [tenantId, memorySpace]
       );
       for (const row of staleAwaitingUser.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "EXPIRED_PAYMENT_WITH_ACTIVE_INTENT");
@@ -2537,9 +2746,9 @@ export class FinanceService {
       );
       let refundFlagsAdded = 0;
       for (const row of refundConflicts.rows as Array<{ payment_intent_id: string; refund_ids: string[] }>) {
-        await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", row.payment_intent_id, ["REFUND_AMOUNT_CONFLICT"]);
+        await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", row.payment_intent_id, ["REFUND_AMOUNT_CONFLICT"]);
         for (const refundId of row.refund_ids) {
-          await this.appendVippsAnomalyFlags(client, "vipps_refunds", "refund_id", refundId, ["REFUND_AMOUNT_CONFLICT"]);
+          await this.appendVippsAnomalyFlags(client, tenantId, "vipps_refunds", "refund_id", refundId, ["REFUND_AMOUNT_CONFLICT"]);
         }
         refundFlagsAdded++;
       }
@@ -2554,9 +2763,9 @@ export class FinanceService {
       );
       let captureFlagsAdded = 0;
       for (const row of captureConflicts.rows as Array<{ payment_intent_id: string; capture_ids: string[] }>) {
-        await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", row.payment_intent_id, ["CAPTURE_AMOUNT_CONFLICT"]);
+        await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", row.payment_intent_id, ["CAPTURE_AMOUNT_CONFLICT"]);
         for (const captureId of row.capture_ids) {
-          await this.appendVippsAnomalyFlags(client, "vipps_captures", "capture_id", captureId, ["CAPTURE_AMOUNT_CONFLICT"]);
+          await this.appendVippsAnomalyFlags(client, tenantId, "vipps_captures", "capture_id", captureId, ["CAPTURE_AMOUNT_CONFLICT"]);
         }
         captureFlagsAdded++;
       }
@@ -2566,12 +2775,12 @@ export class FinanceService {
   }
 
   /** SAMME som `appendAnomalyFlags()`, men for `vipps_captures`/`vipps_refunds` (egen overload - `appendAnomalyFlags()` sin `table`-parameter er typet snevert til de Stripe-tabellene, BEVISST IKKE utvidet for å unngå å svekke den eksisterende typesikkerheten). */
-  private async appendVippsAnomalyFlags(client: pg.PoolClient, table: "vipps_captures" | "vipps_refunds", idColumn: string, id: string, flags: readonly VippsAnomalyType[]): Promise<void> {
+  private async appendVippsAnomalyFlags(client: pg.PoolClient, tenantId: string, table: "vipps_captures" | "vipps_refunds", idColumn: string, id: string, flags: readonly VippsAnomalyType[]): Promise<void> {
     await client.query(
       `UPDATE ${table} SET anomaly_flags = (
          SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(anomaly_flags || $2::jsonb) AS v
-       ), updated_at = now() WHERE ${idColumn} = $1`,
-      [id, JSON.stringify(flags)]
+       ), updated_at = now() WHERE tenant_id = $3 AND ${idColumn} = $1`,
+      [id, JSON.stringify(flags), tenantId]
     );
   }
 
@@ -2664,7 +2873,7 @@ export class FinanceService {
 
     if (targetState !== null && targetState !== current.state) {
       if (!canTransitionPaymentIntent(current.state, targetState)) {
-        await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", current.payment_intent_id, ["WEBHOOK_STATE_CONFLICT"]);
+        await this.appendAnomalyFlags(client, tenantId, "payment_intents", "payment_intent_id", current.payment_intent_id, ["WEBHOOK_STATE_CONFLICT"]);
         const { rows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, current.payment_intent_id]);
         return { applied: false, reason: "terminal_state_conflict", intent: rows[0] as PaymentIntent };
       }
@@ -2793,7 +3002,7 @@ export class FinanceService {
           return { status: "unsupported" as const, eventId: envelope.dedupeKey };
         }
         if (intentRow.tenant_id !== neonomicsTenantId) {
-          await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", intentRow.payment_intent_id, ["PROVIDER_OBJECT_TENANT_CONFLICT"]);
+          await this.appendAnomalyFlags(client, intentRow.tenant_id, "payment_intents", "payment_intent_id", intentRow.payment_intent_id, ["PROVIDER_OBJECT_TENANT_CONFLICT"]);
           await client.query(`UPDATE neonomics_webhook_events SET status = 'failed_retryable', payment_intent_id = $2, error_message = $3, processed_at = now() WHERE dedupe_key = $1`, [
             envelope.dedupeKey, intentRow.payment_intent_id, new ProviderObjectTenantConflictError(envelope.paymentId, neonomicsTenantId, intentRow.tenant_id).message
           ]);

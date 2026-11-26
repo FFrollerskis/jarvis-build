@@ -3,7 +3,7 @@ import { FamilyError, type FamilyActor, type FamilyDelegationScope, type FamilyE
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { HealthIntakeError, HealthRetentionPolicyRequiredError, type HealthIntakeService } from "@jarvis/health";
 import type {
-  ActionDomain, ActionStatus, ExecutePersonalActionInput, ExecutePersonalActionResult, Params, PersonalActionExecutorDeps
+  ActionDomain, ActionStatus, ExecutePersonalActionInput, ExecutePersonalActionResult, Params, PersonalActionExecutorDeps, ReconcileInput, ReconcileOutcome
 } from "@jarvis/tool-gateway";
 import { handleDavRoute, type PersonalDavDeps } from "./personal-dav.ts";
 import { handleFinanceRead, type PersonalFinanceDeps } from "./personal-finance-read.ts";
@@ -26,6 +26,8 @@ export interface PersonalActionsDeps {
   domains: ReadonlyMap<string, PersonalActionDomainDeps>;
   /** Utfører én handling (i drift `executePersonalAction(executor, identity, input)`; en egen søm slik at rutetester kan teste rekkefølgen uten database). */
   run: (identity: IdentityContext, input: ExecutePersonalActionInput) => Promise<ExecutePersonalActionResult>;
+  /** Avstemmer én `outcome_unknown`-rad (WP-G2c, D-483): leser målets tilstand via lese-handlingen og avgjør raden; aldri en retry, aldri skrive-verktøyet. I drift `reconcilePersonalAction(...)`. */
+  reconcile: (identity: IdentityContext, input: ReconcileInput) => Promise<ReconcileOutcome>;
 }
 
 export interface PersonalFamilyDeps {
@@ -66,6 +68,11 @@ export interface PersonalRouteContext {
 }
 
 const DOMAIN = /^(home|car)$/;
+/** Avstemmingens bevisste feilkoder -> HTTP-status. `personal_action_target_busy` = en handling (eller en annen avstemming) har målet akkurat nå: ingenting er lest eller skrevet, prøv på nytt. */
+const RECONCILE_ERROR_STATUS: Readonly<Record<string, number>> = {
+  personal_action_reconcile_id_invalid: 400, personal_action_reconcile_owner_only: 403, personal_action_not_found: 404,
+  personal_action_not_reconcilable: 409, personal_action_domain_not_enabled: 409, personal_action_target_busy: 409
+};
 const ACTION_STATUS: readonly string[] = ["requested", "applied", "failed", "outcome_unknown"];
 
 /** Bindeverdiene (forutsetninger) som forhåndsvisningen gir tilbake: scene/skript krever sin markør, de øvrige tilstanden de så. */
@@ -134,7 +141,7 @@ async function handleHealthIngest(ctx: PersonalRouteContext, health: PersonalHea
 // ---------------------------------------------------------------------------------------------------------------------
 export const FAMILY_STATUS: Readonly<Record<FamilyErrorCode, number>> = {
   invalid_input: 400, self_target: 400,
-  shared_space_required: 403, not_a_member: 403, owner_required: 403, role_not_allowed: 403, not_the_invitee: 403, share_required: 403, share_not_allowed: 403, delegation_required: 403, delegation_not_allowed: 403,
+  shared_space_required: 403, not_a_member: 403, owner_required: 403, role_not_allowed: 403, share_required: 403, share_not_allowed: 403, delegation_required: 403, delegation_not_allowed: 403,
   not_found: 404,
   already_member: 409, invitation_pending: 409, invitation_not_pending: 409, invitation_expired: 409, owner_cannot_leave: 409, cannot_remove_owner: 409, circle_not_dedicated: 409, circle_space_missing: 409,
   invitee_not_enrolled: 409, data_tenant_not_member: 409,
@@ -292,6 +299,28 @@ async function handleActionRoute(ctx: PersonalRouteContext, actions: PersonalAct
       // `personal_action_target_busy` = en annen handling mot SAMME mål er i flukt (målets prosess-lokale lås): 409 «ikke utført, prøv igjen» - ingenting er sendt.
       if (/^personal_action_[a-z_]+(?::|$)/.test(reason)) ctx.json(reason === "personal_action_target_busy" ? 409 : 400, { error: "personal_action_rejected", reason: reason.slice(0, 80), request_id: ctx.requestId() });
       else ctx.domainFailure(400, "personal_action_rejected", err);
+    }
+    return true;
+  }
+
+  if (url.pathname === "/personal/actions/reconcile") {
+    // Avstemming av en `outcome_unknown`-rad (WP-G2c, D-483, Q-73 pkt 10). Rekkefølge: grant -> KUN eieren (ingen delegat) -> step-up (enhetssignert økt: utfallet styrer hva en replay med samme nøkkel returnerer, så den følger `mutate`) -> avstemming.
+    // Avstemmingen leser kun målets tilstand (klasse A via gatewayen), setter `applied`/`failed` bare når det er bevist, ellers forblir raden `outcome_unknown` med begrunnelse; ALDRI en retry av kommandoen. Ingen modellflate.
+    const authed = await ctx.authed(["action_id"]);
+    if (!authed) return true;
+    if (!(await ctx.requireOwner(authed.identity, { tool_id: "personal", action: "actions_reconcile" }))) return true;
+    const stepUp = ctx.stepUpDenial(authed.identity, "personal_actions_reconcile");
+    if (stepUp) return ctx.json(403, { error: "step_up_required", reason: stepUp, request_id: ctx.requestId() }), true;
+    const actionId = ctx.fieldString(authed.body, "action_id"); // utenfor `try`: en mangelfull kropp er en vanlig 400 `malformed_request` (HttpError), aldri en 500
+    try {
+      const outcome = await actions.reconcile(authed.identity, { action_id: actionId });
+      ctx.json(200, { reconciliation: { resolution: outcome.resolution, basis: outcome.basis, replayed: outcome.replayed, action: outcome.action, observed_state: outcome.observed, output_trust: "untrusted" } });
+    } catch (err) {
+      // Kun VÅRE bevisste feilkoder vises; alt annet (databasefeil) logges og blir generisk.
+      const reason = err instanceof Error ? err.message : "";
+      const status = RECONCILE_ERROR_STATUS[reason];
+      if (status !== undefined) ctx.json(status, { error: "personal_action_rejected", reason, request_id: ctx.requestId() });
+      else ctx.domainFailure(500, "personal_action_reconcile_failed", err);
     }
     return true;
   }

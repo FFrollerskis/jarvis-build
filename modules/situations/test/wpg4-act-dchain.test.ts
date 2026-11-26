@@ -8,6 +8,7 @@ import { detectSpendSpike, detectStaleJobs, mapSpendSpikeToCandidate, mapStaleJo
 import { openingDetectionKey } from "../src/home-bridge.ts";
 import { SituationSignalBus } from "../src/signal-bus.ts";
 import { identity, minutesAgo, NOW, OWNER, actorOwner, record, startG4Db, TENANT_A, type G4Db } from "./support/wpg4-db.ts";
+import { TEST_BINDABLE } from "./support/bindable.ts";
 
 /**
  * WP-G4 (D-466) P2e: «D-klasse-handlinger gir umiddelbart varsel + gjenopprettingskontekst» og «INFORM-kun for anomalier», bevist gjennom den EKTE `ToolGateway`/`PolicyGateway`/`SituationEngine` mot ekte Postgres:
@@ -49,7 +50,8 @@ function buildGateway(notifier: ClassDNotifier) {
   built.gateway.register({
     tool_id: "test_gate", action: "close", description: "test", input_schema: record({ situation_id: z.string() }), capability_class: "D", scopes: [], reversible: true, rollback_procedure: GATE_ROLLBACK,
     idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_GATE_TOKEN", output_trust: "internal", transport: built.actuator,
-    preflight_action: "read_state", preflight_requires_target: true, postcondition_predicate: (after) => (after as { done?: boolean } | null)?.done === true
+    preflight_action: "read_state", preflight_requires_target: true, postcondition_predicate: (after) => (after as { done?: boolean } | null)?.done === true,
+    autonomy_bindable: TEST_BINDABLE
   });
   return built;
 }
@@ -141,7 +143,7 @@ describe("A2: bindingen re-verifiseres med LEVENDE parametre rett før hvert kal
     const spy = new ParamSpy();
     gateway.register({
       tool_id: "test_param", action: "apply", description: "test", input_schema: record({ situation_id: z.string(), target: z.string() }), capability_class: "B", scopes: [], reversible: true,
-      rollback_procedure: "angre via test_param", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_PARAM_TOKEN", output_trust: "internal", transport: spy
+      rollback_procedure: "angre via test_param", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_PARAM_TOKEN", output_trust: "internal", transport: spy, autonomy_bindable: TEST_BINDABLE
     });
     await seedGateSuggest("cover.garasje");
     await seedGateSuggest("cover.port");
@@ -159,7 +161,7 @@ describe("A2: bindingen re-verifiseres med LEVENDE parametre rett før hvert kal
     const spy = new ParamSpy();
     gateway.register({
       tool_id: "test_param", action: "apply", description: "test", input_schema: record({ situation_id: z.string(), target: z.string() }), capability_class: "B", scopes: [], reversible: true,
-      rollback_procedure: "angre via test_param", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_PARAM_TOKEN", output_trust: "internal", transport: spy
+      rollback_procedure: "angre via test_param", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_PARAM_TOKEN", output_trust: "internal", transport: spy, autonomy_bindable: TEST_BINDABLE
     });
     await seedGateSuggest("cover.garasje");
     await seedGateSuggest("cover.port");
@@ -199,14 +201,14 @@ describe("B: fysiske/kritiske handlinger (lås, alarm, lys, klima, bil, critical
     ["home-assistant", "critical_lock"], ["home-assistant", "critical_alarm"], ["home-assistant", "critical_cover"], ["home-assistant", "critical_valve"], ["home-assistant", "critical_switch"],
     ["home-assistant", "critical_scene"], ["home-assistant", "critical_script"], ["home-assistant", "critical_climate_mode"],
     ["car", "lock"], ["car", "unlock"], ["car", "climate_set"], ["car", "charge_set"],
-    // allowlist-tankegang: en NY/ukjent handling i de fysiske navnerommene er fysisk til noen bevisst legger den på lese-listen
+    // en NY/ukjent handling i de fysiske navnerommene er fysisk (ingen allowlist som kan åpnes ved en feil)
     ["home-assistant", "open_garage_v2"], ["car", "honk"]
   ];
 
-  it("regelen er ren og fail-closed: kun kjente LESE-handlinger i `home-assistant`/`car` er bindbare; alt annet der (også ukjent/ugyldig) er fysisk; andre navnerom er uendret", () => {
+  it("regelen er ren og fail-closed: ENHVER handling i `home-assistant`/`car` er fysisk (FIX-9: også lese-handlinger; ugyldig inndata likeså); andre navnerom er uendret", () => {
     for (const [tool, action] of PHYSICAL) expect(autonomyActionBlocker(tool, action), `${tool}.${action}`).toEqual({ code: "physical_action_not_bindable", tool_id: tool, action });
-    for (const read of ["list_states", "read_state", "read_state_detail", "read_states_detail", "read_critical_state"]) expect(autonomyActionBlocker("home-assistant", read), read).toBeNull();
-    expect(autonomyActionBlocker("car", "read_vehicle_state")).toBeNull();
+    for (const read of ["list_states", "read_state", "read_state_detail", "read_states_detail", "read_critical_state"]) expect(autonomyActionBlocker("home-assistant", read), read).toEqual({ code: "physical_action_not_bindable", tool_id: "home-assistant", action: read });
+    expect(autonomyActionBlocker("car", "read_vehicle_state")).toEqual({ code: "physical_action_not_bindable", tool_id: "car", action: "read_vehicle_state" });
     for (const other of [["telegram", "notify"], ["test_gate", "close"], ["email", "send"], ["github", "merge_pr"], ["docker", "stop_container"]]) expect(autonomyActionBlocker(other[0], other[1]), other.join(".")).toBeNull();
     // ugyldig inndata er alltid nektet (aldri en stille «bindbar»)
     for (const bad of [[undefined, "x"], ["home-assistant", undefined], ["", "x"], ["x", ""], [null, null], [5, "x"]]) expect(autonomyActionBlocker(bad[0], bad[1]), String(bad)).not.toBeNull();
@@ -215,15 +217,17 @@ describe("B: fysiske/kritiske handlinger (lås, alarm, lys, klima, bil, critical
     expect(autonomyActionBlocker("Home-Assistant", "lock_set")).toBeNull();
   });
 
-  it("bind-tid: ALLE fysiske/kritiske handlinger avvises med stabil årsakskode og ingenting lagres; lese-handlinger og andre navnerom kan bindes", async () => {
+  it("bind-tid: ALLE fysiske/kritiske handlinger avvises med stabil årsakskode og ingenting lagres; også lese-handlinger i de fysiske navnerommene (FIX-9), og andre navnerom er bindbare kun når definisjonen sier det", async () => {
     for (const [tool, action] of PHYSICAL) {
       await expect(bind(tool, action, { entity: "x" }), `${tool}.${action}`).rejects.toMatchObject({ name: "SituationActActionForbiddenError", message: `situation_autonomy_action_forbidden:physical_action_not_bindable:${tool}.${action}` });
     }
     expect(await db.engine.listAutonomyPolicies(TENANT_A, "home")).toEqual([]);
-    await bind("home-assistant", "read_state", { entity: "lock.x" });
-    expect((await db.engine.listAutonomyPolicies(TENANT_A, "home")).map((p) => `${p.tool_id}.${p.action}`)).toEqual(["home-assistant.read_state"]);
-    await bind("test_gate", "close", { situation_id: "{{situation_id}}" });
-    expect((await db.engine.listAutonomyPolicies(TENANT_A, "home")).map((p) => `${p.tool_id}.${p.action}`)).toEqual(["test_gate.close"]);
+    // WP-G4b fiks-runde 1 (FIX-9): ENHVER handling i et fysisk navnerom er nektet av navnerom-vakten, også en lesing (en lesing er aldri en autonom ACT og kan ikke åpnes av en definisjon).
+    await expect(bind("home-assistant", "read_state", { entity: "lock.x" })).rejects.toMatchObject({ name: "SituationActActionForbiddenError", message: "situation_autonomy_action_forbidden:physical_action_not_bindable:home-assistant.read_state" });
+    expect(await db.engine.listAutonomyPolicies(TENANT_A, "home")).toEqual([]);
+    // Et annet navnerom er bindbart KUN fordi definisjonen erklærer det (`test_actuator.close` i G4Db-gatewayen).
+    await bind("test_actuator", "close", { situation_id: "{{situation_id}}" });
+    expect((await db.engine.listAutonomyPolicies(TENANT_A, "home")).map((p) => `${p.tool_id}.${p.action}`)).toEqual(["test_actuator.close"]);
   });
 
   it("de GAMLE klasse D-verktøyene (lock_set/alarm_set) i ekte ToolGateway + klasse D-kjede + sveipens identitet: en binding fra før regelen utføres ALDRI (ingen claim, ingen kall, huset urørt)", async () => {
@@ -298,7 +302,7 @@ describe("B: fysiske/kritiske handlinger (lås, alarm, lys, klima, bil, critical
     for (const def of homeAssistantTools(new House())) gateway.register(def);
     gateway.register({
       tool_id: "test_stepup", action: "apply", description: "test", input_schema: record({ situation_id: z.string() }), capability_class: "D", scopes: [], reversible: true, rollback_procedure: "angre via test_stepup",
-      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_STEPUP_TOKEN", output_trust: "internal", transport: new HaSpy(), step_up_required: true
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_STEPUP_TOKEN", output_trust: "internal", transport: new HaSpy(), step_up_required: true, autonomy_bindable: TEST_BINDABLE
     });
     await seedGateSuggest();
     const sit = (await db.engine.findByDetectionKey(TENANT_A, "home", gateOpening()))!;

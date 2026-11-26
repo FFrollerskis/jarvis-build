@@ -19,7 +19,7 @@ export type FamilyDelegationScope = (typeof DELEGABLE_SCOPES)[number];
 
 export const FAMILY_ERROR_CODES = [
   "shared_space_required", "circle_space_missing", "circle_not_dedicated", "not_a_member", "owner_required", "role_not_allowed", "not_found", "already_member", "invitee_not_enrolled", "invitation_pending",
-  "invitation_not_pending", "invitation_expired", "not_the_invitee", "data_tenant_not_member", "owner_cannot_leave", "cannot_remove_owner", "share_required", "share_not_allowed", "self_target", "delegation_required",
+  "invitation_not_pending", "invitation_expired", "data_tenant_not_member", "owner_cannot_leave", "cannot_remove_owner", "share_required", "share_not_allowed", "self_target", "delegation_required",
   "delegation_not_allowed", "invalid_input", "reader_unavailable"
 ] as const;
 export type FamilyErrorCode = (typeof FAMILY_ERROR_CODES)[number];

@@ -8,6 +8,7 @@ import type { ReadinessVerdict } from "@jarvis/self-modification";
 import type { BackupStatusRead } from "../backup-status.ts";
 import type { Ev0BootStatus } from "../ev0-boot.ts";
 import { actionRequiresStepUp } from "../step-up.ts";
+import { visionFlagsFromEnv } from "../vision-flags.ts";
 import { createAgentCenter } from "./agent.ts";
 import { createAiCenter, type AiCenterDeps } from "./ai.ts";
 import { createAuthorityCenter, type AuthorityCenterDeps } from "./authority.ts";
@@ -17,6 +18,7 @@ import { createIntegrationCenter, type IntegrationCenterDeps } from "./integrati
 import { createMemoryCenter } from "./memory.ts";
 import { createOperationsCenter } from "./operations.ts";
 import { createPrivacyCenter } from "./privacy.ts";
+import type { PrivacyVisionSource } from "./privacy-vision.ts";
 import { createSecurityCenter } from "./security.ts";
 import { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS, flagOn, type ControlCenterPool } from "./shared.ts";
 import { createValueCenter } from "./value.ts";
@@ -119,6 +121,16 @@ export interface ControlCenterWiring {
   processStartedAt?: () => Date;
   /** WP-H2 Security Center: golden-suite-kjøreren. Brukes KUN med `JARVIS_CONTROL_GOLDEN_SUITE=on`. */
   goldenSuite?: GoldenSuiteControl;
+  /**
+   * WP-G3b (D-485): Syn-kortet i Personvern-senteret (kun lesing; lat status fordi kjøretiden bygges etter sentrene). `main.ts` gir den KUN med JARVIS_VISION_ENABLED=on, og `registerControlCenters` sjekker flagget en gang til:
+   * uten begge (og uten Personvern-flagget) finnes ikke kortet, og senteret er byte-identisk med main.
+   */
+  vision?: PrivacyVisionSource;
+  /**
+   * WP-N1b fiks-runde 1 (FIX-1): `true` KUN med begrenset-vakten PÅ (satt fra `main.ts`). Sikkerhet-senteret bygget for en skymodell holder da finanskoblinger/-credentials og `spend`-pausen ute av listene og tellingene.
+   * Utelatt (vakten AV) = nøyaktig H2-oppførselen (main) - nøkkelen settes ikke engang.
+   */
+  financeGuard?: true;
 }
 
 /** Lat oppslag av klassen til en registrert executive-handling: `undefined` når verktøyet ikke (ennå/lenger) er registrert i gatewayen - aldri en gjettet klasse. Kaster aldri. */
@@ -187,10 +199,17 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
     }));
   }
   if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.value) && wiring.valueReport) registry.register(createValueCenter({ valueReport: wiring.valueReport }));
-  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.privacy)) registry.register(createPrivacyCenter({ pool: wiring.pool, env: wiring.env }));
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.privacy)) {
+    registry.register(createPrivacyCenter({
+      pool: wiring.pool, env: wiring.env,
+      // WP-G3b (D-485): Syn-kortet finnes KUN når kilden er gitt OG hovedbryteren `JARVIS_VISION_ENABLED` er eksakt `on` (samme tolkning som resten av UA-9: `visionFlagsFromEnv`).
+      ...(wiring.vision !== undefined && visionFlagsFromEnv(wiring.env as NodeJS.ProcessEnv).enabled ? { vision: wiring.vision } : {})
+    }));
+  }
   if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.security) && wiring.toolGateway && wiring.ownerControls && wiring.killSwitch) {
     registry.register(createSecurityCenter({
       pool: wiring.pool, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls, killSwitch: wiring.killSwitch,
+      ...(wiring.financeGuard === true ? { financeGuard: true } : {}),
       ...(flagOn(wiring.env, CONTROL_FEATURE_FLAGS.goldenSuite) && wiring.goldenSuite ? { goldenSuite: wiring.goldenSuite } : {})
     }));
   }

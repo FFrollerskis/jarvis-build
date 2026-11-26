@@ -1,5 +1,5 @@
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
-import type { ToolTransport } from "@jarvis/tool-gateway";
+import { adoptCallSignal, type ToolTransport } from "@jarvis/tool-gateway";
 import type { FinanceService, FikenCredentialsProvider } from "./service.ts";
 import type { FinanceReconciliationService } from "./reconciliation.ts";
 import type { CreatePaymentIntentInput, PaymentIntentState, PaymentProvider } from "./types.ts";
@@ -23,7 +23,15 @@ export class FinanceTransport implements ToolTransport {
     private readonly reconciliation?: FinanceReconciliationService
   ) {}
 
-  async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
+  /**
+   * WP-FIN2 (D-486, K2): gatewayen gir kallsignalet BÅDE som 5. parameter og som ambient kontekst (`invokeWithCallSignal`); `adoptCallSignal` gjør argumentet til det ambiente kallsignalet også for en
+   * kaller som bare gir argumentet (tester/skript), slik at finanstransportene (`financeFetch`) alltid ser samme avbrudd.
+   */
+  async invoke(action: string, parameters: Record<string, JsonValue>, _credential?: string, _context?: unknown, signal?: AbortSignal): Promise<{ external_id?: string; data?: JsonValue }> {
+    return adoptCallSignal(signal, () => this.dispatch(action, parameters));
+  }
+
+  private async dispatch(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
     const tenantId = requireString(parameters, "tenant_id");
     const memorySpace = (parameters["memory_space"] !== undefined ? String(parameters["memory_space"]) : "business") as MemorySpace;
     const actorPersonId = parameters["actor_person_id"] !== undefined ? String(parameters["actor_person_id"]) : undefined;

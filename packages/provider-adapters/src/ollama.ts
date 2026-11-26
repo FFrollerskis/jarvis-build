@@ -17,7 +17,9 @@ export class OllamaAdapter implements ModelProviderAdapter {
   constructor(
     private readonly baseUrl: string | undefined = process.env["JARVIS_OLLAMA_URL"],
     readonly model: string = envOrDefault("JARVIS_OLLAMA_MODEL", "llama3.1"),
-    private readonly timeoutMs: number = envPositiveInt("JARVIS_MODEL_TIMEOUT_MS", 120_000)
+    private readonly timeoutMs: number = envPositiveInt("JARVIS_MODEL_TIMEOUT_MS", 120_000),
+    /** WP-G4b fiks-runde 1 (FIX-5): `noRedirect: true` følger aldri en omdirigering (`redirect: "error"`); av som standard = ingen `redirect`-nøkkel (som før). Se `LocalOpenAiCompatibleAdapter`. */
+    private readonly options: { noRedirect?: boolean } = {}
   ) {}
 
   available(): boolean {
@@ -35,6 +37,7 @@ export class OllamaAdapter implements ModelProviderAdapter {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs),
+        ...(this.options.noRedirect === true ? { redirect: "error" as const } : {}),
         body: JSON.stringify({
           model: this.model,
           stream: false,

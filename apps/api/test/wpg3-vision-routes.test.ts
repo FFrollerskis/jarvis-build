@@ -137,7 +137,7 @@ const upload = (request: { request_id: string }, bytes: Uint8Array, over: Record
 
 describe("dormant: uten deps.vision finnes ingen rute", () => {
   it("alle ruter gir 404 selv med gyldig eier-grant; med deps.vision gir feil metode/ukjent sti også 404", async () => {
-    for (const path of ["/vision/cameras/list", "/vision/cameras/register", "/vision/capture/request", "/vision/capture/upload", "/vision/last-seen", "/vision/inventory", "/vision/status"]) {
+    for (const path of ["/vision/cameras/list", "/vision/cameras/register", "/vision/capture/request", "/vision/capture/upload", "/vision/last-seen", "/vision/inventory", "/vision/status", "/vision/retention/get", "/vision/retention/set"]) {
       expect((await post(urlDormant, path, { grant_token: "owner-signed" })).status, path).toBe(404);
     }
     expect((await fetch(`${url}/vision/cameras/list`)).status).toBe(404); // GET
@@ -163,7 +163,9 @@ describe("kropp, grant, eier og step-up - alt avvises FØR noe skrives", () => {
     const bodies: Array<[string, Record<string, unknown>]> = [
       ["/vision/cameras/list", {}], ["/vision/status", {}], ["/vision/last-seen", { query: "x" }], ["/vision/inventory", {}],
       ["/vision/cameras/register", { label: "x", source_type: "iphone", source_ref: "d", zone_kind: "home", route_policy: "local_only" }],
-      ["/vision/cameras/update", { camera_id: "c", label: "x" }], ["/vision/cameras/remove", { camera_id: "c", confirm: true, confirm_camera_id: "c" }], ["/vision/capture/request", { camera_id: "c" }]
+      ["/vision/cameras/update", { camera_id: "c", label: "x" }], ["/vision/cameras/remove", { camera_id: "c", confirm: true, confirm_camera_id: "c" }], ["/vision/capture/request", { camera_id: "c" }],
+      // WP-G3b (D-485): retensjonsrutene er eier-kun som resten (full dekning i wpg3b-vision-retention-routes.test.ts)
+      ["/vision/retention/get", {}], ["/vision/retention/set", { retention_days: 30, snapshot_retention_days: null }]
     ];
     for (const [path, body] of bodies) {
       const res = await call(path, "other-signed", body);

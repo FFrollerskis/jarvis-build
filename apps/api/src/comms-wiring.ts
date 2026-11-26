@@ -2,11 +2,11 @@
 import type pg from "pg";
 import type { BusinessService } from "@jarvis/business";
 import {
-  CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MeetingService, ReplySweep, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
-  commsAnyEnabled, commsToolDefinitions, parseCommsConfig, retentionTenants, startRetentionSweep, type CommsConfig
+  COMMS_PEPPER_REF, CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MeetingService, ReplySweep, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
+  assessPepper, commsAnyEnabled, commsToolDefinitions, createContentHasher, guardLegacyNotifyTransport, parseCommsConfig, retentionTenants, startRetentionSweep, type CommsConfig
 } from "@jarvis/comms";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
-import { AccessTokenCache, googleAccessToken, microsoftRefreshExchange, type ToolDefinition, type ToolGateway } from "@jarvis/tool-gateway";
+import { AccessTokenCache, googleAccessToken, microsoftRefreshExchange, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
 
 /** Delegerte Graph-scopes for Teams-sending (`ChatMessage.Send`/`ChannelMessage.Send` finnes KUN som delegerte rettigheter - verifisert via søk). Eksakt scope-streng i refresh-forespørselen er UVERIFISERT. */
 const TEAMS_REFRESH_SCOPE = "https://graph.microsoft.com/ChatMessage.Send https://graph.microsoft.com/ChannelMessage.Send offline_access";
@@ -41,11 +41,16 @@ export interface CommsRuntime {
    `JARVIS_COMMS_TENANT_ID` MÅ være en av dem (ellers kastes `InvalidCommsConfigError` og oppstarten stopper: hendelser skrevet dit ville aldri blitt sveipet).
    */
   startSweeps(tenants: readonly string[], ownerPersonId: string): void;
+  /**
+   * WP-G1c (D-481, JARVIS-112 g5): pakker en av de eldre `twilio`/`telnyx`/`whatsapp`/`slack`/`discord`-transportene inn i en STOP-vakt (kun `notify` rørt: avmeldt mottaker = policy-avslag FØR noe sendes; ingen nye tak). Med ALLE comms-flagg AV
+   * returneres transporten uendret (samme objekt): oppførselen er identisk med main. Dekker kun api-prosessen; workeren har egne transporter (se runbook).
+   */
+  guardLegacyNotifyTransport(toolId: string, transport: ToolTransport): ToolTransport;
 }
 
 export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
   const config = parseCommsConfig(input.env);
-  if (!commsAnyEnabled(config)) return { config, tools: [], apiDeps: () => undefined, startSweeps: () => undefined };
+  if (!commsAnyEnabled(config)) return { config, tools: [], apiDeps: () => undefined, startSweeps: () => undefined, guardLegacyNotifyTransport: (_toolId, transport) => transport };
 
   const clock = input.clock ?? (() => new Date());
   const store = new CommsStore(input.pool, clock);
@@ -59,6 +64,9 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
   const funnel = config.outbound
     ? new OutboundFunnel({
         store, graph: input.graph, config, clock, business: input.business,
+        // K1 (JARVIS-112 b): innholds-hashen i journalen er en HMAC med en server-side pepper fra DEN EKSISTERENDE hemmelighetskjeden (vault først, som leverandør-credentials) - lest på nytt ved hvert kall, så en rotasjon gjelder umiddelbart.
+        // Mangler pepperen (eller er den for kort), feiler ALL utsendelse lukket (`content_hash_key_unavailable`); det finnes ingen standardverdi og verdien logges aldri. Å skaffe pepperen er eierens handling (BLOCKED_EXTERNAL kun for aktivering, se runbook).
+        contentHasher: async () => createContentHasher(await secrets.get(COMMS_PEPPER_REF)),
         adapters: {
           slack: new SlackAdapter(), discord: new DiscordAdapter(), meta_whatsapp: new WhatsAppAdapter(config.graph_api_version),
           // Telnyx har bevisst INGEN `call` (AI-opplysningen kan ikke garanteres som første talte innhold uten call.answered-flyten): samtale via Telnyx feiler lukket (DEFERRED).
@@ -89,6 +97,14 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
   const replySweep = config.reply_sweep ? new ReplySweep({ pool: input.pool, clock, business: input.business, afterHours: config.reply_after_hours, windowDays: config.reply_window_days, ...(input.warn ? { warn: input.warn } : {}) }) : undefined;
   const startSweeps = (tenants: readonly string[], ownerPersonId: string): void => {
     const sweepTenants = retentionTenants(tenants, config.webhook_tenant_id); // kaster hvis webhook-tenanten ikke er en av eierens (fail closed, før noe planlegges)
+    // K1: en tydelig oppstartsvarsel (kun koden og et ja/nei, aldri verdien) når utgående er på men pepperen mangler - utsendelse feiler lukket helt til eieren har lagt den inn (runbook §6, NAS-trinn).
+    if (config.outbound) {
+      void secrets.get(COMMS_PEPPER_REF).then((value) => {
+        // FIX-7: kun en fast årsakskode (aldri verdien): `missing` beholder den gamle meldingen; en svak/ugyldig verdi får en egen melding med årsaken.
+        const verdict = assessPepper(value);
+        if (!verdict.ok) input.warn?.(verdict.code === "missing" ? { msg: "comms_content_pepper_missing", effect: "outbound_fails_closed" } : { msg: "comms_content_pepper_invalid", reason: verdict.code, effect: "outbound_fails_closed" });
+      }).catch(() => input.warn?.({ msg: "comms_content_pepper_check_failed" }));
+    }
     startRetentionSweep({
       tenants: sweepTenants,
       purge: async (tenantId, space) => {
@@ -114,6 +130,9 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
 
   return {
     config, tools, startSweeps,
+    guardLegacyNotifyTransport: (toolId, transport) => guardLegacyNotifyTransport(toolId, transport, {
+      store, extraTenants: () => (config.webhook_tenant_id === null ? [] : [config.webhook_tenant_id]), ...(input.warn ? { warn: input.warn } : {})
+    }),
     apiDeps: (gateway) => ({
       ...(webhookService ? { webhooks: { service: webhookService, providers: config.webhooks } } : {}),
       ...(funnel ? { outbound: { gateway, funnel } } : {})

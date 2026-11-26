@@ -391,7 +391,8 @@ async function main(): Promise<void> {
   await section("RUNTIME INIT (DomainPauseRegistry.restore + SituationEngine, samme komposisjon som main.ts)", async () => {
     domainPauses = new DomainPauseRegistry(pool, { owner_person_id: OWNER_PERSON });
     await domainPauses.restore();
-    engine = new SituationEngine(pool, domainPauses, { owner_person_id: OWNER_PERSON });
+    // WP-G4b K1: bind-tid-oppslaget mot akseptansens egen aktuator (ingen ekstern effekt); produksjonens oppslag er `toolGateway.get`.
+    engine = new SituationEngine(pool, domainPauses, { owner_person_id: OWNER_PERSON }, { definitionLookup: (t, a) => (t === ACTUATOR_TOOL && a === "assign" ? { autonomy_bindable: { reason: "UA-10 akseptanse-lokal aktuator uten ekstern effekt (kun akseptansekjøringen)" } } : undefined) });
     policy = new PolicyGateway({
       devices: new InMemoryDeviceRegistry(),
       nonces: new PgApprovalStore(pool),
@@ -459,7 +460,8 @@ async function main(): Promise<void> {
     idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 100,
     credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, output_trust: "internal", transport: actuator,
     preflight_action: "read_state",
-    postcondition_predicate: (after) => (after as { done: boolean } | null)?.done === true
+    postcondition_predicate: (after) => (after as { done: boolean } | null)?.done === true,
+    autonomy_bindable: { reason: "UA-10 akseptanse-lokal aktuator uten ekstern effekt (kun akseptansekjøringen)" }
   };
   gateway.register(actuatorTool);
   const situationsTools = situationsToolDefinitions(new SituationsTransport(engine, domainPauses));

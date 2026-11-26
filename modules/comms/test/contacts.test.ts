@@ -5,7 +5,7 @@ import { ConversationGraphService } from "@jarvis/conversation-graph";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
 import { CommsStore, CommsTransport, GoogleContacts, OutboundFunnel, commsToolDefinitions, executeCommsOwnerAction, parseCommsConfig, viewOf } from "../src/index.ts";
-import { OWNER, TENANT_A, startCommsDb, type CommsDb } from "./support/harness.ts";
+import { OWNER, TENANT_A, startCommsDb, type CommsDb, testContentHasher } from "./support/harness.ts";
 
 /**
  * WP-G1 (P2e): Google Contacts (People API) mot en FALSK transport (`fetch` stubbet) gjennom den EKSAKTE kjeden (ToolGateway med klasse D-pipeline, embedded Postgres, ekte Conversation Graph). Bevist: minimerte/rensede felt,
@@ -39,7 +39,7 @@ beforeAll(async () => {
   const store = new CommsStore(db.app);
   graph = new ConversationGraphService(db.app);
   const config = parseCommsConfig({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms", JARVIS_COMMS_CONTACTS: "on" });
-  funnel = new OutboundFunnel({ store, graph, adapters: {}, config, clock: () => new Date() });
+  funnel = new OutboundFunnel({ contentHasher: testContentHasher, store, graph, adapters: {}, config, clock: () => new Date() });
   const killSwitch = new KillSwitch();
   const controls = new OwnerControls(killSwitch);
   const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, controls, authority: { owner_person_id: OWNER, owner_tenants: [TENANT_A] } });

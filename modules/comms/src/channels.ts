@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { normalizeE164 } from "@jarvis/conversation-graph";
 
 /**
@@ -52,7 +52,8 @@ export const CUSTOMER_SERVICE_WINDOW_MS = 24 * 3_600_000;
 export type RecipientResult = { readonly ok: true; readonly value: string } | { readonly ok: false; readonly code: string };
 
 const SLACK_RECIPIENT = /^[CDGUW][A-Z0-9]{8,14}$/;
-const DISCORD_RECIPIENT = /^\d{17,20}$/;
+/** FIX-4 (runde 2): en snowflake starter aldri med 0. En utfylt form (`0` + id) ville fått en ANNEN avmeldingsnøkkel enn id-en den ligner på, så den kan ikke regnes som samme mottaker: avvises. */
+const DISCORD_RECIPIENT = /^[1-9]\d{16,19}$/;
 const TEAMS_CHAT = /^chat:19:[A-Za-z0-9_.@:=-]{5,200}$/;
 const TEAMS_CHANNEL = /^channel:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\/19:[A-Za-z0-9_.@:=-]{5,200}$/;
 const META_RECIPIENT = /^\d{5,20}$/;
@@ -144,6 +145,74 @@ export function recipientHint(channel: CommsChannel, normalizedRecipient: string
 
 export function sha256Hex(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+/**
+ * K1 (JARVIS-112 b): SALTET innholds-hash. Den gamle journal-hashen var et usaltet SHA-256 av meldingsinnholdet - ordbok-gjettbar for korte meldinger («Hei!», «Ja», «Takk»), og journalen er det ENESTE sporet av innholdet. Nå er den en
+ * HMAC-SHA256 med en server-side PEPPER fra den EKSISTERENDE hemmelighetsmekanismen (vault-kjeden `readSecretProvider`, samme som leverandør-credentials; referansen er `COMMS_PEPPER_REF`). Pepperen er aldri i kode, testfiksturer eller
+ * logger (kun en kort feilkode når den mangler), og hver HMAC bruker en nøkkel utledet PER FORMÅL (`PepperPurpose`) OG TENANT (FIX-7), så en hash laget for ett formål aldri kan gjenbrukes for et annet - og samme pepper kan gjenbrukes av flere formål senere
+ * (Q-78 pkt 2: pepper for G1b-nyttelastavtrykket) uten at oppskriftene blandes. Mangler pepperen (eller er den for kort), finnes ingen `ContentHasher`, og utsendelse feiler LUKKET (`content_hash_key_unavailable`) - aldri en stille standardverdi.
+ * Rotasjon: en ny pepper gir nye hasher; eldre rader beholder sin versjon (`comms_outbound_log.content_hash_version` = 2 for HMAC, 1 for den gamle usaltede) og en gjenspilling av en forespørsel laget FØR rotasjonen avvises som kollisjon (feil retning: ingen sending).
+ */
+export const COMMS_PEPPER_REF = "JARVIS_COMMS_CONTENT_PEPPER";
+/** Minste pepper-lengde (tegn). `openssl rand -base64 48` gir 64. En kortere verdi regnes som manglende (fail-closed) - en svak pepper er verre enn ingen, fordi den ser ut som beskyttelse. */
+export const PEPPER_MIN_LENGTH = 32;
+/**
+ * FIX-7 (fiks-runde 1): minste antall FORSKJELLIGE tegn. En pepper på `"a"` x 32 eller `"0"` x 32 har riktig lengde men ingen styrke. Grensen 10 er valgt så en ekte tilfeldig verdi aldri avvises: 32 tilfeldige hex-tegn har færre enn 10
+ * ulike tegn med sannsynlighet ca. 1 av 10 000 (en 64-tegns hex eller base64-verdi, som `openssl rand` gir, praktisk talt aldri). Dette er IKKE en entropimåling, kun et filter mot åpenbart svake verdier.
+ */
+export const PEPPER_MIN_DISTINCT_CHARS = 10;
+/** Hvorfor en pepper ikke godtas (kun en fast kode - aldri verdien). `missing` = ikke satt. */
+export type PepperProblem = "missing" | "not_a_string" | "surrounding_whitespace" | "too_short" | "too_few_distinct_characters" | "repeating_pattern";
+export type PepperAssessment = { readonly ok: true } | { readonly ok: false; readonly code: PepperProblem };
+
+/**
+ * FIX-7: vurderer en pepper FØR en hasher lages. Fail-lukket med en tydelig kode (aldri verdien i koden eller feilmeldingen): manglende, ikke-tekst, ledende/avsluttende mellomrom eller linjeskift (AVVISES i stedet for å trimmes stille, så to ulike
+ * lagrede strenger aldri gir samme nøkkel; en hemmelighet limt inn med et linjeskift må rettes), for kort, for få ulike tegn, og en periodisk verdi, dvs. en kortere blokk gjentatt også med en delvis siste blokk (`0123456789` x 3 + `01`).
+ */
+export function assessPepper(pepper: unknown): PepperAssessment {
+  if (pepper === null || pepper === undefined) return { ok: false, code: "missing" };
+  if (typeof pepper !== "string") return { ok: false, code: "not_a_string" };
+  if (pepper.length === 0) return { ok: false, code: "missing" };
+  if (pepper !== pepper.trim()) return { ok: false, code: "surrounding_whitespace" };
+  if (pepper.length < PEPPER_MIN_LENGTH) return { ok: false, code: "too_short" };
+  if (new Set(pepper).size < PEPPER_MIN_DISTINCT_CHARS) return { ok: false, code: "too_few_distinct_characters" };
+  // En periodisk verdi (en kortere blokk gjentatt, også med en delvis siste blokk): `s[i] === s[i - p]` for alle i >= p, med en periode p på høyst halve lengden.
+  for (let period = 1; period <= pepper.length / 2; period++) {
+    let periodic = true;
+    for (let i = period; i < pepper.length && periodic; i++) periodic = pepper[i] === pepper[i - period];
+    if (periodic) return { ok: false, code: "repeating_pattern" };
+  }
+  return { ok: true };
+}
+
+export type PepperPurpose = "content" | "request";
+export interface ContentHasher {
+  /** 2 = HMAC-SHA256 med pepper (1 = den gamle, usaltede SHA-256 - finnes kun i eldre rader). */
+  readonly version: 2;
+  /**
+   * HMAC-SHA256 (hex) over `data` med en nøkkel utledet av pepperen for (formål, TENANT): samme tekst gir ulik hash i ulike tenanter (FIX-7), og en hash laget for ett formål kan aldri gjenbrukes for et annet. `tenantId` er obligatorisk
+   * (tom streng kaster): en hash uten tenant-kontekst skal ikke kunne oppstå ved en glipp.
+   */
+  hmac(purpose: PepperPurpose, tenantId: string, data: string): string;
+}
+
+export function createContentHasher(pepper: string | null | undefined): ContentHasher | null {
+  if (!assessPepper(pepper).ok) return null;
+  const secret = pepper as string;
+  const keys = new Map<string, Buffer>();
+  const keyFor = (purpose: PepperPurpose, tenantId: string): Buffer => {
+    if (typeof tenantId !== "string" || tenantId.length === 0) throw new Error("comms_hash_scope_invalid");
+    const cacheKey = JSON.stringify([purpose, tenantId]);
+    let key = keys.get(cacheKey);
+    if (key === undefined) {
+      // JSON gir en entydig koding (en tenant-id med skilletegn kan ikke forveksles med et annet formål/tenant-par). Versjonen i teksten er 2: nøkkelutledningen med tenant er ikke den samme oppskriften som den første (kun formål).
+      key = createHmac("sha256", secret).update(JSON.stringify(["jarvis-comms-pepper-v2", purpose, tenantId]), "utf8").digest();
+      keys.set(cacheKey, key);
+    }
+    return key;
+  };
+  return { version: 2, hmac: (purpose, tenantId, data) => createHmac("sha256", keyFor(purpose, tenantId)).update(data, "utf8").digest("hex") };
 }
 
 /** Teknisk leverandør per kanal (SMS avgjøres av kontoens `provider`, se `authorized account`). */

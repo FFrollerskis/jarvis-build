@@ -1,6 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type pg from "pg";
-import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
+import { correlationFields, scheduledRunCorrelation, type IdentityContext, type MemorySpace, type RunCorrelation } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction, writeAudit } from "@jarvis/core";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import {
@@ -20,6 +20,7 @@ import type { ToolGateway } from "@jarvis/tool-gateway";
  * Utfallsregel (H1, «høyst én gang»): bare et avslag som BEVISER at ingenting gikk ut frigir reservasjonen (se `classifyNotifyFailure` i `@jarvis/executive`). Tidsavbrudd, 5xx, nettverksbrudd og alt ukjent beholder den - en påminnelse kan i
  * sjeldne tilfeller gå tapt, men kan ikke komme to ganger så lenge ledgeren (revisjonssporet) er intakt.
  * Av som standard (`JARVIS_V2_PUSH_ENABLED`): `startFollowUpPush` kalles bare når policyen er på OG en leveringskanal er konfigurert.
+ * WP-P3 K5 (JARVIS-054): hvert tikk bærer en korrelasjon (`task_id` = `sched:v2-push:<UTC-dato>`, `trace_id` unik per tikk) som ledgeren skriver i `followup.push_*`-radene og som sendes videre til `gateway.execute()`; identiteten er uendret `system`.
  */
 type Pool = Pick<pg.Pool, "query"> & Partial<Pick<pg.Pool, "connect">>;
 
@@ -31,6 +32,28 @@ const MAX_MESSAGE_CHARS = 3900;
 
 /** Feiltekst som kan lagres/logges: hemmelighetsskannet (en feilmelding kan inneholde en URL med token), flatet og kortet. */
 const safeDetail = (value: unknown, max = 120): string => flattenText(scanForSecrets(value instanceof Error ? value.message : String(value)).text, max);
+
+/** WP-P3 K5: jobbnavnet i tikkets korrelasjon (`sched:v2-push:<dato>`). */
+export const PUSH_JOB_NAME = "v2-push";
+
+/**
+ * WP-P3 K5 (JARVIS-054): korrelasjon per tikk. `task_id` er STABIL per UTC-dag (alle tikk samme dag hører til samme logiske oppgave); `trace_id` er UNIK per tikk. «Forsøksnummeret» er sekunder siden UTC-midnatt (+1), tvunget
+ * strengt økende i prosessen (to tikk i samme sekund, f.eks. en fast testklokke) og uten teller som deles mellom prosesser: en omstart samme dag tikker på et senere tidspunkt og kolliderer derfor ikke med tikkene
+ * før omstarten. Kun tegn fra det trygge mønsteret (`scheduledRunCorrelation`); aldri innhold eller hemmeligheter.
+ */
+export function createPushCorrelator(now: () => Date): () => RunCorrelation {
+  let lastDate = "";
+  let lastAttempt = 0;
+  return () => {
+    const at = now();
+    const date = at.toISOString().slice(0, 10);
+    let attempt = at.getUTCHours() * 3600 + at.getUTCMinutes() * 60 + at.getUTCSeconds() + 1;
+    if (date === lastDate && attempt <= lastAttempt) attempt = lastAttempt + 1;
+    lastDate = date;
+    lastAttempt = attempt;
+    return scheduledRunCorrelation(PUSH_JOB_NAME, date, attempt);
+  };
+}
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Kandidater (conversation-graph)
@@ -85,6 +108,8 @@ export interface AuditLedgerDeps {
   /** Sporbarhet: sesjonen push-løkken kjører i. Radene skrives som SYSTEM (aldri som om en person handlet). */
   sessionId: string;
   now?: () => Date;
+  /** WP-P3 K5: korrelasjonen til GJELDENDE tikk (leses ved hver skriving). Utelatt/`undefined` = ingen `task_id`/`trace_id` (som før). Porten `FollowUpLedgerPort` er uendret. */
+  correlation?: () => RunCorrelation | undefined;
 }
 
 const AUDIT_TYPES: Record<SettleOutcome, PushAuditType> = { sent: "followup.push_sent", failed: "followup.push_failed", unknown: "followup.push_unknown" };
@@ -120,7 +145,7 @@ export function createAuditLedger(deps: AuditLedgerDeps): FollowUpLedgerPort {
         const decision = build(reduceLedger(await readPushLedgerRows(client), now()));
         if (decision.send) {
           await writeAudit(client, subject, {
-            type: "followup.push_reserved", decision: "ALLOW", tool_id: "telegram", action: "notify",
+            type: "followup.push_reserved", decision: "ALLOW", tool_id: "telegram", action: "notify", ...correlationFields(deps.correlation?.()),
             payload: { message_key: decision.message_key, item_keys: decision.item_keys, count: decision.items.length }
           });
         }
@@ -130,7 +155,7 @@ export function createAuditLedger(deps: AuditLedgerDeps): FollowUpLedgerPort {
     async settle(decision: PushSend, outcome: SettleOutcome, detail: string): Promise<void> {
       await withTenantTransaction(deps.pool as pg.Pool, deps.tenantId, (client) =>
         writeAudit(client, subject, {
-          type: AUDIT_TYPES[outcome], decision: outcome === "sent" ? "ALLOW" : "DENY", tool_id: "telegram", action: "notify",
+          type: AUDIT_TYPES[outcome], decision: outcome === "sent" ? "ALLOW" : "DENY", tool_id: "telegram", action: "notify", ...correlationFields(deps.correlation?.()),
           ...(outcome === "sent" ? {} : { reason: safeDetail(detail) }),
           payload: { message_key: decision.message_key, count: decision.items.length, ...(outcome === "sent" ? { external_id: safeDetail(detail, 60) } : {}) }
         })
@@ -142,14 +167,16 @@ export function createAuditLedger(deps: AuditLedgerDeps): FollowUpLedgerPort {
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Avsender (telegram.notify via ToolGateway)
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-export function createTelegramNotifier(deps: { gateway: Pick<ToolGateway, "execute">; identity: IdentityContext }): FollowUpNotifier {
+export function createTelegramNotifier(deps: { gateway: Pick<ToolGateway, "execute">; identity: IdentityContext; correlation?: () => RunCorrelation | undefined }): FollowUpNotifier {
   return {
     channel: "telegram",
     async notify(text: string, opts: { idempotency_key: string }): Promise<NotifyOutcome> {
       try {
         // Mottakeren er eierens konfigurerte chat (`JARVIS_TELEGRAM_CHAT_ID`); `message` er det eneste parameteret. Policy, kill switch, frys og revisjon håndheves av gatewayen.
         const result = await deps.gateway.execute({
-          identity: deps.identity, tool_id: "telegram", action: "notify", parameters: { message: text.slice(0, MAX_MESSAGE_CHARS) }, idempotency_key: opts.idempotency_key
+          identity: deps.identity, tool_id: "telegram", action: "notify", parameters: { message: text.slice(0, MAX_MESSAGE_CHARS) }, idempotency_key: opts.idempotency_key,
+          // WP-P3 K5: tikkets task_id/trace_id (gatewayens rader og policy-avgjørelsen knyttes til samme tikk som ledger-radene)
+          ...correlationFields(deps.correlation?.())
         });
         return result.ok ? { ok: true, ...(result.external_id !== undefined ? { external_id: result.external_id } : {}) } : { ok: false, reason: safeDetail(result.reason) };
       } catch (err) {
@@ -247,10 +274,14 @@ export function startFollowUpPush(deps: StartFollowUpPushDeps): FollowUpPushHand
   const now = deps.now ?? (() => new Date());
   const tenantId = deps.ownerIdentity.tenant_id;
   const identity: IdentityContext = { ...deps.ownerIdentity, session_id: `${deps.ownerIdentity.session_id}-v2-push` };
+  // WP-P3 K5: ÉN korrelasjon per tikk, satt FØR planleggeren kjører og lest lat av ledgeren og avsenderen (to tikk kjører aldri samtidig i denne prosessen: `running`-vakten under).
+  const nextCorrelation = createPushCorrelator(now);
+  let correlation: RunCorrelation | undefined;
+  const currentCorrelation = (): RunCorrelation | undefined => correlation;
   const ports = {
     candidates: createGraphCandidateSource({ graph: deps.graph, tenantId, now, warn: log }),
-    ledger: createAuditLedger({ pool: deps.pool, tenantId, sessionId: identity.session_id, now }),
-    notifier: createTelegramNotifier({ gateway: deps.gateway, identity }),
+    ledger: createAuditLedger({ pool: deps.pool, tenantId, sessionId: identity.session_id, now, correlation: currentCorrelation }),
+    notifier: createTelegramNotifier({ gateway: deps.gateway, identity, correlation: currentCorrelation }),
     guard: deps.guard
   };
   let running = false;
@@ -261,6 +292,7 @@ export function startFollowUpPush(deps: StartFollowUpPushDeps): FollowUpPushHand
     if (running) return { sent: false, reason: "min_gap" };
     running = true;
     try {
+      correlation = nextCorrelation();
       const result = await runFollowUpPushTick(ports, deps.policy, now);
       const reason = result.sent ? "sent" : result.reason;
       status.last_result = reason;

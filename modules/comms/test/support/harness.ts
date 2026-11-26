@@ -5,14 +5,20 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import type { AdapterSend, AdapterTarget, ChannelAdapter, CommsProvider } from "../../src/index.ts";
+import { createContentHasher, type AdapterSend, type AdapterTarget, type ChannelAdapter, type CommsProvider, type ContentHasher } from "../../src/index.ts";
 
 /** Felles testoppsett: ekte embedded Postgres + migrasjoner, to tenants, en runtime-rolle uten superbruker/BYPASSRLS (RLS gjelder). */
 export interface CommsDb {
   readonly admin: pg.Pool;
   readonly app: pg.Pool;
+  /** En EKSTRA pool som app-rollen (samme rolle, RLS gjelder) med en `lock_timeout` (ms): en test som ellers ville henge på en lås (selv-vranglås) feiler dermed raskt og tydelig. Lukkes av `stop()`. */
+  appPool(options?: { readonly lockTimeoutMs?: number }): pg.Pool;
   stop(): Promise<void>;
 }
+
+/** K1: en FALSK pepper for tester (lang nok til å godtas, åpenbart ikke en ekte verdi). Ekte pepper hentes fra vault-kjeden og står aldri i kode. */
+export const TEST_PEPPER = "fake-pepper-for-test-not-real-0000000000000000";
+export const testContentHasher = async (): Promise<ContentHasher | null> => createContentHasher(TEST_PEPPER);
 
 export const TENANT_A = "tenant-g1-a";
 export const TENANT_B = "tenant-g1-b";
@@ -32,9 +38,20 @@ export async function startCommsDb(prefix: string): Promise<CommsDb> {
   await admin.query(`INSERT INTO people (person_id, display_name) VALUES ('${OWNER}', 'Owner'), ('person-g1-guest', 'Guest')`);
   await admin.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${OWNER}', '${TENANT_A}'), ('person-g1-guest', '${TENANT_A}')`);
   const app = createPool({ host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: role, password: "pw2" });
+  const extra: pg.Pool[] = [];
   return {
     admin, app,
+    appPool(options = {}) {
+      const pool = new pg.Pool({
+        host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: role, password: "pw2", max: 5,
+        ...(options.lockTimeoutMs !== undefined ? { options: `-c lock_timeout=${Math.floor(options.lockTimeoutMs)}` } : {})
+      });
+      pool.on("error", () => undefined);
+      extra.push(pool);
+      return pool;
+    },
     async stop() {
+      for (const pool of extra) await pool.end().catch(() => undefined);
       await app.end();
       await admin.end();
       await leased.stop();
