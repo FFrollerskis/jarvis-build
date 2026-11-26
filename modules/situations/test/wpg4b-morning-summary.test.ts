@@ -129,6 +129,9 @@ describe("B: tjenesten mot ekte Postgres og ekte ToolGateway", () => {
     await nightMotion();
     await db.adminPool.query(`UPDATE situations SET last_notified_at = now(), stage = 'inform' WHERE tenant_id = $1 AND domain = 'vision'`, [TENANT_A]);
     expect((await svc().deliver(TENANT_A, "home", gateway, identity(TENANT_A, "home"), MORNING)).status).toBe("nothing_to_report");
+    // en situasjon som står på `remember` men HAR vært varslet (`last_notified_at` satt) teller heller ikke: kun det som aldri ble varslet (uavhengig av stadiet)
+    await db.adminPool.query(`UPDATE situations SET last_notified_at = now(), stage = 'remember', priority = 'normal' WHERE tenant_id = $1 AND domain = 'vision'`, [TENANT_A]);
+    expect((await svc().deliver(TENANT_A, "home", gateway, identity(TENANT_A, "home"), MORNING)).status).toBe("nothing_to_report");
     // lav prioritet (remember uten at stille timer holdt den) teller ikke
     await db.adminPool.query(`UPDATE situations SET last_notified_at = NULL, stage = 'remember', priority = 'low' WHERE tenant_id = $1 AND domain = 'vision'`, [TENANT_A]);
     expect((await svc().deliver(TENANT_A, "home", gateway, identity(TENANT_A, "home"), MORNING)).status).toBe("nothing_to_report");

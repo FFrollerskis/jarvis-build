@@ -73,7 +73,7 @@ export async function readAutonomy(pool: ControlCenterPool, tenantId: string): P
   const health = await tenantSpaceRead(pool, tenantId, ["health"], (query) => query(`SELECT (count(*))::int AS n FROM situation_autonomy_policies WHERE tenant_id = $1`, [tenantId]));
   return {
     rows: main.policies.map((r) => ({
-      memory_space_id: String(r["memory_space_id"]), domain: String(r["domain"]), tool_id: String(r["tool_id"]), action: String(r["action"]),
+      memory_space_id: String(r["memory_space_id"]), domain: String(r["domain"]), scope_key: typeof r["scope_key"] === "string" && r["scope_key"] !== "" ? r["scope_key"] : "*", tool_id: String(r["tool_id"]), action: String(r["action"]),
       enabled: Boolean(r["enabled"]), updated_at: toIso(r["updated_at"])
     })),
     health_count: Number(health[0]?.["n"] ?? 0),

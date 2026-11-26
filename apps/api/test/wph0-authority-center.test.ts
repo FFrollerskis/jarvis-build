@@ -156,6 +156,29 @@ describe("seksjonene og eier-/delegert autoritet", () => {
     const clean = await build().run();
     expect(item(clean, "autonomy", "business:finance").status).toBe("OK");
   });
+
+  it("WP-G4b K1/K2: en lagret binding til en handling som IKKE er bindbar vises som WARN med forklaring (utføres ikke, er ikke slettet); en skopet binding har eget id og skop og er OK når handlingen er bindbar", async () => {
+    // `make.run_scenario` er registrert (klasse C) uten `autonomy_bindable` => default-deny; en fysisk handling i et fysisk navnerom er stengt uansett
+    const r = await build({ policies: [
+      { memory_space_id: "business", domain: "home", scope_key: "*", tool_id: "make", action: "run_scenario", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "business", domain: "ops", scope_key: "*", tool_id: "home-assistant", action: "lock_set", enabled: true, updated_at: ago(30 * H) },
+      { memory_space_id: "business", domain: "finance", scope_key: "rule:home_assistant:water_leak", tool_id: "business", action: "create_followup", enabled: true, updated_at: ago(30 * H) }
+    ] }).run();
+    const blocked = item(r, "autonomy", "business:home");
+    expect(blocked.status).toBe("WARN");
+    expect(blocked.detail_no).toContain("UTFØRES IKKE autonomt");
+    expect(blocked.detail_no).toContain("definisjonen erklærer ikke handlingen bindbar");
+    expect(blocked.facts).toMatchObject({ tool: "make", action: "run_scenario", not_bindable: "action_not_bindable" });
+    const physical = item(r, "autonomy", "business:ops");
+    expect(physical.status).toBe("WARN");
+    expect(physical.detail_no).toContain("fysisk/kritisk handling");
+    expect(physical.facts).toMatchObject({ not_bindable: "physical_action_not_bindable" });
+    const scoped = item(r, "autonomy", "business:finance:rule:home_assistant:water_leak");
+    expect(scoped.status).toBe("OK");
+    expect(scoped.detail_no).toContain("gjelder KUN skopet rule:home_assistant:water_leak");
+    expect(scoped.facts).toMatchObject({ scope: "rule:home_assistant:water_leak" });
+    expect(scoped.facts).not.toHaveProperty("not_bindable");
+  });
 });
 
 describe("globale brytere", () => {
