@@ -142,6 +142,14 @@ describe("B: hver beskyttede fil er E3 - uansett skrivemåte (hardkodede mønstr
       expect(constitution.classify([p]), p).not.toBe("E1");
     }
   });
+
+  it("B6: den gamle policyen ALENE (uten manifestet) har samme eksakte allowliste: en annen skrivemåte gir requires_approval, aldri zero_review", () => {
+    expect(classifySelfModification(["config/charlie-personality.json"])).toBe("zero_review");
+    expect(classifySelfModification(["./config/charlie-personality.json"])).toBe("zero_review");
+    for (const p of ["Config/charlie-personality.json", "config/Charlie-Personality.json", "CONFIG/CHARLIE-PERSONALITY.JSON", "config/charlie-personality.json.", "config/./charlie-personality.json/x"]) {
+      expect(classifySelfModification([p]), p).toBe("requires_approval");
+    }
+  });
 });
 
 describe("C: invarianter mellom hardkodede mønstre, sonder og signert manifest", () => {

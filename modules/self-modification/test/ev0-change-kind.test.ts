@@ -212,6 +212,30 @@ describe("C: validateProposal - klassen er alltid max(sti-klasse, gulv for typen
     expect(entry.evidence["kind"]).toBe("routing");
     expect(entry.change_class).toBe(v.effective_class);
   });
+
+  it("C11: gulvet for typer utledet fra stiene gjelder UAVHENGIG av stiklassifiseringen (forsvar i dybden: selv om klassifisereren feilaktig sier E1)", () => {
+    const lenient = { classify: () => "E1" as const };
+    const dep = validateProposal(withPaths(["apps/web/Dockerfile"], { kind: "code", claimed_class: "E0", primary_source_verified: { verified: true, source_ref: "https://example.org/a" } }), lenient);
+    expect(dep.derived_kinds).toEqual(["dependency"]);
+    expect(dep.effective_class).toBe("E2");
+    expect(dep.decision).toBe("needs_owner");
+    const adjacent = validateProposal(withPaths(["README.md"], { kind: "code", claimed_class: "E0" }), lenient);
+    expect(adjacent.derived_kinds).toEqual(["protected-adjacent"]);
+    expect(adjacent.effective_class).toBe("E2");
+    const harmless = validateProposal(withPaths(["apps/web/index.html"], { kind: "code", claimed_class: "E0" }), lenient);
+    expect(harmless.derived_kinds).toEqual([]);
+    expect(harmless.effective_class).toBe("E1");
+  });
+
+  it("C12: en ugyldig sti (`..`) teller som berørt sensitiv flate - test_plan må ha security, i tillegg til at forslaget er E3", () => {
+    const v = validateProposal(withPaths(["a/../b.ts"], { kind: "code", claimed_class: "E1", test_plan: ["unit", "integration"] }), constitution);
+    expect(v.effective_class).toBe("E3");
+    expect(v.reasons).toContain("test_plan_needs_security");
+    const ok = validateProposal(withPaths(["a/../b.ts"], { kind: "code", claimed_class: "E1", test_plan: ["unit", "integration", "security"] }), constitution);
+    expect(ok.reasons).not.toContain("test_plan_needs_security");
+    const plain = validateProposal(withPaths(["apps/web/index.html"], { kind: "code", claimed_class: "E1", test_plan: ["unit", "integration"] }), constitution);
+    expect(plain.reasons).not.toContain("test_plan_needs_security");
+  });
 });
 
 describe("D: utrullingsporten (decideRelease) deler samme gulv - og er uendret for de fem gamle typene", () => {

@@ -405,4 +405,17 @@ describe("I: forslagsvalideringen kjører porten for ALLE skjemaendringer (fail-
     expect(ok.decision).toBe("needs_owner");
     expect(ok.effective_class).toBe("E2");
   });
+
+  it("I9: forslagets proposal_id ER trinnets change_id: gjenbruk av en id som allerede er brukt i migrasjonen avvises (ikke migrasjons-id-en som slår inn)", () => {
+    const prior: MigrationGateState = { migration_id: "mig-1", steps: [step(0, { change_id: "chg-prop-1" })] };
+    const next = { migration_id: "mig-1", phase: "compatible_code" as const, deploy_id: "dep-2", facts: { ...GOOD } };
+    const reused = validateProposal(proposal({ migration: next }), constitution, ctx(prior));
+    expect(reused.decision).toBe("rejected");
+    expect(reused.reasons).toContain("migration_gate:change_id_reused");
+    const fresh2 = validateProposal(proposal({ proposal_id: "chg-prop-2", migration: next }), constitution, ctx(prior));
+    expect(fresh2.reasons.filter((r) => r.startsWith("migration"))).toEqual([]);
+    // og en tidligere change_id lik migrasjons-id-en er IKKE det som sammenlignes
+    const sameAsMigrationId: MigrationGateState = { migration_id: "mig-1", steps: [step(0, { change_id: "mig-1" })] };
+    expect(validateProposal(proposal({ migration: next }), constitution, ctx(sameAsMigrationId)).reasons.filter((r) => r.startsWith("migration"))).toEqual([]);
+  });
 });
