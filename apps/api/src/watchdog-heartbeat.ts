@@ -3,6 +3,7 @@ import type pg from "pg";
 import { envInt } from "@jarvis/contracts";
 import type { Watchdog } from "@jarvis/watchdog";
 import { HeartbeatConfigError, HeartbeatSender, validateHeartbeatUrl, type HeartbeatLog, type PingFn } from "./heartbeat-sender.ts";
+import { WATCHDOG_MIN_FRESH_MS, watchdogFreshLimitMs } from "./watchdog-status.ts";
 
 /**
  * WP-OPS2a K3: EKSTERN dead man's switch for VAKTHUNDEN (`JARVIS_WATCHDOG_HEARTBEAT_URL`). AV som standard: uten URL sendes ingenting og ingen timer startes.
@@ -19,7 +20,7 @@ import { HeartbeatConfigError, HeartbeatSender, validateHeartbeatUrl, type Heart
 export const WATCHDOG_HEARTBEAT_URL_ENV = "JARVIS_WATCHDOG_HEARTBEAT_URL";
 export const WATCHDOG_HEARTBEAT_INTERVAL_ENV = "JARVIS_WATCHDOG_HEARTBEAT_INTERVAL_SEC";
 /** Gulvet for hvor gammelt siste fullførte tikk kan være: en vakthund med kort intervall får likevel minst 2 min før stillheten starter. */
-export const WATCHDOG_HEARTBEAT_MIN_FRESH_MS = 120_000;
+export const WATCHDOG_HEARTBEAT_MIN_FRESH_MS = WATCHDOG_MIN_FRESH_MS;
 export const WATCHDOG_HEARTBEAT_DB_TIMEOUT_MS = 3_000;
 /** En `SELECT 1` som har hengt lenger enn dette (x databasefristen) regnes som tapt, og en ny kan startes - ellers kunne én aldri-avsluttet spørring gjøre heartbeaten stum for alltid, også etter at databasen er frisk. */
 const HUNG_QUERY_RETRY_FACTOR = 10;
@@ -55,9 +56,9 @@ export function poolPing(pool: Pick<pg.Pool, "query">, timeoutMs: number = WATCH
   return () => pool.query({ text: "SELECT 1", query_timeout: timeoutMs } as pg.QueryConfig);
 }
 
-/** Hvor gammelt siste fullførte vakthund-tikk kan være før heartbeaten tier: max(3 x vakthund-intervallet, 2 min). */
+/** Hvor gammelt siste fullførte vakthund-tikk kan være før heartbeaten tier: max(3 x vakthund-intervallet, 2 min). SAMME formel som selvdiagnosens vakthund-leser (K1, `watchdogFreshLimitMs` i `watchdog-status.ts`): ÉN definisjon. */
 export function watchdogTickMaxAgeMs(watchdogIntervalMs: number): number {
-  return Math.max(3 * watchdogIntervalMs, WATCHDOG_HEARTBEAT_MIN_FRESH_MS);
+  return watchdogFreshLimitMs(watchdogIntervalMs);
 }
 
 export interface WatchdogHeartbeatSelfCheckDeps {

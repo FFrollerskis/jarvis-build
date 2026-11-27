@@ -33,7 +33,7 @@ export interface SelfModelReaderDeps {
    */
   backupStatus?: (() => Promise<BackupStatusRead>) | undefined;
   /**
-   * WP-OPS2a K1: vakthundens siste registrerte tikk (`incident_producer_runs`, producer `watchdog`) + produsent-intervallet grensen regnes av (`watchdogRunSource`). Sendes KUN når incident-produsentene er på; uten den svarer `watchdog`-leseren
+   * WP-OPS2a K1: vakthundens siste registrerte tikk (`incident_producer_runs`, producer `watchdog`) + VAKTHUND-intervallet (`JARVIS_WATCHDOG_INTERVAL_MS`) grensen regnes av (`watchdogRunSource`). Sendes KUN når incident-produsentene er på; uten den svarer `watchdog`-leseren
    * UKJENT med årsaken «incident-produsentene er AV» (vakthundens tikk registreres da ikke varig).
    */
   watchdogRuns?: WatchdogRunSource | undefined;
@@ -202,7 +202,7 @@ export function buildSelfModelReaders(deps: SelfModelReaderDeps): Record<string,
 
     // WP-OPS2a K1: vakthunden kjører i worker; det ENE varige sporet er raden `incident_producer_runs`/`watchdog` (kun når produsentene er på). Se `watchdog-status.ts`: UKJENT uten rad, ved lesefeil og ved klokkeavvik; aldri OK på en gjetning.
     async watchdog(): Promise<Observation> {
-      return readWatchdogObservation(deps.watchdogRuns, now());
+      return readWatchdogObservation(deps.watchdogRuns, now); // klokken tas ETTER lesingen (rad skrevet under en treg spørring er ikke «frem i tid»)
     }
   };
   // WP-C2: `backup` leses kun når en statusfil er montert; ellers har området BEVISST ingen leser og vises som UKJENT.

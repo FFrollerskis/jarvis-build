@@ -11,7 +11,7 @@ import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, s
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { buildSelfModelReaders } from "./self-model-readers.ts";
 import { backupStatusSourceFromEnv } from "./backup-status.ts";
-import { watchdogRunSource } from "./watchdog-status.ts";
+import { watchdogIntervalMsFromEnv, watchdogRunSource } from "./watchdog-status.ts";
 import { startUptimeHeartbeat } from "./heartbeat-sender.ts";
 import {
   ChannelSessionAuthority,
@@ -224,8 +224,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     ev0Status: () => getLastEv0BootStatus(),
     build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" }),
     backupStatus: backupStatusSource,
-    // WP-OPS2a K1 (EV-1/H2): vakthundens siste registrerte tikk (incident_producer_runs, kun lesing) - kun når incident-produsentene er på; ellers er `watchdog` UKJENT med årsaken.
-    watchdogRuns: incidentProducerConfig.enabled ? watchdogRunSource(new ProducerRunStore(pool), owner.tenant_id, incidentProducerConfig.intervalMs) : undefined
+    // WP-OPS2a K1 (EV-1/H2): vakthundens siste registrerte tikk (incident_producer_runs, kun lesing) - kun når incident-produsentene er på; ellers er `watchdog` UKJENT med årsaken. Raden skrives per VAKTHUND-tikk, så grensen regnes av JARVIS_WATCHDOG_INTERVAL_MS (ikke produsent-intervallet).
+    watchdogRuns: incidentProducerConfig.enabled ? watchdogRunSource(new ProducerRunStore(pool), owner.tenant_id, watchdogIntervalMsFromEnv(process.env)) : undefined
   });
   await ownerControls.restore();
   // EV-2 (D-417): SLO/drift/dataskvalitet fra eksisterende observerbarhet (cost_events, tool_executions, tasks, memory_items) - ingen parallell telemetri.

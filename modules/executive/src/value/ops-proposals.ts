@@ -82,10 +82,12 @@ export function proposeOpsActions(signals: OpsSignals): OpsProposalReport {
   const obs = signals.observations;
   if (obs === null) skipped.push("selvdiagnosen kunne ikke leses (watchdog, backup, jobber og diskplass er ikke vurdert)");
   else {
-    // 2. Watchdog (kjører i worker-prosessen): svekket/nede -> omstart av worker.
+    // 2. Watchdog (kjører i worker-prosessen): KUN nede (DOWN = har ikke tikket) -> omstart av worker. DEGRADED (en sjekk feiler, f.eks. kostnadsvarselet over grensen hele måneden) gir INGEN forslag: vakthunden lever, og en omstart av worker
+    // hjelper ikke mot en feilende database-, kostnads- eller lease-sjekk (WP-OPS2a fiks 1, B-M3).
     const watchdog = obs["watchdog"];
-    if (watchdog === undefined || watchdog.status === "UNKNOWN") skipped.push("watchdog er ikke målt (ingen leser)");
-    else if (BAD.has(watchdog.status)) restart.worker.push({ area: "watchdog", status: watchdog.status, why: `watchdog melder ${watchdog.status === "DOWN" ? "nede" : "svekket"}` });
+    if (watchdog === undefined) skipped.push("watchdog er ikke målt (ingen leser)");
+    else if (watchdog.status === "UNKNOWN") skipped.push("watchdog er ikke målt (selvdiagnosen svarer UKJENT)");
+    else if (watchdog.status === "DOWN") restart.worker.push({ area: "watchdog", status: "DOWN", why: "watchdog melder nede" });
 
     // 3. Daglige jobber (scheduleren bor i API-prosessen): tapt kritisk arbeid (DOWN) -> omstart av API.
     const scheduled = obs["scheduled_jobs"];

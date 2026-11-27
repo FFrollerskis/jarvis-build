@@ -10,16 +10,17 @@ import {
 
 /**
  * WP-OPS2a K1 (EV-1/H2, JARVIS-041-resten): vakthunden i selvdiagnosen. Leseren er en REN funksjon over raden `incident_producer_runs` for `watchdog` (den ENESTE varige sporet av at vakthunden tikker, skrevet av den eksisterende broen -
- * ingen ny skrivevei). Grensene: 3 x produsent-intervallet (samme regel som `compose.ts`), negativ alder er klokkeavvik (UKJENT), og sjekkenes meldingstekst er aldri en del av svaret. Rader mot ekte Postgres: `wpops2a-watchdog-reader-db.test.ts`.
+ * ingen ny skrivevei). Grensene: max(3 x VAKTHUND-intervallet, 2 min) (fiks-runde 1, B-L1: raden skrives per vakthund-tikk), alder under -2 s er klokkeavvik (UKJENT), og sjekkenes meldingstekst er aldri en del av svaret.
+ * Rader mot ekte Postgres: `wpops2a-watchdog-reader-db.test.ts`. Fiks-rundens nye tester: `wpops2a-fix1-k1-reader.test.ts`.
  */
-const INTERVAL = 300_000; // standard produsent-intervall (5 min) -> grensen er 15 min
+const INTERVAL = 300_000; // vakthund-intervall 5 min (JARVIS_WATCHDOG_INTERVAL_MS=300000) -> grensen er 15 min
 const LIMIT_MS = WATCHDOG_STALE_FACTOR * INTERVAL;
 const NOW = new Date("2026-11-26T12:00:00.000Z");
 const agoMs = (ms: number): string => new Date(NOW.getTime() - ms).toISOString();
 const mmss = (m: number, s: number): number => (m * 60 + s) * 1000;
 const row = (over: Partial<WatchdogRunRow> = {}): WatchdogRunRow => ({ last_started_at: agoMs(mmss(1, 0)), last_status: "ok", facts_seen: 0, consecutive_failures: 0, ...over });
 
-describe("grensene: 3 x produsent-intervallet (14:59 / 15:00 / 15:01)", () => {
+describe("grensene: 3 x vakthund-intervallet (14:59 / 15:00 / 15:01 ved 5 min)", () => {
   it("konstantene er 3 x 300 s = 15 min", () => {
     expect(WATCHDOG_STALE_FACTOR).toBe(3);
     expect(LIMIT_MS).toBe(15 * 60_000);
@@ -41,9 +42,9 @@ describe("grensene: 3 x produsent-intervallet (14:59 / 15:00 / 15:01)", () => {
     expect(observeWatchdogRun(row({ last_started_at: agoMs(mmss(30, 1)) }), NOW, 600_000).status).toBe("DOWN");
   });
 
-  it("alder 0 (tikket akkurat nå) er OK; negativ alder (klokkeavvik, også 1 ms) er UKJENT - aldri OK, aldri DOWN", () => {
+  it("alder 0 (tikket akkurat nå) er OK; negativ alder over 2 s (klokkeavvik) er UKJENT - aldri OK, aldri DOWN (fiks-runde 1, B-L2: under 2 s regnes som 0, se wpops2a-fix1-k1-reader.test.ts)", () => {
     expect(observeWatchdogRun(row({ last_started_at: NOW.toISOString() }), NOW, INTERVAL).status).toBe("OK");
-    for (const aheadMs of [1, 1000, 60_000, 3_600_000]) {
+    for (const aheadMs of [2001, 60_000, 3_600_000]) {
       const o = observeWatchdogRun(row({ last_started_at: new Date(NOW.getTime() + aheadMs).toISOString() }), NOW, INTERVAL);
       expect(o.status, `${aheadMs} ms frem`).toBe("UNKNOWN");
       expect(o.detail).toContain("klokkeavvik");
@@ -206,7 +207,8 @@ describe("ops-proposals (kildefilen er urørt): leserens svar mates til forslage
     for (const u of unknowns) {
       const r = proposeOpsActions(signals(u));
       expect(r.proposals).toEqual([]);
-      expect(r.skipped_no).toContain("watchdog er ikke målt (ingen leser)");
+      expect(r.skipped_no).toContain("watchdog er ikke målt (selvdiagnosen svarer UKJENT)");
+      expect(r.skipped_no.filter((x) => x.startsWith("watchdog")).join(" ")).not.toContain("ingen leser"); // fiks-runde 1: det finnes en leser; «ingen leser» er kun riktig når området mangler helt (se wpc4-ops-proposals.test.ts)
     }
   });
 
@@ -214,12 +216,14 @@ describe("ops-proposals (kildefilen er urørt): leserens svar mates til forslage
     expect(proposeOpsActions(signals(observeWatchdogRun(row(), NOW, INTERVAL))).proposals).toEqual([]);
   });
 
-  it("KJENT BIVIRKNING (meldt til lead): DEGRADED fordi en sjekk feiler gir i dag også et omstart-forslag for worker, fordi ops-proposals behandler DEGRADED som «svekket»", () => {
-    const degraded = observeWatchdogRun(row({ facts_seen: 1 }), NOW, INTERVAL);
-    expect(degraded.status).toBe("DEGRADED");
-    const r = proposeOpsActions(signals(degraded));
-    expect(r.proposals.map((p) => p.id)).toEqual(["restart_service:worker"]);
-    expect(r.proposals[0]?.rationale_no).toContain("watchdog melder svekket");
+  it("DEGRADED (en sjekk feiler, f.eks. cost_warning over varselgrensen) gir INGEN omstartforslag (fiks-runde 1, B-M3: omstart hjelper ikke mot en feilende sjekk, og vakthunden lever); kun DOWN foreslår omstart", () => {
+    for (const degradedRow of [row({ facts_seen: 1 }), row({ facts_seen: 4 }), row({ last_status: "failed", consecutive_failures: 3 }), row({ last_status: "skipped" })]) {
+      const degraded = observeWatchdogRun(degradedRow, NOW, INTERVAL);
+      expect(degraded.status).toBe("DEGRADED");
+      const r = proposeOpsActions(signals(degraded));
+      expect(r.proposals, JSON.stringify(degradedRow)).toEqual([]);
+      expect(JSON.stringify(r)).not.toContain("svekket");
+    }
   });
 });
 
@@ -228,7 +232,7 @@ describe("kildevakter: wiringen i main.ts kan ikke fjernes eller gjøres ubeting
   const main = readFileSync(join(ROOT, "apps/api/src/main.ts"), "utf8");
 
   it("kilden sendes KUN når incident-produsentene er på (ellers UKJENT), og begrensningen er betinget av samme bryter", () => {
-    expect(main).toContain("watchdogRuns: incidentProducerConfig.enabled ? watchdogRunSource(new ProducerRunStore(pool), owner.tenant_id, incidentProducerConfig.intervalMs) : undefined");
+    expect(main).toContain("watchdogRuns: incidentProducerConfig.enabled ? watchdogRunSource(new ProducerRunStore(pool), owner.tenant_id, watchdogIntervalMsFromEnv(process.env)) : undefined");
     expect(main).toContain("watchdogStateReadable: incidentProducerConfig.enabled");
     expect(main.match(/watchdogRunSource\(/g)).toHaveLength(1);
     expect(main.match(/new ProducerRunStore\(/g)).toHaveLength(1);

@@ -9,7 +9,7 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { ProducerRunStore } from "@jarvis/incidents";
 import { composeSelfDiagnosis, buildLimitationRegistry, type Observation } from "@jarvis/executive";
 import { MemoryAlertSink, Watchdog, type HealthCheck } from "@jarvis/watchdog";
-import { createWatchdogIncidentBridge, INCIDENT_PRODUCER_INTERVAL_MS_DEFAULT } from "../src/incident-producers.ts";
+import { createWatchdogIncidentBridge } from "../src/incident-producers.ts";
 import { buildSelfModelReaders, type SelfModelReaderDeps } from "../src/self-model-readers.ts";
 import { watchdogRunSource, WATCHDOG_UNREADABLE_DETAIL } from "../src/watchdog-status.ts";
 
@@ -17,6 +17,8 @@ import { watchdogRunSource, WATCHDOG_UNREADABLE_DETAIL } from "../src/watchdog-s
  * WP-OPS2a K1 mot EKTE Postgres som app-rolle (RLS): raden skrives av den EKTE skriveveien (`runIncidentProducers` via `createWatchdogIncidentBridge`, slik worker-main.ts kobler den), og leseren leser det den skrev.
  * Ingen ny skrivevei: testen skriver aldri til `incident_producer_runs` selv (unntatt en fremmed tenant-rad for å bevise isolasjon).
  */
+/** Vakthund-intervallet (JARVIS_WATCHDOG_INTERVAL_MS) leseren regner grensen av - fiks-runde 1 (B-L1): ikke incident-produsentenes intervall. 5 min gir grensen 3 x 300 s = 15 min som testene under bruker. */
+const WATCHDOG_INTERVAL_MS = 300_000;
 const T = "tenant-ops2a-wd";
 const OTHER = "tenant-ops2a-other";
 let stop: (() => Promise<void>) | undefined;
@@ -46,7 +48,7 @@ afterAll(async () => {
 const readerDeps = (over: Partial<SelfModelReaderDeps> = {}): SelfModelReaderDeps => ({
   pool: app, tenantId: T, meshStatus: () => ({ providers: [] }),
   controlState: async () => ({ kill_switch: { active: false }, frozen_connectors: [], revoked_credentials: [] }), connectorStatus: async () => [],
-  watchdogRuns: watchdogRunSource(new ProducerRunStore(app), T, INCIDENT_PRODUCER_INTERVAL_MS_DEFAULT), ...over
+  watchdogRuns: watchdogRunSource(new ProducerRunStore(app), T, WATCHDOG_INTERVAL_MS), ...over
 });
 const observeWatchdog = async (over: Partial<SelfModelReaderDeps> = {}): Promise<Observation> => (await buildSelfModelReaders(readerDeps(over)).watchdog!()) as Observation;
 
@@ -108,20 +110,20 @@ describe("leseren leser det den EKTE skriveveien skrev (vakthund -> bro -> incid
 
   it("tenant-isolasjon: en annen tenants vakthund-rad leses aldri (RLS), og uten egen rad er svaret UKJENT", async () => {
     await admin.query(`INSERT INTO incident_producer_runs (tenant_id, producer, last_started_at, last_finished_at, last_status, facts_seen) VALUES ('${OTHER}', 'watchdog', now(), now(), 'failed', 9)`);
-    const other = await observeWatchdog({ tenantId: OTHER, watchdogRuns: watchdogRunSource(new ProducerRunStore(app), OTHER, INCIDENT_PRODUCER_INTERVAL_MS_DEFAULT) });
+    const other = await observeWatchdog({ tenantId: OTHER, watchdogRuns: watchdogRunSource(new ProducerRunStore(app), OTHER, WATCHDOG_INTERVAL_MS) });
     expect(other.status).toBe("DEGRADED");
     expect(other.data).toMatchObject({ failing_checks: 9 });
     // T-leseren ser fortsatt KUN sin egen rad (facts_seen 0 fra forrige test), aldri OTHERs 9.
     expect((await observeWatchdog()).data).toMatchObject({ failing_checks: 0 });
     // En tenant uten rad: UKJENT.
     await admin.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('tenant-ops2a-empty','E','business')`);
-    const empty = await observeWatchdog({ tenantId: "tenant-ops2a-empty", watchdogRuns: watchdogRunSource(new ProducerRunStore(app), "tenant-ops2a-empty", INCIDENT_PRODUCER_INTERVAL_MS_DEFAULT) });
+    const empty = await observeWatchdog({ tenantId: "tenant-ops2a-empty", watchdogRuns: watchdogRunSource(new ProducerRunStore(app), "tenant-ops2a-empty", WATCHDOG_INTERVAL_MS) });
     expect(empty.status).toBe("UNKNOWN");
   });
 
   it("lesefeil mot databasen gir UKJENT med fast tekst (aldri OK)", async () => {
     const broken = { connect: async () => { throw new Error("connection terminated password=hunter2"); }, query: async () => { throw new Error("connection terminated password=hunter2"); } };
-    const o = await observeWatchdog({ watchdogRuns: watchdogRunSource(new ProducerRunStore(broken as never), T, INCIDENT_PRODUCER_INTERVAL_MS_DEFAULT) });
+    const o = await observeWatchdog({ watchdogRuns: watchdogRunSource(new ProducerRunStore(broken as never), T, WATCHDOG_INTERVAL_MS) });
     expect(o).toMatchObject({ status: "UNKNOWN", detail: WATCHDOG_UNREADABLE_DETAIL });
     expect(JSON.stringify(o)).not.toContain("hunter2");
   });
