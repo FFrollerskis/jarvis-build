@@ -2,7 +2,8 @@ import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { OperationalGateChangedPayloadSchema, type GateStatus, type OperationalGateChangedPayload } from "./gate-events.ts";
 import { evaluateGate, evaluateOrl, GateSchema, makeGateContext, OrlSchema, type Gate, type Orl } from "./gates.ts";
-import { loadProgramData, makeFileReader, PROGRAM_DIR, ProgramDataError } from "./fs-loader.ts";
+import { evidenceWeaknesses, parseEvidenceDetails, parseEvidenceHeader, WEAKNESS_TEXT, type EvidenceHeader } from "./evidence-header.ts";
+import { loadProgramData, isInsideRoot, makeFileReader, PROGRAM_DIR, ProgramDataError } from "./fs-loader.ts";
 import { acquireLock, replaceFileAtomically } from "./file-lock.ts";
 import { canonicalJson, contractFingerprint, normalizeLineEndings, sha256Hex } from "./hash.ts";
 import { serializeData } from "./index-builder.ts";
@@ -16,7 +17,11 @@ import { EvidenceRefSchema, type EvidenceRef } from "./schema.ts";
  * for stor evidensfil, evidens som er ELDRE enn en bundet komponents siste kontraktendring, bundne komponenter hvis fingeravtrykk ikke er à jour, og ORL-PASS der en forutsetning ikke står som PASS nå.
  * En PASS som er blitt foreldet gjenåpnes først (`OPEN`) og registreres så på nytt med ny evidens: to forståelige overganger i historikken, ikke en stille overskriving.
  *
- * Evidensfilen er UBETRODD tekst: kun den faste toppteksten (før «## Utdata») leses for tidspunkt og git-SHA; resten hashes, aldri tolkes.
+ * Evidensfilen er UBETRODD tekst: kun den faste toppteksten (før «## Utdata») leses for tidspunkt, git-SHA, exit-kode, stdin-merking og ekstern-markør; resten hashes, aldri tolkes.
+ *
+ * M2 (fiks 1): en PASS krever at evidensen viser en kommando som LYKTES og som opptakeren selv KJØRTE. Evidens med exit ≠ 0 (eller drept), uten gjenkjennelig exit-linje eller pipet inn via `--stdin`
+ * nektes for PASS (FAIL og OPEN er uberørt). `verified_at` (flagget) kan aldri være senere enn toppteksttiden og aldri i fremtiden. En `external: true`-port krever en markør for ekstern kilde eller
+ * dokumentert eier-bekreftelse i evidensens merknad. `by` er en SELVRAPPORTERT rolle-etikett, ikke autentisert: git-historikken og denne vakten er hele sporbarheten.
  */
 export const RECORD_PROBLEMS = [
   "gate_unknown",
@@ -37,6 +42,11 @@ export const RECORD_PROBLEMS = [
   "evidence_older_than_contract_change",
   "prerequisite_not_pass",
   "reason_invalid",
+  "evidence_from_stdin",
+  "evidence_exit_not_zero",
+  "evidence_exit_unknown",
+  "external_confirmation_required",
+  "verified_at_after_evidence",
   "concurrent_registration",
   "result_invalid"
 ] as const;
@@ -71,35 +81,9 @@ export type RecordGateResult =
 const MAX_EVIDENCE_BYTES = 1_000_000;
 const EVIDENCE_PATH = /^docs\/evidence\/[A-Za-z0-9][A-Za-z0-9._-]*\.md$/;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
-const TIME_LINE = /^- \*\*Tidspunkt \(UTC\):\*\* (\S+)\s*$/;
-const GIT_LINE = /^- \*\*Git:\*\* `([0-9a-f]{40})`(.*)$/;
 
-export interface EvidenceHeader {
-  recorded_time: string | null;
-  git_sha: string | null;
-  /** Evidensen er tatt på et arbeidstre med ucommittede endringer (svakere bevis). */
-  dirty: boolean;
-}
-
-/** Leser KUN den faste toppteksten (til «## Utdata», høyst 30 linjer): utdataene under er ubetrodd og leses aldri for verdier. */
-export function parseEvidenceHeader(text: string): EvidenceHeader {
-  const lines = normalizeLineEndings(text).split("\n");
-  const end = lines.findIndex((l) => l.startsWith("## Utdata"));
-  const header = lines.slice(0, Math.min(end === -1 ? 30 : end, 30));
-  let recorded: string | null = null;
-  let sha: string | null = null;
-  let dirty = false;
-  for (const line of header) {
-    const t = TIME_LINE.exec(line);
-    if (t !== null && recorded === null && ISO_INSTANT.test(t[1] as string) && Number.isFinite(Date.parse(t[1] as string))) recorded = new Date(Date.parse(t[1] as string)).toISOString();
-    const g = GIT_LINE.exec(line);
-    if (g !== null && sha === null) {
-      sha = g[1] as string;
-      dirty = /ucommittede endringer|git-status ukjent/.test(g[2] as string);
-    }
-  }
-  return { recorded_time: recorded, git_sha: sha, dirty };
-}
+// Toppteksten leses av `evidence-header.ts` (ren modul, delt med skanningen); re-eksportert her så eksisterende importer virker.
+export { parseEvidenceHeader, type EvidenceHeader };
 
 const fail = (problem: RecordProblem, detail: string): RecordGateResult => ({ ok: false, problem, detail });
 
@@ -115,10 +99,25 @@ function readCanonical(file: string, isOrl: boolean): string | null {
   }
 }
 
+/* eslint-disable no-control-regex -- kontroll- og retningstegn er hele poenget med denne renseren (samme valg som `sanitize` i ops/acceptance/record-evidence.mjs). */
+const LINE_BREAKS = /[\r\n\u2028\u2029]+/g;
+const EXOTIC_SPACES = /[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g;
+/** Kontrolltegn, bredde-null-tegn, retningstegn (bidi: U+202A-202E og U+2066-2069), myk bindestrek og Mongolsk vokalskille: ingenting av dette skal stå skjult i en committet begrunnelse. */
+const INVISIBLE = /[\u0000-\u0008\u000b-\u001f\u007f\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
+/* eslint-enable no-control-regex */
+
+/**
+ * Begrunnelsen havner i en committet fil i et offentlig repo (porthistorikken): linjeskift flettes til ETT mellomrom, eksotiske mellomrom blir vanlige, og kontrolltegn, usynlige tegn og
+ * retningstegn (som kan snu visningen av teksten) FJERNES. Samme tegnsett som `sanitize` i evidens-opptakeren, pluss retningstegnene (L1).
+ */
+export function cleanReason(raw: string): string {
+  return raw.replace(LINE_BREAKS, " ").replace(EXOTIC_SPACES, " ").replace(INVISIBLE, "").trim();
+}
+
 export function recordGate(input: RecordGateInput): RecordGateResult {
   if (!ISO_INSTANT.test(input.now) || !Number.isFinite(Date.parse(input.now))) return fail("evidence_time_invalid", "now er ikke et gyldig UTC-tidspunkt");
-  const reason = input.reason.replace(/[\r\n]+/g, " ").trim();
-  if (reason.length < 3 || reason.length > 200) return fail("reason_invalid", "begrunnelsen må være 3-200 tegn");
+  const reason = cleanReason(input.reason);
+  if (reason.length < 3 || reason.length > 200) return fail("reason_invalid", "begrunnelsen må være 3-200 tegn (etter at kontrolltegn og usynlige tegn er fjernet)");
   // Id-en bygges inn i en lås- og filsti: kun nøyaktig G01-G17/ORL0-ORL5 slipper videre (aldri ukontrollert tekst i en sti).
   if (!GATE_OR_ORL_ID.test(input.gate_id)) return fail("gate_unknown", `${input.gate_id} er ikke en port (G01-G17) eller et nivå (ORL0-ORL5)`);
   if (!input.write) return recordGateCore(input, reason, false);
@@ -166,6 +165,7 @@ function recordGateCore(input: RecordGateInput, reason: string, tookOverStaleLoc
     try {
       const st = lstatSync(abs);
       if (!st.isFile()) return fail("evidence_not_regular_file", "evidensen er ikke en vanlig fil (symlenker avvises)");
+      if (!isInsideRoot(input.root, abs)) return fail("evidence_not_regular_file", "evidensen ligger utenfor repoet (en symlenket mellomkatalog peker ut av det)");
       size = st.size;
     } catch {
       return fail("evidence_missing", `${path} finnes ikke`);
@@ -179,6 +179,17 @@ function recordGateCore(input: RecordGateInput, reason: string, tookOverStaleLoc
     }
     const sha256 = sha256Hex(normalizeLineEndings(text));
     const header = parseEvidenceHeader(text);
+    const details = parseEvidenceDetails(text);
+    if (input.status === "PASS") {
+      // M2: en PASS krever evidens fra en kommando som LYKTES og som opptakeren selv KJØRTE. FAIL kan registreres med hvilken som helst evidens (en feilet kjøring ER evidens), og OPEN har ingen.
+      if (details.from_stdin) return fail("evidence_from_stdin", "evidensen er innlimt utdata (--stdin): opptakeren kjørte ingenting og kan ikke bevise at noe lyktes; kjør kommandoen med record-evidence.mjs (en FAIL kan registreres med innlimt evidens, en PASS ikke)");
+      if (details.exit_kind === "abnormal") return fail("evidence_exit_not_zero", `kommandoen i evidensen ble drept (tidsavbrudd eller signal, exit ${details.exit_code}): en PASS krever exit 0`);
+      if (details.exit_kind === "code" && details.exit_code !== 0) return fail("evidence_exit_not_zero", `kommandoen i evidensen avsluttet med exit ${details.exit_code}: en PASS krever exit 0 (registrer FAIL, eller ta evidensen på nytt når kommandoen lykkes)`);
+      if (details.exit_kind === "missing" || details.exit_kind === "unrecognized") return fail("evidence_exit_unknown", "evidensen har ingen entydig «Exit:»-linje i toppteksten: en PASS krever en evidensfil fra record-evidence.mjs som viser exit 0");
+      if (target.external && details.external_source === null) {
+        return fail("external_confirmation_required", `${input.gate_id} krever en ekstern kilde (NAS-kjøring, pilot eller eier-signoff): ta evidensen med --note "ekstern-kilde: <hva og hvor>" eller "eier-bekreftet: <hva>". Merk at «by» er en selvrapportert etikett, ikke autentisert`);
+      }
+    }
 
     let verifiedAt: string;
     let source: EvidenceRef["verified_at_source"];
@@ -195,11 +206,20 @@ function recordGateCore(input: RecordGateInput, reason: string, tookOverStaleLoc
       warnings.push("evidensfilen har ingen gjenkjennelig topptekst med tidspunkt: verified_at er satt til registreringstidspunktet (svakere bevis)");
     }
     if (Date.parse(verifiedAt) > Date.parse(input.now)) return fail("evidence_in_future", "evidensen er datert etter registreringstidspunktet");
+    if (source === "flag") {
+      // --verified-at kan aldri gjøre evidensen NYERE enn filen selv sier (ellers omgår den «evidens eldre enn kontraktendringen»): høyst toppteksttiden.
+      if (header.recorded_time === null) return fail("verified_at_after_evidence", "evidensfilen har ingen tidsangivelse i toppteksten, så --verified-at har ingenting å begrenses mot");
+      if (Date.parse(verifiedAt) > Date.parse(header.recorded_time)) return fail("verified_at_after_evidence", `--verified-at (${verifiedAt}) kan ikke være senere enn tidspunktet i evidensens topptekst (${header.recorded_time})`);
+    }
 
     const gitSha = header.git_sha ?? input.git_sha;
     if (gitSha === null || !/^[0-9a-f]{40}$/.test(gitSha)) return fail("git_sha_unavailable", "fant ingen git-SHA (hverken i evidensfilen eller fra arbeidstreet)");
     if (header.git_sha === null) warnings.push("evidensfilen oppgir ingen git-SHA: SHA-en til arbeidstreet ved registrering er brukt");
     if (header.dirty) warnings.push("evidensen er tatt på et arbeidstre med ucommittede endringer eller ukjent git-status (svakere bevis)");
+    if (input.status === "PASS") {
+      const weak = evidenceWeaknesses({ ...header, ...details }, { external: target.external, verified_at: verifiedAt });
+      if (weak.length > 0) warnings.push(`svak evidens (${weak.map((w) => WEAKNESS_TEXT[w]).join("; ")}): porten vil stå som gate_weak_evidence i skanningen`);
+    }
 
     const fingerprints: Record<string, string | null> = {};
     for (const id of [...target.bound_components].sort()) {
@@ -224,7 +244,7 @@ function recordGateCore(input: RecordGateInput, reason: string, tookOverStaleLoc
   }
 
   // ORL-PASS: forutsetningene (porter og forrige nivå) må stå som PASS NÅ (effektivt), ellers ville registreringen vært ugyldig fra første sekund.
-  const ctx = makeGateContext(data.components, reader.file_sha256);
+  const ctx = makeGateContext(data.components, reader);
   if (isOrl && input.status === "PASS") {
     const orl = target as Orl;
     const gateEffective = new Map(data.gates.map((g) => [g.id, evaluateGate(g, ctx).effective]));

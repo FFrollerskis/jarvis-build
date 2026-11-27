@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { compareFindings, type Finding } from "./findings.ts";
-import { canonicalJson } from "./hash.ts";
+import { evidenceWeaknesses, type EvidenceFacts, type EvidenceWeakness, WEAKNESS_TEXT } from "./evidence-header.ts";
+import { canonicalJson, contractFingerprint } from "./hash.ts";
 import { GATE_ID_PATTERN, GateIdSchema, GateStatusSchema, OperationalGateChangedPayloadSchema, ORL_ID_PATTERN, OrlIdSchema, type GateStatus } from "./gate-events.ts";
 import { ComponentIdSchema, EvidenceRefSchema, type ComponentShard, type EvidenceRef } from "./schema.ts";
 
@@ -102,22 +103,65 @@ export type Orl = z.infer<typeof OrlSchema>;
 // ---------------------------------------------------------------------------------------------------------------------
 // Evaluering: effektiv status (staleness-regelen)
 // ---------------------------------------------------------------------------------------------------------------------
-export interface GateContext {
-  /** Komponentens nåværende kontraktfingeravtrykk og siste kontraktendring (null = ukjent/ingen). `undefined` = komponenten finnes ikke i indeksen. */
-  component: (id: string) => { contract_fingerprint: string | null; changed_at: string | null } | undefined;
-  /** sha256 (hex) av evidensfilen slik den ligger nå; null hvis den ikke finnes. */
-  evidence_sha256: (path: string) => string | null;
+/** En bundet komponents tilstand slik portene ser den. */
+export interface GateComponentState {
+  /** Fingeravtrykket som er LAGRET i skjerven. */
+  contract_fingerprint: string | null;
+  changed_at: string | null;
+  /**
+   * Fingeravtrykket regnet fra kontraktfilene NÅ (M3): `null` = komponenten har ingen kontraktfiler, `"unreadable"` = minst én fil mangler eller kan ikke leses (teller som foreldet). `undefined` = ikke
+   * målt (kun hånd-bygde kontekster i tester; `makeGateContext` setter alltid en verdi).
+   */
+  live_fingerprint?: string | null;
 }
 
-/** Bygger `GateContext` fra komponentene (kontraktfingeravtrykk og siste kontraktendring) og en leser av evidensfilenes sha256. Felles for orkestratoren og registreringsverktøyet. */
-export function makeGateContext(components: ReadonlyArray<Pick<ComponentShard, "component_id" | "contract">>, evidenceSha256: (path: string) => string | null): GateContext {
+/** Verdien `live_fingerprint` har når en kontraktfil ikke kan leses: aldri lik et ekte fingeravtrykk, så en slik komponent er alltid foreldet. */
+export const UNREADABLE_CONTRACT = "unreadable" as const;
+
+export interface GateContext {
+  /** Komponentens tilstand (lagret fingeravtrykk, live fingeravtrykk og siste kontraktendring). `undefined` = komponenten finnes ikke i indeksen. */
+  component: (id: string) => GateComponentState | undefined;
+  /** sha256 (hex) av evidensfilen slik den ligger nå; null hvis den ikke finnes. */
+  evidence_sha256: (path: string) => string | null;
+  /** Toppteksten i evidensfilen slik den ligger nå (til vurdering av evidensstyrke, M2); null hvis den ikke finnes/kan leses. */
+  evidence_facts: (path: string) => EvidenceFacts | null;
+}
+
+/** Kildene `makeGateContext` trenger fra repoet: filhash (evidens og kontraktfiler) og evidensens topptekst. */
+export interface GateReader {
+  file_sha256: (path: string) => string | null;
+  evidence_facts: (path: string) => EvidenceFacts | null;
+}
+
+/**
+ * Bygger `GateContext` fra komponentene og en leser av filer. Felles for orkestratoren og registreringsverktøyet. Fingeravtrykket regnes LIVE fra kontraktfilene (M3, lazy og cachet per komponent),
+ * så en kontraktfil som er endret uten `fingerprint --write` åpner porten med en gang: lagret fingeravtrykk alene er ikke nok.
+ */
+export function makeGateContext(components: ReadonlyArray<Pick<ComponentShard, "component_id" | "contract">>, reader: GateReader): GateContext {
   const byId = new Map(components.map((c) => [c.component_id, c]));
+  const live = new Map<string, string | null>();
+  const liveOf = (c: Pick<ComponentShard, "component_id" | "contract">): string | null => {
+    if (live.has(c.component_id)) return live.get(c.component_id) as string | null;
+    let value: string | null;
+    if (c.contract.files.length === 0) value = null;
+    else {
+      const hashes = c.contract.files.map((path) => ({ path, sha256: reader.file_sha256(path) }));
+      try {
+        value = hashes.some((h) => h.sha256 === null) ? UNREADABLE_CONTRACT : contractFingerprint(hashes.map((h) => ({ path: h.path, sha256: h.sha256 as string })));
+      } catch {
+        value = UNREADABLE_CONTRACT;
+      }
+    }
+    live.set(c.component_id, value);
+    return value;
+  };
   return {
     component: (id) => {
       const c = byId.get(id);
-      return c === undefined ? undefined : { contract_fingerprint: c.contract.fingerprint, changed_at: c.contract.changed_at };
+      return c === undefined ? undefined : { contract_fingerprint: c.contract.fingerprint, changed_at: c.contract.changed_at, live_fingerprint: liveOf(c) };
     },
-    evidence_sha256: evidenceSha256
+    evidence_sha256: reader.file_sha256,
+    evidence_facts: reader.evidence_facts
   };
 }
 
@@ -128,6 +172,7 @@ export type GateReason =
   | { code: "component_unknown"; component_id: string }
   | { code: "stale_contract_changed_after_evidence"; component_id: string; changed_at: string; verified_at: string }
   | { code: "stale_fingerprint_changed"; component_id: string }
+  | { code: "stale_contract_files_changed"; component_id: string }
   | { code: "stale_binding_missing"; component_id: string }
   | { code: "prerequisite_not_pass"; prerequisite: string };
 
@@ -153,6 +198,8 @@ function proveFresh(g: { evidence_ref: EvidenceRef | null; bound_components: rea
     }
     if (!Object.hasOwn(e.contract_fingerprints, id)) reasons.push({ code: "stale_binding_missing", component_id: id });
     else if (e.contract_fingerprints[id] !== c.contract_fingerprint) reasons.push({ code: "stale_fingerprint_changed", component_id: id });
+    // M3: skjervens lagrede fingeravtrykk kan ligge etter filene (ingen har kjørt `fingerprint --write` ennå): sammenlign øyeblikksbildet mot det LIVE fingeravtrykket også. Ulesbar fil = foreldet.
+    else if (c.live_fingerprint !== undefined && e.contract_fingerprints[id] !== c.live_fingerprint) reasons.push({ code: "stale_contract_files_changed", component_id: id });
     if (c.changed_at !== null && Date.parse(c.changed_at) > Date.parse(e.verified_at)) {
       reasons.push({ code: "stale_contract_changed_after_evidence", component_id: id, changed_at: c.changed_at, verified_at: e.verified_at });
     }
@@ -174,14 +221,26 @@ export function evaluateOrl(orl: Pick<Orl, "status" | "evidence_ref" | "bound_co
   return { declared: "PASS", effective: reasons.length === 0 ? "PASS" : "OPEN", reasons };
 }
 
+/**
+ * Svakhetene ved evidensen for en deklarert PASS (M2). Tom liste = sterk evidens. Leser toppteksten i evidensfilen slik den ligger NÅ og vurderer den (exit 0, kjørt av opptakeren, tidspunkt og git-SHA
+ * fra filen, rent arbeidstre, ekstern-markør for `external`-porter): `verified_at_source` i dataene stoles ikke på, siden en håndredigert port-fil kan påstå hva som helst.
+ */
+export function gateWeaknesses(g: Pick<Gate, "evidence_ref" | "external">, ctx: GateContext): EvidenceWeakness[] {
+  const e = g.evidence_ref;
+  if (e === null) return [];
+  const facts = ctx.evidence_facts(e.path);
+  if (facts === null) return ["evidence_unreadable"];
+  return evidenceWeaknesses(facts, { external: g.external, verified_at: e.verified_at });
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Skanning av port-/ORL-dataene
 // ---------------------------------------------------------------------------------------------------------------------
-export const GATE_RULES = ["gate_set_incomplete", "gate_unknown_component", "gate_stale", "gate_evidence_invalid", "gate_prerequisite_violation"] as const;
+export const GATE_RULES = ["gate_set_incomplete", "gate_unknown_component", "gate_stale", "gate_evidence_invalid", "gate_prerequisite_violation", "gate_weak_evidence", "gate_bound_untracked_component"] as const;
 export type GateRule = (typeof GATE_RULES)[number];
 
 const EVIDENCE_CODES = new Set(["evidence_missing", "evidence_file_missing", "evidence_hash_mismatch"]);
-const STALE_CODES = new Set(["stale_contract_changed_after_evidence", "stale_fingerprint_changed", "stale_binding_missing"]);
+const STALE_CODES = new Set(["stale_contract_changed_after_evidence", "stale_fingerprint_changed", "stale_contract_files_changed", "stale_binding_missing"]);
 
 export interface GateScanInput {
   gates: readonly Gate[];
@@ -189,6 +248,8 @@ export interface GateScanInput {
   /** Komponent-id-ene som finnes i indeksen. */
   component_ids: ReadonlySet<string>;
   ctx: GateContext;
+  /** BYGDE komponenter uten `contract.files` (staleness er blind for dem). En port bundet til en av dem er et funn (L5). Utelatt = ingen. */
+  untracked_components?: ReadonlySet<string>;
 }
 
 export function scanGates(input: GateScanInput): Finding[] {
@@ -206,19 +267,33 @@ export function scanGates(input: GateScanInput): Finding[] {
     if (e.reasons.some((r) => EVIDENCE_CODES.has(r.code))) add("gate_evidence_invalid", id, `${id} står som PASS, men evidensen kan ikke gjenverifiseres (fil mangler, hash avviker eller evidens mangler)`);
     else if (e.reasons.some((r) => STALE_CODES.has(r.code))) add("gate_stale", id, `${id} står som PASS, men er OPEN igjen: en bundet komponent er endret etter evidensen (${e.reasons.filter((r) => STALE_CODES.has(r.code)).map((r) => ("component_id" in r ? `${r.code}:${r.component_id}` : r.code)).join(", ")})`);
   };
+  const untracked = input.untracked_components ?? new Set<string>();
+  const checkBindings = (id: string, bound: readonly string[]): void => {
+    for (const c of bound) {
+      if (!input.component_ids.has(c)) add("gate_unknown_component", `${id}:${c}`, `${id} er bundet til ${c}, som ikke finnes i indeksen`);
+      else if (untracked.has(c)) add("gate_bound_untracked_component", `${id}:${c}`, `${id} er bundet til den bygde komponenten ${c}, som ikke har contract.files: uten kontraktfingeravtrykk er foreldelse blind for den (fyll inn contract.files)`);
+    }
+  };
+  const weak = (g: Pick<Gate, "id" | "evidence_ref" | "external">, e: GateEvaluation): void => {
+    if (e.effective !== "PASS") return;
+    const w = gateWeaknesses(g, input.ctx);
+    if (w.length > 0) add("gate_weak_evidence", g.id, `${g.id} står som PASS, men evidensen er svak: ${w.map((x) => WEAKNESS_TEXT[x]).join("; ")}`);
+  };
   const effectiveGate = new Map<string, GateStatus>();
   for (const g of input.gates) {
-    for (const c of g.bound_components) if (!input.component_ids.has(c)) add("gate_unknown_component", `${g.id}:${c}`, `${g.id} er bundet til ${c}, som ikke finnes i indeksen`);
+    checkBindings(g.id, g.bound_components);
     const e = evaluateGate(g, input.ctx);
     effectiveGate.set(g.id, e.effective);
     classify(g.id, e);
+    weak(g, e);
   }
   const effectiveOrl = new Map<string, GateStatus>();
   for (const o of [...input.orls].sort((a, b) => a.level - b.level)) {
-    for (const c of o.bound_components) if (!input.component_ids.has(c)) add("gate_unknown_component", `${o.id}:${c}`, `${o.id} er bundet til ${c}, som ikke finnes i indeksen`);
+    checkBindings(o.id, o.bound_components);
     const e = evaluateOrl(o, input.ctx, (id) => effectiveGate.get(id) ?? "OPEN", (id) => effectiveOrl.get(id) ?? "OPEN");
     effectiveOrl.set(o.id, e.effective);
     classify(o.id, e);
+    weak(o, e);
     for (const r of e.reasons) if (r.code === "prerequisite_not_pass") add("gate_prerequisite_violation", `${o.id}:${r.prerequisite}`, `${o.id} står som PASS, men ${r.prerequisite} er ikke PASS`);
   }
   return [...found.values()].sort(compareFindings);

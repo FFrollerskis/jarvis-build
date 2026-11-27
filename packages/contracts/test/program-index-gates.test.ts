@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { OPERATIONAL_GATE_CHANGED_TYPE, OPERATIONAL_GATE_CHANGED_VERSION, OperationalGateChangedEventSchema, OperationalGateChangedPayloadSchema } from "../src/program/gate-events.ts";
 import { GATE_RULES, GateSchema, ORL_IDS, OrlSchema, PROGRAM_GATE_IDS, evaluateGate, evaluateOrl, scanGates, type Gate, type GateContext, type Orl } from "../src/program/gates.ts";
+import type { EvidenceFacts } from "../src/program/evidence-header.ts";
 import type { EvidenceRef } from "../src/program/schema.ts";
 import { T0 } from "./program-index-fixtures.ts";
 
@@ -45,9 +46,13 @@ const openGate = (patch: Partial<Gate> = {}): Gate => ({
 const change = (patch: Record<string, unknown> = {}) => ({ gate_kind: "program_gate", gate_id: "G02", prior_status: "OPEN", new_status: "PASS", evidence_refs: [evidence()], owner: "owner", changed_at: T_MID, reason: "Evidens registrert etter test.", ...patch });
 const passGate = (patch: Partial<Gate> = {}): Gate => openGate({ status: "PASS", evidence_ref: evidence(), history: [change() as Gate["history"][number]], ...patch });
 
+/** Sterk evidens (M2): kjørt av opptakeren, exit 0, tidspunkt og git-SHA i toppteksten, rent arbeidstre. Samme tidspunkt som `evidence()` bruker for verified_at. */
+const STRONG_FACTS: EvidenceFacts = { recorded_time: T_MID, git_sha: "a".repeat(40), dirty: false, exit_kind: "code", exit_code: 0, from_stdin: false, external_source: null };
+
 const ctx = (over: { components?: Record<string, { contract_fingerprint: string | null; changed_at: string | null } | undefined>; files?: Record<string, string | null> } = {}): GateContext => ({
   component: (id) => (over.components ?? { "core.alpha": { contract_fingerprint: FP1, changed_at: T_OLD } })[id],
-  evidence_sha256: (p) => (over.files ?? { "docs/evidence/2026-11-25-g01.md": EV_SHA })[p] ?? null
+  evidence_sha256: (p) => (over.files ?? { "docs/evidence/2026-11-25-g01.md": EV_SHA })[p] ?? null,
+  evidence_facts: (p) => ((over.files ?? { "docs/evidence/2026-11-25-g01.md": EV_SHA })[p] === undefined ? null : STRONG_FACTS)
 });
 
 describe("identifikatorer", () => {
@@ -357,7 +362,7 @@ describe("scanGates: funn mot indeksen", () => {
   });
 
   it("regelmengden er stabil", () => {
-    expect([...GATE_RULES].sort()).toEqual(["gate_evidence_invalid", "gate_prerequisite_violation", "gate_set_incomplete", "gate_stale", "gate_unknown_component"]);
+    expect([...GATE_RULES].sort()).toEqual(["gate_bound_untracked_component", "gate_evidence_invalid", "gate_prerequisite_violation", "gate_set_incomplete", "gate_stale", "gate_unknown_component", "gate_weak_evidence"]);
   });
 
   it("alle gate-tester bruker T0-konstanten fra fikstur (tidsstempel-fiksturen er konsistent)", () => {

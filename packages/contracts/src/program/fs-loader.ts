@@ -1,6 +1,7 @@
-import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync } from "node:fs";
+import { join, sep } from "node:path";
 import type { ZodType } from "zod";
+import { parseEvidenceFacts, type EvidenceFacts } from "./evidence-header.ts";
 import type { Finding } from "./findings.ts";
 import { GateSchema, OrlSchema, type Gate, type Orl } from "./gates.ts";
 import { normalizeLineEndings, sha256Hex } from "./hash.ts";
@@ -220,19 +221,66 @@ export function collectRepoFacts(root: string, manifest: Manifest): RepoFacts {
   };
 }
 
-/** Eksistens-, hash- og beslutningsoppslag med stibeskyttelse (kun repo-relative stier; symlenker og for store filer gir null). */
-export function makeFileReader(root: string): Pick<RepoFacts, "path_exists" | "file_sha256" | "decision_exists"> {
+/** Evidensens topptekst ligger helt først i filen: 64 kB er mer enn nok (høyst 30 linjer leses), og en stor fil leses ikke i sin helhet bare for å vurdere styrken. */
+const HEADER_READ_BYTES = 65_536;
+
+/**
+ * Ligger `abs` (etter at ALLE symlenker er fulgt, også mellomkataloger) innenfor repo-roten? `lstat` avviser bare at SELVE filen er en symlenke; en symlenket MELLOMKATALOG (`docs/evidence -> et annet sted`)
+ * ville ellers latt oss lese og hashe filer utenfor repoet. En sti som ikke kan løses er utenfor.
+ */
+export function isInsideRoot(root: string, abs: string): boolean {
+  try {
+    const r = realpathSync(root);
+    const a = realpathSync(abs);
+    return a === r || a.startsWith(r.endsWith(sep) ? r : `${r}${sep}`);
+  } catch {
+    return false;
+  }
+}
+
+export interface FileReader extends Pick<RepoFacts, "path_exists" | "file_sha256" | "decision_exists"> {
+  /** Toppteksten i en evidensfil (exit, kommando, tidspunkt, git, merknad); null hvis filen ikke finnes, ikke er en vanlig fil innenfor repoet eller ikke kan leses. */
+  evidence_facts: (path: string) => EvidenceFacts | null;
+}
+
+/** Eksistens-, hash- og beslutningsoppslag med stibeskyttelse (kun repo-relative stier innenfor repoet; symlenker, symlenkede mellomkataloger og for store filer gir null). */
+export function makeFileReader(root: string): FileReader {
   const safe = (p: string): boolean => typeof p === "string" && REPO_PATH.test(p);
   let decisionLog: string | null | undefined;
+  const regularInside = (p: string): { abs: string; size: number } | null => {
+    if (!safe(p)) return null;
+    try {
+      const abs = join(root, p);
+      const st = lstatSync(abs);
+      if (!st.isFile() || st.size > MAX_HASH_BYTES || !isInsideRoot(root, abs)) return null;
+      return { abs, size: st.size };
+    } catch {
+      return null;
+    }
+  };
   return {
     path_exists: (p) => safe(p) && existsSync(join(root, p)),
     file_sha256: (p) => {
-      if (!safe(p)) return null;
+      const f = regularInside(p);
+      if (f === null) return null;
       try {
-        const abs = join(root, p);
-        const st = lstatSync(abs);
-        if (!st.isFile() || st.size > MAX_HASH_BYTES) return null;
-        return sha256Hex(normalizeLineEndings(readFileSync(abs, "utf8")));
+        return sha256Hex(normalizeLineEndings(readFileSync(f.abs, "utf8")));
+      } catch {
+        return null;
+      }
+    },
+    evidence_facts: (p) => {
+      const f = regularInside(p);
+      if (f === null) return null;
+      try {
+        const fd = openSync(f.abs, "r");
+        try {
+          const buf = Buffer.alloc(Math.min(f.size, HEADER_READ_BYTES));
+          const n = readSync(fd, buf, 0, buf.length, 0);
+          return parseEvidenceFacts(buf.subarray(0, n).toString("utf8"));
+        } finally {
+          closeSync(fd);
+        }
       } catch {
         return null;
       }
