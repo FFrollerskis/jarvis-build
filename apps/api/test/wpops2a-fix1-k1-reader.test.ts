@@ -73,13 +73,13 @@ describe("watchdogIntervalMsFromEnv: samme variabel og samme område som worker 
 
   it("gyldige verdier uendret; ugyldige gir NaN (aldri et kast, aldri en gjettet verdi)", () => {
     for (const ok of ["1000", "30000", "60000", "3600000"]) expect(status.watchdogIntervalMsFromEnv({ JARVIS_WATCHDOG_INTERVAL_MS: ok }), ok).toBe(Number(ok));
-    for (const bad of ["999", "3600001", "0", "-1000", "abc", "NaN", "Infinity", "1.5", "1e3x", "60 000"]) {
+    for (const bad of ["999", "3600001", "0", "-1000", "abc", "NaN", "Infinity", "1.5", "30000.5", "1e3x", "60 000"]) {
       expect(Number.isNaN(status.watchdogIntervalMsFromEnv({ JARVIS_WATCHDOG_INTERVAL_MS: bad })), bad).toBe(true);
     }
   });
 
   it("paritet: for hver verdi gir API-leseren det samme som `parseWatchdogIntervalMs` (unntatt tom streng, som worker avviser og API tolker som standard)", () => {
-    for (const v of [undefined, "1000", "999", "60000", "3600000", "3600001", "0", "-5", "abc", "NaN", "Infinity", "1.5", "30000", "250000"]) {
+    for (const v of [undefined, "1000", "999", "60000", "3600000", "3600001", "0", "-5", "abc", "NaN", "Infinity", "1.5", "30000.5", "30000", "250000", "1e4", "0x7530"]) {
       let expected: number;
       try { expected = parseWatchdogIntervalMs(v); } catch { expected = Number.NaN; }
       const actual = status.watchdogIntervalMsFromEnv(v === undefined ? {} : { JARVIS_WATCHDOG_INTERVAL_MS: v });
@@ -161,6 +161,7 @@ describe("B-L3: den rene funksjonen kaster aldri og gir UKJENT for ugyldige inng
     for (const badNow of [new Date(Number.NaN), new Date("ikke en dato"), "2026-11-27T10:00:00Z", null, undefined, 1_700_000_000_000]) {
       const o = status.observeWatchdogRun(row(), badNow as never, 60_000);
       expect(o.status, String(badNow)).toBe("UNKNOWN");
+      expect(o.detail, String(badNow)).toContain("Klokken er ugyldig"); // egen, presis årsak (ikke den generelle «alder kan ikke beregnes»)
       expect(JSON.stringify(o)).not.toContain("NaN");
     }
   });

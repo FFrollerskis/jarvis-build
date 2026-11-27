@@ -364,5 +364,18 @@ describe("B-L11: grener som manglet test", () => {
     const [status, detail] = c13(r);
     expect(status, r.out).toBe("PASS");
     expect(detail).toBe("exit=0 age_h=3.5 verify=ok offsite=ok reasons=- (OVERSTYRT, kun test)");
+    // Exit-koden følger kommandoen også uten `timeout`-binær (exit 3 = FAIL, ikke forkastet til 0).
+    const overdue = run(gateEnv(3, statusJson({ ok: false, exit_code: 3, backup: { age_hours: 40 } })), {}, { path: `${fake}${delimiter}${bin}` });
+    expect(c13(overdue)[0], overdue.out).toBe("FAIL");
+    expect(c13(overdue)[1]).toMatch(/^exit=3 age_h=40 /);
+    expect(overdue.status).toBe(1);
+  });
+
+  it("exit 137 UTEN at fristen er gått (kommandoen ble drept av noe annet) er «uventet exit», ikke «tidsavbrudd»", () => {
+    const r = run(gateEnv(137, statusJson({ exit_code: 137 })));
+    const [status, detail] = c13(r);
+    expect(status, r.out).toBe("UNKNOWN");
+    expect(detail).toMatch(/uventet exit 137/);
+    expect(detail).not.toMatch(/tidsavbrudd/);
   });
 });
