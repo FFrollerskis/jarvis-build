@@ -1,16 +1,30 @@
 import { CATEGORY_CAP_KEYS, EVOLUTION_COST_CATEGORIES, type BudgetCaps, type Constitution, type EvolutionCostCategory } from "./constitution.ts";
 import type { LedgerDecision } from "./change-ledger.ts";
-import type { UsageCounter } from "./usage-ledger.ts";
 
 /**
  * EV-0 (D-409, utvidet i WP-EV0): budsjettlåser. Grensene kommer fra den SIGNERTE konstitusjonen (`constitution.budget`) - Evolution kan aldri heve dem.
- * Forbruk telles fra append-only registre (endringsregisteret D-408 for merger/deploys/forslag; forbruksregisteret, migrasjon 280, for kostnad pr. kategori og
- * eierens tid), så en låst grense ikke kan «nullstilles» ved å slette rader og forbruket aldri er motorens egen påstand.
+ * Forbruk telles fra append-only registre (endringsregisteret D-408 for merger/deploys/forslag). Kostnad pr. kategori og eierens tid leses via `UsageCounter`: den
+ * KONKRETE, varige implementasjonen (forbruksregister i databasen) er DEFERRED til WP-EV0b (krever klasse-sti i MC8a-linten, `search_path`-herding og at `at` settes
+ * av databasen); til da finnes ingen kilde, og kategori-/eier-tid-sjekkene gir «ikke tillatt» uten `usage` (fail-closed).
  *
  * FAIL-CLOSED (WP-EV0): alt som ikke kan måles trygt er «ikke tillatt» (`budget_check_failed`): databasefeil, ugyldig klokke, manglende forbruksregister, ugyldige tak
  * (negative/NaN/brøk) og ugyldige tellerverdier (NaN, negative, brøk, uendelig, ikke-tall). Aldri en stille «ubegrenset». Dager er UTC-døgn, timer er hele UTC-timer,
  * uker er ISO-uker (mandag 00:00 UTC) og måneder er UTC-kalendermåneder.
  */
+
+/** Hva forbruksteller måler: `spend` = kostnad i ØRE pr. kategori, `owner_time` = eierens tid i MINUTTER. */
+export type UsageKind = "spend" | "owner_time";
+
+/**
+ * Det budsjettlåsen trenger av et forbrukskilde (strukturelt, som `LedgerCounter`). Kontrakt: summene er HELE, ikke-negative tall; en kilde som ikke kan måle trygt skal KASTE
+ * (ikke returnere 0). Den varige implementasjonen er DEFERRED (WP-EV0b); testene bruker fiktive tellere.
+ */
+export interface UsageCounter {
+  /** Sum av beløpet (øre for `spend`, minutter for `owner_time`) siden `sinceIso`; `categories: null` = alle kategorier. */
+  sumSince(kind: UsageKind, categories: readonly string[] | null, sinceIso: string): Promise<number>;
+  /** Sum av beløpet for én endring (eier-minutter pr. autonom endring). */
+  sumForChange(kind: UsageKind, changeId: string): Promise<number>;
+}
 
 export type BudgetKind = "auto_merge" | "deploy" | "deploy_hour" | "owner_proposal" | "spend" | "category_spend" | "owner_time";
 

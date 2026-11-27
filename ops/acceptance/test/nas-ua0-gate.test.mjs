@@ -20,7 +20,7 @@ function fakeDocker(overrides = {}) {
     migrations: MIGS.join("\n"),
     vector: "vector", hnsw: "2", regclass: "t", delivered: "1", select1: "1",
     health: "200", models: "llama3.1:8b,bge-m3",
-    cost: "gemma_local:12 kall/0 øre", cloudOre: "0", fails: "", ev0: '{"msg":"ev0_constitution_boot","status":"verified"} {"msg":"ev0_change_ledger_boot","status":"ok"}', norls: "capabilities,evolution_change_ledger,evolution_usage_ledger,github_rate_limit_state,owner_control_state,scheduler_state,schema_migrations,self_modification_requests,situation_domain_pauses,telegram_poll_state",
+    cost: "gemma_local:12 kall/0 øre", cloudOre: "0", fails: "", ev0: '{"msg":"ev0_constitution_boot","status":"verified"} {"msg":"ev0_change_ledger_boot","status":"ok"}', norls: "capabilities,evolution_change_ledger,github_rate_limit_state,owner_control_state,scheduler_state,schema_migrations,self_modification_requests,situation_domain_pauses,telegram_poll_state",
     inspect: 'jarvis|true|["ALL"]',
     ...overrides
   };

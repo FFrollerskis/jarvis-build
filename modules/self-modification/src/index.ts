@@ -2,7 +2,6 @@ export * from "./types.ts";
 export * from "./policy.ts";
 export * from "./constitution.ts";
 export * from "./change-ledger.ts";
-export * from "./usage-ledger.ts";
 export * from "./budget-lock.ts";
 export * from "./github-client.ts";
 export * from "./service.ts";

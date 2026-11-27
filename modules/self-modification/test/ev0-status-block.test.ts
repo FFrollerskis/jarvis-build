@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   STATUS_BLOCK_BEGIN, STATUS_BLOCK_END, UsageSnapshotSchema, buildConstitution, canonicalizeManifest, checkStatusBlock, extractStatusBlock, renderEvolutionStatusBlock,
-  spliceStatusBlock, usageSnapshotFromLedger, type BudgetCaps, type EvolutionStatusInput, type LedgerCounter, type UsageCounter, type UsageSnapshot
+  spliceStatusBlock, type BudgetCaps, type EvolutionStatusInput, type UsageSnapshot
 } from "../src/index.ts";
 
 /**
@@ -175,48 +175,8 @@ describe("E: grenser fra manifestet og determinisme", () => {
   });
 });
 
-describe("F: usageSnapshotFromLedger - fra de samme tellerne som budsjettlåsen", () => {
-  const now = new Date("2026-12-10T12:00:00Z");
-  const usage = (over: Partial<UsageCounter> = {}): UsageCounter => ({
-    sumSince: async (kind, categories) => (kind === "spend" ? { radar: 450, eval: 1000, redteam: 0, shadow: 1500, review: 300 }[(categories ?? [""])[0] as string] ?? 0 : 90),
-    sumForChange: async () => 0, ...over
-  });
-  const ledger: LedgerCounter = { countSince: async () => 6 };
-
-  it("F1: bygger månedens og ukens tall (dager gått = dag i måneden, dager i måneden, ukestart = mandag)", async () => {
-    expect(await usageSnapshotFromLedger(usage(), now, ledger)).toEqual({
-      month: "2026-12", days_elapsed: 10, days_in_month: 31, spend_ore: { radar: 450, eval: 1000, redteam: 0, shadow: 1500, review: 300 },
-      week_start: "2026-12-07", owner_minutes_week: 90, autonomous_changes_week: 6
-    });
-  });
-
-  it("F2: februar i skuddår og månedsskifte gir riktig dager i måneden", async () => {
-    const feb = await usageSnapshotFromLedger(usage(), new Date("2028-02-29T23:59:59Z"), ledger);
-    expect([feb.month, feb.days_elapsed, feb.days_in_month]).toEqual(["2028-02", 29, 29]);
-    const jan = await usageSnapshotFromLedger(usage(), new Date("2027-01-01T00:00:00Z"), ledger);
-    expect([jan.month, jan.days_elapsed, jan.days_in_month, jan.week_start]).toEqual(["2027-01", 1, 31, "2026-12-28"]);
-  });
-
-  it("F3: en teller som feiler eller gir ugyldig verdi gir null for akkurat den delen (aldri 0), resten beholdes", async () => {
-    const partial = await usageSnapshotFromLedger(usage({
-      sumSince: async (kind, categories) => {
-        if (kind === "spend" && categories?.[0] === "eval") throw new Error("db nede");
-        if (kind === "spend" && categories?.[0] === "shadow") return Number.NaN;
-        if (kind === "owner_time") throw new Error("db nede");
-        return 5;
-      }
-    }), now, { countSince: async () => -1 });
-    expect(partial.spend_ore).toEqual({ radar: 5, eval: null, redteam: 5, shadow: null, review: 5 });
-    expect(partial.owner_minutes_week).toBeNull();
-    expect(partial.autonomous_changes_week).toBeNull();
-  });
-
-  it("F4: uten endringsregister-teller er antall autonome endringer null; ugyldig klokke kaster (kalleren må håndtere)", async () => {
-    expect((await usageSnapshotFromLedger(usage(), now)).autonomous_changes_week).toBeNull();
-    await expect(usageSnapshotFromLedger(usage(), new Date(Number.NaN), ledger)).rejects.toThrow();
-  });
-
-  it("F5: skjemaet for et snapshot er strengt (ukjent felt, negative tall, feil dato, dager gått > dager i måneden avvises)", () => {
+describe("F: forbruksbildet (UsageSnapshot) - eneste kilde til faktisk forbruk i visningen", () => {
+  it("F1: skjemaet for et snapshot er strengt (ukjent felt, negative tall, feil dato, dager gått > dager i måneden avvises)", () => {
     expect(UsageSnapshotSchema.safeParse(USAGE).success).toBe(true);
     for (const bad of [
       { ...USAGE, extra: 1 }, { ...USAGE, month: "2026-13" }, { ...USAGE, month: "26-12" }, { ...USAGE, days_elapsed: 0 }, { ...USAGE, days_elapsed: 32 }, { ...USAGE, days_in_month: 27 },

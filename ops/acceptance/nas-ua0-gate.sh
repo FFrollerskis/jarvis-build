@@ -124,10 +124,10 @@ else
 fi
 
 # C11: tabeller UTEN rad-nivå-sikkerhet må være nøyaktig de dokumenterte globale (RLS_EXEMPT i modules/core/test/remediation-2-schema-invariants.test.ts)
-EXPECTED_NO_RLS="capabilities,evolution_change_ledger,evolution_usage_ledger,github_rate_limit_state,owner_control_state,scheduler_state,schema_migrations,self_modification_requests,situation_domain_pauses,telegram_poll_state"
+EXPECTED_NO_RLS="capabilities,evolution_change_ledger,github_rate_limit_state,owner_control_state,scheduler_state,schema_migrations,self_modification_requests,situation_domain_pauses,telegram_poll_state"
 norls="$(psqlq "SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_class WHERE relkind='r' AND relnamespace='public'::regnamespace AND NOT relrowsecurity")"
 if [ -z "$(psqlq 'SELECT 1')" ]; then record C11_rls_tables UNKNOWN "fikk ikke kontakt med databasen"
-elif [ "$norls" = "$EXPECTED_NO_RLS" ]; then record C11_rls_tables PASS "kun de 10 dokumenterte globale tabellene mangler RLS"
+elif [ "$norls" = "$EXPECTED_NO_RLS" ]; then record C11_rls_tables PASS "kun de 9 dokumenterte globale tabellene mangler RLS"
 else record C11_rls_tables FAIL "avvik fra dokumenterte globale tabeller. Funnet: ${norls:-ingen} | Forventet: $EXPECTED_NO_RLS"; fi
 
 # C12: containerherding (api/worker): ikke root, read-only rotfs, cap_drop ALL

@@ -2,7 +2,7 @@
 <!-- evolution-status: constitution_version=2 caps_sha256=199ba5483aec8ca0aeb71d5f645f6fa5dcff1b94538242059477084502058351 -->
 ### Evolution: planlagt forbruk, faktisk forbruk, run-rate og eier-tid
 
-> GENERERT visning - rediger ikke for hånd. Kilden til takene er den signerte konstitusjonen (øre og minutter); faktisk forbruk kommer fra `evolution_usage_ledger` (migrasjon 280). Det som ikke er målt står som «ikke målt», aldri som 0.
+> GENERERT visning - rediger ikke for hånd. Kilden til takene er den signerte konstitusjonen (øre og minutter); faktisk forbruk kommer fra et innsendt forbruksbilde (ingen varig forbrukskilde ennå). Det som ikke er målt står som «ikke målt», aldri som 0.
 > Generert 2026-12-10T12:00:00.000Z.
 
 - **Konstitusjon:** versjon 2 - UTKAST - IKKE signert/verifisert (constitution_unsigned): takene er IKKE autoritative ennå

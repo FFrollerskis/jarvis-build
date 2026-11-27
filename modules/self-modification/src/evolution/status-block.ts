@@ -1,14 +1,13 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { startOfUtcIsoWeek, startOfUtcMonth, type LedgerCounter } from "../budget-lock.ts";
 import { CATEGORY_CAP_KEYS, EVOLUTION_COST_CATEGORIES, canonicalizeManifest, type BudgetCaps, type EvolutionCostCategory } from "../constitution.ts";
-import type { UsageCounter } from "../usage-ledger.ts";
 
 /**
  * WP-EV0 (HF2 kap. 29/31 pkt. 18, PC2): GENERERT visning av Evolution-takene, faktisk forbruk, run-rate og eier-tid for `docs/PROJECT_STATUS.md`.
- * Det SIGNERTE manifestet er kilden (øre/minutter) - et markdown-dokument kan ikke være en autoritet - og forbruket kommer fra forbruksregisteret
- * (`evolution_usage_ledger`, migrasjon 280). Alt som ikke er målt står som «ikke målt», ALDRI som 0, og en delsum er aldri en total. Ren logikk: samme input gir
- * byte-lik utdata (tidspunktet gis inn), og visningen skriver aldri `issued_by` (kan være et navn).
+ * Det SIGNERTE manifestet er kilden (øre/minutter) - et markdown-dokument kan ikke være en autoritet - og forbruket kommer KUN fra et innsendt forbruksbilde
+ * (`UsageSnapshot`, f.eks. `--usage <fil.json>`): det finnes ingen varig forbrukskilde i denne pakken (forbruksregisteret er DEFERRED til WP-EV0b). Alt som ikke er målt
+ * står som «ikke målt», ALDRI som 0, og en delsum er aldri en total. Ren logikk: samme input gir byte-lik utdata (tidspunktet gis inn), og visningen skriver aldri
+ * `issued_by` (kan være et navn).
  */
 export const STATUS_BLOCK_BEGIN = "<!-- EVOLUTION_STATUS_BEGIN -->";
 export const STATUS_BLOCK_END = "<!-- EVOLUTION_STATUS_END -->";
@@ -80,7 +79,7 @@ export function renderEvolutionStatusBlock(input: EvolutionStatusInput): string 
   out.push(`<!-- evolution-status: constitution_version=${constitution.version} caps_sha256=${sha256(canonicalizeManifest(caps))} -->`);
   out.push("### Evolution: planlagt forbruk, faktisk forbruk, run-rate og eier-tid", "");
   out.push(
-    "> GENERERT visning - rediger ikke for hånd. Kilden til takene er den signerte konstitusjonen (øre og minutter); faktisk forbruk kommer fra `evolution_usage_ledger` (migrasjon 280). " +
+    "> GENERERT visning - rediger ikke for hånd. Kilden til takene er den signerte konstitusjonen (øre og minutter); faktisk forbruk kommer fra et innsendt forbruksbilde (ingen varig forbrukskilde ennå). " +
       `Det som ikke er målt står som «${NOT_MEASURED}», aldri som 0.`,
     `> Generert ${input.generated_at}.`, ""
   );
@@ -131,32 +130,6 @@ export function renderEvolutionStatusBlock(input: EvolutionStatusInput): string 
   caveats.push("Run-rate er et enkelt snitt (faktisk hittil ÷ dager gått × dager i måneden), ikke en garanti.");
   out.push("**Forbehold**", "", ...caveats.map((c) => `- ${c}`), "", STATUS_BLOCK_END, "");
   return out.join("\n");
-}
-
-/** Bygger et forbruksbilde fra de SAMME tellerne budsjettlåsen bruker. En teller som feiler eller gir ugyldig verdi gir `null` for akkurat den delen (aldri 0). Kaster ved ugyldig klokke. */
-export async function usageSnapshotFromLedger(usage: UsageCounter, now: Date, ledger?: LedgerCounter): Promise<UsageSnapshot> {
-  const monthStart = startOfUtcMonth(now);
-  const weekStart = startOfUtcIsoWeek(now);
-  const valid = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0;
-  const measure = async (fn: () => Promise<number>): Promise<number | null> => {
-    try {
-      const n = await fn();
-      return valid(n) ? n : null;
-    } catch {
-      return null;
-    }
-  };
-  const spend = {} as Record<EvolutionCostCategory, number | null>;
-  for (const c of EVOLUTION_COST_CATEGORIES) spend[c] = await measure(() => usage.sumSince("spend", [c], monthStart));
-  return {
-    month: monthStart.slice(0, 7),
-    days_elapsed: now.getUTCDate(),
-    days_in_month: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate(),
-    spend_ore: spend,
-    week_start: weekStart.slice(0, 10),
-    owner_minutes_week: await measure(() => usage.sumSince("owner_time", null, weekStart)),
-    autonomous_changes_week: ledger === undefined ? null : await measure(() => ledger.countSince(weekStart, ["merged"], ["E0", "E1"]))
-  };
 }
 
 const MARKER_LINE = /<!-- evolution-status: constitution_version=(\d+) caps_sha256=([0-9a-f]{64}) -->/;

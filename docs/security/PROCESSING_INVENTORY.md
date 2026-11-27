@@ -52,12 +52,12 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 
 ### Kostnad og modellbruk
 
-- **Formål:** Run-rate og modellkostnad; vedlikeholdstid per connector (`connector_maintenance_log`, append-only, kun metadata); Evolution-forbruk pr. kostnadskategori og eierens tid (`evolution_usage_ledger`, WP-EV0, migrasjon 280: GLOBAL som `evolution_change_ledger`, append-only og hash-kjedet, kun beløp/kategori/kilde-referanse - ingen personopplysninger; grunnlaget budsjettlåsene teller fra)
+- **Formål:** Run-rate og modellkostnad; vedlikeholdstid per connector (`connector_maintenance_log`, append-only, kun metadata)
 - **Memory space/tenant:** system (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
 - **Datakategori:** Antall tokens, tidsbruk, leverandør, kostnad (ikke innhold)
-- **Retensjon:** Ingen automatisk sletting ennå (egen indeks i 073; aggregeres til run-rate). `evolution_usage_ledger`: append-only og aldri slettet (regnskapet for Evolution-budsjettene; forbud mot UPDATE/DELETE/TRUNCATE i databasen); `source_ref`/`recorded_by` er begrenset til et trygt tegnsett (ingen fritekst) og bærer aldri hemmeligheter.
+- **Retensjon:** Ingen automatisk sletting ennå (egen indeks i 073; aggregeres til run-rate).
 - **Eksterne mottakere:** Ingen
-- **Tabeller:** `connector_maintenance_log`, `cost_events`, `evolution_usage_ledger`
+- **Tabeller:** `connector_maintenance_log`, `cost_events`
 
 ### Forretning (CRM, support, avtaler, drift)
 
