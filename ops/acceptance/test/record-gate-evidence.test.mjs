@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { gateArgs, reasonProblem } from "../record-gate-evidence.mjs";
+import { gateArgs, reasonProblem, reasonProblemOf } from "../record-gate-evidence.mjs";
+import { sanitize } from "../record-evidence.mjs";
 import { miniRepo, put } from "../../../packages/contracts/test/program-index-minirepo.ts";
 
 // WP-PGA / PG3: inngangen `record-gate-evidence.mjs` (porteregistrering). Kjører selve skriptet som en egen prosess mot et midlertidig mini-repo.
@@ -24,6 +25,36 @@ describe("gateArgs (kun `gate` slippes igjennom)", () => {
     for (const bad of [[], ["G18", "PASS"], ["G00", "PASS"], ["ORL6", "PASS"], ["g01", "PASS"], ["G01"], ["G01", "pass"], ["G01", "DONE"], ["fingerprint", "--write"], ["report"], ["--write", "G01", "PASS"]]) {
       expect(gateArgs(bad), JSON.stringify(bad)).toBeNull();
     }
+  });
+});
+
+describe("gateArgs: port-id-en er forankret i begge ender (fiks 1, M92)", () => {
+  it("avviser en id med noe etter seg eller foran seg; godtar nøyaktig G01-G17 og ORL0-ORL5", () => {
+    for (const bad of [["G011", "PASS"], ["G01x", "PASS"], ["G01 ", "PASS"], ["G01\n", "PASS"], ["G170", "PASS"], ["ORL01", "PASS"], ["ORL5x", "PASS"], ["ORL5\n", "PASS"], ["xG01", "PASS"], ["xORL0", "PASS"], ["G01/../x", "PASS"]]) {
+      expect(gateArgs(bad), JSON.stringify(bad)).toBeNull();
+    }
+    for (let n = 1; n <= 17; n += 1) expect(gateArgs([`G${String(n).padStart(2, "0")}`, "OPEN"])).not.toBeNull();
+    for (let n = 0; n <= 5; n += 1) expect(gateArgs([`ORL${n}`, "OPEN"])).not.toBeNull();
+  });
+});
+
+describe("retningstegn og usynlige tegn i begrunnelsen (fiks 1, L1)", () => {
+  const cp = (...c) => String.fromCodePoint(...c);
+  it("sanitize fjerner retningstegn (U+202A-202E, U+2066-2069), myk bindestrek og Mongolsk vokalskille, i tillegg til de gamle tegnene", () => {
+    for (const c of [0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069, 0x00ad, 0x180e, 0x200b, 0x2060, 0xfeff]) expect(sanitize(`a${cp(c)}b`), c.toString(16)).toBe("ab");
+    expect(sanitize("vanlig tekst")).toBe("vanlig tekst");
+  });
+
+  it("reasonProblem og reasonProblemOf avviser retningstegn (tidligere null), uten å gjengi dem", () => {
+    for (const c of [0x202e, 0x202d, 0x2066, 0x2069]) {
+      const reason = `ok ${cp(c)}evil done`;
+      const msg = reasonProblem(["gate", "G01", "PASS", "--reason", reason]);
+      expect(msg, c.toString(16)).toContain("retningstegn");
+      expect(msg).not.toContain(cp(c));
+      expect(reasonProblemOf(reason)).toBe(msg);
+    }
+    expect(reasonProblemOf("vanlig begrunnelse uten skjulte tegn")).toBeNull();
+    expect(reasonProblemOf(`${cp(0x200b)}skjult`)).toContain("kontrolltegn");
   });
 });
 

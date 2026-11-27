@@ -34,16 +34,20 @@ export function gateArgs(argv) {
  * Begrunnelsen havner i en committet datafil (porthistorikken) i et offentlig repo: den må aldri bære en hemmelighet eller kontrolltegn. Samme redigering som evidens-opptakeren (`redact`/`sanitize`):
  * treffer den noe, nektes registreringen (aldri en stille redigering som ville gjemt at noen limte inn en hemmelighet). Meldingen nevner kun regelnavn, aldri verdien.
  */
-export function reasonProblem(args) {
-  const i = args.indexOf("--reason");
-  if (i === -1 || i + 1 >= args.length) return null; // manglende begrunnelse meldes av kommandolinjen
-  const raw = args[i + 1];
+export function reasonProblemOf(raw) {
   const clean = sanitize(raw);
   const { counts } = redact(clean);
   const rules = Object.keys(counts);
   if (rules.length > 0) return `begrunnelsen ligner en hemmelighet (regel: ${rules.join(", ")}): skriv den uten hemmeligheter`;
-  if (clean !== raw) return "begrunnelsen inneholder kontrolltegn eller skjulte tegn";
+  if (clean !== raw) return "begrunnelsen inneholder kontrolltegn, retningstegn eller skjulte tegn";
   return null;
+}
+
+/** Samme screening på en argumentliste (finner `--reason`). Kommandolinjen `program-index.ts gate` kaller `reasonProblemOf` direkte, så direkte bruk screenes likt (L1). */
+export function reasonProblem(args) {
+  const i = args.indexOf("--reason");
+  if (i === -1 || i + 1 >= args.length) return null; // manglende begrunnelse meldes av kommandolinjen
+  return reasonProblemOf(args[i + 1]);
 }
 
 export function run(argv) {

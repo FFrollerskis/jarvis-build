@@ -8,6 +8,7 @@ import { OperationalGateChangedEventSchema } from "../src/program/gate-events.ts
 import { parseEvidenceHeader, RECORD_PROBLEMS, recordGate, type RecordGateInput, type RecordProblem } from "../src/program/gate-recorder.ts";
 import { sha256Hex } from "../src/program/hash.ts";
 import { runProgramIndex } from "../src/program/run.ts";
+import { realEvidence } from "./program-index-evidence.ts";
 import { json, miniRepo, put } from "./program-index-minirepo.ts";
 
 /**
@@ -161,7 +162,7 @@ describe("registrering av PASS", () => {
 });
 
 describe("tidspunkt og git-SHA for evidensen", () => {
-  it("--verified-at (flag) overstyrer toppteksten og får kilde flag; ugyldig eller fremtidig verdi nektes", () => {
+  it("--verified-at (flag) kan bare gjøre evidensen ELDRE enn toppteksten (M2) og får kilde flag; ugyldig, fremtidig eller senere enn toppteksten nektes", () => {
     const { root } = miniRepo();
     evidence(root, "e1");
     const ok = rec(root, { verified_at: "2026-11-26T12:30:00.000Z" });
@@ -169,7 +170,10 @@ describe("tidspunkt og git-SHA for evidensen", () => {
     expect(ok.ok && ok.evidence_ref?.verified_at_source).toBe("flag");
     expect(problem(rec(root, { verified_at: "i går" }))).toBe("evidence_time_invalid");
     expect(problem(rec(root, { verified_at: "2026-11-26T14:00:00.001Z" }))).toBe("evidence_in_future");
-    expect(problem(rec(root, { verified_at: "2026-11-26T14:00:00.000Z" }))).toBe("ok");
+    // Toppteksttiden er taket (13:00): likt er ok, ett millisekund senere er nektet (tidligere ga flagget en vei utenom «evidens eldre enn kontraktendringen»).
+    expect(problem(rec(root, { verified_at: VERIFIED }))).toBe("ok");
+    expect(problem(rec(root, { verified_at: "2026-11-26T13:00:00.001Z" }))).toBe("verified_at_after_evidence");
+    expect(problem(rec(root, { verified_at: "2026-11-26T14:00:00.000Z" }))).toBe("verified_at_after_evidence");
   });
 
   it("topptekst uten tidspunkt gir registreringstidspunktet som verified_at, med advarsel", () => {
@@ -226,6 +230,23 @@ describe("nektelser (hver kontroll har en test som feiler uten den)", () => {
     ["reason_invalid", (r) => rec(r, { reason: "ab" })],
     ["reason_invalid", (r) => rec(r, { reason: "   " })],
     ["reason_invalid", (r) => rec(r, { reason: "x".repeat(201) })],
+    ["evidence_from_stdin", (r) => {
+      put(r, "docs/evidence/stdin.md", realEvidence({ stdin: true }));
+      return rec(r, { evidence_path: "docs/evidence/stdin.md" });
+    }],
+    ["evidence_exit_not_zero", (r) => {
+      put(r, "docs/evidence/feilet.md", realEvidence({ code: 1 }));
+      return rec(r, { evidence_path: "docs/evidence/feilet.md" });
+    }],
+    ["evidence_exit_unknown", (r) => {
+      put(r, "docs/evidence/uten-exit.md", `# Hjemmelaget\n\n- **Tidspunkt (UTC):** ${VERIFIED}\n- **Git:** \`${SHA_EVIDENCE}\` på \`main\`\n\n## Utdata\n\nok\n`);
+      return rec(r, { evidence_path: "docs/evidence/uten-exit.md" });
+    }],
+    ["external_confirmation_required", (r) => {
+      writeGate(r, "G01", { external: true });
+      return rec(r);
+    }],
+    ["verified_at_after_evidence", (r) => rec(r, { verified_at: "2026-11-26T13:30:00.000Z" })],
     ["concurrent_registration", (r) => {
       acquireLock(join(r, "config/program/.G01.lock"));
       return rec(r, { write: true });
@@ -260,8 +281,14 @@ describe("nektelser (hver kontroll har en test som feiler uten den)", () => {
     evidence(root, "e1");
     writeFileSync(join(root, "docs/evidence/stor.md"), "x".repeat(1_000_001));
     expect(problem(rec(root, { evidence_path: "docs/evidence/stor.md" }))).toBe("evidence_too_large");
-    writeFileSync(join(root, "docs/evidence/akkurat.md"), `- **Tidspunkt (UTC):** ${VERIFIED}\n- **Git:** \`${SHA_EVIDENCE}\` på \`main\`\n${"x".repeat(1_000_000 - 120)}`);
+    // Grensen er nøyaktig 1 000 000 byte: en fil på akkurat det er ok (med en ekte topptekst inkl. Exit-linje), én byte til er for stor.
+    const head = `- **Tidspunkt (UTC):** ${VERIFIED}\n- **Git:** \`${SHA_EVIDENCE}\` på \`main\`\n- **Exit:** 0\n`;
+    const exact = head + "x".repeat(1_000_000 - Buffer.byteLength(head));
+    expect(Buffer.byteLength(exact)).toBe(1_000_000);
+    writeFileSync(join(root, "docs/evidence/akkurat.md"), exact);
     expect(problem(rec(root, { evidence_path: "docs/evidence/akkurat.md" }))).toBe("ok");
+    writeFileSync(join(root, "docs/evidence/en-over.md"), `${exact}x`);
+    expect(problem(rec(root, { evidence_path: "docs/evidence/en-over.md" }))).toBe("evidence_too_large");
   });
 
   it("time_before_last_change: kjeden er tidsmessig stigende", () => {

@@ -139,7 +139,7 @@ export const REDACTIONS = [
   ["keyword_long_secret", /(?<![A-Za-z0-9])((?:token|secret|password|passwd|api[ _-]?key)s?\b[^\n«]{0,12}?)(?<![A-Za-z0-9_+/=-])([A-Za-z0-9_+/=-]{32,})(?![A-Za-z0-9_+/=»-])/gi, `$1${R}`, (_m, _kw, candidate) => /[A-Za-z]/.test(candidate) && /\d/.test(candidate)]
 ];
 
-/** Fjerner kontrolltegn som kan skjule eller forfalske innhold (ANSI/ESC, NUL, usynlige bredde-null-tegn) FØR redigering - et skjult tegn midt i en hemmelighet skal ikke omgå mønstrene. */
+/** Fjerner kontrolltegn som kan skjule eller forfalske innhold (ANSI/ESC, NUL, usynlige bredde-null-tegn, myk bindestrek og retningstegn/bidi U+202A-202E og U+2066-2069) FØR redigering - et skjult tegn midt i en hemmelighet skal ikke omgå mønstrene, og et retningstegn skal ikke kunne snu visningen av committet tekst. */
 export function sanitize(text) {
   // Kontrolltegn i regulære uttrykk er hele poenget her (no-control-regex slås av bevisst for akkurat disse tre linjene).
   /* eslint-disable no-control-regex */
@@ -149,7 +149,7 @@ export function sanitize(text) {
     .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, " ")
     .replace(/\x1b\][^\x07\x1b]{0,2000}(?:\x07|\x1b\\)/g, "")
     .replace(/\x1b\[[0-9;?]{0,40}[ -/]{0,4}[@-~]/g, "")
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u2028\u2029\u2060\ufeff]/g, "");
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u00ad\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, "");
   /* eslint-enable no-control-regex */
 }
 

@@ -2,7 +2,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { OperationalGateChangedPayloadSchema, type GateStatus, type OperationalGateChangedPayload } from "./gate-events.ts";
 import { evaluateGate, evaluateOrl, GateSchema, makeGateContext, OrlSchema, type Gate, type Orl } from "./gates.ts";
-import { evidenceWeaknesses, parseEvidenceDetails, parseEvidenceHeader, WEAKNESS_TEXT, type EvidenceHeader } from "./evidence-header.ts";
+import { evidenceWeaknesses, parseEvidenceDetails, parseEvidenceHeader, type EvidenceHeader, type EvidenceWeakness } from "./evidence-header.ts";
 import { loadProgramData, isInsideRoot, makeFileReader, PROGRAM_DIR, ProgramDataError } from "./fs-loader.ts";
 import { acquireLock, replaceFileAtomically } from "./file-lock.ts";
 import { canonicalJson, contractFingerprint, normalizeLineEndings, sha256Hex } from "./hash.ts";
@@ -75,7 +75,7 @@ export interface RecordGateInput {
 }
 
 export type RecordGateResult =
-  | { ok: true; gate_id: string; prior_status: GateStatus; new_status: GateStatus; payload: OperationalGateChangedPayload; evidence_ref: EvidenceRef | null; warnings: string[]; written: boolean }
+  | { ok: true; gate_id: string; prior_status: GateStatus; new_status: GateStatus; payload: OperationalGateChangedPayload; evidence_ref: EvidenceRef | null; warnings: string[]; weaknesses: EvidenceWeakness[]; written: boolean }
   | { ok: false; problem: RecordProblem; detail: string };
 
 const MAX_EVIDENCE_BYTES = 1_000_000;
@@ -153,6 +153,8 @@ function recordGateCore(input: RecordGateInput, reason: string, tookOverStaleLoc
   const warnings: string[] = [];
   if (tookOverStaleLock) warnings.push("en foreldet lås (eldre enn 60 s, fra en avbrutt registrering) ble overtatt");
   let evidence: EvidenceRef | null = null;
+  /** Svakhetene ved evidensen for en PASS som likevel ble godtatt (tidspunkt/SHA mangler, uren arbeidstre): skanningen flagger dem som gate_weak_evidence. */
+  let weaknesses: EvidenceWeakness[] = [];
 
   if (input.status === "OPEN") {
     if (input.evidence_path !== null) return fail("evidence_not_allowed_for_open", "en gjenåpning (OPEN) har ingen evidens");
@@ -216,10 +218,7 @@ function recordGateCore(input: RecordGateInput, reason: string, tookOverStaleLoc
     if (gitSha === null || !/^[0-9a-f]{40}$/.test(gitSha)) return fail("git_sha_unavailable", "fant ingen git-SHA (hverken i evidensfilen eller fra arbeidstreet)");
     if (header.git_sha === null) warnings.push("evidensfilen oppgir ingen git-SHA: SHA-en til arbeidstreet ved registrering er brukt");
     if (header.dirty) warnings.push("evidensen er tatt på et arbeidstre med ucommittede endringer eller ukjent git-status (svakere bevis)");
-    if (input.status === "PASS") {
-      const weak = evidenceWeaknesses({ ...header, ...details }, { external: target.external, verified_at: verifiedAt });
-      if (weak.length > 0) warnings.push(`svak evidens (${weak.map((w) => WEAKNESS_TEXT[w]).join("; ")}): porten vil stå som gate_weak_evidence i skanningen`);
-    }
+    if (input.status === "PASS") weaknesses = evidenceWeaknesses({ ...header, ...details }, { external: target.external, verified_at: verifiedAt });
 
     const fingerprints: Record<string, string | null> = {};
     for (const id of [...target.bound_components].sort()) {
@@ -291,5 +290,5 @@ function recordGateCore(input: RecordGateInput, reason: string, tookOverStaleLoc
     if (outcome === "changed_since_read") return fail("concurrent_registration", `${input.gate_id}: port-filen ble endret av en annen mens registreringen pågikk; ingenting er skrevet, prøv på nytt`);
     written = true;
   }
-  return { ok: true, gate_id: input.gate_id, prior_status: prior, new_status: input.status, payload, evidence_ref: evidence, warnings, written };
+  return { ok: true, gate_id: input.gate_id, prior_status: prior, new_status: input.status, payload, evidence_ref: evidence, warnings, weaknesses, written };
 }

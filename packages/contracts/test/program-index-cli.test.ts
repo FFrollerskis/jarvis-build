@@ -175,13 +175,13 @@ describe("gate", () => {
 
   it("advarsler (svak evidens) skrives til stderr, ikke stdout; uten git-SHA noe sted nektes registreringen", () => {
     const { root } = miniRepo();
-    put(root, "docs/evidence/e1.md", `# Evidens uten tidspunkt\n\n- **Git:** \`${"a".repeat(40)}\` på \`main\` (**ucommittede endringer i arbeidstreet**)\n\n## Utdata\n\nok\n`);
+    put(root, "docs/evidence/e1.md", `# Evidens uten tidspunkt\n\n- **Git:** \`${"a".repeat(40)}\` på \`main\` (**ucommittede endringer i arbeidstreet**)\n- **Exit:** 0\n\n## Utdata\n\nok\n`);
     const args = ["gate", "G01", "PASS", "--root", root, "--reason", "grunn", "--by", "platform_operator", "--evidence", "docs/evidence/e1.md"];
     const weak = cli(args);
     expect(weak.code).toBe(0);
     expect(weak.err.filter((l) => l.startsWith("ADVARSEL"))).toHaveLength(2);
     expect(weak.out.join("\n")).toContain("registration_time");
-    put(root, "docs/evidence/e2.md", "# Evidens uten topptekst\n");
+    put(root, "docs/evidence/e2.md", "# Evidens uten topptekst\n\n- **Exit:** 0\n");
     const none = cli(["gate", "G02", "PASS", "--root", root, "--reason", "grunn", "--by", "owner", "--evidence", "docs/evidence/e2.md"]);
     // Verken evidensen eller arbeidstreet (mini-repoet er ikke et git-repo) har en SHA: nektes.
     expect(none.code).toBe(1);

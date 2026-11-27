@@ -7,14 +7,16 @@
 //                                          Vis (eller med --write: oppdater) kontraktfingeravtrykk og changed_at i komponentskjervene.
 //   gate <G01..G17|ORL0..ORL5> <PASS|FAIL|OPEN> --reason <tekst> --by <owner|platform_operator> [--evidence docs/evidence/<fil>.md] [--verified-at <ISO>] [--write]
 //                                          Registrer en porteovergang (OperationalGateChanged). Uten --write er det en tørrkjøring.
-//                                          Bruk ops/acceptance/record-gate-evidence.mjs: den screener --reason for hemmelighetsformer (denne kommandoen gjør det ikke).
+//                                          --reason screenes for hemmelighetsformer og kontroll-/retningstegn (samme `reasonProblemOf` som ops/acceptance/record-gate-evidence.mjs), også ved direkte bruk.
+//                                          PASS krever evidens fra en kommando som lyktes (exit 0) og som opptakeren selv kjørte; --by er en SELVRAPPORTERT rolle-etikett, ikke autentisert.
 //   Felles: --root <mappe> (standard: repo-roten).
 //
-// Exit: 0 = ok, 1 = rød dom eller registrering/oppdatering nektet, 2 = bruksfeil. Ren lesing med unntak av `fingerprint --write` og `gate --write` (én fil per endring, atomisk).
+// Exit: 0 = ok, 1 = rød dom eller registrering/oppdatering nektet, 2 = bruksfeil (inkl. en begrunnelse som ligner en hemmelighet). Ren lesing med unntak av `fingerprint --write` og `gate --write` (én fil per endring, atomisk).
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { reasonProblemOf } from "../../../ops/acceptance/record-gate-evidence.mjs";
 import { recordGate } from "../src/program/gate-recorder.ts";
 import { refreshFingerprints, type BumpKind } from "../src/program/fingerprint-tool.ts";
 import { ProgramDataError } from "../src/program/fs-loader.ts";
@@ -128,6 +130,12 @@ export function main(argv: readonly string[], env: NodeJS.ProcessEnv, out: (line
         const by = flag(parsed, "--by");
         if (reason === undefined) throw new UsageError("--reason er påkrevd");
         if (by !== "owner" && by !== "platform_operator") throw new UsageError("--by må være owner eller platform_operator (en rolle, aldri et navn)");
+        // Begrunnelsen havner i en committet fil i et offentlig repo: samme screening som inngangen (kun regelnavn i meldingen, aldri verdien).
+        const screened = reasonProblemOf(reason);
+        if (screened !== null) {
+          err(`NEKTET (reason_secret): ${screened}`);
+          return 2;
+        }
         const result = recordGate({
           root,
           gate_id: gateId,
@@ -145,8 +153,10 @@ export function main(argv: readonly string[], env: NodeJS.ProcessEnv, out: (line
           return 1;
         }
         for (const w of result.warnings) err(`ADVARSEL: ${w}`);
+        if (result.weaknesses.length > 0) out(`merk: svak evidens (${result.weaknesses.join(", ")}): porten vil stå som gate_weak_evidence i skanningen`);
         out(`${result.gate_id}: ${result.prior_status} -> ${result.new_status}${result.evidence_ref !== null ? ` (evidens ${result.evidence_ref.path}, sha256 ${result.evidence_ref.sha256.slice(0, 12)}, git ${result.evidence_ref.git_sha.slice(0, 10)}, verified_at ${result.evidence_ref.verified_at} [${result.evidence_ref.verified_at_source}])` : ""}`);
         out(result.written ? "skrevet" : "tørrkjøring: ingenting er skrevet (bruk --write)");
+        out(`merk: --by ${by} er en selvrapportert rolle-etikett, ikke autentisert`);
         return 0;
       }
       default:

@@ -32,7 +32,7 @@ export function realEvidence(o: RealEvidenceOptions = {}): string {
     cmd: o.cmd ?? ["pnpm", "test"],
     result: { code: o.stdin === true ? null : (o.code ?? 0), signal: o.signal ?? null, timedOut: o.timedOut ?? false, fromStdin: o.stdin === true, truncated: false },
     counts: {},
-    info: { sha: o.sha ?? EVIDENCE_SHA, branch: "main", dirty: o.dirty ?? false },
+    info: { sha: o.sha ?? EVIDENCE_SHA, branch: "main", dirty: o.dirty === undefined ? false : o.dirty },
     now: o.at ?? EVIDENCE_AT,
     host: "testvert",
     output: o.output ?? "ok"
