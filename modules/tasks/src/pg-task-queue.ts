@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { JobContractSchema, type JobContract, type JsonValue } from "@jarvis/contracts";
-import { withTenantTransaction } from "@jarvis/core";
+import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
 import type { ClaimedTask, TaskView, WorkflowAdapter } from "./workflow-adapter.ts";
 
 /** D-446: høyeste ventetid mellom to forsøk, uansett hva kontrakten ber om (en feilkonfigurert `backoff_seconds` skal ikke parkere en jobb i dager). */
@@ -75,7 +75,7 @@ export class PgTaskQueue implements WorkflowAdapter {
                 finished_at = CASE WHEN $2 = 'failed' THEN now() ELSE NULL END,
                 not_before = CASE WHEN $2 = 'created' AND $4::int > 0 THEN now() + make_interval(secs => $4::int) ELSE NULL END
          WHERE task_id = $1`,
-        [taskId, retry ? "created" : "failed", error, backoff]
+        [taskId, retry ? "created" : "failed", scanForSecrets(error).text, backoff] // skriveren redigerer selv: en annen WorkflowAdapter-kaller kan sende rå feiltekst (fiks-runde 1, review B L2)
       );
       return retry ? "created" : "failed";
     });

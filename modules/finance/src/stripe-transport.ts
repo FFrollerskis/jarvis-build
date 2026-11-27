@@ -78,7 +78,7 @@ export class StripeApiError extends Error {
 
 /** Tolerant, avkortet (200 tegn) sanering av Stripe sin feilrespons - ALDRI rå kropp/headere logget (samme presedens som `classifyFikenErrorBody`). */
 function classifyStripeErrorBody(rawBody: string): { summary: string; errorType: string | null } {
-  const trimmed = rawBody.slice(0, 200).trim();
+  const trimmed = clipRedacted(rawBody, 200).trim(); // skann FØRST, kutt etterpå (fiks-runde 1, review B L3)
   try {
     const parsed = JSON.parse(rawBody) as { error?: { type?: string; message?: string } };
     const errorType = typeof parsed.error?.type === "string" ? parsed.error.type : null;

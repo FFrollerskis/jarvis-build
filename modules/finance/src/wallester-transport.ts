@@ -1,4 +1,5 @@
 import { createSign } from "node:crypto";
+import { clipRedacted } from "@jarvis/core";
 
 /**
  * UA-6 Finance & Spend Integrity Gateway - SJETTE slice (Slice 6, D-112):
@@ -106,7 +107,7 @@ export class WallesterApiError extends Error {
 
 /** Avkortet, token-/nøkkelfri sanering av feilkropp - ALDRI hemmeligheter i meldingen (byggeordrens §23). */
 function sanitizeErrorBody(rawBody: string): string {
-  return rawBody.slice(0, 200).trim() || "no_body";
+  return clipRedacted(rawBody, 200).trim() || "no_body"; // skann FØRST, kutt etterpå (fiks-runde 1, review B L3)
 }
 
 function base64Url(input: Buffer | string): string {

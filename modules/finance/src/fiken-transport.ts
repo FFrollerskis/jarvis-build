@@ -48,6 +48,7 @@
  *     Fiken selv deduplikerer.
  */
 
+import { clipRedacted } from "@jarvis/core";
 import { detachFromCallSignal, raceCallSignal, throwIfAborted } from "@jarvis/tool-gateway";
 import { FIKEN_OAUTH_TOKEN_ENDPOINT, buildRefreshTokenExchangeBody, fikenBasicAuthHeader } from "./fiken-oauth.ts";
 
@@ -72,7 +73,7 @@ export class FikenApiError extends Error {
 
 /** Tolerant, avkortet (200 tegn) sanering av Fiken sin feilrespons - ALDRI rå kropp/headere logget (samme presedens som `classifyGoogleAdsErrorBody`). */
 function classifyFikenErrorBody(rawBody: string): string {
-  const trimmed = rawBody.slice(0, 200).trim();
+  const trimmed = clipRedacted(rawBody, 200).trim(); // skann FØRST, kutt etterpå (fiks-runde 1, review B L3)
   return trimmed.length > 0 ? trimmed : "no_body";
 }
 

@@ -1,4 +1,5 @@
 import type { IdentityContext } from "@jarvis/contracts";
+import { clipRedacted } from "@jarvis/core";
 import { CONNECTOR_REGISTRY } from "./connector-registry.ts";
 import type { ToolGateway } from "./gateway.ts";
 
@@ -69,7 +70,7 @@ export async function runConnectorHealthSweep(
         console.error(JSON.stringify({ msg: "connector_health_sweep_check_failed", connector_id: def.id, reason: result.reason }));
       }
     } catch (err) {
-      const reason = (err as Error).message.slice(0, 200);
+      const reason = clipRedacted((err as Error).message, 200); // skann FØRST, kutt etterpå (fiks-runde 1, review B L2)
       failed.push({ connector_id: def.id, reason });
       console.error(JSON.stringify({ msg: "connector_health_sweep_check_threw", connector_id: def.id, reason }));
     }

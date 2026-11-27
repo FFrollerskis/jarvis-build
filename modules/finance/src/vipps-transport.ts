@@ -76,6 +76,7 @@ const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 
+import { clipRedacted } from "@jarvis/core";
 import { toOreInteger } from "./ore.ts";
 
 import { financeBackoff, financeFetch, isRetrySafe } from "./http.ts";
@@ -102,10 +103,11 @@ export class VippsApiError extends Error {
 
 /** Tolerant, avkortet (200 tegn) sanering av Vipps sin feilrespons - ALDRI rå kropp/headere logget (samme presedens som Stripe/Fiken sine `classify*ErrorBody`). */
 function classifyVippsErrorBody(rawBody: string): string {
-  const trimmed = rawBody.slice(0, 200).trim();
+  // Fiks-runde 1 (review B, L3): SKANN FØRST, kutt etterpå (`clipRedacted`) - et token som krysser 200-tegnsgrensen blir ellers et halvt token.
+  const trimmed = clipRedacted(rawBody, 200).trim();
   try {
     const parsed = JSON.parse(rawBody) as { title?: string; detail?: string };
-    const message = typeof parsed.detail === "string" ? parsed.detail.slice(0, 200) : typeof parsed.title === "string" ? parsed.title.slice(0, 200) : trimmed;
+    const message = typeof parsed.detail === "string" ? clipRedacted(parsed.detail, 200) : typeof parsed.title === "string" ? clipRedacted(parsed.title, 200) : trimmed;
     return message.length > 0 ? message : "no_body";
   } catch {
     return trimmed.length > 0 ? trimmed : "no_body";

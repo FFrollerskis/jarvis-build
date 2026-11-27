@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type pg from "pg";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
-import { withTenantTransaction } from "@jarvis/core";
+import { clipRedacted, withTenantTransaction } from "@jarvis/core";
 import type { ToolGateway } from "./gateway.ts";
 import { configuredGithubRepo } from "./github-repo-lock.ts";
 
@@ -235,7 +235,7 @@ export class DailyBrief {
         items.push(...(await source.collect(identity)));
       } catch (err) {
         // Én manglende connector velter aldri briefen - degrader pent.
-        errors.push({ source: source.name, error: (err as Error).message.slice(0, 80) });
+        errors.push({ source: source.name, error: clipRedacted((err as Error).message, 80) }); // (fiks-runde 1, review B L2: briefen går til eieren og modellen)
       }
     }
     // Dedupe på (source, ref) - samme hendelse presenteres aldri dobbelt.

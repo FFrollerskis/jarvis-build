@@ -291,7 +291,7 @@ async function readForUpdate(client: pg.PoolClient, tenantId: string, paymentInt
 
 /** WP-FIN2 (K7): detaljen i en `ProviderOutcomeUnknownError` uten et ledende `outcome_unknown:` (en transport kan allerede ha kastet `outcome_unknown:...`) - aldri dobbelt prefiks. */
 function unknownDetail(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).replace(/^outcome_unknown:/, "").slice(0, 110);
+  return clipRedacted((err instanceof Error ? err.message : String(err)).replace(/^outcome_unknown:/, ""), 110); // skann FØRST, kutt etterpå (fiks-runde 1, review B L3)
 }
 
 /**
@@ -1423,7 +1423,7 @@ export class FinanceService {
           // sitt eget historiske `created`-tidsstempel) pr. definisjon skal
           // vinne over hva som helst lagret tidligere (se JSDoc over).
           sourceEventEpochSeconds: Math.ceil(observedAtMs / 1000),
-          lastPaymentErrorMessage: stripePaymentIntent.last_payment_error?.message?.slice(0, 500) ?? null
+          lastPaymentErrorMessage: typeof stripePaymentIntent.last_payment_error?.message === "string" ? clipRedacted(stripePaymentIntent.last_payment_error.message, 500) : null
         },
         actorPersonId ?? null
       );

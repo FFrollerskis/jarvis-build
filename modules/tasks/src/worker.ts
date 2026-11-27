@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { JsonValue } from "@jarvis/contracts";
+import { scanForSecrets } from "@jarvis/core";
 import type { ClaimedTask, WorkflowAdapter } from "./workflow-adapter.ts";
 
 export class JobCancelledError extends Error {
@@ -100,7 +101,7 @@ export class InProcessWorker {
       } else if (err instanceof JobCancelledError) {
         await this.queue.markCancelled(task.tenant_id, task.task_id, this.workerId);
       } else {
-        await this.queue.fail(task.tenant_id, task.task_id, this.workerId, (err as Error).message);
+        await this.queue.fail(task.tenant_id, task.task_id, this.workerId, scanForSecrets(String((err as Error).message)).text); // feiltekst fra en handler/leverandør lagres i tasks.last_error: redigert (fiks-runde 1, review B L2)
       }
     } finally {
       clearInterval(heartbeat);

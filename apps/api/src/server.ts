@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
-import { BusinessTenantProvisioningError, ChallengeLimitError, previewBusinessTenant, provisionBusinessTenant, withTenantTransaction, writeAudit, type ConfirmationStore } from "@jarvis/core";
+import { BusinessTenantProvisioningError, ChallengeLimitError, clipRedacted, previewBusinessTenant, provisionBusinessTenant, withTenantTransaction, writeAudit, type ConfirmationStore } from "@jarvis/core";
 import type {
   ChannelSessionAuthority, DeviceEnrollmentService, DeviceService, IdentityService,
   SessionGrantService, SessionService, VoiceSessionAuthority
@@ -264,7 +264,7 @@ export function makeReadiness(
         ]);
         checks[name] = "ok";
       } catch (err) {
-        checks[name] = `unavailable:${(err as Error).message.slice(0, 60)}`;
+        checks[name] = `unavailable:${clipRedacted((err as Error).message, 60)}`; // skann FØRST, kutt etterpå: /ready er HTTP-synlig (fiks-runde 1, review B L2)
       } finally {
         if (timer) clearTimeout(timer);
       }

@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { clipRedacted } from "@jarvis/core";
 import { safeProviderId, safeToken, strictUnixSeconds, strictWebhookAmount, strictWebhookCurrency } from "./webhook-guard.ts";
 
 /**
@@ -177,7 +178,7 @@ export function parseStripeEventEnvelope(rawBody: Buffer): ParsedStripeEventEnve
   }
 
   const lastError = object?.["last_payment_error"];
-  const lastErrorMessage = isRecord(lastError) && typeof lastError["message"] === "string" ? lastError["message"].slice(0, 500) : null;
+  const lastErrorMessage = isRecord(lastError) && typeof lastError["message"] === "string" ? clipRedacted(lastError["message"], 500) : null; // skann FØRST, kutt etterpå: lagres i payment_intents.failure_reason (fiks-runde 1, review B L2)
 
   return {
     id,

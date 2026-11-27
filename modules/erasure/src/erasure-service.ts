@@ -4,6 +4,7 @@ import type { PolicyGateway } from "@jarvis/policy";
 import { withMemoryTransaction, MemoryRetriever, type EmbeddingProvider } from "@jarvis/memory";
 import { KnowledgeRetriever } from "@jarvis/knowledge";
 import {
+  clipRedacted,
   completeErasureRequest,
   failErasureRequest,
   findErasureRequest,
@@ -154,7 +155,7 @@ export class ErasureService {
           error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)
         }));
       });
-      const message = (err as Error).message.slice(0, 200);
+      const message = clipRedacted((err as Error).message, 200); // skann FØRST, kutt etterpå: lagres i erasure_requests.error og returneres (fiks-runde 1, review B L2)
       // D-220: hvis DENNE persisteringen selv feiler, skal kalleren FORTSATT få et
       // ærlig {status:"failed"} i minnet (uendret av denne fiksen) - MEN `erasure_
       // requests` får da INGEN rad i det hele tatt for denne forespørselen (den
