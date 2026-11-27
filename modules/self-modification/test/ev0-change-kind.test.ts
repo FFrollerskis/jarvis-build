@@ -192,6 +192,19 @@ describe("C: validateProposal - klassen er alltid max(sti-klasse, gulv for typen
     expect(v.effective_class).toBe("E2");
   });
 
+  it("C10: avhengighet/credential/nettverk krever verifisert primærkilde (med kilde-referanse) selv med harmløse stier; andre typer krever det ikke", () => {
+    for (const kind of ["dependency", "credential", "network"] as const) {
+      const none = validateProposal(base({ kind, claimed_class: "E2" }), constitution);
+      expect(none.reasons, kind).toContain("primary_source_not_verified");
+      expect(none.decision, kind).toBe("rejected");
+      expect(validateProposal(base({ kind, claimed_class: "E2", primary_source_verified: { verified: true } }), constitution).reasons, `${kind} uten ref`).toContain("primary_source_not_verified");
+      expect(validateProposal(base({ kind, claimed_class: "E2", primary_source_verified: { verified: true, source_ref: "https://example.org/advisory" } }), constitution).reasons, `${kind} verifisert`).not.toContain("primary_source_not_verified");
+    }
+    for (const kind of ["code", "config", "prompt", "routing", "personality", "protected-adjacent"] as const) {
+      expect(validateProposal(base({ kind, claimed_class: "E2" }), constitution).reasons, kind).not.toContain("primary_source_not_verified");
+    }
+  });
+
   it("C9: forslaget i endringsregisteret bærer typen (evidens), uten hemmeligheter", () => {
     const p = base({ kind: "routing" });
     const v = validateProposal(p, constitution);
