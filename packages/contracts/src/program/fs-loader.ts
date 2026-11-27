@@ -210,6 +210,7 @@ export function collectRepoFacts(root: string, manifest: Manifest): RepoFacts {
     created: set.created,
     alters: set.alters,
     duplicates: set.duplicates,
+    dynamic_ddl: set.dynamic_ddl,
     migration_files: sqlNames,
     workspace_dirs: workspaceDirs,
     compose_services: parseComposeServiceNames(composeText),

@@ -3,7 +3,8 @@ import { contractFingerprint } from "./hash.ts";
 import { LOG_D_REF } from "./ids.ts";
 import type { ComponentShard, Manifest } from "./schema.ts";
 import { satisfiesRange } from "./semver.ts";
-import type { CreatedRecord, EffectiveTable } from "./sql-schema.ts";
+import { DYNAMIC_DDL_ALLOWLIST } from "./frozen-rules.ts";
+import type { CreatedRecord, EffectiveTable, TouchKind } from "./sql-schema.ts";
 
 /**
  * WP-PGA / PG1 (HF6 §24, PGA-D-02/03/07): DUPLICATE-OWNER-SKANNINGEN og kompatibilitetsvakten. Ren funksjon over (manifest, komponentskjerver, repo-fakta): ingen filsystem, ingen kjøretid.
@@ -35,6 +36,7 @@ export const SCAN_RULES = [
   "migration_unclaimed",
   "migration_unknown",
   "migration_not_acknowledged",
+  "migration_dynamic_ddl",
   "contract_file_unclaimed",
   "contract_fingerprint_mismatch",
   "event_multi_owner",
@@ -65,8 +67,11 @@ export interface RepoFacts {
   /** Effektive tabeller etter alle migrasjoner (DROP/RENAME anvendt). */
   tables: Map<string, EffectiveTable>;
   created: CreatedRecord[];
-  alters: Array<{ table: string; file: string }>;
+  /** Endringer av tabeller per fil: ALTER (uten `via`) og indeks/policy/trigger/insert (med `via`). Eieren må kvittere filen. */
+  alters: Array<{ table: string; file: string; via?: TouchKind }>;
   duplicates: Array<{ table: string; files: string[] }>;
+  /** Dynamisk tabell-DDL (`EXECUTE` mot en streng med CREATE/ALTER/DROP TABLE) som ikke er en RLS-hjelper: den kan ingen statisk skanning se. */
+  dynamic_ddl: Array<{ file: string; statement: string }>;
   migration_files: string[];
   workspace_dirs: string[];
   compose_services: string[];
@@ -98,6 +103,9 @@ function multimap<K>(entries: Iterable<readonly [K, string]>): Map<K, string[]> 
 }
 
 const claimsPath = (claim: string, dir: string): boolean => claim === dir || dir.startsWith(`${claim}/`);
+
+/** Hva en indeks/policy/trigger/insert gjør med en tabell, til meldingen om manglende kvittering. */
+const TOUCH_TEXT: Readonly<Record<TouchKind, string>> = { index: "oppretter en indeks på", policy: "oppretter en policy på", trigger: "oppretter en trigger på", insert: "setter inn rader i" };
 
 export function scanProgramIndex(input: ScanInput): Finding[] {
   const { manifest, components, repo } = input;
@@ -197,7 +205,15 @@ export function scanProgramIndex(input: ScanInput): Finding[] {
     if (owner !== null && !claimsMigration(owner, file)) add("migration_not_acknowledged", owner, `${owner}:${file}`, `${file} ${what} ${table}, som ${owner} eier, men ${owner} har ikke kvittert filen i state_store.migrations (kontraktendring uten indeksendring)`);
   };
   for (const rec of repo.created) needAck(rec.name, rec.file, "oppretter");
-  for (const a of repo.alters) needAck(a.table, a.file, "endrer");
+  for (const a of repo.alters) needAck(a.table, a.file, a.via === undefined ? "endrer" : TOUCH_TEXT[a.via]);
+
+  // Dynamisk tabell-DDL (EXECUTE) er usynlig for den statiske lesingen: hver fil utenfor den eksplisitte, begrunnede allowlisten (frozen-rules.ts) er et funn. Ett funn per fil.
+  const dynamicByFile = multimap(repo.dynamic_ddl.map((d) => [d.file, d.statement] as const));
+  const allowedDynamic = new Set(DYNAMIC_DDL_ALLOWLIST.map((e) => e.file));
+  for (const [file, statements] of dynamicByFile) {
+    if (allowedDynamic.has(file)) continue;
+    add("migration_dynamic_ddl", null, file, `${file} har ${statements.length} ${statements.length === 1 ? "setning" : "setninger"} med dynamisk tabell-DDL (EXECUTE) som skanningen ikke kan se, f.eks. «${(statements[0] as string).slice(0, 90)}»: bruk statisk DDL, eller føre filen i allowlisten (frozen-rules.ts) med en begrunnelse`);
+  }
 
   // ------------------------------------------------------------------ kontraktfiler og fingeravtrykk
   const claimedContract = new Set(components.flatMap((c) => c.contract.files));

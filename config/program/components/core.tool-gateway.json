@@ -48,6 +48,7 @@
       "065_telegram_poll_state.sql",
       "070_tool_executions_reserve.sql",
       "071_scheduler_retry.sql",
+      "073_operational_retention.sql",
       "125_personal_action_journal.sql",
       "144_personal_action_reconcile.sql"
     ],

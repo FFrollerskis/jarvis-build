@@ -36,6 +36,7 @@
       "011_runrate_evidence.sql",
       "015_cost_events_mesh.sql",
       "016_cost_events_stream_metrics.sql",
+      "073_operational_retention.sql",
       "115_cost_events_provider_at_idx.sql"
     ],
     "services": [

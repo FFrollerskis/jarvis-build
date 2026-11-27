@@ -42,6 +42,7 @@
       "007_claim_function.sql",
       "009_worker.sql",
       "035_worker_claim_profile_filter.sql",
+      "064_definer_least_privilege.sql",
       "076_task_delivery.sql",
       "083_task_claim_poison_guard.sql",
       "084_task_claim_guard_safe_cap.sql"

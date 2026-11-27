@@ -2,9 +2,15 @@
  * WP-PGA / PG1: SQL-lesing for eierskapsskanningen. Ingen SQL-parser: en STØY-FRI skanner som blanker kommentarer og strenginnhold før den leter etter CREATE TABLE / ALTER TABLE / DROP TABLE,
  * så en tabell som bare er «nevnt» i en kommentar eller en streng aldri teller. Ren modul (ingen filsystem): migrasjonsfilene gis inn som tekst.
  *
- * KJENTE GRENSER (ærlig): (1) dynamisk SQL (`EXECUTE format('ALTER TABLE %I ...')`) kan ingen statisk skanning se - kun literale tabellnavn dekkes; (2) skjemaprefiks (`public.t`) ignoreres, så to like tabellnavn
- * i ulike skjemaer ville blitt slått sammen (finnes ikke i repoet); (3) rekkefølgen mellom setninger INNE i én fil er create -> rename -> drop, ikke tekstrekkefølgen; (4) `ALTER TABLE ... ADD COLUMN` leses for
- * kolonnenavn, men ikke `ALTER COLUMN`/`RENAME COLUMN`/`DROP COLUMN`.
+ * Setningene prosesseres i TEKSTREKKEFØLGE (fiks 1, M4): `DROP TABLE IF EXISTS x; CREATE TABLE x (...)` gir tabellen x, og en `ALTER` etter en `RENAME` treffer det nye navnet. Filene prosesseres i navnerekkefølge.
+ * Hver CREATE INDEX, CREATE POLICY, CREATE TRIGGER ... ON <tabell> og INSERT INTO <tabell> telles som en endring av tabellen (`touch`), likt en ALTER: eieren må kvittere filen.
+ *
+ * KJENTE GRENSER (ærlig): (1) DYNAMISK SQL: en `EXECUTE`-setning hvis argument inneholder `CREATE/ALTER/DROP TABLE` flagges som dynamisk DDL (`dynamic_ddl`; skanningen gir `migration_dynamic_ddl`), men SELVE
+ * tabellen/endringen ses ikke. To former: (a) enkeltapostrofstrenger (`EXECUTE 'CREATE TABLE x ...'`, `EXECUTE format('ALTER TABLE %I ...', t)`) blankes og er usynlige for den statiske skanningen; (b)
+ * dollar-siterte strenger (`EXECUTE $q$CREATE TABLE x ...$q$`) leses som kode, så tabellen SES OG flagges. SQL bygd i en variabel og kjørt med `EXECUTE v` ses ikke. RLS-hjelperne
+ * (`EXECUTE format('ALTER TABLE %I ENABLE|FORCE ROW LEVEL SECURITY', t)`) er unntatt som eksakt mønster; (2) skjemaprefiks (`public.t`) ignoreres, så to like tabellnavn i ulike skjemaer ville blitt slått sammen
+ * (finnes ikke i repoet); (3) funksjonskropper (dollar-sitert) leses som kode, så en INSERT eller CREATE TABLE inni en funksjon som aldri kjøres teller likevel; (4) `ALTER TABLE ... ADD COLUMN` leses for
+ * kolonnenavn, men ikke `ALTER COLUMN`/`RENAME COLUMN`/`DROP COLUMN`; (5) UPDATE/DELETE/TRUNCATE mot en annen eiers tabell telles ikke (kun INSERT).
  */
 
 export interface BlankOptions {
@@ -114,6 +120,16 @@ const CREATE_RE = new RegExp(`\\bCREATE\\s+(?:(?:GLOBAL\\s+|LOCAL\\s+)?(TEMP|TEM
 const ALTER_RE = new RegExp(`\\bALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?(?:ONLY\\s+)?(${QUALIFIED})`, "gi");
 const RENAME_RE = new RegExp(`\\bALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?(?:ONLY\\s+)?(${QUALIFIED})\\s+RENAME\\s+TO\\s+(${QUALIFIED})`, "gi");
 const DROP_RE = new RegExp(`\\bDROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?(${QUALIFIED}(?:\\s*,\\s*${QUALIFIED})*)`, "gi");
+const INDEX_RE = new RegExp(`\\bCREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+(?:CONCURRENTLY\\s+)?(?:IF\\s+NOT\\s+EXISTS\\s+)?(?:(?!ON\\b)${NAME}\\s+)?ON\\s+(?:ONLY\\s+)?(${QUALIFIED})`, "gi");
+const POLICY_RE = new RegExp(`\\bCREATE\\s+POLICY\\s+${NAME}\\s+ON\\s+(${QUALIFIED})`, "gi");
+const TRIGGER_RE = new RegExp(`\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:CONSTRAINT\\s+)?TRIGGER\\s+${NAME}\\s+(?:BEFORE|AFTER|INSTEAD\\s+OF)\\s+[^;]*?\\bON\\s+(${QUALIFIED})`, "gi");
+const INSERT_RE = new RegExp(`\\bINSERT\\s+INTO\\s+(${QUALIFIED})`, "gi");
+/** PL/pgSQL `EXECUTE <uttrykk>` (dynamisk SQL). `EXECUTE FUNCTION/PROCEDURE` (trigger) og `GRANT/REVOKE EXECUTE ON ...` er ikke det. */
+const EXECUTE_RE = /\bEXECUTE\b(?!\s+(?:FUNCTION|PROCEDURE|ON)\b)/gi;
+/** Tabell-DDL i teksten til en dynamisk setning (midlertidige tabeller er ikke tilstand og teller ikke, som i den statiske skanningen). */
+const DDL_IN_STRING = /\b(?:CREATE\s+(?:UNLOGGED\s+)?TABLE|ALTER\s+TABLE|DROP\s+TABLE)\b/i;
+/** RLS-hjelperne i migrasjonene: nøyaktig `EXECUTE format('ALTER TABLE %I ENABLE|FORCE ROW LEVEL SECURITY', <variabel>)` (etter normalisert mellomrom). DISABLE, NO FORCE og alt annet er IKKE unntatt. */
+const RLS_HELPER = /^EXECUTE format\( ?'ALTER TABLE %I (?:ENABLE|FORCE) ROW LEVEL SECURITY' ?, ?[A-Za-z_][A-Za-z0-9_]* ?\)$/i;
 const NAME_TOKEN = new RegExp(NAME, "g");
 const ADD_COLUMN = new RegExp(`^\\s*ADD\\s+(?:COLUMN\\s+)?(?:IF\\s+NOT\\s+EXISTS\\s+)?(${NAME})`, "i");
 const NOT_COLUMN_AFTER_ADD = new Set(["constraint", "primary", "foreign", "unique", "check", "exclude", "like"]);
@@ -204,6 +220,23 @@ export interface AlterStatement {
   added_columns: string[];
 }
 
+/** Hva en setning gjør med en tabell uten å endre dens definisjon: indeks, policy, trigger eller innsetting av rader. */
+export type TouchKind = "index" | "policy" | "trigger" | "insert";
+
+/** Én setning med posisjon (tegnindeks i filen): hendelsene sorteres på posisjon og prosesseres i den rekkefølgen. */
+export type SqlEvent =
+  | { kind: "create"; pos: number; table: CreatedTable }
+  | { kind: "alter"; pos: number; statement: AlterStatement }
+  | { kind: "rename"; pos: number; from: string; to: string }
+  | { kind: "drop"; pos: number; name: string }
+  | { kind: "touch"; pos: number; touch: { kind: TouchKind; table: string } };
+
+/** En `EXECUTE`-setning med tabell-DDL i argumentet (teksten med strenger beholdt, mellomrom normalisert). `rls_helper` = RLS-hjelperen, som er unntatt. */
+export interface DynamicDdl {
+  statement: string;
+  rls_helper: boolean;
+}
+
 export interface ParsedMigration {
   file: string;
   created: CreatedTable[];
@@ -212,6 +245,10 @@ export interface ParsedMigration {
   alter_statements: AlterStatement[];
   dropped: string[];
   renamed: Array<{ from: string; to: string }>;
+  /** ALLE hendelser (create/alter/rename/drop/touch) i tekstrekkefølge. */
+  events: SqlEvent[];
+  /** Dynamisk tabell-DDL (`EXECUTE`), i tekstrekkefølge. */
+  dynamic_ddl: DynamicDdl[];
 }
 
 /** Tekst til og med neste `;` på parentesdybde 0 fra `from` (eller til slutten). */
@@ -226,9 +263,13 @@ function statementEnd(code: string, from: number): number {
   return code.length;
 }
 
+const EVENT_ORDER: Record<SqlEvent["kind"], number> = { create: 0, alter: 1, rename: 2, drop: 3, touch: 4 };
+const KEEP_BLANK_WS = /\s+/g;
+
 export function parseMigration(file: string, sql: string): ParsedMigration {
   const code = blankSqlNoise(sql);
   const text = blankSqlNoise(sql, { keepStrings: true });
+  const events: SqlEvent[] = [];
   const created: CreatedTable[] = [];
   for (const m of code.matchAll(CREATE_RE)) {
     const name = normalizeName(m[3] as string);
@@ -244,7 +285,9 @@ export function parseMigration(file: string, sql: string): ParsedMigration {
         bodyText = text.slice(k + 1, close);
       }
     }
-    created.push({ name, columns, temporary: m[1] !== undefined, if_not_exists: m[2] !== undefined, body_text: bodyText });
+    const table: CreatedTable = { name, columns, temporary: m[1] !== undefined, if_not_exists: m[2] !== undefined, body_text: bodyText };
+    created.push(table);
+    events.push({ kind: "create", pos: m.index as number, table });
   }
 
   const alterStatements: AlterStatement[] = [];
@@ -264,17 +307,41 @@ export function parseMigration(file: string, sql: string): ParsedMigration {
       if (!first.quoted && NOT_COLUMN_AFTER_ADD.has(first.name) && !/^\s*ADD\s+COLUMN\b/i.test(action)) continue;
       added.push(first.name);
     }
-    alterStatements.push({ table, text: text.slice(start, end), added_columns: added });
+    const statement: AlterStatement = { table, text: text.slice(start, end), added_columns: added };
+    alterStatements.push(statement);
+    events.push({ kind: "alter", pos: start, statement });
     if (!altered.includes(table)) altered.push(table);
   }
 
   const renamed: Array<{ from: string; to: string }> = [];
-  for (const m of code.matchAll(RENAME_RE)) renamed.push({ from: normalizeName(m[1] as string), to: normalizeName(m[2] as string) });
+  for (const m of code.matchAll(RENAME_RE)) {
+    const r = { from: normalizeName(m[1] as string), to: normalizeName(m[2] as string) };
+    renamed.push(r);
+    events.push({ kind: "rename", pos: m.index as number, ...r });
+  }
 
   const dropped: string[] = [];
-  for (const m of code.matchAll(DROP_RE)) for (const element of splitTopLevel(m[1] as string)) dropped.push(normalizeName(element));
+  for (const m of code.matchAll(DROP_RE)) {
+    for (const element of splitTopLevel(m[1] as string)) {
+      const name = normalizeName(element);
+      dropped.push(name);
+      events.push({ kind: "drop", pos: m.index as number, name });
+    }
+  }
 
-  return { file, created, altered, alter_statements: alterStatements, dropped, renamed };
+  for (const [re, kind] of [[INDEX_RE, "index"], [POLICY_RE, "policy"], [TRIGGER_RE, "trigger"], [INSERT_RE, "insert"]] as const) {
+    for (const m of code.matchAll(re)) events.push({ kind: "touch", pos: m.index as number, touch: { kind, table: normalizeName(m[1] as string) } });
+  }
+
+  const dynamic: DynamicDdl[] = [];
+  for (const m of code.matchAll(EXECUTE_RE)) {
+    const start = m.index as number;
+    const statement = text.slice(start, statementEnd(code, start + m[0].length)).replace(KEEP_BLANK_WS, " ").trim();
+    if (DDL_IN_STRING.test(statement)) dynamic.push({ statement, rls_helper: RLS_HELPER.test(statement) });
+  }
+
+  events.sort((a, b) => a.pos - b.pos || EVENT_ORDER[a.kind] - EVENT_ORDER[b.kind]);
+  return { file, created, altered, alter_statements: alterStatements, dropped, renamed, events, dynamic_ddl: dynamic };
 }
 
 export interface EffectiveTable {
@@ -298,54 +365,72 @@ export interface MigrationSet {
   tables: Map<string, EffectiveTable>;
   /** Hver opprettelse (ikke midlertidige, ikke IF NOT EXISTS-gjentakelser), med filen som evt. droppet den. */
   created: CreatedRecord[];
-  alters: Array<{ table: string; file: string }>;
+  /** Hver endring av en tabell i en fil: ALTER (uten `via`) eller indeks/policy/trigger/insert (med `via`). Eieren av tabellen må kvittere filen (PGA-D-07). */
+  alters: Array<{ table: string; file: string; via?: TouchKind }>;
   /** Tabell opprettet to ganger uten DROP imellom (uten IF NOT EXISTS). */
   duplicates: Array<{ table: string; files: string[] }>;
+  /** Dynamisk tabell-DDL (`EXECUTE`) som IKKE er en RLS-hjelper, med filen den står i. */
+  dynamic_ddl: Array<{ file: string; statement: string }>;
 }
 
-/** Filene behandles i navnerekkefølge (NNN_navn.sql), uansett hvilken rekkefølge de gis i. */
+/** Filene behandles i navnerekkefølge (NNN_navn.sql), uansett hvilken rekkefølge de gis i; setningene i hver fil i TEKSTREKKEFØLGE. */
 export function parseMigrationSet(files: ReadonlyArray<{ name: string; sql: string }>): MigrationSet {
   const ordered = [...files].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const tables = new Map<string, EffectiveTable>();
   const created: CreatedRecord[] = [];
-  const alters: Array<{ table: string; file: string }> = [];
+  const alters: Array<{ table: string; file: string; via?: TouchKind }> = [];
   const duplicates: Array<{ table: string; files: string[] }> = [];
+  const dynamic: Array<{ file: string; statement: string }> = [];
   for (const f of ordered) {
     const m = parseMigration(f.name, f.sql);
-    for (const c of m.created) {
-      if (c.temporary) continue;
-      const existing = tables.get(c.name);
-      if (existing !== undefined) {
-        if (!c.if_not_exists) duplicates.push({ table: c.name, files: [existing.created_in, f.name] });
-        continue;
-      }
-      tables.set(c.name, { name: c.name, created_in: f.name, columns: [...c.columns], definition_text: c.body_text });
-      created.push({ name: c.name, file: f.name });
-    }
-    for (const a of m.alter_statements) {
-      alters.push({ table: a.table, file: f.name });
-      const t = tables.get(a.table);
-      if (t !== undefined) {
-        for (const col of a.added_columns) if (!t.columns.includes(col)) t.columns.push(col);
-        t.definition_text += `\n${a.text}`;
-      }
-    }
-    for (const r of m.renamed) {
-      const t = tables.get(r.from);
-      if (t === undefined) continue;
-      tables.delete(r.from);
-      tables.set(r.to, { ...t, name: r.to });
-    }
-    for (const name of m.dropped) {
-      if (!tables.delete(name)) continue;
-      for (let i = created.length - 1; i >= 0; i -= 1) {
-        const rec = created[i] as CreatedRecord;
-        if (rec.name === name && rec.dropped_in === undefined) {
-          rec.dropped_in = f.name;
+    for (const ev of m.events) {
+      switch (ev.kind) {
+        case "create": {
+          const c = ev.table;
+          if (c.temporary) break;
+          const existing = tables.get(c.name);
+          if (existing !== undefined) {
+            if (!c.if_not_exists) duplicates.push({ table: c.name, files: [existing.created_in, f.name] });
+            break;
+          }
+          tables.set(c.name, { name: c.name, created_in: f.name, columns: [...c.columns], definition_text: c.body_text });
+          created.push({ name: c.name, file: f.name });
           break;
         }
+        case "alter": {
+          const a = ev.statement;
+          alters.push({ table: a.table, file: f.name });
+          const t = tables.get(a.table);
+          if (t !== undefined) {
+            for (const col of a.added_columns) if (!t.columns.includes(col)) t.columns.push(col);
+            t.definition_text += `\n${a.text}`;
+          }
+          break;
+        }
+        case "rename": {
+          const t = tables.get(ev.from);
+          if (t === undefined) break;
+          tables.delete(ev.from);
+          tables.set(ev.to, { ...t, name: ev.to });
+          break;
+        }
+        case "drop": {
+          if (!tables.delete(ev.name)) break;
+          for (let i = created.length - 1; i >= 0; i -= 1) {
+            const rec = created[i] as CreatedRecord;
+            if (rec.name === ev.name && rec.dropped_in === undefined) {
+              rec.dropped_in = f.name;
+              break;
+            }
+          }
+          break;
+        }
+        case "touch":
+          alters.push({ table: ev.touch.table, file: f.name, via: ev.touch.kind });
+          break;
       }
     }
+    for (const d of m.dynamic_ddl) if (!d.rls_helper) dynamic.push({ file: f.name, statement: d.statement });
   }
-  return { tables, created, alters, duplicates };
+  return { tables, created, alters, duplicates, dynamic_ddl: dynamic };
 }

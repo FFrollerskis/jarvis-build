@@ -363,7 +363,7 @@ describe("ingen hopping: en regel som ikke kan evalueres er et funn, ikke en sti
     expect([...SCAN_RULES].sort()).toEqual(
       [
         "active_state_in_learning_table", "contract_file_unclaimed", "contract_fingerprint_mismatch", "decision_ref_missing", "dependency_on_planned", "dependency_unknown", "dependency_unsatisfied", "dir_uncovered",
-        "event_consumer_unknown", "event_multi_owner", "evidence_invalid", "exclusive_name_violation", "migration_duplicate_create", "migration_not_acknowledged", "migration_unclaimed", "migration_unknown", "path_missing",
+        "event_consumer_unknown", "event_multi_owner", "evidence_invalid", "exclusive_name_violation", "migration_duplicate_create", "migration_dynamic_ddl", "migration_not_acknowledged", "migration_unclaimed", "migration_unknown", "path_missing",
         "plan_active_conflict", "plan_unknown", "planned_table_exists", "planned_table_multi_owner", "reserved_prefix_violation", "runtime_table_conflict", "service_multi_owner", "service_orphan", "service_unknown",
         "table_multi_owner", "table_orphan", "table_unknown", "workspace_dependency_undeclared"
       ].sort()

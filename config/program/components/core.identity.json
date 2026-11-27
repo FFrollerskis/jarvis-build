@@ -60,6 +60,7 @@
       "053_session_grants.sql",
       "063_device_revocation_approval_binding.sql",
       "064_definer_least_privilege.sql",
+      "073_operational_retention.sql",
       "074_erasure_session_grants_cascade.sql"
     ],
     "services": [],
