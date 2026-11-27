@@ -131,7 +131,7 @@ describe("D: repoets UTKAST-verdier (eier MÅ vurdere før signering)", () => {
     for (const key of EXPECTED_KEYS as Array<keyof BudgetCaps>) expect(c.budget[key], key).toBeLessThanOrEqual(BUDGET_HARD_CEILINGS[key]);
   });
 
-  it("D2: konservative startverdier: totalt 100 kr/mnd, eier-tid 4 t/uke (planens 3-5 t), 15 min pr endring, 1 deploy/time", () => {
+  it("D2: konservative startverdier: totalt 100 kr/mnd, eier-tid 4 t/uke (HF2 kap. 29), 15 min pr endring, 1 deploy/time", () => {
     const b = buildConstitution(manifest()).budget;
     expect(b.max_evolution_cost_ore_per_month).toBe(10_000);
     expect(b.owner_time_budget_minutes_per_week).toBe(240);

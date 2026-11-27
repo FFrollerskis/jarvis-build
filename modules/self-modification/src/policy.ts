@@ -49,7 +49,7 @@ export const FORBIDDEN_PATH_PATTERNS: readonly RegExp[] = [
   /^config\/program\//i,
   /^ops\/(security|break-glass|backup|job-runner|claude-worker)\//i,
   /CLAUDE\.md$/i,
-  // WP-EV0 (HF2 kap. 5, «Authority Plane»): step-up for eier-kontroll, revisjonsintegritet, godkjenningslager, identitets-/sesjons-/enhetsautoritet,
+  // WP-EV0 (HF2 kap. 5, Authority Plane): step-up for eier-kontroll, revisjonsintegritet, godkjenningslager, identitets-/sesjons-/enhetsautoritet,
   // databasens tenant-kontekst og den metrikk-avledede confidence-gaten. Kun navngitte filer (vanlig kode ellers er E2, ikke E3).
   /^apps\/api\/src\/step-up\.ts$/i,
   /^modules\/core\/src\/services\/(audit-writer|policy-audit-sink|approval-store|identity-service|session-grant-service|device-authority|channel-session-authority|voice-session-authority|telegram-owner-authority|runtime-role)\.ts$/i,

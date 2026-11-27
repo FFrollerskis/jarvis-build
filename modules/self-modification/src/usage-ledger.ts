@@ -5,7 +5,7 @@ import { EVOLUTION_COST_CATEGORIES } from "./constitution.ts";
 import { GENESIS_HASH } from "./change-ledger.ts";
 
 /**
- * WP-EV0 (HF2 kap. 6 «Budget locks» og kap. 29): append-only FORBRUKS- og EIER-TID-register med hash-kjede (migrasjon 280, samme mønster som endringsregisteret 075).
+ * WP-EV0 (HF2 kap. 6 og kap. 29): append-only FORBRUKS- og EIER-TID-register med hash-kjede (migrasjon 280, samme mønster som endringsregisteret 075).
  * Budsjettlåsen (`BudgetLock`) teller herfra: kostnad pr. kategori i ØRE (`spend`) og eierens tid i MINUTTER (`owner_time`), hver rad knyttet til målingen den kommer
  * fra (`source_ref`) og til konstitusjonen som gjaldt. Raden skrives av deterministisk målekode - aldri av Evolution-motoren selv. Databasen nekter UPDATE/DELETE/TRUNCATE
  * og setter `seq`/`entry_hash`; denne klassen validerer, skriver og verifiserer (databasen OG uavhengig i TypeScript).

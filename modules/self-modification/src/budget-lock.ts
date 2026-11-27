@@ -65,7 +65,7 @@ export class BudgetLock {
     return { allowed: false, kind, reason: "budget_check_failed", used: 0, limit: Number.isFinite(limit) ? limit : 0, ...(scope !== undefined ? { scope } : {}) };
   }
 
-  /** «Kan det skje én gang til i dette vinduet?» - teller rader i endringsregisteret siden vindusstart. */
+  /** Er det plass til én til i dette vinduet? Teller rader i endringsregisteret siden vindusstart. */
   private async countVerdict(
     kind: BudgetKind, limit: number, since: () => string, decisions: readonly LedgerDecision[], classes: readonly string[]
   ): Promise<BudgetVerdict> {

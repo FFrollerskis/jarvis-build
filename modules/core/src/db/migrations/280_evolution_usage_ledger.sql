@@ -1,4 +1,4 @@
--- WP-EV0 (HF2 EV-0, kap. 6 «Budget locks» og kap. 29 «kostnads- og eier-tid-modell»): append-only FORBRUKS- og EIER-TID-register med hash-kjede.
+-- WP-EV0 (HF2 EV-0, kap. 6 og kap. 29): append-only FORBRUKS- og EIER-TID-register med hash-kjede.
 -- Budsjettlåsene (`BudgetLock`) teller herfra - aldri fra Evolution selv: kostnad pr. kategori (radar, eval, redteam, shadow, review) i ØRE og eierens tid
 -- (godkjenninger, merking, review, styring) i MINUTTER, hver rad knyttet til målingen den kommer fra (`source_ref`, f.eks. `cost_events:<id>`) og til konstitusjonen som gjaldt.
 -- Raden skrives av deterministisk målekode (modellgateway-kostnadsføring, eier-konsollen) - ikke av motoren; `recorded_by` sier hvem. Tallene i signert manifest
@@ -12,7 +12,9 @@
 --     `source_ref`/`recorded_by` er begrenset til et trygt tegnsett (ingen fritekst, aldri hemmeligheter).
 --   * `evolution_usage_ledger_verify()` regner kjeden på nytt og returnerer første ødelagte `seq` (NULL = hel kjede).
 -- Avgrensning (NOT VERIFIED): en databaseadministrator med tilgang til triggerne kan skrive om hele kjeden (som 075); eksterne signerte sjekkpunkter er neste slice.
--- Klassifisering (MC8a-regelen finnes ikke i basen): operasjonell metadata uten personopplysninger; ingen PROCESSING_INVENTORY-rad og ingen erasure-plan trengs.
+-- Klassifisering (MC8a-regelen finnes ikke i basen; mønsteret er 075): operasjonell metadata uten personopplysninger (kun kategori, beløp, endrings-ID, målereferanse, digest).
+-- Tabellen står i docs/security/PROCESSING_INVENTORY.md (guard-testen d420 krever en rad pr. tabell) og i unntakslisten for tabeller uten RLS; ingen erasure-plan trengs
+-- fordi ingen rad kan peke på en person.
 -- Rollback: tabellen er rent additiv (expand); ingen eksisterende kode leser den. Forover-only: fjern bruken i koden og la tabellen stå (append-only), ikke DROP.
 
 CREATE TABLE evolution_usage_ledger (

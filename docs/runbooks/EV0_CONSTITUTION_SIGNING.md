@@ -26,7 +26,7 @@ Alle verdier i `config/evolution/constitution.v1.json` -> `budget_caps` er **kon
 | `max_redteam_cost_ore_per_month` | 1 500 = 15 kr | 100 000 | red team |
 | `max_shadow_cost_ore_per_month` | 1 500 = 15 kr | 100 000 | shadow/canary (doble modellkall) |
 | `max_review_cost_ore_per_month` | 2 000 = 20 kr | 100 000 | uavhengig review (annen modell) |
-| `owner_time_budget_minutes_per_week` | 240 = 4 t/uke | 600 | din tid: godkjenninger, merking, review, styring (planens antakelse er 3-5 t/uke) |
+| `owner_time_budget_minutes_per_week` | 240 = 4 t/uke | 600 | din tid: godkjenninger, merking, review, styring (se HF2 kap. 29 for forutsetningene) |
 | `max_owner_minutes_per_autonomous_change` | 15 | 60 | din tid pr. autonom endring (summert over endringens levetid) |
 | `max_auto_merges_per_day` | 5 | 20 | automatiske (E1) merger pr. UTC-døgn |
 | `max_deploys_per_day` / `max_deploys_per_hour` | 3 / 1 | 10 / 3 | deploys pr. UTC-døgn og pr. hel UTC-time (time kan ikke overstige døgn) |
