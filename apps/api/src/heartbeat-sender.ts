@@ -1,6 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import { envInt } from "@jarvis/contracts";
-import { guardedFetch } from "@jarvis/tool-gateway";
+import { UnsafeVendorUrlError, assertSafeVendorUrl, guardedFetch } from "@jarvis/tool-gateway";
 
 /**
  * WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat («dead man's switch») for API-et. AV som standard: uten `JARVIS_UPTIME_HEARTBEAT_URL` sendes ingenting.
@@ -20,7 +20,7 @@ export class HeartbeatConfigError extends Error {
   }
 }
 
-// guardedFetch (assertSafeVendorUrl) godtar ikke IPv6-literaler i vertsdelen - holdes utenfor her så validering og utsending er enige.
+// http:// er KUN tillatt mot disse (test/lokal proxy). Settet er bevisst smalt: `0.0.0.0`, `127.0.0.2`, `[::1]` og `localhost.` hører ikke hjemme her (pinnet av test, fiks-runde 1 S13).
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost"]);
 // eslint-disable-next-line no-control-regex
 const UNSAFE = /[\u0000- \u007f\\]/;
@@ -31,7 +31,26 @@ const LOG_EVERY_N = 10;
 /** Variabelen API-heartbeaten leses fra - standard i feilmeldingene. WP-OPS2a K3: andre kallere (vakthundens heartbeat) gir sitt EGET variabelnavn, så meldingen peker på riktig innstilling. */
 const UPTIME_URL_ENV = "JARVIS_UPTIME_HEARTBEAT_URL";
 
-/** https:// (http:// kun mot loopback, for test/lokal proxy); ingen brukerinfo/fragment/mellomrom. Feilmeldingen siterer ALDRI URL-en (nøkkelen står i den). */
+/**
+ * WP-OPS2a fiks 1 (A-L7): vert som aldri er et ekte, eksternt overvåkningsmål over https: loopback (127/8, `localhost`, `*.localhost`), privat (10/8, 172.16/12, 192.168/16), link-local (169.254/16, inkl. metadata-adressen
+ * og `metadata.google.internal`) og uspesifisert (0/8). `hostname` kommer fra `URL` og er allerede normalisert (desimal-, hex- og oktalformer er punktum-form, store bokstaver er små). IPv6-literaler avvises av `assertSafeVendorUrl`.
+ * Et vertsnavn kan fortsatt peke til en privat adresse via DNS; dette er et forsvar mot åpenbare feil og SSRF-former, ikke en DNS-garanti.
+ */
+function isNonPublicHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host === "metadata.google.internal") return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m === null) return false;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+/**
+ * https:// (http:// kun mot loopback, for test/lokal proxy); ingen brukerinfo/fragment/mellomrom. Feilmeldingen siterer ALDRI URL-en (nøkkelen står i den).
+ * Fiks-runde 1: (A-L6) den NORMALISERTE URL-en må også bestå `assertSafeVendorUrl` - samme vern som `guardedFetch` kjører ved sending - så validering og utsending er enige (ellers ble en URL godtatt ved oppstart og HVER ping feilet stille som `network`);
+ * (A-L7) https mot loopback/privat/link-local/uspesifisert adresse avvises (`isNonPublicHost`).
+ */
 export function validateHeartbeatUrl(raw: string, envName: string = UPTIME_URL_ENV): URL {
   if (raw.length === 0 || raw.length > MAX_URL_LENGTH || UNSAFE.test(raw)) throw new HeartbeatConfigError(`${envName}: ugyldig URL (tom, for lang, mellomrom/kontrolltegn eller backslash)`);
   let url: URL;
@@ -45,6 +64,16 @@ export function validateHeartbeatUrl(raw: string, envName: string = UPTIME_URL_E
   if (url.hostname === "") throw new HeartbeatConfigError(`${envName}: mangler vert`);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))) {
     throw new HeartbeatConfigError(`${envName}: kun https:// er tillatt (http:// bare mot loopback, for test)`);
+  }
+  if (url.protocol === "https:" && isNonPublicHost(url.hostname)) {
+    throw new HeartbeatConfigError(`${envName}: https mot localhost, loopback, privat eller link-local adresse er ikke tillatt (bruk et offentlig vertsnavn)`);
+  }
+  try {
+    assertSafeVendorUrl(url.toString());
+  } catch (err) {
+    // `reason` er en fast kode fra et lukket sett (aldri URL-innhold); alt annet gir «ukjent».
+    const reason = err instanceof UnsafeVendorUrlError && /^[a-z_]{1,40}$/.test(err.reason) ? err.reason : "ukjent";
+    throw new HeartbeatConfigError(`${envName}: URL avvist av utsendingsvernet (${reason}) - kun ren vert uten IPv6-literal eller understrek`);
   }
   return url;
 }
