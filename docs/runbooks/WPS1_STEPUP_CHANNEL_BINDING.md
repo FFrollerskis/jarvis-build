@@ -221,7 +221,23 @@ su postgres -s /bin/bash -c 'export HOME=/tmp/pg-home npm_config_manage_package_
 | `apps/api/test/wps1-enroll-ticket-cli.test.ts`, `wps1-authority-center-device-kind.test.ts` | CLI krever `--kind`; kontrollsenteret viser type/kilde |
 | `apps/api/test/remediation-2-control-plane-auth.test.ts` (H3) | `stepup_binding` i `/infra/status` er kun for den suverene eieren |
 
-**Mutanter** (`MUTANT_TALL`): se rapporten fra byggeren; settet og resultatene (drept/overlevde, ekvivalente forklart) ligger i `MUTANT_TABELL`.
+**Mutanter (120 unike, hver mutant er en enkelt kodeendring som skal felle minst ett test-trinn):** 119 drepte, 1 overlevende som er **ekvivalent**. Mutantene er laget for hånd mot selve sikkerhetsreglene (ikke tilfeldige operatorer), kjørt som egen harness som muterer filen på plass, kjører de relevante testfilene (`--bail=1`) og skriver originalinnholdet tilbake (aldri `git checkout`/`stash`).
+
+| Gruppe | Antall | Hva som muteres | Drept |
+|---|---|---|---|
+| `DK01`-`DK19` | 19 | `DEVICE_KIND_CHANNELS` (en type får en kanal for mye/lite, `legacy_unknown` får step-up, lavtillits-typer får `web`/`api`), fail-closed (`true` ved ukjent), etikett-avbildningen, billettlisten | 18 (+1 ekvivalent, se under) |
+| `SB01`-`SB13`, `LG01`-`LG05` | 18 | modusparser (case/trim/ugyldig verdi = enforce), den fail-closed porten (snudd, flagg fjernes ikke, mangler i registeret, blokkering meldes ikke, delt `process.env`), status og oppstartslogg | 18 |
+| `DA01`-`DA12`, `IS01` | 13 | autorisasjonskjernen: håndhever aldri / alltid / feil kanal / konstant type, sideeffekter før avslag, observe-revisjon fjernet / feil `decision` / uten nyttelast, standard `enforce` | 13 |
+| `DS01`-`DS10` | 10 | `FOR UPDATE` fjernet (TOCTOU), GUC-tillatelsen (satt tom / aldri nullstilt), kilde, `insert_only`, validering, konstant type | 10 |
+| `SG01`-`SG04` | 4 | `verify()`-dybdeforsvaret (av / snudd / uten type / også i observe) | 4 |
+| `DE01`-`DE20` | 20 | innrulling: billettens type ignorert, regel R-B (selv-unntak, null-mål, `||`/`&&`, enforce kaster ikke, alltid tillatt), `RETURNING`, `insert_only`, tilbakekalt-i-vinduet, revisjonsfelter, billett uten type nullstiller typen, klientetikett vinner | 20 |
+| `RS01`-`RS03`, `MG01`-`MG10` | 13 | kontraktenes årsakskoder og migrasjonen (backfill-avbildning, CHECK-ene, triggeren, revisjonen, standardverdier) | 13 |
+| `AP01`-`AP15`, `SD01`-`SD03` | 18 | `main.ts` (rå `process.env` til en flaggfamilie, modus ikke til en tjeneste, porten leser tomt miljø, logg/status skjult), `/infra/status` for ikke-eier, `service-env`, kontrollsenter, billett-CLI, seed-typer | 18 |
+| `RB01`-`RB05` | 5 | selve runbooken (mappingtabell, flaggtabell, SQL-kolonne, billettliste, `legacy_unknown`-påstand) | 5 |
+
+Første kjøring (102 mutanter) etterlot 9 overlevende; 8 var testhull og er lukket med nye tester (visningsetikettens avkorting, `describeStepUpBinding`, validering i koden, `device.enrolled`-revisjonen per vei, CHECK-ene og SQL/TS-listene, billett-CLI mot ekte database, oppstartsloggens betingelse) og kontrollert med en ny kjøring.
+
+**Ekvivalent overlevende (`DK16`):** regex-en `^[A-Za-z_]{1,32}$` i `deviceKindFromLegacyLabel` er ren forsvarsdybde. Etter regex-en slås etiketten opp i en LUKKET tabell med rene ASCII-nøkler (maks 16 tegn), så en etikett som slipper gjennom en mer tolerant regex (`^\S{1,32}$`) kan aldri treffe en nøkkel og gir `legacy_unknown` uansett: utfallet er identisk for alle innganger (det finnes ingen Unicode-tegn som blir en ASCII-nøkkel av `toLowerCase()` for de nøklene som finnes). Regex-en beholdes fordi den holder TS-avbildningen byte-lik SQL-avbildningen også om en fremtidig nøkkel skulle inneholde en bokstav med en Unicode-lookalike (f.eks. Kelvin-tegnet); `packages/contracts/test/wps1-labels-status.test.ts` låser dagens oppførsel for lookalike-tegn.
 
 ## 11. Kjente begrensninger, `DEFERRED`/`PARTIAL`, `NOT_VERIFIED` og eierhandlinger
 
