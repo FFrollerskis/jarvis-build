@@ -9,12 +9,12 @@ Statusord: LUKKET HER / PARTIAL / DEFERRED / NOT VERIFIED / BLOCKED_EXTERNAL.
 
 | Krav | Status | Kode | Test |
 |---|---|---|---|
-| K1 klassifiseringsmodell (frosset baseline + annotasjon i nye migrasjoner) | LUKKET HER | `modules/core/src/db/schema-classes.baseline.json`, `modules/core/src/testing/schema-classes/{directives,manifest,analysis}.ts` | `mc8a-schema-classes-static.test.ts` (60), `mc8a-schema-classes-db.test.ts` (4) |
+| K1 klassifiseringsmodell (frosset baseline + annotasjon i nye migrasjoner) | LUKKET HER | `modules/core/src/db/schema-classes.baseline.json`, `modules/core/src/testing/schema-classes/{directives,manifest,analysis}.ts` | `mc8a-schema-classes-static.test.ts` (62), `mc8a-schema-classes-db.test.ts` (4) |
 | K2 lint-regler per klasse (ORG_OWNED/USER_OWNED/GLOBAL/PLATFORM, DEFINER-allowlist) | LUKKET HER | `schema-classes/{catalog,rules,run}.ts` | samme + mutantene |
 | K3 utvid, ikke dupliser; `pnpm check:schema-classes` | LUKKET HER | rotens `package.json`, `modules/core/scripts/check-schema-classes.ts`; `remediation-2-schema-invariants.test.ts` A og B leser nå manifestet | `remediation-2-schema-invariants.test.ts` (22), CLI-tester i static-filen |
 | K4 negativ org-A/B-fixture | LUKKET HER (173 av 173 ORG_OWNED atferdsbevist, 0 kun katalogbevist; se §7) | `schema-classes/isolation.ts`, `test/fixtures/isolation-factories/` | `mc8a-tenant-isolation-matrix.test.ts` (7) |
 | K5 funn uten stille fiks | LUKKET HER (5 funn i baseline; ingen skjemaendring, §8) | manifestets `exceptions` | `mc8a-schema-classes-db.test.ts` |
-| K6 mutanter (minst 25) | LUKKET HER (47 mutanter, 47 drept, 0 overlevende) | - | `mc8a-schema-class-mutants.test.ts` (49 tester inkl. 2 kontroller) |
+| K6 mutanter (minst 25) | LUKKET HER (54 skjema-mutanter: 54 drept av linten, 13 også av atferdsharnisken, 0 overlevende; i tillegg 36 kodemutanter av biblioteket selv, §9b) | - | `mc8a-schema-class-mutants.test.ts` (56 tester inkl. 2 kontroller) |
 | K7 runbook + forslag til byggeregler | LUKKET HER (dette dokumentet, §10) | `docs/runbooks/WPMC8A_SCHEMA_CLASSIFICATION.md` | `mc8a-schema-classes-doc.test.ts` |
 
 ## 2. Klassene og reglene
@@ -42,12 +42,12 @@ Regel-ID-ene (stabile; brukes i unntak, meldinger og tester). *Struktur*-regler 
 |---|---|---|
 | tenant-kolonne NOT NULL + FK + indeks | `org_no_tenant_id`, `tenant_id_nullable`, `tenant_fk_missing`, `tenant_index_missing` | mutantene M13-M16, N02 |
 | ENABLE + FORCE RLS | `rls_not_forced` | M01, M02, N03 |
-| policyer per kommando med WITH CHECK, ingen `true` | `policy_coverage_missing`, `policy_scope`, `policy_with_check_missing`, `policy_true` | M03-M12, N08 |
-| ingen eier/BYPASSRLS som runtime | `owner_is_runtime`, `runtime_role_unsafe`, `runtime_create_in_public`, `app_dangerous_privilege` | M17-M24 |
+| policyer per kommando med WITH CHECK, ingen `true` | `policy_coverage_missing`, `policy_scope`, `policy_with_check_missing`, `policy_true` | M03-M12, M38, M43, N08 |
+| ingen eier/BYPASSRLS som runtime | `owner_is_runtime`, `runtime_role_unsafe`, `runtime_create_in_public`, `app_dangerous_privilege` | M17-M24, M42 |
 | tenant-kontekst server-side i transaksjonen | ikke en skjemaregel: `set_config(..., true)` i `withTenantTransaction`; harnisken setter kontekst på samme måte | `data-foundation.test.ts`, matrisen |
-| SECURITY DEFINER default deny | `definer_*` | M25-M29, N09 |
+| SECURITY DEFINER default deny | `definer_*` | M25-M29, M41, N09 |
 | negativ A/B-fixture | `assertTenantIsolation` | matrisen: 173 av 173 |
-| PLATFORM uleselig for appen / GLOBAL uten tenant-nyttelast | `platform_app_access`, `global_*` | M30-M32, N04-N06 |
+| PLATFORM uleselig for appen / GLOBAL uten tenant-nyttelast | `platform_app_access`, `global_*` | M30-M32, M39, M40, N04-N06, N11 |
 
 ## 3. Slik klassifiserer du en NY tabell
 
@@ -112,7 +112,7 @@ Alle DB-kommandoer MÅ kjøres som en vanlig bruker (embedded Postgres nekter ro
 pnpm check:schema-classes --static     # kun filer + manifest + annotasjoner (ingen DB; også som root); ca. 1 s
 pnpm check:schema-classes              # statisk + katalogsjekk mot en MIGRERT embedded Postgres (ca. 4 s); exit 0 grønt, 1 brudd, 2 kunne ikke kjøre
 pnpm check:schema-classes --verbose    # lister også de kjente baseline-unntakene; --json for maskinlesbar rapport
-pnpm exec vitest run modules/core/test/mc8a-schema-classes-static.test.ts    # 60 tester, ingen DB
+pnpm exec vitest run modules/core/test/mc8a-schema-classes-static.test.ts    # 62 tester, ingen DB
 # som postgres-bruker (DB):
 pnpm exec vitest run --maxWorkers=2 modules/core/test/mc8a-schema-classes-db.test.ts modules/core/test/mc8a-tenant-isolation-matrix.test.ts modules/core/test/mc8a-schema-class-mutants.test.ts
 ```
@@ -161,6 +161,10 @@ Observasjon (ikke et funn mot en regel): append-only-triggerne (`audit_events`, 
 - «Atferdsbevist» betyr: bevist på en fixture-database uten datagyldighets-constraints (fingeravtrykk-identisk for RLS/GRANT) og, for 11 tabeller, også med ekte constraints. En ekte rad med uvanlig innhold kan i teorien oppføre seg annerledes i en trigger som leser tenant-innstillingen; slike triggere holdes PÅ av `stripForIsolation` (ingen i dag).
 - Transitiv tenant-forankring: en tabell er `tenant_fk_missing`-fri også når `tenant_id` kun er forankret via en sammensatt FK `(tenant_id, ...)` til en forankret ORG_OWNED-forelder (bevisst; 7 tabeller i dag).
 - Én intermittent, uavhengig observasjon: `remediation-2-device-revocation-session.test.ts` (urørt) kan melde en «Unhandled Rejection» (FATAL 57P01) ved nedstenging av embedded Postgres i noen kjøringer; testene i filen er grønne.
+
+## 9b. Mutasjonstest av biblioteket selv (kodemutanter)
+
+Utover de 54 skjema-mutantene (K6) er selve lint-/harnisk-koden mutasjonstestet manuelt: 36 enlinjes kodemutanter (f.eks. `OR` som `some` i `isTenantScoped`, DELETE ut av kommandokravet, FORCE ignorert, runtime-medlemmer ikke sjekket, partiell indeks godtatt, transitiv forankring fjernet, `<` i stedet for `<=` ved frosset grense, sjekksum ikke sammenlignet, direktivgrammatikk, nestede kommentarer, E-strenger, dollar-sitater, manifesttak/sortering, og alle seks bevis i A/B-harnisken). Første kjøring: 24 drept, 12 overlevende. Overlevende pekte på ni REELLE testhull (DELETE-dekning, skrivbar GLOBAL ved DELETE/UPDATE, `pg_temp` sist, kolonne-REFERENCES, kolonne-SELECT på PLATFORM, grensen ved 148, frossen tabell uten klasse, nestede kommentarer, asymmetrisk policy som kun lekker B->A) og et svakt utsagn (angreps-insert skulle melde LEKKASJE, ikke bare «avvist av noe annet»), som er lukket med nye tester (M38-M43, N11 og to statiske tester; `behaviorLeak` krever at harnisken melder LEKKASJE). Etter fiksen: **34 av 36 drept, 2 overlevende som er REDUNDANTE sjekker**: filtrert telling av B-rader og ufiltrert telling (`C28`, `C36`) oppdager nøyaktig de samme lekkasjene, så hver for seg er hver av dem unødvendig for alle skjema-mutantene; de er beholdt som forsvar i dybden. Skriptet ligger utenfor repoet (kjørt manuelt); mutantlisten og resultatet står i rapporten til bygger.
 
 ## 10. Forslag til tilføyelse i BUILD-RULES.md (§1, migrasjoner)
 

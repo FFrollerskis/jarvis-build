@@ -71,7 +71,7 @@ describe("A: SQL-skanneren", () => {
 
   it("nestede blokkommentarer blankes og beholder linjetellingen", () => {
     const scan = scanSql("a /* x /* y\n */ z */ b;\nCREATE TABLE real_t (a int);");
-    expect(scan.code).not.toContain("x");
+    expect(scan.code).not.toMatch(/[xyz]/i); // z står etter den INDRE avslutningen: kun en nestet skanner blanker den også
     expect(scan.code).toContain("CREATE TABLE real_t");
     expect(splitStatements(scan).map((s) => s.line)).toEqual([1, 3]);
   });
@@ -338,6 +338,17 @@ describe("G: statiske mutanter - en NY migrasjon (eller manifestendring) som MÅ
     const files = REAL.map((f) => (f.name === "005_rls.sql" ? { ...f, sql: `${f.sql}\n-- sniket inn` } : f));
     expect(analyse(files).map((x) => `${x.rule}:${x.detail}`)).toEqual(["frozen_migration_changed:005_rls.sql"]);
     expect(analyse(REAL.map((f) => (f.name === "005_rls.sql" ? { ...f, sql: f.sql.replace(/\n/g, "\r\n") } : f)))).toEqual([]);
+  });
+
+  it("grensen går ved 148: filen 148 er frossen (endring avvises), en NY fil 149 trenger ikke stå i manifestet", () => {
+    const edited = REAL.map((f) => (f.name === "148_situation_autonomy_scope.sql" ? { ...f, sql: `${f.sql}\n-- sniket inn` } : f));
+    expect(analyse(edited).map((x) => `${x.rule}:${x.detail}`)).toEqual(["frozen_migration_changed:148_situation_autonomy_scope.sql"]);
+    expect(analyse(withNew(NEW("SELECT 1;", "149_boundary.sql")))).toEqual([]);
+  });
+
+  it("baseline som mangler en frossen tabell => unclassified_table (klassen kan ikke bare fjernes fra manifestet)", () => {
+    const v = analyse(REAL, mutated((m) => (m.classes["ORG_OWNED"] = (m.classes["ORG_OWNED"] ?? []).filter((t) => t !== "tenants"))));
+    expect(v.map((x) => `${x.rule}:${x.table}`)).toEqual(["unclassified_table:tenants"]);
   });
 
   it("en frossen migrasjon som fjernes => frozen_migration_missing", () => {

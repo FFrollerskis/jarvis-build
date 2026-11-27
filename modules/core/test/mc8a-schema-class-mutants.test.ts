@@ -143,10 +143,12 @@ interface Mutant {
   readonly id: string;
   readonly desc: string;
   readonly sql: () => string;
-  /** Regler linten MÅ rapportere (tabell valgfri). */
-  readonly lint: ReadonlyArray<{ rule: string; table?: () => string | null }>;
-  /** Atferdsharnisken MÅ feile på disse operasjonene (kun policy-mutanter som er atferdsmessig synlige). */
+  /** Regler linten MÅ rapportere (tabell og presis detalj valgfritt). */
+  readonly lint: ReadonlyArray<{ rule: string; table?: () => string | null; detail?: string }>;
+  /** Atferdsharnisken MÅ feile på disse operasjonene (kun policy-mutanter som er atferdsmessig synlige): kontroll (egen tenant virker ikke) eller lekkasje. */
   readonly behavior?: ReadonlyArray<Op>;
+  /** Operasjoner der harnisken MÅ melde en LEKKASJE (angrepet lyktes), ikke bare en feilet kontroll. */
+  readonly behaviorLeak?: ReadonlyArray<Op>;
   /** Atferdsmessig ekvivalent (kun lint kan drepe): harnisken skal fortsatt være grønn, og det dokumenteres. */
   readonly behaviorEquivalent?: boolean;
 }
@@ -157,11 +159,11 @@ const q = (id: string): string => `"${id}"`;
 
 const MUTANTS: Mutant[] = [
   { id: "M01", desc: "FORCE ROW LEVEL SECURITY fjernet (eier omgår RLS)", sql: () => `ALTER TABLE ${q(T())} NO FORCE ROW LEVEL SECURITY`, lint: [{ rule: "rls_not_forced", table: T }], behaviorEquivalent: true },
-  { id: "M02", desc: "RLS slått helt av", sql: () => `ALTER TABLE ${q(T())} DISABLE ROW LEVEL SECURITY`, lint: [{ rule: "rls_not_forced", table: T }], behavior: ["read", "noContext", "update", "delete"] },
-  { id: "M03", desc: "policy USING (true) WITH CHECK (true)", sql: () => `ALTER POLICY ${q(P())} ON ${q(T())} USING (true) WITH CHECK (true)`, lint: [{ rule: "policy_scope", table: T }, { rule: "policy_true", table: T }], behavior: ["read", "insert", "update", "delete"] },
-  { id: "M04", desc: "WITH CHECK (true) (USING uendret)", sql: () => `ALTER POLICY ${q(P())} ON ${q(T())} WITH CHECK (true)`, lint: [{ rule: "policy_scope", table: T }, { rule: "policy_true", table: T }], behavior: ["insert", "updateMove"] },
+  { id: "M02", desc: "RLS slått helt av", sql: () => `ALTER TABLE ${q(T())} DISABLE ROW LEVEL SECURITY`, lint: [{ rule: "rls_not_forced", table: T }], behavior: ["read", "noContext", "update", "delete"], behaviorLeak: ["read", "noContext", "update", "delete"] },
+  { id: "M03", desc: "policy USING (true) WITH CHECK (true)", sql: () => `ALTER POLICY ${q(P())} ON ${q(T())} USING (true) WITH CHECK (true)`, lint: [{ rule: "policy_scope", table: T }, { rule: "policy_true", table: T }], behavior: ["read", "insert", "update", "delete"], behaviorLeak: ["read", "insert", "update", "delete"] },
+  { id: "M04", desc: "WITH CHECK (true) (USING uendret)", sql: () => `ALTER POLICY ${q(P())} ON ${q(T())} WITH CHECK (true)`, lint: [{ rule: "policy_scope", table: T }, { rule: "policy_true", table: T }], behavior: ["insert", "updateMove"], behaviorLeak: ["insert", "updateMove"] },
   { id: "M05", desc: "WITH CHECK fjernet (kun USING; Postgres bruker USING som sjekk)", sql: () => `DROP POLICY ${q(P())} ON ${q(T())}; CREATE POLICY ${q(P())} ON ${q(T())} USING (${TENANT})`, lint: [{ rule: "policy_with_check_missing", table: T }], behaviorEquivalent: true },
-  { id: "M06", desc: "policy med `OR true`", sql: () => `ALTER POLICY ${q(P())} ON ${q(T())} USING (${TENANT} OR true) WITH CHECK (${TENANT} OR true)`, lint: [{ rule: "policy_scope", table: T }], behavior: ["read", "insert", "update", "delete"] },
+  { id: "M06", desc: "policy med `OR true`", sql: () => `ALTER POLICY ${q(P())} ON ${q(T())} USING (${TENANT} OR true) WITH CHECK (${TENANT} OR true)`, lint: [{ rule: "policy_scope", table: T }], behavior: ["read", "insert", "update", "delete"], behaviorLeak: ["read", "insert", "update", "delete"] },
   { id: "M07", desc: "policy leser feil innstilling (jarvis.other)", sql: () => `ALTER POLICY ${q(P())} ON ${q(T())} USING (tenant_id = current_setting('jarvis.other', true)) WITH CHECK (tenant_id = current_setting('jarvis.other', true))`, lint: [{ rule: "policy_scope", table: T }], behavior: ["read", "insert"] },
   { id: "M08", desc: "tenant-policyen droppet (kun RESTRICTIVE igjen: default deny)", sql: () => `DROP POLICY ${q(P())} ON ${q(T())}`, lint: [{ rule: "policy_coverage_missing", table: T }], behavior: ["read", "insert"] },
   { id: "M09", desc: "kun SELECT-policy (INSERT/UPDATE/DELETE uten policy)", sql: () => `DROP POLICY ${q(P())} ON ${q(T())}; CREATE POLICY ${q(P())} ON ${q(T())} FOR SELECT USING (${TENANT})`, lint: [{ rule: "policy_coverage_missing", table: T }], behavior: ["insert", "update", "delete"] },
@@ -171,9 +173,10 @@ const MUTANTS: Mutant[] = [
     sql: () =>
       `DROP POLICY ${q(P())} ON ${q(T())}; CREATE POLICY p_sel ON ${q(T())} FOR SELECT USING (${TENANT}); CREATE POLICY p_upd ON ${q(T())} FOR UPDATE USING (${TENANT}) WITH CHECK (${TENANT}); CREATE POLICY p_del ON ${q(T())} FOR DELETE USING (${TENANT}); CREATE POLICY p_ins ON ${q(T())} FOR INSERT WITH CHECK (true)`,
     lint: [{ rule: "policy_scope", table: T }, { rule: "policy_true", table: T }],
-    behavior: ["insert"]
+    behavior: ["insert"],
+    behaviorLeak: ["insert"]
   },
-  { id: "M11", desc: "ekstra PERMISSIVE policy USING (true) for PUBLIC", sql: () => `CREATE POLICY leak ON ${q(T())} USING (true) WITH CHECK (true)`, lint: [{ rule: "policy_true", table: T }, { rule: "policy_scope", table: T }], behavior: ["read", "update", "delete"] },
+  { id: "M11", desc: "ekstra PERMISSIVE policy USING (true) for PUBLIC", sql: () => `CREATE POLICY leak ON ${q(T())} USING (true) WITH CHECK (true)`, lint: [{ rule: "policy_true", table: T }, { rule: "policy_scope", table: T }], behavior: ["read", "update", "delete"], behaviorLeak: ["read", "update", "delete"] },
   { id: "M12", desc: "policyen flyttet til en annen rolle (runtime uten policy)", sql: () => `ALTER POLICY ${q(P())} ON ${q(T())} TO jarvis_definer`, lint: [{ rule: "policy_coverage_missing", table: T }], behavior: ["read", "insert"] },
   { id: "M13", desc: "tenant_id gjort nullable", sql: () => `ALTER TABLE ${q(T())} ALTER COLUMN tenant_id DROP NOT NULL`, lint: [{ rule: "tenant_id_nullable", table: T }], behaviorEquivalent: true },
   { id: "M14", desc: "FK fra tenant_id til tenants droppet", sql: () => `ALTER TABLE ${q(T())} DROP CONSTRAINT ${q(pick.fk)}`, lint: [{ rule: "tenant_fk_missing", table: T }] },
@@ -199,7 +202,26 @@ const MUTANTS: Mutant[] = [
   { id: "M34", desc: "USER_OWNED-tabell får tenant_id", sql: () => "ALTER TABLE people ADD COLUMN tenant_id text", lint: [{ rule: "user_has_tenant_id", table: () => "people" }] },
   { id: "M35", desc: "visning over en tenant-tabell (RLS-omgåelse)", sql: () => `CREATE VIEW mut_view AS SELECT * FROM ${q(T())}`, lint: [{ rule: "unmanaged_relation", table: () => "mut_view" }] },
   { id: "M36", desc: "tabell i et annet skjema", sql: () => "CREATE SCHEMA mut_schema; CREATE TABLE mut_schema.t1 (a int)", lint: [{ rule: "unmanaged_relation", table: () => "t1" }] },
-  { id: "M37", desc: "tabell opprettet utenom migrasjonene", sql: () => "CREATE TABLE mut_direct (id text)", lint: [{ rule: "static_db_mismatch", table: () => null }, { rule: "unclassified_table", table: () => "mut_direct" }] }
+  { id: "M37", desc: "tabell opprettet utenom migrasjonene", sql: () => "CREATE TABLE mut_direct (id text)", lint: [{ rule: "static_db_mismatch", table: () => null }, { rule: "unclassified_table", table: () => "mut_direct" }] },
+  {
+    id: "M38",
+    desc: "policyer for SELECT/INSERT/UPDATE men INGEN for DELETE",
+    sql: () => `DROP POLICY ${q(P())} ON ${q(T())}; CREATE POLICY p_sel ON ${q(T())} FOR SELECT USING (${TENANT}); CREATE POLICY p_ins ON ${q(T())} FOR INSERT WITH CHECK (${TENANT}); CREATE POLICY p_upd ON ${q(T())} FOR UPDATE USING (${TENANT}) WITH CHECK (${TENANT})`,
+    lint: [{ rule: "policy_coverage_missing", table: T, detail: "DELETE" }],
+    behavior: ["delete"]
+  },
+  { id: "M39", desc: "GLOBAL-tabell får DELETE for runtime-rollen", sql: () => "GRANT DELETE ON capabilities TO jarvis_app", lint: [{ rule: "global_app_write", table: () => "capabilities", detail: "DELETE" }] },
+  { id: "M40", desc: "GLOBAL-tabell får UPDATE for runtime-rollen", sql: () => "GRANT UPDATE ON capabilities TO jarvis_app", lint: [{ rule: "global_app_write", table: () => "capabilities", detail: "UPDATE" }] },
+  { id: "M41", desc: "DEFINER-funksjon med search_path uten pg_temp sist", sql: () => `ALTER FUNCTION ${DEFINER_FN} SET search_path = pg_catalog, public`, lint: [{ rule: "definer_search_path", table: () => null }] },
+  { id: "M42", desc: "kolonne-REFERENCES (kun én kolonne) gitt til runtime-rollen", sql: () => `GRANT REFERENCES (tenant_id) ON ${q(T())} TO jarvis_app`, lint: [{ rule: "app_dangerous_privilege", table: T, detail: "REFERENCES" }], behaviorEquivalent: true },
+  {
+    id: "M43",
+    desc: "asymmetrisk policy: tenanten 'iso-tenant-b' ser ALT (A->B er tett, B->A lekker)",
+    sql: () => `ALTER POLICY ${q(P())} ON ${q(T())} USING (${TENANT} OR current_setting('jarvis.tenant_id', true) = '${CTX.tenantB}') WITH CHECK (${TENANT})`,
+    lint: [{ rule: "policy_scope", table: T }],
+    behavior: ["read"],
+    behaviorLeak: ["read"]
+  }
 ];
 
 describe("A: mutanter mot det eksisterende skjemaet (DDL i en transaksjon som rulles tilbake)", () => {
@@ -218,7 +240,8 @@ describe("A: mutanter mot det eksisterende skjemaet (DDL i en transaksjon som ru
       });
       for (const want of m.lint) {
         const table = want.table === undefined ? undefined : want.table();
-        expect(has(strictResult.failures, want.rule, table), `${m.id}: forventet [${want.rule}]${table === undefined ? "" : ` på ${table}`} fra linten, fikk:\n${formatFailures(strictResult.failures)}`).toBe(true);
+        const hit = strictResult.failures.some((f) => f.rule === want.rule && (table === undefined || f.table === table) && (want.detail === undefined || f.detail === want.detail));
+        expect(hit, `${m.id}: forventet [${want.rule}]${table === undefined ? "" : ` på ${table}`}${want.detail === undefined ? "" : ` (${want.detail})`} fra linten, fikk:\n${formatFailures(strictResult.failures)}`).toBe(true);
       }
       let behaviorKilled = false;
       if (m.behavior !== undefined || m.behaviorEquivalent === true) {
@@ -228,6 +251,7 @@ describe("A: mutanter mot det eksisterende skjemaet (DDL i en transaksjon som ru
         });
         if (m.behavior !== undefined) {
           for (const op of m.behavior) expect(report[op].startsWith("failed:"), `${m.id}: atferdsharnisken skal feile på ${op}, fikk ${report[op]}`).toBe(true);
+          for (const op of m.behaviorLeak ?? []) expect(report[op], `${m.id}: ${op} skal melde en LEKKASJE (angrepet lyktes), ikke bare en feilet kontroll`).toMatch(/^failed:LEKKASJE/);
           behaviorKilled = true;
         } else {
           expect(report.ok, `${m.id} er ment atferdsmessig ekvivalent (kun lint kan drepe den), men harnisken feilet: ${JSON.stringify(report)}`).toBe(true);
@@ -322,6 +346,13 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ${name} TO jarvis_app;
     const clean = await runNew("-- jarvis-class: mut_platform PLATFORM\nCREATE TABLE mut_platform (id text PRIMARY KEY);\n");
     expect(formatFailures(clean.failures)).toBe("(ingen)");
     results.push({ id: "N06", lint: true, behavior: false });
+  });
+
+  it("N11 drept: ny PLATFORM-tabell med KUN et kolonne-GRANT (SELECT på én kolonne) til runtime-rollen", async () => {
+    const sql = "-- jarvis-class: mut_platform_col PLATFORM\nCREATE TABLE mut_platform_col (id text PRIMARY KEY, secret text);\nGRANT SELECT (id) ON mut_platform_col TO jarvis_app;\n";
+    const { failures } = await runNew(sql);
+    expect(failures.some((f) => f.rule === "platform_app_access" && f.table === "mut_platform_col" && f.detail === "SELECT"), formatFailures(failures)).toBe(true);
+    results.push({ id: "N11", lint: true, behavior: false });
   });
 
   it("N07 drept: ORG_OWNED-annotasjon på en tabell uten tenant_id, og USER_OWNED med tenant_id", async () => {
