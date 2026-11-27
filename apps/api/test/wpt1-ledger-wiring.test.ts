@@ -26,9 +26,11 @@ describe("main.ts: konfigurasjon, rute og jobb", () => {
     expect(parse - digestGuard).toBeLessThan(900);
   });
 
-  it("rute-deps settes KUN når flagget er på (betinget spread, ellers er `toolLedger` helt fraværende), med den samme eier-porten som kontrollsentrene", () => {
-    expect(MAIN).toMatch(/\.\.\.\(toolLedgerConfig\.enabled \? \{ toolLedger: \{ pool, gateway: toolGateway, ownerGate: ownerPredicate\(ownerAuthority\) \} \} : \{\}\),/);
+  it("rute-deps settes KUN når flagget er på (betinget spread, ellers er `toolLedger` helt fraværende), og main.ts bygger ALDRI en egen eier-port for dem (`ownerGate` finnes fortsatt kun én gang)", () => {
+    expect(MAIN).toMatch(/\.\.\.\(toolLedgerConfig\.enabled \? \{ toolLedger: \{ pool, gateway: toolGateway \} \} : \{\}\),/);
     expect([...MAIN.matchAll(/toolLedger:/g)]).toHaveLength(1);
+    expect(MAIN.match(/\bownerGate\s*:/g)).toHaveLength(1);
+    expect(MAIN.match(/ownerPredicate\(/g)).toHaveLength(1);
   });
 
   it("den daglige jobben er registrert KUN inne i `if (toolLedgerConfig.enabled)`, via failOnSweepFailures med samleren sendt inn, og med eget jobbnavn", () => {
@@ -41,7 +43,7 @@ describe("main.ts: konfigurasjon, rute og jobb", () => {
 
 describe("server.ts: kroken", () => {
   it("rutene finnes kun når `deps.toolLedger` er satt, og stien er avgrenset til `/tool-ledger/`", () => {
-    expect(SERVER).toMatch(/if \(deps\.toolLedger && url\.pathname\.startsWith\("\/tool-ledger\/"\)\) \{\n\s*const handled = await handleToolLedgerRoute\(req, url\.pathname, deps\.toolLedger, \{/);
+    expect(SERVER).toMatch(/if \(deps\.toolLedger && url\.pathname\.startsWith\("\/tool-ledger\/"\)\) \{\n\s*const handled = await handleToolLedgerRoute\(req, url\.pathname, \{ \.\.\.deps\.toolLedger, ownerGate: deps\.ownerGate \}, \{/);
     expect(SERVER).toContain("toolLedger?: ToolLedgerApiDeps;");
   });
 

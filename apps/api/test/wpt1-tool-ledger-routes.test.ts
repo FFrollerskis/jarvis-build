@@ -20,6 +20,7 @@ let admin: pg.Pool;
 let app: pg.Pool;
 let url = "";
 let urlDormant = "";
+let urlNoGate = "";
 const closers: Array<() => Promise<void>> = [];
 const T = "tenant-t1rt";
 const T2 = "tenant-t1rt-b";
@@ -47,7 +48,7 @@ function makeDeps(withFeature: boolean): ApiDeps {
     owner: { tenant_id: T, person_id: OWNER },
     ownerGate: OWNER_GATE,
     incidents: { pool: app },
-    ...(withFeature ? { toolLedger: { pool: app, gateway: registry, ownerGate: OWNER_GATE } } : {})
+    ...(withFeature ? { toolLedger: { pool: app, gateway: registry } } : {})
   } as unknown as ApiDeps;
 }
 
@@ -82,6 +83,8 @@ beforeAll(async () => {
   grants.set("second-signed", grant({ person_id: SECOND, session_id: "s-second", device_id: "web-second" }));
   url = await listen(makeDeps(true));
   urlDormant = await listen(makeDeps(false));
+  // En server uten eier-port (som `main.ts` aldri bygger, men en feilkonfigurasjon kunne gi): ledger-rutene skal nekte ALLE, også eieren.
+  urlNoGate = await listen({ ...makeDeps(true), ownerGate: undefined } as unknown as ApiDeps);
 }, 240_000);
 
 afterAll(async () => {
@@ -125,6 +128,18 @@ describe("dormant: uten deps.toolLedger finnes ingen rute", () => {
     expect((await call("/tool-ledger/", "owner-signed")).status).toBe(404);
     expect((await call("/tool-ledger/__proto__", "owner-signed")).status).toBe(404);
     expect((await call("/tool-ledger/constructor", "owner-signed")).status).toBe(404);
+  });
+});
+
+describe("eier-porten er serverens `deps.ownerGate` (aldri en egen sammenligning i ledger-rutene)", () => {
+  it("uten eier-port nekter begge rutene alle - også eieren - med `owner_gate_not_configured`, og ingenting endres", async () => {
+    const k = newKey("nogate");
+    await seed(k, "unverified", 100);
+    for (const [path, body] of [["/tool-ledger/queue", {}], ["/tool-ledger/resolve", resolveBody(k)]] as const) {
+      const res = await call(path, "owner-signed", body, urlNoGate);
+      expect(res, path).toMatchObject({ status: 403, body: { error: "owner_required", reason: "owner_gate_not_configured" } });
+    }
+    expect((await rowOf(k))?.status).toBe("unverified");
   });
 });
 

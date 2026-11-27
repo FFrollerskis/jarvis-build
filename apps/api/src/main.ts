@@ -1608,8 +1608,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     ...(visionRuntime !== null ? { vision: visionRuntime.api } : {}),
     // WP-G4 fiks-runde (D-466, B-MEDIUM-5): `/situations/signals/*` finnes KUN med JARVIS_SITUATION_SIGNALS=on (ellers 404, identisk med main).
     ...(situationSignals.api !== null ? { situationSignals: situationSignals.api } : {}),
-    // WP-T1 K5 (JARVIS-103): eierens ledger-kø og -avgjørelse (`/tool-ledger/queue|resolve`) finnes KUN med JARVIS_TOOL_LEDGER_RECONCILE=on (ellers 404, identisk med main). Eier-porten er DET SAMME predikatet som kontrollsentrene.
-    ...(toolLedgerConfig.enabled ? { toolLedger: { pool, gateway: toolGateway, ownerGate: ownerPredicate(ownerAuthority) } } : {}),
+    // WP-T1 K5 (JARVIS-103): eierens ledger-kø og -avgjørelse (`/tool-ledger/queue|resolve`) finnes KUN med JARVIS_TOOL_LEDGER_RECONCILE=on (ellers 404, identisk med main). Eier-porten er `ownerGate` over (bygget én gang); serveren gir den videre til rutene.
+    ...(toolLedgerConfig.enabled ? { toolLedger: { pool, gateway: toolGateway } } : {}),
     // WP-D2 (UA-3 «churn/product usage»): produktbruk-webhooken er AV som standard - ruten finnes først når eieren har satt JARVIS_PRODUCT_USAGE_TENANT_ID (en bedrifts-tenant;
     // tjenesten avviser alt annet). Hemmeligheten leses ved HVERT kall via den delte kjeden (Infisical-primær, .env-fallback), slik at rotasjon gjelder umiddelbart; er den
     // borte eller kortere enn 32 tegn svarer ruten 503 (fail closed).

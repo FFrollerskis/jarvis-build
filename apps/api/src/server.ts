@@ -1368,7 +1368,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
 
   // WP-T1 K5 (JARVIS-103): rutene under `/tool-ledger/` finnes KUN når `deps.toolLedger` er satt (JARVIS_TOOL_LEDGER_RECONCILE=on); ellers faller alt til den vanlige 404-en. Ruten håndterer selv grant/eier/step-up (tool-ledger-routes.ts).
   if (deps.toolLedger && url.pathname.startsWith("/tool-ledger/")) {
-    const handled = await handleToolLedgerRoute(req, url.pathname, deps.toolLedger, {
+    const handled = await handleToolLedgerRoute(req, url.pathname, { ...deps.toolLedger, ownerGate: deps.ownerGate }, {
       authed: (keys, maxBytes) => authedRequest(req, res, deps, keys, maxBytes),
       requireOwner: (identity, subject) => requireOwner(res, deps, identity, subject),
       json: (status, body) => json(res, status, body),

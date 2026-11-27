@@ -16,7 +16,13 @@ export interface ToolLedgerApiDeps {
   pool: pg.Pool;
   /** Registeret (kun oppslag): handlingens klasse og recovery-prosedyre for køen og step-up-kravet. */
   gateway: Pick<ToolGateway, "get">;
-  /** Den suverene eieren (samme predikat som kontrollsentrene). Mangler den, nektes alle. */
+}
+
+/**
+ * Det rutefunksjonen får: avhengighetene over pluss eier-porten. Porten er `deps.ownerGate` i `server.ts` (DEN ENE eier-porten: `main.ts` bygger den én gang fra `ownerPredicate(ownerAuthority)`, låst av `e1-review-m3-owner-gate`);
+ * serveren gir den videre her, så ledger-rutene aldri har en egen eier-sammenligning. Mangler den, nektes alle (`requireOwner` er fail-closed).
+ */
+export interface ToolLedgerRouteDeps extends ToolLedgerApiDeps {
   ownerGate: ((identity: IdentityContext) => boolean) | undefined;
 }
 
@@ -54,7 +60,7 @@ const RESOLVE_STATUS: Readonly<Record<string, number>> = {
 const MAX_NOTE_CHARS = 2_000;
 
 /** Returnerer `true` når ruten er håndtert (svar sendt), `false` når stien/metoden ikke er en ledger-rute (serveren faller da til sin vanlige 404). */
-export async function handleToolLedgerRoute(req: IncomingMessage, pathname: string, deps: ToolLedgerApiDeps, h: ToolLedgerRouteHelpers): Promise<boolean> {
+export async function handleToolLedgerRoute(req: IncomingMessage, pathname: string, deps: ToolLedgerRouteDeps, h: ToolLedgerRouteHelpers): Promise<boolean> {
   const spec = Object.prototype.hasOwnProperty.call(ROUTES, pathname) ? ROUTES[pathname] : undefined;
   if (spec === undefined || req.method !== "POST") return false;
   const authed = await h.authed(spec.keys);
