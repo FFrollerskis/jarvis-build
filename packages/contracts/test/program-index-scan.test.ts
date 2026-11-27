@@ -4,7 +4,7 @@ import { SCAN_RULES, scanProgramIndex, type Finding } from "../src/program/scan.
 import { cleanWorld, cloneWorld, toScanInput, T0, planned, shard, type World } from "./program-index-fixtures.ts";
 
 /**
- * WP-PGA / PG1: duplicate-owner-skanningen og kompatibilitetsvakten (HF6 §24, D-PROG-02/03/07). Alt går mot en liten «ren verden» som gir NULL funn; hver test endrer ÉN ting og forventer
+ * WP-PGA / PG1: duplicate-owner-skanningen og kompatibilitetsvakten (HF6 §24, PGA-D-02/03/07). Alt går mot en liten «ren verden» som gir NULL funn; hver test endrer ÉN ting og forventer
  * nøyaktig det navngitte funnet (ikke «et funn»). Dermed dreper en mutant som svekker en regel nettopp den regelens test.
  */
 const ids = (w: World): string[] => scanProgramIndex(toScanInput(w)).map((f) => f.id);
@@ -114,7 +114,7 @@ describe("tjenester (compose)", () => {
   });
 });
 
-describe("migrasjoner: kontraktendring på skjemaet må kvitteres i indeksen (D-PROG-07)", () => {
+describe("migrasjoner: kontraktendring på skjemaet må kvitteres i indeksen (PGA-D-07)", () => {
   it("en ny migrasjonsfil som ingen eier = migration_unclaimed", () => {
     only(edit((w) => w.repo.migration_files.push("003_c.sql")), ["migration_unclaimed:003_c.sql"]);
   });
@@ -261,7 +261,7 @@ describe("HF6-negative regler", () => {
     only(withTable("skillregistry", "core.alpha"), []);
   });
 
-  it("et KOLONNENAVN flagges ikke (D-PROG-09): `*_id` er normalt en referanse til sannhetskilden, og det skal programmet oppmuntre", () => {
+  it("et KOLONNENAVN flagges ikke (PGA-D-09): `*_id` er normalt en referanse til sannhetskilden, og det skal programmet oppmuntre", () => {
     only(edit((w) => w.repo.tables.get("t_a")!.columns.push("capability_registry_id", "commitment_id", "commitment_text")), []);
   });
 
@@ -336,7 +336,7 @@ describe("planer og beslutninger", () => {
   });
 });
 
-describe("komponentens evidence_ref (D-PROG-08)", () => {
+describe("komponentens evidence_ref (PGA-D-08)", () => {
   const withEvidence = (sha: string, fileSha: string | null): World =>
     edit((w) => {
       const c = comp(w, "core.alpha");

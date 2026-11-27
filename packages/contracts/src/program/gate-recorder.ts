@@ -8,7 +8,7 @@ import { serializeData } from "./index-builder.ts";
 import { EvidenceRefSchema, type EvidenceRef } from "./schema.ts";
 
 /**
- * WP-PGA / PG3 (D-PROG-08): REGISTRERING av en overgang for en programport eller et ORL-nivå. Den eneste skrivende stien for port-/nivådata (ved siden av `fingerprint-tool.ts` for komponent-
+ * WP-PGA / PG3 (PGA-D-08): REGISTRERING av en overgang for en programport eller et ORL-nivå. Den eneste skrivende stien for port-/nivådata (ved siden av `fingerprint-tool.ts` for komponent-
  * skjerver). Registreringen lager en `OperationalGateChanged`-nyttelast, legger den til historikken (append-only) og oppdaterer `status`/`evidence_ref` i ÉN fil (atomisk: midlertidig fil + rename).
  *
  * Registreringen nekter (heller enn å skrive noe som umiddelbart ville vært foreldet eller ugyldig): ukjent port, uendret status, PASS/FAIL uten evidens, evidens utenfor `docs/evidence/`, symlenke eller

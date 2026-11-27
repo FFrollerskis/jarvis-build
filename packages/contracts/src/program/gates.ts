@@ -5,7 +5,7 @@ import { GATE_ID_PATTERN, GateIdSchema, GateStatusSchema, OperationalGateChanged
 import { ComponentIdSchema, EvidenceRefSchema, type ComponentShard, type EvidenceRef } from "./schema.ts";
 
 /**
- * WP-PGA / PG3 (HF6 §26-27, D-PROG-08, H6-PG10/OR01): Program Completion-portene (17) og Operational Readiness Levels (ORL0-5) som DATA. Alle står OPEN i dag; en port kan bare stå PASS med en
+ * WP-PGA / PG3 (HF6 §26-27, PGA-D-08, H6-PG10/OR01): Program Completion-portene (17) og Operational Readiness Levels (ORL0-5) som DATA. Alle står OPEN i dag; en port kan bare stå PASS med en
  * gjenverifiserbar `evidence_ref` (sti + sha256 + git-SHA), og er OPEN igjen så snart en bundet komponents kontrakt er endret etter evidensen (staleness-regelen).
  *
  * Data bor i `config/program/gates/G01.json ... G17.json` og `config/program/orl/ORL0.json ... ORL5.json` (én fil per port: parallelle evidensregistreringer berører ulike filer).
@@ -23,7 +23,7 @@ function validateState(
   ctx: z.RefinementCtx
 ): void {
   const add = (path: (string | number)[], message: string): void => ctx.addIssue({ code: "custom", path, message });
-  if (g.status === "PASS" && g.evidence_ref === null) add(["evidence_ref"], "PASS krever en evidence_ref (D-PROG-08)");
+  if (g.status === "PASS" && g.evidence_ref === null) add(["evidence_ref"], "PASS krever en evidence_ref (PGA-D-08)");
   if (new Set(g.bound_components).size !== g.bound_components.length) add(["bound_components"], "duplikate bundne komponenter");
   if (g.history.length === 0) {
     if (g.status !== "OPEN") add(["status"], "en port uten historikk er OPEN");

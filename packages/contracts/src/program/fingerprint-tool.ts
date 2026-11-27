@@ -7,7 +7,7 @@ import { ComponentShardSchema, type ComponentShard } from "./schema.ts";
 import { parseSemver } from "./semver.ts";
 
 /**
- * WP-PGA / PG1 (D-PROG-07): VERKTØYET som holder `contract.fingerprint` og `contract.changed_at` i takt med kontraktfilene. Skanningen feiler (`contract_fingerprint_mismatch`) når en kontraktfil er
+ * WP-PGA / PG1 (PGA-D-07): VERKTØYET som holder `contract.fingerprint` og `contract.changed_at` i takt med kontraktfilene. Skanningen feiler (`contract_fingerprint_mismatch`) når en kontraktfil er
  * endret uten at skjerven er oppdatert; dette verktøyet gjør oppdateringen ÉN kommando: `fingerprint <id> --write [--bump patch|minor|major]`. Uten `--write` er det en tørrkjøring (viser kun avvik).
  *
  * Den ENESTE skrivende stien i programmodulen. Skriver kun én skjerv-fil per endret komponent (atomisk: midlertidig fil + rename), validerer resultatet mot skjemaet først, og rører aldri noe

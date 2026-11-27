@@ -5,7 +5,7 @@ import { COMPONENT_ID, D_REF, EVENT_TYPE, FINGERPRINT, GIT_SHA, MIGRATION_FILE, 
 import { rangeIsValid } from "./semver.ts";
 
 /**
- * WP-PGA / PG1 (HF6 §24.3, D-PROG-03): SKJEMAENE for den maskinlesbare programindeksen. Indeksen er SHARDET: én fil per komponent (`config/program/components/<component_id>.json`) pluss en liten
+ * WP-PGA / PG1 (HF6 §24.3, PGA-D-03): SKJEMAENE for den maskinlesbare programindeksen. Indeksen er SHARDET: én fil per komponent (`config/program/components/<component_id>.json`) pluss en liten
  * manifestfil (plan-adopsjonsstatus og vaktregler) og en baseline-fil. Parallelle pakker legger til komponenter/tabeller/hendelsestyper i hver sin fil, så merger blir konfliktfrie.
  *
  * Ren modul: ingen filsystem, ingen kjøretidsimport (ikke eksportert fra `@jarvis/contracts`-barrelen). Alle objekter er `.strict()`: et ukjent felt er en feil, ikke en stille utvidelse.
@@ -35,7 +35,7 @@ export const VERIFICATION_STATES = ["NOT_VERIFIED", "CODE_FIXED", "DEPLOYED_UNVE
 export const AUTHORITY_DOMAINS = ["none", "identity", "policy", "tools", "models", "memory", "finance", "comms", "infra", "self_change", "business", "personal", "knowledge", "learning", "diagnostics", "program"] as const;
 
 /**
- * En gjenverifiserbar referanse til evidens (D-PROG-08): stien til en evidensfil under `docs/evidence/`, filens sha256, git-SHA koden stod på ved registrering og to tidspunkt
+ * En gjenverifiserbar referanse til evidens (PGA-D-08): stien til en evidensfil under `docs/evidence/`, filens sha256, git-SHA koden stod på ved registrering og to tidspunkt
  * (når evidensen ble til, og når den ble registrert). `contract_fingerprints` er et øyeblikksbilde av de bundne komponentenes kontraktfingeravtrykk ved registrering:
  * endres fingeravtrykket senere, er evidensen foreldet (gate OPEN igjen) - selv om noen glemte å oppdatere `changed_at`.
  */
@@ -171,7 +171,7 @@ export const ComponentShardSchema = z
       if ((c.contract.schema_version !== null) !== owns) add(["contract", "schema_version"], "schema_version finnes hvis og bare hvis komponenten eier tabeller");
     }
     if ((c.contract.fingerprint === null) !== (c.contract.files.length === 0)) add(["contract", "fingerprint"], "fingeravtrykk finnes hvis og bare hvis kontraktfiler finnes");
-    if (c.verification === "VERIFIED" && (c.evidence_ref === null || c.last_verified === null)) add(["verification"], "VERIFIED krever evidence_ref og last_verified (D-PROG-08)");
+    if (c.verification === "VERIFIED" && (c.evidence_ref === null || c.last_verified === null)) add(["verification"], "VERIFIED krever evidence_ref og last_verified (PGA-D-08)");
     if (c.evidence_ref !== null && c.last_verified === null) add(["last_verified"], "en evidence_ref krever last_verified");
     for (const [name, list] of [
       ["code_paths", c.code_paths],

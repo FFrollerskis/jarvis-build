@@ -1,4 +1,4 @@
-// WP-PGA / PG1+PG3 (D-PROG-01..09): kommandolinje for programindeksen. Kjøres fra repo-roten:
+// WP-PGA / PG1+PG3 (PGA-D-01..09): kommandolinje for programindeksen. Kjøres fra repo-roten:
 //   node --experimental-transform-types packages/contracts/scripts/program-index.ts <kommando> [valg]
 //
 //   report [--json] [--max <n>]            Kjør skanningen og skriv rapporten. Exit 1 ved rød dom (modus: manifest + PROGRAM_INDEX_MODE).

@@ -6,7 +6,7 @@ import { satisfiesRange } from "./semver.ts";
 import type { CreatedRecord, EffectiveTable } from "./sql-schema.ts";
 
 /**
- * WP-PGA / PG1 (HF6 §24, D-PROG-02/03/07): DUPLICATE-OWNER-SKANNINGEN og kompatibilitetsvakten. Ren funksjon over (manifest, komponentskjerver, repo-fakta): ingen filsystem, ingen kjøretid.
+ * WP-PGA / PG1 (HF6 §24, PGA-D-02/03/07): DUPLICATE-OWNER-SKANNINGEN og kompatibilitetsvakten. Ren funksjon over (manifest, komponentskjerver, repo-fakta): ingen filsystem, ingen kjøretid.
  * Fakta om repoet (tabeller fra migrasjonene, kataloger, compose-tjenester, filhasher) leveres av `fs-loader.ts`; skanningen kan derfor testes med syntetiske verdener.
  *
  * Hvert funn har en STABIL id `<regel>:<subjekt>` som baselinen (`config/program/baseline.json`) refererer. Funnene er sortert og dedupliserte (samme inndata gir samme utdata).
@@ -185,7 +185,7 @@ export function scanProgramIndex(input: ScanInput): Finding[] {
   const composeSet = new Set(repo.compose_services);
   for (const c of components) for (const s of c.state_store.services) if (!composeSet.has(s)) add("service_unknown", c.component_id, `${c.component_id}:${s}`, `compose-tjenesten ${s} finnes ikke i ${manifest.coverage.compose_file}`);
 
-  // ------------------------------------------------------------------ migrasjoner: skjemaendring må kvitteres av eieren (D-PROG-07)
+  // ------------------------------------------------------------------ migrasjoner: skjemaendring må kvitteres av eieren (PGA-D-07)
   const migrationClaims = multimap(components.flatMap((c) => c.state_store.migrations.map((f) => [f, c.component_id] as const)));
   const migrationSet = new Set(repo.migration_files);
   for (const f of repo.migration_files) if (!migrationClaims.has(f)) add("migration_unclaimed", null, f, `migrasjonen ${f} er ikke krevd av noen komponent: legg den i state_store.migrations hos eieren av tabellene den berører`);
@@ -262,7 +262,7 @@ export function scanProgramIndex(input: ScanInput): Finding[] {
     for (const table of repo.tables.keys()) {
       const owner = ownerOfTable(table);
       if (ownerAllowed(owner)) continue;
-      // Kun TABELLNAVN (og planlagte tabeller under): et `*_id`-felt i en annen tabell er normalt en REFERANSE til sannhetskilden, og det skal programmet oppmuntre, ikke flagge (D-PROG-09).
+      // Kun TABELLNAVN (og planlagte tabeller under): et `*_id`-felt i en annen tabell er normalt en REFERANSE til sannhetskilden, og det skal programmet oppmuntre, ikke flagge (PGA-D-09).
       if (re.test(table)) add("exclusive_name_violation", owner, `${rule.id}:${table}`, `${table} bærer et eksklusivt navn (${rule.id}) men eies ikke av en tillatt komponent: ${rule.reason}`);
     }
     for (const c of components) {

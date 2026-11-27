@@ -18,7 +18,7 @@ export const TABLE_NAME = /^[a-z][a-z0-9_]{0,62}$/;
 export const MIGRATION_FILE = /^\d{3}_[a-z0-9_]+\.sql$/;
 /** Hendelsestype: PascalCase-kontrakt (`TaskCompleted`) eller snake_case (`council_result`), evt. med punktum. */
 export const EVENT_TYPE = /^[A-Za-z][A-Za-z0-9_.]{1,80}$/;
-/** Beslutningsreferanse: `D-<tall>` i repoets beslutningslogg, eller en plan-intern id (`D-PROG-07`, `D-CI-24`) som ikke finnes i loggen. */
+/** Beslutningsreferanse: `D-<tall>` i repoets beslutningslogg, eller en plan-intern id (planens egne, f.eks. `D-PROG-07` i HF6 §24 og `D-CI-24`) som ikke finnes i loggen. Byggerens egne forslag bruker prefikset `PGA-D-` (ikke samme navnerom). */
 export const D_REF = /^D-(?:\d{1,4}|[A-Z]{2,5}-\d{2})$/;
 /** Et repo-nummerert beslutningsrad-id (`D-497`): kun disse sjekkes mot beslutningsloggen. */
 export const LOG_D_REF = /^D-\d{1,4}$/;

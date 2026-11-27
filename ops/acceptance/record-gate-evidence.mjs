@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// WP-PGA / PG3 (D-PROG-08): registrerer en porteovergang (programport G01-G17 eller ORL0-ORL5) mot en evidensfil som `ops/acceptance/record-evidence.mjs` har skrevet. Samme mønster som
+// WP-PGA / PG3 (PGA-D-08): registrerer en porteovergang (programport G01-G17 eller ORL0-ORL5) mot en evidensfil som `ops/acceptance/record-evidence.mjs` har skrevet. Samme mønster som
 // evidens-opptakeren: én kommando, ingen skall, tydelige exit-koder. Selve logikken ligger i `packages/contracts/src/program/gate-recorder.ts`; dette er kun inngangen (den slipper ikke gjennom
 // andre kommandoer enn `gate`).
 //

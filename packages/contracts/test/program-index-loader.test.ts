@@ -249,7 +249,7 @@ describe("repo-fakta og stibeskyttelse", () => {
   });
 });
 
-describe("fingerprint-verktøyet (D-PROG-07)", () => {
+describe("fingerprint-verktøyet (PGA-D-07)", () => {
   const NOW = "2026-12-01T08:00:00.000Z";
   const alphaFile = (root: string) => join(root, "config/program/components/core.alpha.json");
   const readAlpha = (root: string) => JSON.parse(readFileSync(alphaFile(root), "utf8")) as ReturnType<typeof shard>;

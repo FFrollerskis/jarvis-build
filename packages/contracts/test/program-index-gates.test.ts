@@ -6,7 +6,7 @@ import type { EvidenceRef } from "../src/program/schema.ts";
 import { T0 } from "./program-index-fixtures.ts";
 
 /**
- * WP-PGA / PG3 (HF6 §26-27, D-PROG-08, H6-PG10/OR01): de 17 Program Completion-portene og ORL0-5 som DATA, evidence_ref med staleness-regel og hendelseskontrakten `OperationalGateChanged`.
+ * WP-PGA / PG3 (HF6 §26-27, PGA-D-08, H6-PG10/OR01): de 17 Program Completion-portene og ORL0-5 som DATA, evidence_ref med staleness-regel og hendelseskontrakten `OperationalGateChanged`.
  * Regelen «ingen PASS uten gjenverifiserbar evidens» og «OPEN igjen etter kontraktendring» er det som testes her - hvert grensetilfelle for seg.
  */
 const T_OLD = "2026-11-20T10:00:00.000Z";
@@ -79,10 +79,10 @@ describe("GateSchema", () => {
     expect(ok(mut(openGate(), (c) => (c["kind"] = "orl")))).toBe(false);
   });
 
-  it("PASS krever evidence_ref (D-PROG-08): avvist, og med den uttrykkelige meldingen (ikke bare som følge av kjedereglene)", () => {
+  it("PASS krever evidence_ref (PGA-D-08): avvist, og med den uttrykkelige meldingen (ikke bare som følge av kjedereglene)", () => {
     const r = GateSchema.safeParse(mut(passGate(), (c) => (c["evidence_ref"] = null)));
     expect(r.success).toBe(false);
-    expect(r.success ? [] : r.error.issues.map((i) => i.message)).toContain("PASS krever en evidence_ref (D-PROG-08)");
+    expect(r.success ? [] : r.error.issues.map((i) => i.message)).toContain("PASS krever en evidence_ref (PGA-D-08)");
   });
 
   it("uten historikk må porten være OPEN uten evidens; en status uten historikk er ikke tillatt", () => {
