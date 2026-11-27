@@ -551,5 +551,75 @@ describe("I: audit-blokken", () => {
     expect(block["truncated"]).toBe(true);
     expect(block["verdict"]).toBe("mismatch");
     expect(block["rollback"]).not.toBeNull();
+    // trinn 3: selv uten kontekst er før/etter-verdiene for store, så kun stier beholdes (diff som stiliste, ingen verdier)
+    expect(block["before"]).toBeNull();
+    expect(block["after"]).toBeNull();
+    expect(block["diff"]).toEqual(Array.from({ length: 40 }, (_, i) => `f${i}`).sort());
+  });
+});
+
+describe("K: grenseverdier og forsvar i dybden (mutasjonshull lukket)", () => {
+  it("sanering: dybdegrensen er nøyaktig fem objektnivåer (det sjette kuttes), og kuttet gjør beviset tapsmerket", () => {
+    const five = { a: { a: { a: { a: { a: 1 } } } } };
+    expect(sanitizeEvidence(five)).toEqual({ value: five, lossless: true });
+    const six = { a: { a: { a: { a: { a: { a: 1 } } } } } };
+    expect(sanitizeEvidence(six)).toEqual({ value: { a: { a: { a: { a: { a: "[TRUNCATED:depth]" } } } } }, lossless: false });
+  });
+
+  it("sanering: nøyaktig 40 oppføringer er tapsfritt, 41 er kuttet til 40 og tapsmerket (objekt og matrise)", () => {
+    const wide = (n: number): Record<string, number> => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, i]));
+    const list = (n: number): number[] => Array.from({ length: n }, (_, i) => i);
+    expect(sanitizeEvidence(wide(40)).lossless).toBe(true);
+    const cutObject = sanitizeEvidence(wide(41));
+    expect(cutObject.lossless).toBe(false);
+    expect(Object.keys(cutObject.value as object)).toHaveLength(40);
+    expect(sanitizeEvidence(list(40)).lossless).toBe(true);
+    const cutList = sanitizeEvidence(list(41));
+    expect(cutList.lossless).toBe(false);
+    expect(cutList.value as number[]).toHaveLength(40);
+  });
+
+  it("sanering: en nøkkel som kuttes eller sladdes gjør beviset tapsmerket, og en hemmelighet som NØKKEL når aldri lagringen", () => {
+    const longKey = "k".repeat(120);
+    const cut = sanitizeEvidence({ [longKey]: 1 });
+    expect(cut.lossless).toBe(false);
+    expect(Object.keys(cut.value as object)[0]).not.toBe(longKey);
+    const secretKey = sanitizeEvidence({ [GITHUB_LIKE_TOKEN]: "x" });
+    expect(secretKey.lossless).toBe(false);
+    expect(JSON.stringify(secretKey.value)).not.toContain(GITHUB_LIKE_TOKEN);
+    expect(JSON.stringify(secretKey.value)).toContain("[REDACTED:github_token]");
+  });
+
+  it("diff: et tomt objekt er et blad (ikke borte), så {} mot null er en endring og {} mot {} er det ikke", () => {
+    expect(diffStates({ a: {} }, { a: null })).toEqual([{ path: "a", before: {}, after: null }]);
+    expect(diffStates({ a: {} }, { a: {} })).toEqual([]);
+  });
+
+  it("request_digest er nøyaktig 64 små hex-tegn: en lengre streng (eller med linjeskift) er aldri et gyldig prefiks", () => {
+    const digest = "ab".repeat(32);
+    expect(requestDigestOf({ request_digest: `${digest}a` })).toBeNull();
+    expect(requestDigestOf({ request_digest: `${digest}\n` })).toBeNull();
+    expect(run("enforce", itemAdapter(), { requestDigest: `${digest}ff` }).auditBlock()["request_digest"]).toBeNull();
+  });
+
+  it("tolererte stier valideres som forventningsstier: en ugyldig sti gir unverified, aldri en stille bestått", async () => {
+    const { read } = readFrom({ get_item: [item(), item({ name: "nytt" })] });
+    const r = run("enforce", itemAdapter({ tolerated: ["ugyldig sti!"] }));
+    await r.preflight(PARAMS, read, { replay: false });
+    const out = await r.verify(PARAMS, MUTATION, read);
+    expect(out.postconditionReason).toBe("postcondition_unverified:predicate_error");
+    expect(r.auditBlock()["verdict"]).toBe("unverified");
+    expect(String(r.auditBlock()["verdict_detail"])).toContain("class_c_path_invalid");
+  });
+
+  it("begin() nekter eierens kontrollhandlinger også om et adapter mot formodning ligger i registeret (forsvar i dybden)", () => {
+    const pipeline = createClassCPipeline({ mode: "enforce", adapters: [itemAdapter()] });
+    const registry = (pipeline as unknown as { adapters: Map<string, ClassCAdapter> }).adapters;
+    for (const key of [...CLASS_C_OWNER_OVERRIDE_ACTIONS, "owner_controls.set_limit"]) {
+      registry.set(key, itemAdapter({ key }));
+      const dot = key.indexOf(".");
+      expect(pipeline.begin({ tool_id: key.slice(0, dot), action: key.slice(dot + 1), capability_class: "C" }), key).toBeNull();
+    }
+    expect(pipeline.begin({ tool_id: "items", action: "rename", capability_class: "C" })).not.toBeNull();
   });
 });

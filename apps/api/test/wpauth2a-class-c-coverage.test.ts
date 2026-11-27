@@ -157,3 +157,19 @@ describe("F: vakten er selv mutasjonstestet (den feller det den skal felle)", ()
     expect(assessClassCCoverage(defs, allAdapterKeys, short).some((v) => v.startsWith("slack.notify: begrunnelsen er for kort"))).toBe(true);
   });
 });
+
+describe("G: hasOwnFullChain krever HVER egenskap i WP-D3-kjeden (ellers står en handling feilaktig som existing_chain)", () => {
+  const full = {
+    preflight_action: "get_state", preflight_requires_target: true, preflight_validator: () => true, postcondition_predicate: () => true, step_up_required: true, owner_only: true
+  } as unknown as ToolDefinition;
+  it("hele kjeden er sann; å fjerne eller slå av hver enkelt egenskap gjør den usann; postcondition_target_absent kan erstatte predikatet", () => {
+    expect(hasOwnFullChain(full)).toBe(true);
+    for (const drop of ["preflight_action", "preflight_requires_target", "preflight_validator", "postcondition_predicate", "step_up_required", "owner_only"]) {
+      expect(hasOwnFullChain({ ...full, [drop]: undefined } as ToolDefinition), drop).toBe(false);
+    }
+    expect(hasOwnFullChain({ ...full, preflight_requires_target: false } as ToolDefinition)).toBe(false);
+    expect(hasOwnFullChain({ ...full, step_up_required: false } as ToolDefinition)).toBe(false);
+    expect(hasOwnFullChain({ ...full, owner_only: false } as ToolDefinition)).toBe(false);
+    expect(hasOwnFullChain({ ...full, postcondition_predicate: undefined, postcondition_target_absent: true } as ToolDefinition)).toBe(true);
+  });
+});

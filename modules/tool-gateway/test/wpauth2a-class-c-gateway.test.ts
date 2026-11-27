@@ -358,9 +358,14 @@ describe("E: eier-overstyring respekteres også ETTER pipelinens lesinger (live-
         const r = rig(mode);
         r.store.hooks.onRead = (n) => { if (n === 1) trigger(r); };
         const key = `auth2a-e-${mode}-${reason}`;
+        const w = await mark();
         expect(await r.run(undefined, key)).toEqual({ ok: false, reason });
         expect(r.store.calls).toEqual(["read_state"]);
         expect(await ledgerRow(key)).toMatchObject({ status: "failed", postcondition_reason: `recheck_${reason}` });
+        // avslaget bærer pipelinens bevis (preflight bestått, mutasjonen aldri kjørt)
+        const denied = (await auditSince(w)).find((a) => a.type === "tool.denied")!;
+        expect(denied.reason).toBe(reason);
+        expect(classC(denied)).toMatchObject({ mode, verdict: "not_run", preflight: { outcome: "passed" } });
       });
     }
   }

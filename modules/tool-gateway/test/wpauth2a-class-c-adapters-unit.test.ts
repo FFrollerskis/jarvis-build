@@ -221,3 +221,28 @@ describe("drive.rename/move/trash: valideringsregler og advarsler", () => {
     expect((await drive(driveCreateFileAdapter, { name: "x", parent_folder_id: "d1" }, { get_metadata: [META()] }, { external_id: "n1", data: {} })).block).toBe("class_c_preflight_invalid:parent_not_folder");
   });
 });
+
+describe("mutasjonshull lukket: tittelnormalisering, åpne PR-er og riktig målmappe", () => {
+  const prBase = { get_branch: [BRANCH("s1"), BRANCH("s2")], list_pull_requests: [{ data: { pull_requests: [] as JsonValue[] } }] };
+
+  it("github.create_pr: tittelen normaliseres på begge sider (leverandøren kollapser blanke): ikke et brudd", async () => {
+    const out = await drive(githubCreatePrAdapter, { ...GH, title: "  En   endring \n her " }, { ...prBase, get_pull_request: [{ external_id: "7", data: PR({ title: "En endring her" }) }] }, { external_id: "7", data: { created: true } });
+    expect(out.reason).toBeNull();
+  });
+
+  it("github.create_pr: kun ÅPNE PR-er med samme head og base regnes som eksisterende; en lukket gjør det ikke", async () => {
+    const script = (prs: JsonValue[]) => ({ ...prBase, list_pull_requests: [{ data: { pull_requests: prs } }], get_pull_request: [{ external_id: "7", data: PR() }] });
+    const closed = await drive(githubCreatePrAdapter, GH, script([PR({ number: 5, state: "closed" })]), { external_id: "7", data: { created: true } });
+    expect(closed.audit["preflight"]).toMatchObject({ warnings: [] });
+    expect((closed.audit["before"] as { state: unknown }).state).toEqual({ pr: null });
+    const open = await drive(githubCreatePrAdapter, GH, script([PR({ number: 5 })]), { external_id: "7", data: { created: false } });
+    expect(open.audit["preflight"]).toMatchObject({ warnings: ["open_pr_exists"] });
+    expect((open.audit["before"] as { state: { pr: { number: number } } }).state.pr.number).toBe(5);
+  });
+
+  it("drive.move: en fil som havner i FEIL mappe er et brudd (ikke bare «endret»)", async () => {
+    const wrong = await drive(driveMoveAdapter, { file_id: "f1", new_parent_folder_id: "d1" }, { get_metadata: [META(), FOLDER(), META({ parents: ["annen"] })] }, { external_id: "f1", data: {} });
+    expect(wrong.reason).toBe("postcondition_mismatch");
+    expect((wrong.audit["violations"] as Array<{ path: string }>).map((v) => v.path)).toContain("parents");
+  });
+});

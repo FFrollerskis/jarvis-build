@@ -139,3 +139,15 @@ describe("business.update_lead_status: klasse C-adapter mot den ekte tjenesten",
     expect((await audit(w2)).find((a) => a.type === "tool.executed")!.payload["class_c"]).toMatchObject({ mode: "observe", verdict: "verified" });
   });
 });
+
+describe("adapteren uten database: dommen over nåstatus", () => {
+  const P = { tenant_id: "t", lead_id: "l", status: "qualified" };
+  const reads = (data: unknown) => ({ lead: { ok: true as const, data: data as never, external_id: null } });
+
+  it("en lead med ukjent nåstatus blokkerer (fail-lukket), en kjent slipper gjennom, og manglende lead er ikke funnet", () => {
+    expect(businessUpdateLeadStatusAdapter.before.judge(P, reads({ status: "legacy_x", lead_id: "l" }))).toEqual({ block: "unknown_current_status" });
+    expect(businessUpdateLeadStatusAdapter.before.judge(P, reads({ status: "new", lead_id: "l" }))).toEqual({ block: null, warnings: [] });
+    expect(businessUpdateLeadStatusAdapter.before.judge(P, reads({ status: "qualified", lead_id: "l" }))).toEqual({ block: null, warnings: ["status_unchanged"] });
+    expect(businessUpdateLeadStatusAdapter.before.judge(P, { lead: { ok: false, error: "x", timed_out: false, not_found: true } })).toEqual({ block: "lead_not_found" });
+  });
+});

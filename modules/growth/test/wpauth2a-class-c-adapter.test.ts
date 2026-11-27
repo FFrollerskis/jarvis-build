@@ -142,3 +142,20 @@ describe("growth.set_campaign_status: klasse C-adapter mot den ekte tjenesten", 
     expect((await service.getCampaign(TENANT, "business", id))?.status).toBe("paused");
   });
 });
+
+describe("adapteren uten database: forventet diff og dom", () => {
+  const P = { tenant_id: "t", campaign_id: "c", status: "active" };
+  const campaign = (status: string) => ({ data: { status, started_at: null, ended_at: null, budget_amount_ore: null } as never });
+
+  it("forventet diff krever NØYAKTIG den ønskede statusen (ikke bare at en status finnes)", () => {
+    expect(growthSetCampaignStatusAdapter.expect(P, { external_id: null, data: null }, { state: { status: "draft" }, context: {} })).toEqual([{ path: "status", op: "equals", value: "active" }]);
+  });
+
+  it("en kampanje som etterpå står i en ANNEN status enn bedt om er mismatch (aldri verifisert)", async () => {
+    const replies = [campaign("draft"), campaign("paused")];
+    const read = async (): Promise<{ data: never }> => replies.shift()!;
+    const run = createClassCPipeline({ mode: "enforce", adapters: [growthSetCampaignStatusAdapter] }).begin({ tool_id: "growth", action: "set_campaign_status", capability_class: "C" })!;
+    expect((await run.preflight(P, read, { replay: false })).block).toBeNull();
+    expect((await run.verify(P, { external_id: null, data: null }, read)).postconditionReason).toBe("postcondition_mismatch");
+  });
+});
