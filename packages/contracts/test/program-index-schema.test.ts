@@ -228,11 +228,13 @@ describe("ManifestSchema", () => {
     expect(mok(nested)).toBe(false);
   });
 
-  it("en plan kan bare stå ACTIVE med en navngitt beslutningsreferanse", () => {
+  it("en plan kan bare stå ACTIVE med en navngitt beslutning i loggen (D-nnn), ikke et dokument (fiks 1, M5/D7: tidligere godtok et vilkårlig eksisterende dokument)", () => {
     const a = m();
     a["plans"][0]["status"] = "ACTIVE";
     expect(mok(a)).toBe(false);
     a["plans"][0]["decision_ref"] = "docs/remediation/ADR-001-dokumenthierarki.md";
+    expect(mok(a)).toBe(false);
+    a["plans"][0]["decision_ref"] = "D-500";
     expect(mok(a)).toBe(true);
   });
 

@@ -19,9 +19,25 @@
   "contract": {
     "version": "0.1.0",
     "schema_version": null,
-    "files": [],
-    "fingerprint": null,
-    "changed_at": "2026-11-26T19:45:00.000Z"
+    "files": [
+      "apps/api/src/self-model-readers.ts",
+      "apps/api/src/slo-source.ts",
+      "modules/executive/src/self-model/confidence-gate.ts",
+      "modules/executive/src/self-model/diagnosis.ts",
+      "modules/executive/src/self-model/index.ts",
+      "modules/executive/src/self-model/limitations.ts",
+      "modules/executive/src/self-model/render.ts",
+      "modules/executive/src/self-model/types.ts",
+      "modules/executive/src/slo/data-quality.ts",
+      "modules/executive/src/slo/definitions.ts",
+      "modules/executive/src/slo/drift.ts",
+      "modules/executive/src/slo/evaluate.ts",
+      "modules/executive/src/slo/index.ts",
+      "modules/executive/src/slo/report.ts",
+      "modules/executive/src/slo/types.ts"
+    ],
+    "fingerprint": "sha256:563fc1d38fe72cc671d15ab5f59356c498c04606f598e7655aa646f19287a306",
+    "changed_at": "2026-11-27T06:04:05.860Z"
   },
   "code_paths": [
     "apps/api/src/self-model-readers.ts",

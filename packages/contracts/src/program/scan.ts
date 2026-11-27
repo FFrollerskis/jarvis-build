@@ -40,7 +40,11 @@ export const SCAN_RULES = [
   "contract_file_unclaimed",
   "contract_fingerprint_mismatch",
   "event_multi_owner",
+  "event_name_variant",
   "event_consumer_unknown",
+  "code_path_too_broad",
+  "file_multi_owner",
+  "dependency_cycle",
   "dependency_unknown",
   "dependency_unsatisfied",
   "dependency_on_planned",
@@ -75,7 +79,7 @@ export interface RepoFacts {
   migration_files: string[];
   workspace_dirs: string[];
   compose_services: string[];
-  /** `.ts`-filer rett under kontraktrotene (repo-relative). */
+  /** TypeScript-kilder (.ts/.mts/.cts/.tsx, ikke .d.*) rett under kontraktrotene (repo-relative). */
   contract_files: string[];
   workspace_packages: WorkspacePackage[];
   /** Finnes denne repo-relative stien (fil ELLER katalog)? */
@@ -173,7 +177,8 @@ export function scanProgramIndex(input: ScanInput): Finding[] {
   for (const [t, owners] of plannedOwners) if (owners.length > 1) add("planned_table_multi_owner", null, t, `den planlagte tabellen ${t} er navngitt av flere komponenter (${owners.join(", ")})`);
   const runtimeOwners = multimap(components.flatMap((c) => c.state_store.runtime_tables.map((t) => [t, c.component_id] as const)));
   for (const [t, owners] of runtimeOwners) {
-    if (repo.tables.has(t) || tableOwners.has(t) || owners.length > 1) add("runtime_table_conflict", null, t, `runtime-tabellen ${t} kolliderer med en migrasjonstabell eller en annen komponents runtime-tabell`);
+    // Fiks 1 (S05): også en PLANLAGT tabell med samme navn hos en annen komponent er en kollisjon.
+    if (repo.tables.has(t) || tableOwners.has(t) || plannedOwners.has(t) || owners.length > 1) add("runtime_table_conflict", null, t, `runtime-tabellen ${t} kolliderer med en migrasjonstabell, en planlagt tabell eller en annen komponents runtime-tabell`);
   }
   for (const d of repo.duplicates) add("migration_duplicate_create", null, d.table, `tabellen ${d.table} opprettes to ganger uten DROP imellom (${d.files.join(", ")})`);
 
@@ -181,6 +186,15 @@ export function scanProgramIndex(input: ScanInput): Finding[] {
   const claimedPaths = components.flatMap((c) => c.code_paths);
   for (const dir of repo.workspace_dirs) {
     if (!claimedPaths.some((p) => claimsPath(p, dir))) add("dir_uncovered", null, dir, `katalogen ${dir} er ikke dekket av noen komponents code_paths (hver modul/app/pakke må tilhøre minst én komponent)`);
+  }
+
+  // En kodesti som er selve arbeidsområderoten (`modules`) eller prosjektroten dekker ALT og slår av dir_uncovered (fiks 1, S07): hver komponent skal peke på sine egne kataloger.
+  const workspaceRoots = new Set(manifest.coverage.workspace_roots);
+  for (const c of components) {
+    for (const p of c.code_paths) {
+      const norm = p.replace(/\/+$/, "");
+      if (norm === "." || norm === "" || workspaceRoots.has(norm)) add("code_path_too_broad", c.component_id, `${c.component_id}:${p}`, `${c.component_id} har kodestien ${p}, som er hele arbeidsområderoten (eller prosjektroten): den dekker alle kataloger og skjuler dir_uncovered; pek på komponentens egne kataloger`);
+    }
   }
 
   // ------------------------------------------------------------------ compose-tjenester
@@ -231,9 +245,21 @@ export function scanProgramIndex(input: ScanInput): Finding[] {
     if (actual !== c.contract.fingerprint) add("contract_fingerprint_mismatch", c.component_id, c.component_id, `kontraktfilene til ${c.component_id} er endret uten at fingeravtrykket er oppdatert (kjør «fingerprint --write», øk contract.version og beskriv endringen)`);
   }
 
+  // Én fil, én eier (fiks 1, S08b): samme kontraktfil eller autoritative fil hos to komponenter gjør at to eiere hevder å eie samme sannhet.
+  for (const [kind, label, pick] of [
+    ["contract", "kontraktfilen", (c: ComponentShard) => c.contract.files],
+    ["state", "den autoritative filen", (c: ComponentShard) => c.state_store.files]
+  ] as const) {
+    const owners = multimap(components.flatMap((c) => pick(c).map((f) => [f, c.component_id] as const)));
+    for (const [f, o] of owners) if (o.length > 1) add("file_multi_owner", null, `${kind}:${f}`, `${label} ${f} er krevd av flere komponenter (${o.join(", ")}): én fil har én eier`);
+  }
+
   // ------------------------------------------------------------------ hendelser
   const eventOwners = multimap(components.flatMap((c) => c.events_out.map((e) => [e.type, c.component_id] as const)));
   for (const [type, owners] of eventOwners) if (owners.length > 1) add("event_multi_owner", null, type, `hendelsestypen ${type} sendes ut av flere komponenter (${owners.join(", ")}): én type har én eier`);
+  // Varianter av samme navn (store/små bokstaver, understrek, punktum) er to hendelsestyper for samme ting (fiks 1, S04).
+  const variants = multimap([...eventOwners.keys()].map((t) => [t.toLowerCase().replace(/[_.]/g, ""), t] as const));
+  for (const [norm, types] of variants) if (types.length > 1) add("event_name_variant", null, norm, `hendelsestypene ${[...types].sort().join(", ")} er varianter av samme navn (store/små bokstaver, understrek eller punktum): én hendelse har ett navn`);
   for (const c of components) for (const e of c.events_in) if (!eventOwners.has(e.type)) add("event_consumer_unknown", c.component_id, `${c.component_id}:${e.type}`, `${c.component_id} konsumerer ${e.type}, men ingen komponent har den i events_out`);
 
   // ------------------------------------------------------------------ avhengigheter
@@ -250,6 +276,38 @@ export function scanProgramIndex(input: ScanInput): Finding[] {
       }
     }
   }
+  // Avhengighetssykler (fiks 1, S19): Tarjans sterkt sammenhengende komponenter; en komponent av størrelse >= 2 er en syklus (en selv-avhengighet avvises allerede av skjemaet).
+  const edges = new Map(components.map((c) => [c.component_id, c.dependencies.map((d) => d.component_id).filter((id) => byId.has(id))]));
+  const order = new Map<string, number>();
+  const low = new Map<string, number>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+  const cycles: string[][] = [];
+  const visit = (v: string): void => {
+    order.set(v, order.size);
+    low.set(v, order.get(v) as number);
+    stack.push(v);
+    onStack.add(v);
+    for (const w of edges.get(v) ?? []) {
+      if (!order.has(w)) {
+        visit(w);
+        low.set(v, Math.min(low.get(v) as number, low.get(w) as number));
+      } else if (onStack.has(w)) low.set(v, Math.min(low.get(v) as number, order.get(w) as number));
+    }
+    if (low.get(v) === order.get(v)) {
+      const members: string[] = [];
+      let w: string;
+      do {
+        w = stack.pop() as string;
+        onStack.delete(w);
+        members.push(w);
+      } while (w !== v);
+      if (members.length > 1) cycles.push(members.sort());
+    }
+  };
+  for (const id of [...edges.keys()].sort()) if (!order.has(id)) visit(id);
+  for (const members of cycles) add("dependency_cycle", null, members.join(":"), `komponentene ${members.join(", ")} avhenger av hverandre i en syklus: en avhengighetsgraf skal være asyklisk`);
+
   const packageByDir = new Map(repo.workspace_packages.map((p) => [p.dir, p]));
   const dirByName = new Map(repo.workspace_packages.flatMap((p) => (p.name === null ? [] : [[p.name, p.dir] as const])));
   const primaries = (dir: string): string[] => components.filter((c) => c.code_paths.includes(dir)).map((c) => c.component_id);
@@ -275,9 +333,11 @@ export function scanProgramIndex(input: ScanInput): Finding[] {
     const re = new RegExp(rule.pattern);
     const allowed = rule.allowed_owner_patterns.map((p) => new RegExp(p));
     const ownerAllowed = (owner: string | null): boolean => owner !== null && allowed.some((r) => r.test(owner));
+    // Eksplisitte, begrunnede unntak for EKSISTERENDE tabeller: nøyaktig tabell hos nøyaktig eier (flyttes den til en annen eier, gjelder unntaket ikke lenger).
+    const exempt = (table: string, owner: string | null): boolean => owner !== null && (rule.exceptions ?? []).some((e) => e.table === table && e.owner === owner);
     for (const table of repo.tables.keys()) {
       const owner = ownerOfTable(table);
-      if (ownerAllowed(owner)) continue;
+      if (ownerAllowed(owner) || exempt(table, owner)) continue;
       // Kun TABELLNAVN (og planlagte tabeller under): et `*_id`-felt i en annen tabell er normalt en REFERANSE til sannhetskilden, og det skal programmet oppmuntre, ikke flagge (PGA-D-09).
       if (re.test(table)) add("exclusive_name_violation", owner, `${rule.id}:${table}`, `${table} bærer et eksklusivt navn (${rule.id}) men eies ikke av en tillatt komponent: ${rule.reason}`);
     }
@@ -305,7 +365,10 @@ export function scanProgramIndex(input: ScanInput): Finding[] {
   for (const [table, info] of repo.tables) {
     if (!table.startsWith(na.table_prefix)) continue;
     const owner = ownerOfTable(table);
-    const literals = [...info.definition_text.matchAll(/'((?:[^']|'')*)'/g)].map((m) => (m[1] as string).replace(/''/g, "'").trim());
+    // Enkeltapostrof-literaler OG dollar-siterte (`$$ACTIVE$$`, `$tag$active$tag$`), pluss enum-verdiene leseren har ført inn (`ENUM <type> ('active', ...)`).
+    const quoted = [...info.definition_text.matchAll(/'((?:[^']|'')*)'/g)].map((m) => (m[1] as string).replace(/''/g, "'").trim());
+    const dollar = [...info.definition_text.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)?\$([\s\S]*?)\$\1\$/g)].map((m) => (m[2] as string).trim());
+    const literals = [...quoted, ...dollar];
     if (literals.some((l) => literalRe.test(l))) add("active_state_in_learning_table", owner, `${table}:literal`, `${table} har en literal som kan bære en ACTIVE-tilstand: ${na.reason}`);
     for (const col of info.columns) if (columnRe.test(col)) add("active_state_in_learning_table", owner, `${table}.${col}`, `${table}.${col} ser ut som en aktiveringstilstand: ${na.reason}`);
   }

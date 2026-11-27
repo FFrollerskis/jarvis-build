@@ -20,15 +20,22 @@
   "exclusive_names": [
     {
       "id": "single-capability-registry",
-      "pattern": "(^|_)(skill|capability)_registry($|_)",
+      "pattern": "(^|_)(skills?|capabilit(y|ies))_(registry|registries|register)($|_)",
       "allowed_owner_patterns": ["^ev\\.capability-registry$"],
-      "reason": "Det finnes ett register for lærte evner (EV-18); ingen andre tabeller eller kolonner skal bære et konkurrerende skill-/capability-register."
+      "reason": "Det finnes ett register for lærte evner (EV-18); ingen andre tabeller skal bære et konkurrerende skill-/capability-register (entall og flertall). Gjelder tabellnavn; kolonnenavn sjekkes ikke (et *_id-felt er en referanse til sannhetskilden)."
     },
     {
       "id": "jx-truth-stores",
-      "pattern": "^(commitment|impact|knowledge_gap|workspace)_",
+      "pattern": "^(commitments?|impacts?|knowledge_gaps?|workspaces?)(_|$)",
       "allowed_owner_patterns": ["^jx\\."],
-      "reason": "Forpliktelser, effekt, kunnskapshull og arbeidsområder har JX som eneste sannhetskilde; andre komponenter kan projisere, ikke duplisere."
+      "reason": "Forpliktelser, effekt, kunnskapshull og arbeidsområder har JX som eneste sannhetskilde; andre komponenter kan projisere, ikke duplisere. Gjelder tabellnavn (entall og flertall, som hel tabell eller prefiks); kolonnenavn sjekkes ikke.",
+      "exceptions": [
+        {
+          "table": "commitments",
+          "owner": "core.memory",
+          "reason": "Eksisterende minnetabell for forpliktelser (core.memory) som ble bygd før JX; forholdet avklares av eieren før JX bygges (Q til eier). comms_meeting_commitments og finance_recurring_commitments matcher ikke mønsteret (ikke prefiks) og trenger ikke unntak."
+        }
+      ]
     }
   ],
   "reserved_prefixes": [

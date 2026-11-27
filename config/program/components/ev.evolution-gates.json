@@ -19,9 +19,27 @@
   "contract": {
     "version": "0.1.0",
     "schema_version": null,
-    "files": [],
-    "fingerprint": null,
-    "changed_at": "2026-11-26T19:45:00.000Z"
+    "files": [
+      "apps/api/src/evolution-source.ts",
+      "modules/self-modification/src/evolution/common.ts",
+      "modules/self-modification/src/evolution/credentials.ts",
+      "modules/self-modification/src/evolution/expression-state.ts",
+      "modules/self-modification/src/evolution/heal.ts",
+      "modules/self-modification/src/evolution/index.ts",
+      "modules/self-modification/src/evolution/maintenance-schedule.ts",
+      "modules/self-modification/src/evolution/memory-maintenance.ts",
+      "modules/self-modification/src/evolution/model-autopilot.ts",
+      "modules/self-modification/src/evolution/personality.ts",
+      "modules/self-modification/src/evolution/proposal.ts",
+      "modules/self-modification/src/evolution/radar.ts",
+      "modules/self-modification/src/evolution/readiness.ts",
+      "modules/self-modification/src/evolution/release-gate.ts",
+      "modules/self-modification/src/evolution/resource.ts",
+      "modules/self-modification/src/evolution/security-adaptation.ts",
+      "modules/self-modification/src/evolution/supply-chain.ts"
+    ],
+    "fingerprint": "sha256:1711c00c95cdef396ea0d2fcc21897735b0d454f11b1816eeac718a627168f41",
+    "changed_at": "2026-11-27T06:04:05.860Z"
   },
   "code_paths": [
     "apps/api/src/evolution-source.ts",

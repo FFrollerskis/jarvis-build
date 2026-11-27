@@ -214,7 +214,8 @@ describe("avhengigheter: kjente mål, intervaller og ingen bygget->planlagt", ()
   });
 
   it("en bygd komponent kan ikke avhenge av en planlagt = dependency_on_planned; planlagt -> planlagt og planlagt -> bygd er ok", () => {
-    only(edit((w) => comp(w, "core.alpha").dependencies.push({ component_id: "ci.gamma", min: "0.1.0", max: "0.x" })), ["dependency_on_planned:core.alpha:ci.gamma"]);
+    // ci.gamma avhenger allerede av core.alpha i den rene verdenen, så en motsatt kant lukker også en syklus (fiks 1: dependency_cycle).
+    only(edit((w) => comp(w, "core.alpha").dependencies.push({ component_id: "ci.gamma", min: "0.1.0", max: "0.x" })), ["dependency_cycle:ci.gamma:core.alpha", "dependency_on_planned:core.alpha:ci.gamma"]);
     only(edit((w) => comp(w, "ci.gamma").dependencies.push({ component_id: "jx.delta", min: "0.1.0", max: "0.x" })), []);
   });
 
@@ -362,8 +363,8 @@ describe("ingen hopping: en regel som ikke kan evalueres er et funn, ikke en sti
   it("regelmengden er stabil og hver regel har en test over (ingen død regel)", () => {
     expect([...SCAN_RULES].sort()).toEqual(
       [
-        "active_state_in_learning_table", "contract_file_unclaimed", "contract_fingerprint_mismatch", "decision_ref_missing", "dependency_on_planned", "dependency_unknown", "dependency_unsatisfied", "dir_uncovered",
-        "event_consumer_unknown", "event_multi_owner", "evidence_invalid", "exclusive_name_violation", "migration_duplicate_create", "migration_dynamic_ddl", "migration_not_acknowledged", "migration_unclaimed", "migration_unknown", "path_missing",
+        "active_state_in_learning_table", "code_path_too_broad", "contract_file_unclaimed", "contract_fingerprint_mismatch", "decision_ref_missing", "dependency_cycle", "dependency_on_planned", "dependency_unknown", "dependency_unsatisfied", "dir_uncovered",
+        "event_consumer_unknown", "event_multi_owner", "event_name_variant", "evidence_invalid", "file_multi_owner", "exclusive_name_violation", "migration_duplicate_create", "migration_dynamic_ddl", "migration_not_acknowledged", "migration_unclaimed", "migration_unknown", "path_missing",
         "plan_active_conflict", "plan_unknown", "planned_table_exists", "planned_table_multi_owner", "reserved_prefix_violation", "runtime_table_conflict", "service_multi_owner", "service_orphan", "service_unknown",
         "table_multi_owner", "table_orphan", "table_unknown", "workspace_dependency_undeclared"
       ].sort()

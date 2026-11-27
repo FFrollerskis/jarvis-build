@@ -27,6 +27,10 @@ export class ProgramDataError extends Error {
   }
 }
 
+/** Kontraktfiler rett under en kontraktrot: TypeScript-kilder (.ts/.mts/.cts/.tsx), ikke deklarasjonsfiler. Undermapper leses ikke (DEFERRED: de er implementasjon, ikke flate kontraktfiler). */
+const CONTRACT_SOURCE = /\.(?:ts|mts|cts|tsx)$/;
+const DECLARATION_FILE = /\.d\.(?:ts|mts|cts)$/;
+
 const MAX_JSON_BYTES = 1_000_000;
 const MAX_HASH_BYTES = 8_000_000;
 export const PROGRAM_DIR = "config/program";
@@ -196,7 +200,7 @@ export function collectRepoFacts(root: string, manifest: Manifest): RepoFacts {
   const contractFiles = cov.contract_roots.flatMap((r) => {
     try {
       return readdirSync(join(root, r), { withFileTypes: true })
-        .filter((e) => e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".d.ts"))
+        .filter((e) => e.isFile() && CONTRACT_SOURCE.test(e.name) && !DECLARATION_FILE.test(e.name))
         .map((e) => `${r}/${e.name}`)
         .sort();
     } catch {

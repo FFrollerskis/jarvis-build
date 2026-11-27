@@ -16,9 +16,16 @@
   "contract": {
     "version": "0.1.0",
     "schema_version": "0.1.0",
-    "files": [],
-    "fingerprint": null,
-    "changed_at": "2026-11-26T19:45:00.000Z"
+    "files": [
+      "modules/core/src/services/approval-store.ts",
+      "modules/core/src/services/audit-writer.ts",
+      "modules/core/src/services/confirmation-store.ts",
+      "modules/core/src/services/event-writer.ts",
+      "modules/core/src/services/operational-retention.ts",
+      "modules/core/src/services/policy-audit-sink.ts"
+    ],
+    "fingerprint": "sha256:1e10320e225baef35b4d71ea944f3099982a08e981857388c2a843e855bfa610",
+    "changed_at": "2026-11-27T06:04:05.860Z"
   },
   "code_paths": [
     "modules/core/src/services/approval-store.ts",

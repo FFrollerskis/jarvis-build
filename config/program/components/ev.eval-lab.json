@@ -16,9 +16,13 @@
   "contract": {
     "version": "0.1.0",
     "schema_version": null,
-    "files": [],
-    "fingerprint": null,
-    "changed_at": "2026-11-26T19:45:00.000Z"
+    "files": [
+      "apps/api/src/golden-suite-runner.ts",
+      "apps/api/src/golden-suite.ts",
+      "modules/self-modification/src/evolution/evals.ts"
+    ],
+    "fingerprint": "sha256:ca39b1334954eb87330d9b5149528e6b865a6ced7f724496748aabefda9f091c",
+    "changed_at": "2026-11-27T06:04:05.860Z"
   },
   "code_paths": [
     "apps/api/src/golden-suite-runner.ts",

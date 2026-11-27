@@ -6,7 +6,7 @@ import { DYNAMIC_DDL_ALLOWLIST } from "../src/program/frozen-rules.ts";
 import { scanProgramIndex } from "../src/program/scan.ts";
 import { blankSqlNoise, parseMigration, parseMigrationSet } from "../src/program/sql-schema.ts";
 import { runProgramIndex } from "../src/program/run.ts";
-import { cleanWorld, cloneWorld, toScanInput, type World } from "./program-index-fixtures.ts";
+import { cleanWorld, cloneWorld, shard, toScanInput, type World } from "./program-index-fixtures.ts";
 import { json, miniRepo, put } from "./program-index-minirepo.ts";
 
 /**
@@ -348,5 +348,70 @@ describe("gjennom lasteren (mini-repo på disk): fakta fra migrasjonsfilene når
 
   it("DROP TABLE IF EXISTS + CREATE TABLE i samme fil: tabellen finnes, og den nye tabellen uten eier gir table_orphan (før: usynlig)", () => {
     expect(found(withMigration("DROP TABLE IF EXISTS sneaky;\nCREATE TABLE sneaky (a int);"))).toEqual(["table_orphan:sneaky"]);
+  });
+});
+
+describe("L6: ACTIVE-vakten i ci_-tabeller ser enum-typer og dollar-siterte literaler (A05, A08); RENAME COLUMN er en dokumentert grense (A10)", () => {
+  /** Kjører ekte SQL gjennom leseren og skanningen med den virkelige manifestregelen (ci_-prefiks, 'active'-literal, aktiv-kolonner): funnene for ACTIVE-regelen. */
+  const active = (files: Array<[string, string]>): string[] => {
+    const parsed = set(files);
+    const w = cloneWorld(cleanWorld());
+    w.manifest.no_active_state = { table_prefix: "ci_", forbidden_literal_pattern: "active", forbidden_column_pattern: "^(active|is_active|activated|activated_at|activation[a-z_]*)$", reason: "Ingen ACTIVE i læringstabeller." };
+    for (const [name, info] of parsed.tables) {
+      w.repo.tables.set(name, info);
+      w.repo.created.push({ name, file: info.created_in });
+    }
+    w.components.push(shard("ci.real", { code_paths: ["modules/ci"], contract: { schema_version: "0.1.0" }, state_store: { tables: [...parsed.tables.keys()], migrations: [...new Set([...parsed.tables.values()].map((t) => t.created_in))] } }));
+    w.repo.workspace_dirs.push("modules/ci");
+    return scanProgramIndex(toScanInput(w)).map((f) => f.id).filter((id) => id.startsWith("active_state_in_learning_table:"));
+  };
+  const ci = "CREATE TABLE ci_t (id text, state ci_state);";
+
+  it("A05: en kolonne av en enum-type med ACTIVE (også med skjemaprefiks, anført navn og array) flagges", () => {
+    expect(active([["001_a.sql", `CREATE TYPE ci_state AS ENUM ('ACTIVE', 'DRAFT'); ${ci}`]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+    expect(active([["001_a.sql", "CREATE TYPE public.\"Ci_State\" AS ENUM ('draft', 'active'); CREATE TABLE ci_t (id text, st public.\"Ci_State\");"]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+    expect(active([["001_a.sql", "CREATE TYPE ci_state AS ENUM ('Active'); CREATE TABLE ci_t (id text, st ci_state[]);"]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+    expect(active([["001_a.sql", "CREATE TYPE ci_state AS ENUM ('draft', 'it''s active'); CREATE TABLE ci_t (id text, st ci_state NOT NULL DEFAULT 'draft');"]])).toEqual([]);
+  });
+
+  it("enum uten ACTIVE, en ubrukt enum, og en enum brukt av en tabell uten ci_-prefiks gir ingen funn", () => {
+    expect(active([["001_a.sql", `CREATE TYPE ci_state AS ENUM ('draft', 'retired'); ${ci}`]])).toEqual([]);
+    expect(active([["001_a.sql", "CREATE TYPE ci_state AS ENUM ('active'); CREATE TABLE ci_t (id text);"]])).toEqual([]);
+    expect(active([["001_a.sql", "CREATE TYPE s AS ENUM ('active'); CREATE TABLE other_t (id text, st s);"]])).toEqual([]);
+  });
+
+  it("ALTER TYPE ... ADD VALUE og RENAME VALUE i en senere fil teller (verdien kan komme etter tabellen)", () => {
+    const base: [string, string] = ["001_a.sql", `CREATE TYPE ci_state AS ENUM ('draft'); ${ci}`];
+    expect(active([base, ["002_b.sql", "ALTER TYPE ci_state ADD VALUE 'active';"]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+    expect(active([base, ["002_b.sql", "ALTER TYPE ci_state ADD VALUE IF NOT EXISTS 'active' BEFORE 'draft';"]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+    expect(active([base, ["002_b.sql", "ALTER TYPE ci_state RENAME VALUE 'draft' TO 'active';"]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+    expect(active([base, ["002_b.sql", "ALTER TYPE ci_state ADD VALUE 'retired';"]])).toEqual([]);
+  });
+
+  it("en enum-kolonne lagt til med ALTER TABLE ... ADD COLUMN teller også", () => {
+    expect(active([["001_a.sql", "CREATE TYPE ci_state AS ENUM ('active'); CREATE TABLE ci_t (id text);"], ["002_b.sql", "ALTER TABLE ci_t ADD COLUMN st ci_state;"]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+    expect(active([["001_a.sql", "CREATE TYPE ci_state AS ENUM ('draft'); CREATE TABLE ci_t (id text);"], ["002_b.sql", "ALTER TABLE ci_t ADD COLUMN IF NOT EXISTS st ci_state;"]])).toEqual([]);
+  });
+
+  it("enum-typen følger tabellen gjennom RENAME til et ci_-navn", () => {
+    expect(active([["001_a.sql", "CREATE TYPE s AS ENUM ('active'); CREATE TABLE tmp_t (id text, st s);"], ["002_b.sql", "ALTER TABLE tmp_t RENAME TO ci_t;"]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+  });
+
+  it("A08: en dollar-sitert literal (`$$ACTIVE$$`, `$tag$active$tag$`) i DEFAULT/CHECK flagges; `$$inactive$$` og en vanlig tabell gjør det ikke", () => {
+    expect(active([["001_a.sql", "CREATE TABLE ci_t (id text, st text DEFAULT $$ACTIVE$$);"]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+    expect(active([["001_a.sql", "CREATE TABLE ci_t (id text, st text DEFAULT $tag$active$tag$);"]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+    expect(active([["001_a.sql", "CREATE TABLE ci_t (id text, st text CHECK (st IN ($$draft$$, $$ Active $$)));"]])).toEqual(["active_state_in_learning_table:ci_t:literal"]);
+    expect(active([["001_a.sql", "CREATE TABLE ci_t (id text, st text DEFAULT $$inactive$$);"]])).toEqual([]);
+    expect(active([["001_a.sql", "CREATE TABLE other_t (id text, st text DEFAULT $$active$$);"]])).toEqual([]);
+  });
+
+  it("A10 (dokumentert grense): RENAME COLUMN til et aktiv-navn fanges ikke (kolonnenavn leses fra CREATE og ADD COLUMN)", () => {
+    expect(active([["001_a.sql", "CREATE TABLE ci_t (id text, flag boolean); ALTER TABLE ci_t RENAME COLUMN flag TO is_active;"]])).toEqual([]);
+  });
+
+  it("parseMigration gir enum-hendelser i tekstrekkefølge", () => {
+    const m = parseMigration("001_a.sql", "CREATE TYPE e AS ENUM ('a', 'b');\nALTER TYPE e ADD VALUE 'c';\nALTER TYPE e RENAME VALUE 'a' TO 'z';");
+    const kinds = m.events.map((e) => (e.kind === "enum" ? `enum:${e.name}:${e.values.join("|")}` : e.kind === "enum_add" ? `add:${e.name}:${e.value}` : e.kind));
+    expect(kinds).toEqual(["enum:e:a|b", "add:e:c", "add:e:z"]);
   });
 });

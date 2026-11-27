@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { MemorySpaceSchema } from "../identity.ts";
 import { DataSensitivitySchema } from "../model.ts";
-import { COMPONENT_ID, D_REF, EVENT_TYPE, FINGERPRINT, GIT_SHA, MIGRATION_FILE, REPO_PATH, SEMVER, SHA256_HEX, TABLE_NAME } from "./ids.ts";
+import { COMPONENT_ID, D_REF, EVENT_TYPE, FINGERPRINT, GIT_SHA, LOG_D_REF, MIGRATION_FILE, REPO_PATH, SEMVER, SHA256_HEX, TABLE_NAME } from "./ids.ts";
 import { rangeIsValid } from "./semver.ts";
 
 /**
@@ -164,6 +164,8 @@ export const ComponentShardSchema = z
       if (c.code_paths.length > 0) add(["code_paths"], "en planlagt komponent har ingen kode ennå");
       if (ss.tables.length + ss.runtime_tables.length + ss.migrations.length + ss.services.length + ss.files.length > 0) add(["state_store"], "en planlagt komponent har ingen eksisterende lagring (bruk planned_tables)");
       if (c.contract.version !== null || c.contract.schema_version !== null || c.contract.files.length > 0 || c.contract.fingerprint !== null || c.contract.changed_at !== null) add(["contract"], "en planlagt komponent har ingen kontrakt ennå");
+      // Fiks 1 (S06): uten kode finnes ingen kontrakt, så en planlagt komponent kan ikke ha en `contract_only`/`active`-hendelse (skanningen sjekker ikke kontraktstiene til planlagte komponenter).
+      if (c.events_out.some((e) => e.status !== "planned")) add(["events_out"], "en planlagt komponent har kun planlagte hendelser (ingen kode ennå)");
     } else {
       if (c.code_paths.length === 0) add(["code_paths"], "en bygd komponent har minst én kodesti");
       if (c.contract.version === null) add(["contract", "version"], "en bygd komponent har en kontraktversjon");
@@ -221,7 +223,9 @@ const PlanEntrySchema = z
     decision_ref: z.string().max(200).regex(REPO_PATH).nullable()
   })
   .strict()
-  .refine((p) => p.status !== "ACTIVE" || p.decision_ref !== null, { message: "ACTIVE krever en navngitt beslutning (decision_ref)", path: ["decision_ref"] });
+  .refine((p) => p.status !== "ACTIVE" || p.decision_ref !== null, { message: "ACTIVE krever en navngitt beslutning (decision_ref)", path: ["decision_ref"] })
+  // Fiks 1 (M5, D7): «ACTIVE» er eierens adopsjon av planversjonen og skal peke på en NAVNGITT beslutning (`D-nnn` i loggen; skanningen sjekker at raden finnes), aldri på et vilkårlig dokument.
+  .refine((p) => p.status !== "ACTIVE" || (p.decision_ref !== null && LOG_D_REF.test(p.decision_ref)), { message: "ACTIVE krever en beslutning i beslutningsloggen (D-nnn), ikke et dokument eller en plan-intern id", path: ["decision_ref"] });
 export type PlanEntry = z.infer<typeof PlanEntrySchema>;
 
 export const ManifestSchema = z
@@ -240,7 +244,19 @@ export const ManifestSchema = z
       })
       .strict(),
     exclusive_names: z
-      .array(z.object({ id: z.string().regex(/^[a-z][a-z0-9-]{1,40}$/), pattern: RegexString, allowed_owner_patterns: z.array(RegexString).min(1).max(10), reason: TEXT(10, 300) }).strict())
+      .array(
+        z
+          .object({
+            id: z.string().regex(/^[a-z][a-z0-9-]{1,40}$/),
+            /** Matches TABELLNAVN (aldri kolonnenavn: et `*_id`-felt er en referanse til sannhetskilden). */
+            pattern: RegexString,
+            allowed_owner_patterns: z.array(RegexString).min(1).max(10),
+            reason: TEXT(10, 300),
+            /** Eksplisitte, begrunnede unntak for EKSISTERENDE tabeller (nøyaktig tabell hos nøyaktig eier). Å legge til et unntak er en svekkelse: minimumsreglene (`frozen-rules.ts`) tillater bare de kjente. */
+            exceptions: z.array(z.object({ table: TableNameSchema, owner: z.string().max(64).regex(COMPONENT_ID), reason: TEXT(10, 300) }).strict()).max(20).optional()
+          })
+          .strict()
+      )
       .max(20),
     reserved_prefixes: z
       .array(z.object({ prefix: z.string().regex(/^[a-z][a-z0-9_]{1,30}$/), owner_patterns: z.array(RegexString).min(1).max(10), reason: TEXT(10, 300) }).strict())

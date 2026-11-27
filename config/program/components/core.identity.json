@@ -16,9 +16,21 @@
   "contract": {
     "version": "0.1.0",
     "schema_version": "0.1.0",
-    "files": [],
-    "fingerprint": null,
-    "changed_at": "2026-11-26T19:45:00.000Z"
+    "files": [
+      "modules/core/src/services/business-tenant-provisioning.ts",
+      "modules/core/src/services/channel-session-authority.ts",
+      "modules/core/src/services/device-authority.ts",
+      "modules/core/src/services/device-enrollment-service.ts",
+      "modules/core/src/services/device-service.ts",
+      "modules/core/src/services/identity-service.ts",
+      "modules/core/src/services/session-grant-service.ts",
+      "modules/core/src/services/session-service.ts",
+      "modules/core/src/services/telegram-owner-authority.ts",
+      "modules/core/src/services/tenant-catalog.ts",
+      "modules/core/src/services/voice-session-authority.ts"
+    ],
+    "fingerprint": "sha256:db6682d8668a7690d5a76a02d86264dd4bb326c1e11cd6d6fa826d1f374751ce",
+    "changed_at": "2026-11-27T06:04:05.860Z"
   },
   "code_paths": [
     "modules/core/src/services/business-tenant-provisioning.ts",
