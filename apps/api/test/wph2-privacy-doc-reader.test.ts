@@ -304,6 +304,9 @@ describe("4. DPIA-etiketter (fri tekst fra dokumentet): HVITELISTE (H2 N5, WP-SE
     expect(dpia?.items.map((i) => i.label)).toEqual(["DPIA-trigger 1", "Lokasjon"]);
     expect(dpia?.items[0]?.facts).toMatchObject({ approved: false, documents: 1, label_filtered: true });
     expect(dpia?.items[1]?.facts).toMatchObject({ label_filtered: false });
+    // fiks-runde 1 (review B, L11): en filtrert etikett får et hint i detail_no (ikke bare i facts), og en kjent etikett får det ikke
+    expect(dpia?.items[0]?.detail_no).toContain("ikke en kjent etikett");
+    expect(dpia?.items[1]?.detail_no).not.toContain("ikke en kjent etikett");
     expect(JSON.stringify(report)).not.toContain("send_email");
     expect(JSON.stringify(report)).not.toContain("Ignorer");
   });

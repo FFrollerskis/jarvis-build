@@ -488,7 +488,7 @@ export function createPrivacyCenter(deps: PrivacyCenterDeps): ControlCenterDefin
           const safe = safeDpiaLabel(d.trigger, index);
           return controlItem({
             id: `dpia:${index + 1}`, label: safe.label, status,
-            detail_no: `${d.approved ? "godkjent" : "UTKAST/ikke godkjent"}; ${d.docs.length === 0 ? "ingen DPIA-dokument oppgitt" : `${d.docs.length} DPIA-dokument(er) oppgitt${missingFiles > 0 ? `, ${missingFiles} finnes IKKE` : ""}`}.`,
+            detail_no: `${d.approved ? "godkjent" : "UTKAST/ikke godkjent"}; ${d.docs.length === 0 ? "ingen DPIA-dokument oppgitt" : `${d.docs.length} DPIA-dokument(er) oppgitt${missingFiles > 0 ? `, ${missingFiles} finnes IKKE` : ""}`}.${safe.filtered ? " Triggerteksten er ikke en kjent etikett (§3) og vises ikke - sjekk dokumentet." : ""}`,
             facts: { approved: d.approved, documents: d.docs.length, missing_documents: missingFiles, unknown_documents: unknownFiles, label_filtered: safe.filtered }
           });
         });

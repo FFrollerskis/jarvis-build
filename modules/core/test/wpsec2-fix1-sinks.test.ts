@@ -125,3 +125,16 @@ describe("B-M3/B-L1: writeAudit fail-closed er testet, loggført og beholder nø
     expect(r.payload).toEqual({ a: 1, b: "to", c: [1, "tre"], d: { e: null } });
   });
 });
+
+describe("B-L7: redactLogText hopper over det super-lineære mønsteret når teksten ikke har `:`/`=` (atferd uendret)", () => {
+  it("«KEY»×170 000 og «API_KEY_»×62 500 (tidligere 1,9 s og 0,8 s) går raskt, og redigeringen er den samme som før", () => {
+    for (const text of ["KEY".repeat(170_000), "API_KEY_".repeat(62_500)]) {
+      const started = Date.now();
+      expect(redactLogText(text)).toBe(text);
+      expect(Date.now() - started).toBeLessThan(400);
+    }
+    expect(redactLogText(`feil: API_KEY=${["gh", "p_"].join("")}${body(36)} og TOKEN: hemmelig123`)).toBe("feil: API_KEY=[REDACTED] og TOKEN: [REDACTED]");
+    expect(redactLogText("Bearer abc.def-ghi og Authorization: Basic xyz")).toBe("Bearer [REDACTED] og Authorization: [REDACTED]");
+    expect(redactLogText(`rotasjon ${["sk", "-ant-"].join("")}${body(20)} feilet`)).toBe("rotasjon [REDACTED_ANTHROPIC_KEY] feilet");
+  });
+});

@@ -623,17 +623,19 @@ export function clipRedacted(text: string, max: number): string {
  * `Authorization:`-linjen, `NAVN=verdi` der navnet har TOKEN/KEY/SECRET/PASSWORD/PASSWD/CREDENTIAL) er bevart, og resultatet går alltid gjennom sentralen til slutt - så redaksjonen er aldri svakere enn `scanForSecrets`.
  * Navneprefikset/-suffikset er BEGRENSET (`{0,64}`, som i sentralen): uten tak er `[A-Z0-9_]*` + nøkkelord kvadratisk på lange løper.
  */
-const LOG_LOCAL_PATTERNS: ReadonlyArray<{ re: RegExp; replacement: string }> = [
-  { re: /Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, replacement: "Bearer [REDACTED]" },
-  { re: /Authorization:\s*.*/gi, replacement: "Authorization: [REDACTED]" },
-  { re: /gh[pousr]_[A-Za-z0-9]{20,}/g, replacement: "[REDACTED_GITHUB_TOKEN]" },
-  { re: /sk-ant-[A-Za-z0-9\-_]{10,}/g, replacement: "[REDACTED_ANTHROPIC_KEY]" },
-  { re: /((?:[A-Z0-9_]{0,64}(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]{0,64})\s*[:=]\s*)(\S+)/gi, replacement: "$1[REDACTED]" }
+const LOG_LOCAL_PATTERNS: ReadonlyArray<{ re: RegExp; replacement: string; /** Billig forhåndssjekk: mønsteret kan ikke treffe uten dette (hopper over det dyre mønsteret på tekst som ikke har noe å redigere). */ guard: RegExp }> = [
+  { re: /Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, replacement: "Bearer [REDACTED]", guard: /bearer/i },
+  { re: /Authorization:\s*.*/gi, replacement: "Authorization: [REDACTED]", guard: /authorization:/i },
+  { re: /gh[pousr]_[A-Za-z0-9]{20,}/g, replacement: "[REDACTED_GITHUB_TOKEN]", guard: /gh[pousr]_/ },
+  { re: /sk-ant-[A-Za-z0-9\-_]{10,}/g, replacement: "[REDACTED_ANTHROPIC_KEY]", guard: /sk-ant-/ },
+  // Fiks-runde 1 (review B, L7): dette mønsteret er super-lineært (`{0,64}` + nøkkelord + `{0,64}` per startposisjon: «KEY»×170 000 tok 1,9 s) og trenger et `:` eller `=`. Uten dem hoppes det over. KJENT REST (se runbooken):
+  // en lang løper av nøkkelord som ENDER i `:`/`=` er fortsatt super-lineær (ikke målt for docker-loggenes 8 MB-tak per linje).
+  { re: /((?:[A-Z0-9_]{0,64}(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]{0,64})\s*[:=]\s*)(\S+)/gi, replacement: "$1[REDACTED]", guard: /[:=]/ }
 ];
 
 export function redactLogText(text: string): string {
   let result = text;
-  for (const { re, replacement } of LOG_LOCAL_PATTERNS) result = result.replace(re, replacement);
+  for (const { re, replacement, guard } of LOG_LOCAL_PATTERNS) if (guard.test(result)) result = result.replace(re, replacement);
   return scanForSecrets(result).text;
 }
 
