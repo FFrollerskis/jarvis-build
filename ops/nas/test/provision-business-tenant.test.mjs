@@ -116,7 +116,7 @@ describe("ops/nas/provision-business-tenant.sh", () => {
 
 describe("ops/nas/enroll-device.sh: valgfri tenant-parameter (WP-D2)", () => {
   const ENROLL = join(ROOT, "ops/nas/enroll-device.sh");
-  const BASE = "https://dxp4800plus-ring.tail3935f7.ts.net";
+  const BASE = "https://jarvis-nas.tail1234.ts.net";
   function runEnroll(args) {
     const s = setup();
     const clean = { ...process.env };
