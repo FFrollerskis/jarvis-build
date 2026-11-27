@@ -26,6 +26,16 @@ describe("K1: digest-spesifikasjonen og vektorene i runbooken er de samme som i 
     expect(DOC).toContain("(versjon 1)");
   });
 
+  it("HVER feilkode modulen kan gi (`RequestDigestErrorCode`) er omtalt i avvisningsavsnittet", () => {
+    const source = read("packages/contracts/src/request-digest.ts");
+    const union = source.match(/export type RequestDigestErrorCode =([\s\S]*?);/);
+    expect(union).not.toBeNull();
+    const codes = [...union![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
+    expect(codes.length).toBeGreaterThanOrEqual(8);
+    const section = DOC.slice(DOC.indexOf("### 3.2 Avvisning"), DOC.indexOf("### 3.3"));
+    for (const code of codes) expect(section, code).toContain(`\`${code}\``);
+  });
+
   it("HVER publiserte vektor har en tabellrad med navn og SHA-256 som i modulen", () => {
     expect(REQUEST_DIGEST_TEST_VECTORS.length).toBe(14);
     for (const v of REQUEST_DIGEST_TEST_VECTORS) expect(DOC, v.name).toMatch(new RegExp(`\\| \`${escapeRe(v.name)}\` \\|[^\\n]*\\| \`${v.digest}\` \\|`));

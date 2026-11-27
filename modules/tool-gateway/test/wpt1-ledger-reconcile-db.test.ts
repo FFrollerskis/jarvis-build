@@ -343,6 +343,28 @@ describe("D: eierens kø", () => {
   });
 });
 
+describe("D2: køens `limit` er begrenset i selve funksjonen (uavhengig av ruten)", () => {
+  it("1-200 (heltall avkortes), standard 100; `total` er alltid det fulle antallet", async () => {
+    const tenant = "tenant-t1r-limit";
+    await admin.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenant}','L','person')`);
+    await admin.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status, executed_at)
+       SELECT $1, 'lim-' || g, 't1c', 'mutate', 'unverified', now() - make_interval(mins => g) FROM generate_series(1, 205) AS g`, [tenant]
+    );
+    const g = gateway([def({}, new Counter())]);
+    const sizes = async (limit?: number): Promise<[number, number]> => {
+      const queue = await listLedgerQueue(app, tenant, g, limit === undefined ? {} : { limit });
+      return [queue.entries.length, queue.total];
+    };
+    expect(await sizes()).toEqual([100, 205]);
+    expect(await sizes(10_000)).toEqual([200, 205]);
+    expect(await sizes(200)).toEqual([200, 205]);
+    expect(await sizes(0)).toEqual([1, 205]);
+    expect(await sizes(-5)).toEqual([1, 205]);
+    expect(await sizes(2.9)).toEqual([2, 205]);
+  });
+});
+
 describe("E: eierens avgjørelse (klasse-bevisst)", () => {
   const classC = (): { g: ToolGateway; t: Counter } => { const t = new Counter(); return { g: gateway([def({}, t), def({ tool_id: "t1b", capability_class: "B" }, t)]), t }; };
 

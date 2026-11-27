@@ -55,8 +55,8 @@ digest  = hex( SHA-256( UTF-8( canonical(body) ) ) )
 
 ### 3.2 Avvisning (fail-closed)
 
-`RequestDigestError` (kode + sti, aldri verdien): `non_finite_number` (NaN, ±Infinity), `cycle`, `too_deep` (dybde over 64), `unsupported_type` (bigint, symbol, funksjon), `not_plain_object` (Date, Map, Set, klasseinstanser, accessor-egenskaper, symbolnøkler),
-`undefined_in_array` (`undefined`/hull i lister), `lone_surrogate` (ensomt surrogat: kan ikke representeres i UTF-8, og dermed ikke hos en annen implementasjon), `invalid_input`.
+`RequestDigestError` (kode + sti, aldri verdien): `non_finite_number` (NaN, ±Infinity), `cycle`, `too_deep` (dybde over 64), `undefined_in_array` (`undefined` eller hull i lister), `lone_surrogate` (ensomt surrogat i tekst, nøkkel eller identitetsfelt: kan ikke representeres i UTF-8, og dermed ikke hos en annen implementasjon),
+`unsupported_type` (bigint, symbol, funksjon, og NØSTEDE ikke-rene verdier: Date, Map, Set, klasseinstanser, accessor-egenskaper og symbolnøkler), `not_plain_object` (selve `parameters` er ikke et rent objekt: liste, null, tekst, tall, Map, Date, klasseinstans; sti `$.parameters`) og `invalid_input` (`tool_id`, `action`, `tenant_id` eller `person_id` er ikke en ikke-tom tekst).
 I praksis avviser Policy Gateways skjema (`ToolCallSchema`) NaN, `undefined` i lister og lignende FØR gatewayen (`invalid_tool_call`); digest-avvisningene gjelder det som slipper forbi (Infinity, ensomme surrogater, klasseinstanser, accessorer, dybde over 64).
 
 ### 3.3 Unicode og tall (bevisst valg, A-1)

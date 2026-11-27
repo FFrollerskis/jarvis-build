@@ -212,11 +212,30 @@ describe("avvisning (fail-closed): ingenting som ikke er ren JSON får en digest
     }
   });
 
-  it("parameters må være et rent objekt (ikke liste, null, tekst, Map)", () => {
-    for (const bad of [[1], null, "x", 5, new Map(), undefined]) {
-      expect(() => requestDigest({ ...base, parameters: bad as never })).toThrow(RequestDigestError);
+  it("parameters må være et rent objekt (ikke liste, null, tekst, tall, Map, Date, klasseinstans): kode `not_plain_object` med sti `$.parameters` (nøstede ikke-rene verdier har `unsupported_type`)", () => {
+    class Holder { a = 1; }
+    for (const bad of [[1], null, "x", 5, new Map(), new Date(0), new Holder(), undefined]) {
+      let thrown: unknown;
+      try { requestDigest({ ...base, parameters: bad as never }); } catch (err) { thrown = err; }
+      expect(thrown, String(bad)).toBeInstanceOf(RequestDigestError);
+      expect((thrown as RequestDigestError).code, String(bad)).toBe("not_plain_object");
+      expect((thrown as RequestDigestError).path, String(bad)).toBe("$.parameters");
     }
     expect(() => requestDigest({ ...base, parameters: Object.create(null) as Record<string, JsonValue> })).not.toThrow();
+  });
+
+  it("en nøkkel som heter `__proto__` er en vanlig egenskap (aldri prototypen): den inngår i kanoniseringen, også nøstet, og endrer digesten", () => {
+    const withObject = JSON.parse('{"__proto__":{"role":"owner"},"a":1}') as Record<string, JsonValue>;
+    const withPrimitive = JSON.parse('{"__proto__":1,"a":1}') as Record<string, JsonValue>;
+    expect(canonicalRequest({ ...base, parameters: withObject })).toContain('"parameters":{"__proto__":{"role":"owner"},"a":1}');
+    expect(canonicalRequest({ ...base, parameters: withPrimitive })).toContain('"parameters":{"__proto__":1,"a":1}');
+    expect(canonicalRequest({ ...base, parameters: { n: JSON.parse('{"__proto__":{"x":2}}') as JsonValue } })).toContain('"n":{"__proto__":{"x":2}}');
+    const digests = new Set([withObject, withPrimitive, { a: 1 }].map((parameters) => requestDigest({ ...base, parameters })));
+    expect(digests.size).toBe(3);
+    // Kopien har fortsatt Object.prototype (en `__proto__`-nøkkel i kilden satte aldri prototypen), og nøkkelen er en egen, tellbar egenskap.
+    const copy = toStrictJson(withObject) as Record<string, JsonValue>;
+    expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
+    expect(Object.keys(copy).sort()).toEqual(["__proto__", "a"]);
   });
 
   it("tool_id, action, tenant_id og person_id må være ikke-tomme, velformede tekster", () => {
