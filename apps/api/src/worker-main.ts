@@ -612,8 +612,8 @@ toolGateway.setClassDNotifier(telegramClassDNotifier({
 const watchdogAlertSink = new WatchdogEmergencyAlertSink(telegramTransport, toolSecretProvider);
 const watchdog = new Watchdog(watchdogAlertSink, killSwitch);
 watchdog.register(databaseCheck(pool));
-// WP-OPS2a K2 (JARVIS-041): workeren claimer på tvers av tenants, så fastlåste jobber telles i ALLE tenants (ikke bare eierens); meldingen er uendret så lenge det finnes én tenant.
-watchdog.register(stuckTasksAllTenantsCheck(pool));
+// WP-OPS2a K2 (JARVIS-041): workeren claimer på tvers av tenants, så fastlåste jobber telles i ALLE tenants (ikke bare eierens); meldingen er uendret så lenge det finnes én tenant. Eierens tenant vurderes alltid først (fiks 1, A-L5).
+watchdog.register(stuckTasksAllTenantsCheck(pool, { ownerTenantId: owner.tenant_id }));
 // D-187 (BLOCKER B2, arkitekt-order D187 mot PR #96): begge miljøvariablene
 // valideres FØR bruk - `parseCostHardLimitOre`/`parseWatchdogIntervalMs`
 // kaster ved enhver eksplisitt oppgitt, ugyldig verdi (fail-closed oppstart)

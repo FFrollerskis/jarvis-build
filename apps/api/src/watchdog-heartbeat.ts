@@ -10,7 +10,8 @@ import { WATCHDOG_MIN_FRESH_MS, watchdogFreshLimitMs } from "./watchdog-status.t
  *
  * Problemet: vakthunden kjører i worker-prosessen og kan ikke varsle om at worker selv er død, hengt eller har mistet databasen - en død vakthund er stille. Løsningen er den samme som for backup og for API-et
  * (`heartbeat-sender.ts`): stillhet = alarm hos eierens EGEN eksterne monitor. Workeren pinger monitoren KUN mens
- *  1. vakthundens siste FULLFØRTE tikk er yngre enn max(3 x vakthund-intervallet, 2 min) (`Watchdog.lastCompletedTickAt()`; et hengt tikk, en hengt sjekk eller en hengt varslingssink flytter det aldri), OG
+ *  1. vakthundens siste FULLFØRTE tikk er yngre enn max(3 x vakthund-intervallet, 2 min) (`Watchdog.lastCompletedTickAgeMs()`, målt med en MONOTON klokke så et hopp i veggklokken aldri gjør en hengt vakthund fersk; et hengt tikk, en hengt sjekk
+ *     eller en hengt varslingssink flytter det aldri), OG
  *  2. databasen svarer på `SELECT 1` innen 3 s (en ping-spørring som fortsatt henger fra forrige runde stables ikke på).
  * Ellers sendes INGENTING - og aldri et «feiler»-ping: en død eller hengt worker skal se ut som det den er, nemlig fravær av ping. Monitoren (eierens valg, ingen leverandør bygget inn) varsler når pinget uteblir.
  *
@@ -62,29 +63,31 @@ export function watchdogTickMaxAgeMs(watchdogIntervalMs: number): number {
 }
 
 export interface WatchdogHeartbeatSelfCheckDeps {
-  watchdog: Pick<Watchdog, "lastCompletedTickAt">;
+  /** Alderen på siste fullførte tikk kommer fra vakthundens MONOTONE klokke (`lastCompletedTickAgeMs`), aldri fra `Date.now()` (fiks-runde 1, A-L2). */
+  watchdog: Pick<Watchdog, "lastCompletedTickAgeMs">;
   /** Vakthundens tikk-intervall (ms) - terskelen regnes av det. */
   intervalMs: number;
   /** `SELECT 1` mot runtime-poolen. */
   dbPing: () => Promise<unknown>;
+  /** Klokke (ms) KUN for å tidfeste en hengt `SELECT 1` (relative differanser). Standard `performance.now()` (monoton); injiseres i tester. */
   now?: () => number;
   dbTimeoutMs?: number;
 }
 
 /**
- * Selvsjekken heartbeaten pinger på: ferskt FULLFØRT tikk OG databasen svarer innen fristen. Kaster aldri. Alder under 0 (klokkeavvik) og «aldri tikket» er IKKE ferskt - alderen kan ikke bevises. Strengt «yngre enn»: nøyaktig terskelen er stille.
+ * Selvsjekken heartbeaten pinger på: ferskt FULLFØRT tikk OG databasen svarer innen fristen. Kaster aldri. Alder under 0, ikke-endelig alder og «aldri tikket» er IKKE ferskt - alderen kan ikke bevises. Strengt «yngre enn»: nøyaktig terskelen er stille.
+ * Alderen er vakthundens MONOTONE alder (`lastCompletedTickAgeMs`): veggklokken kan hoppe (NTP, manuell endring), og et hopp bakover under en hengt vakthund ga ellers falske pings, et hopp frem falsk stillhet (fiks-runde 1, A-L2).
  */
 export function watchdogHeartbeatSelfCheck(deps: WatchdogHeartbeatSelfCheckDeps): () => Promise<boolean> {
-  const now = deps.now ?? (() => Date.now());
+  const now = deps.now ?? (() => performance.now());
   const maxAgeMs = watchdogTickMaxAgeMs(deps.intervalMs);
   const dbTimeoutMs = deps.dbTimeoutMs ?? WATCHDOG_HEARTBEAT_DB_TIMEOUT_MS;
   // Én spørring av gangen: henger en `SELECT 1` fortsatt fra forrige runde, legges det ikke en ny oppå (ville tømt poolen for tilkoblinger mens databasen er nede) - men en som har hengt veldig lenge regnes som tapt.
   let inFlight: { since: number } | null = null;
   return async () => {
     try {
-      const last = deps.watchdog.lastCompletedTickAt();
-      if (last === null) return false;
-      const age = now() - last;
+      const age = deps.watchdog.lastCompletedTickAgeMs();
+      if (age === null) return false;
       if (!(age >= 0 && age < maxAgeMs)) return false;
       if (inFlight !== null && now() - inFlight.since < HUNG_QUERY_RETRY_FACTOR * dbTimeoutMs) return false;
       const query = Promise.resolve().then(() => deps.dbPing());
@@ -107,7 +110,7 @@ export function watchdogHeartbeatSelfCheck(deps: WatchdogHeartbeatSelfCheckDeps)
 
 export interface StartWatchdogHeartbeatOptions {
   env?: NodeJS.ProcessEnv;
-  watchdog: Pick<Watchdog, "lastCompletedTickAt">;
+  watchdog: Pick<Watchdog, "lastCompletedTickAgeMs">;
   /** Vakthundens tikk-intervall (ms). */
   watchdogIntervalMs: number;
   dbPing: () => Promise<unknown>;

@@ -33,7 +33,7 @@ function rig(env: Record<string, string | undefined> = ENV_OK, over: { watchdogI
   const r: Rig = { clock: { t: NOW }, last: { at: NOW }, sent: [], events: [], dbCalls: { n: 0 }, db: { mode: "ok" } };
   const send: PingFn = over.send ?? (async (url) => { r.sent.push(url); return { ok: true, status: 200, reason: null }; });
   const heartbeat = startWatchdogHeartbeat({
-    env, watchdog: { lastCompletedTickAt: () => r.last.at }, watchdogIntervalMs: over.watchdogIntervalMs ?? 60_000,
+    env, watchdog: { lastCompletedTickAgeMs: () => (r.last.at === null ? null : r.clock.t - r.last.at) }, watchdogIntervalMs: over.watchdogIntervalMs ?? 60_000,
     dbPing: () => { r.dbCalls.n += 1; return r.db.mode === "ok" ? Promise.resolve() : r.db.mode === "fail" ? Promise.reject(new Error(`connection refused ${KEY}`)) : new Promise<void>(() => undefined); },
     send, log: (e) => r.events.push(e), now: () => r.clock.t, ...(over.dbTimeoutMs !== undefined ? { dbTimeoutMs: over.dbTimeoutMs } : {})
   });
@@ -103,7 +103,7 @@ describe("konfig: AV uten URL, fail-safe ved ugyldig verdi", () => {
       events.push(e);
     };
     let heartbeat: unknown = "ikke satt";
-    expect(() => { heartbeat = startWatchdogHeartbeat({ env: ENV_OK, watchdog: { lastCompletedTickAt: () => NOW }, watchdogIntervalMs: 60_000, dbPing: async () => undefined, log }); }).not.toThrow();
+    expect(() => { heartbeat = startWatchdogHeartbeat({ env: ENV_OK, watchdog: { lastCompletedTickAgeMs: () => 0 }, watchdogIntervalMs: 60_000, dbPing: async () => undefined, log }); }).not.toThrow();
     expect(heartbeat).toBeNull();
     expect(events).toEqual([{ msg: "watchdog_heartbeat_start_failed", note: "heartbeaten er ikke startet (uventet feil); fravær av ping er alarmen" }]);
     expect(vi.getTimerCount()).toBe(0);
@@ -227,7 +227,7 @@ describe("stillhet = alarm (aldri et «feiler»-ping)", () => {
     const events: Array<Record<string, unknown>> = [];
     const sent: string[] = [];
     const hb = startWatchdogHeartbeat({
-      env: ENV_OK, watchdog: { lastCompletedTickAt: () => { throw new Error("boom"); } }, watchdogIntervalMs: 60_000, dbPing: async () => undefined,
+      env: ENV_OK, watchdog: { lastCompletedTickAgeMs: () => { throw new Error("boom"); } }, watchdogIntervalMs: 60_000, dbPing: async () => undefined,
       send: async (u) => { sent.push(u); return { ok: true, status: 200, reason: null }; }, log: (e) => events.push(e), now: () => NOW
     });
     stopAll.push(() => hb!.stop());
@@ -267,7 +267,7 @@ describe("mot en EKTE Watchdog: en hengt vakthund (også en sjekk som aldri blir
     const clock = { t: NOW };
     let hang = false;
     const check: HealthCheck = { name: "maybe", runbook: "r", run: () => (hang ? new Promise(() => undefined) : Promise.resolve({ ok: true, severity: "info" as const, message: "" })) };
-    const wd = new Watchdog(new MemoryAlertSink(), new KillSwitch(), 3_600_000, 0, () => clock.t);
+    const wd = new Watchdog(new MemoryAlertSink(), new KillSwitch(), 3_600_000, 0, () => clock.t, () => clock.t); // veggklokke og monoton klokke følger den falske klokken (fiks 1, A-L2)
     wd.register(check);
     const sent: string[] = [];
     const hb = startWatchdogHeartbeat({
@@ -293,9 +293,9 @@ describe("mot en EKTE Watchdog: en hengt vakthund (også en sjekk som aldri blir
 
 describe("selvsjekken er en REN funksjon av (vakthund, klokke, database)", () => {
   it("kaster aldri og svarer boolsk", async () => {
-    const check = watchdogHeartbeatSelfCheck({ watchdog: { lastCompletedTickAt: () => NOW }, intervalMs: 60_000, dbPing: async () => undefined, now: () => NOW });
+    const check = watchdogHeartbeatSelfCheck({ watchdog: { lastCompletedTickAgeMs: () => 0 }, intervalMs: 60_000, dbPing: async () => undefined, now: () => NOW });
     expect(await check()).toBe(true);
-    const broken = watchdogHeartbeatSelfCheck({ watchdog: { lastCompletedTickAt: () => NOW }, intervalMs: 60_000, dbPing: () => { throw new Error("sync boom"); }, now: () => NOW });
+    const broken = watchdogHeartbeatSelfCheck({ watchdog: { lastCompletedTickAgeMs: () => 0 }, intervalMs: 60_000, dbPing: () => { throw new Error("sync boom"); }, now: () => NOW });
     expect(await broken()).toBe(false);
   });
 });

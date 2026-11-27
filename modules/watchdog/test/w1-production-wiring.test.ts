@@ -38,7 +38,7 @@ describe("W1: @jarvis/watchdog er faktisk konsumert av worker-main.ts (WATCHDOG_
   it("worker-main.ts konstruerer ÉN Watchdog-instans og registrerer alle tre kanoniske sjekker", () => {
     expect(workerMainSource).toContain("new Watchdog(watchdogAlertSink, killSwitch)");
     expect(workerMainSource).toContain("watchdog.register(databaseCheck(pool))");
-    expect(workerMainSource).toContain("watchdog.register(stuckTasksAllTenantsCheck(pool))"); // WP-OPS2a K2: alle tenants (var `stuckTasksCheck(pool, owner.tenant_id)`)
+    expect(workerMainSource).toContain("watchdog.register(stuckTasksAllTenantsCheck(pool, { ownerTenantId: owner.tenant_id }))"); // WP-OPS2a K2: alle tenants, eierens tenant først (var `stuckTasksCheck(pool, owner.tenant_id)`)
     expect(workerMainSource).not.toContain("stuckTasksCheck("); // den gamle eier-tenant-sjekken er ikke lenger registrert
     expect(workerMainSource).toMatch(/watchdog\.register\(\s*costExplosionCheck\(/);
     // Nøyaktig ÉN konstruksjon - ingen duplikat watchdog-instans i samme fil.
