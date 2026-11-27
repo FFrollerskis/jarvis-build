@@ -49,9 +49,12 @@ Core → tekststream → Voice Gateway: streaming TTS → WebRTC → høyttaler
 
 - En talesesjon er samme `session_id` som tekstsesjonen – kanalbytte (rom → mobil → web) beholder samtalen.
 - Romsesjon binder `site_id`/`room_id` til sesjonen for stedsriktige kommandoer («skru på lyset her»).
-- **Gjenopptak:** gateway-tilstand (aktiv sesjon, spillekø, siste tur) checkpointes slik at en restart eller
-  lokal/sky-failover gjenopptar samtalen. Verktøyhandlinger er idempotente med engangs-ID-er slik at
-  failover aldri dobbelutfører en handling.
+- **Gjenopptak (oppdatert WP-V2/D-488 - tidligere tekst lovte mer enn koden gjør):** utterance-journalen
+  (nøkkel: tillitsnivå, tenant, enhet, `utterance_id`) er **prosess-delt**, **atomisk** (`claim` før Core-kallet, så to samtidige
+  `replay_final` gir ett Core-kall) og **begrenset** (LRU + TTL). Den ligger i prosessminnet: **den overlever ikke en omstart og
+  deles ikke mellom gateway-prosesser** (`PARTIAL` - varig deling krever en Core-rute og migrasjon, egen WP). Spillekø og siste tur
+  checkpointes **ikke**. Dobbeltutførelse hindres derfor fullt ut kun innen samme gateway-prosess; ut over det kun delvis av
+  ToolGateway-ledgerens idempotensnøkkel (10 minutters tidsvindu). Etter en Core-feil beholdes claimen (ukjent utfall - aldri retry), unntatt når feilen BEVISER at forespørselen aldri nådde Core (ubevist sti, nektet tilkobling/DNS: da kan samme id sendes på nytt). Se [runbooks/WPV2_VOICE_ROBUSTNESS.md](runbooks/WPV2_VOICE_ROBUSTNESS.md) §5.
 - Avbrutt TTS logges som «ikke levert» slik at Jarvis vet hva Tobias faktisk hørte.
 
 ## 5. Rask bane i tale
@@ -88,10 +91,12 @@ består uansett utfall.
 
 | Feil | Oppførsel |
 |---|---|
-| Skyleverandør STT/TTS nede | Bytt til reserveleverandør/lokal modell via adapter; degradert men fungerende |
+| Skyleverandør STT/TTS nede eller henger | Hvert leverandørkall har en frist. **Failover sky → lokal** via adapter (kun TTS før første ramme, kun når lokal er tilgjengelig og rutingporten slipper den gjennom; aldri lokal → sky automatisk) - degradert men fungerende. Uten lokal reserve: `stt_error`/`tts_error` for den turen/chunken, neste prøver på nytt. Se runbook §3-§4 |
 | Voice Gateway nede | Satellitt faller tilbake til Home Assistant Assist for grunnkommandoer |
 | Nett nede på stedet | Lokale hurtigkommandoer og sikkerhetsautomasjoner virker fortsatt (HA, deterministisk) |
-| Core nede | Gateway svarer med feilmelding og køer ikke-kritiske turer; kritiske hjem-funksjoner uberørt |
+| Core nede eller henger | Gateway svarer med `core_error` (nede) eller `core_timeout` (total turfrist 120 s) og avbryter forespørselen; en nektet tilkobling beviser at ingenting nådde Core, så samme `replay_final`-id kan sendes på nytt (en redirect fra Core følges aldri og regnes som ukjent utfall: claimen beholdes); kritiske hjem-funksjoner uberørt. **Køing av turer er ikke bygget** (`NOT_BUILT`) - den tidligere teksten «køer ikke-kritiske turer» stemte ikke med koden |
+| Ugyldig ramme, for stor melding, flom (ping/pong, lyd, meldinger), for mange tilkoblinger, langsom eller halvåpen klient | Definert lukking per tilkobling (1007/1002/1009/1008/1013/1000/1006, se runbook §2). **Målt** (ekte prosess): serverens minne forblir flatt under ping- og lydflom, og andre økter er målt uberørt for ping-flom og for tekstflom fra en klient som ikke svarer på close (`/health` ca. 1-2 ms, TTS-strømmen uendret); pong-, binær- og lydflom termineres/lukkes etter samme rammebudsjett, men effekten på andre økter er ikke målt. **Ikke begrenset:** TCP/HTTP FØR WebSocket-oppgraderingen og containerens totale minne (ingen compose-grense) - se runbook §2. Er det fullt, kastes den eldste ikke-beviste tilkoblingen ut (en tilkobling med pågående Core-autorisering og en bevist enhet kastes aldri ut); en bevist enhet kommer inn når bare ubeviste fyller opp (målt 30/30 mot en flom på 100 nye tilkoblinger/s), men churn før `start` og en treg Core kan fortsatt holde eieren ute så lenge angrepet pågår (runbook §2, «Gjenstår») |
+| Lokal Piper/Whisper-binær mangler eller kan ikke kjøres | `available()` er `false` -> `/health` 503 (`NOT_CONFIGURED`); en spawn-feil midt i en samtale gir `tts_error`/`stt_error`, ikke krasj |
 
 ## 9. Hva Voice Gateway IKKE er
 
@@ -105,8 +110,8 @@ består uansett utfall.
 er uendret som målarkitektur for romsatellitter/mobil), servert statisk av Core via `GET /voice` men
 snakker DIREKTE med voice-gatewayens EGEN WebSocket-port (§1: egen prosess, aldri en Core-rute). Den
 gjenbruker samme Ed25519-enhetsnøkkel/enrollment som `apps/web/dashboard.html` (samme fysiske
-enhet/nettleser), fanger mikrofon (PCM16 16 kHz, nedsamplet i klienten) og spiller TTS-rammer (PCM16 24
-kHz) via en planlagt Web Audio-kø med korrekt barge-in-avbrudd. `infra/local/docker-compose.yml` fikk en
+enhet/nettleser), fanger mikrofon (PCM16 16 kHz, nedsamplet i klienten) og spiller TTS-rammer (PCM16, samplerate fra `started.tts_sample_rate` - D-390; piper 22 050,
+OpenAI 24 000) via en planlagt Web Audio-kø med korrekt barge-in-avbrudd. `infra/local/docker-compose.yml` fikk en
 egen `voice-gateway`-tjeneste (samme runtime-image som api/worker, egen `command`).
 
 **Ærlig status (OPPDATERT D-226, 2026-09-22):** klienten og WS-håndtrykket er kode-komplette og

@@ -1,5 +1,10 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
+import { deadlineSignal } from "./deadline.ts";
+import { AVAILABILITY_CACHE_MS, AvailabilityCache, killProcessGroup, probeLocalBinary, type LocalBinaryProblem } from "./local-binary.ts";
+import { DEFAULT_VOICE_LIMITS, ProcessSlots, VoiceBusyError } from "./limits.ts";
+import type { SpeechCallContext } from "./speech-context.ts";
 
 /**
  * SpeechAdapter (TTS): streaming-kontrakt med kansellering (barge-in-krav).
@@ -87,7 +92,13 @@ export interface TtsAdapter {
    */
   readonly sampleRate?: number;
   available(): boolean;
-  synthesize(text: string, options?: TtsOptions): TtsPlayback;
+  /**
+   * `context` (WP-V2, K4): sesjonens memory space og tillitsnivå. Enkle adaptere ignorerer den; en failover-adapter bruker den til å
+   * dømme sin RESERVE-behandler mot samme rutingport som primæren (D-122).
+   */
+  synthesize(text: string, options?: TtsOptions, context?: SpeechCallContext): TtsPlayback;
+  /** WP-V2: valgfri, hemmelighetsfri driftsstatus til `/status` (samplerate-kilde, ikke-tilgjengelighetsårsak, failover-tilstand). */
+  status?(): Record<string, unknown>;
 }
 
 export const DEFAULT_TTS_SAMPLE_RATE = 24_000;
@@ -140,6 +151,67 @@ export class FakeTts implements TtsAdapter {
   }
 }
 
+/**
+ * WP-V2 (K4): felles strømming av rå PCM over HTTP for OpenAI og ElevenLabs. Hver forespørsel har en TOTAL frist (`timeoutMs`),
+ * og `cancel()` (barge-in) aborterer selve `fetch` via `controller` - ikke bare et flagg som først leses ved neste `read()` (en
+ * `read()` som henger ville ellers aldri sett flagget). Feilkoder er korte koder (aldri leverandørtekst eller URL).
+ */
+async function* streamHttpPcm(request: {
+  url: string;
+  init: RequestInit;
+  timeoutMs: number;
+  codePrefix: string;
+  controller: AbortController;
+  isCancelled: () => boolean;
+}): AsyncIterable<Buffer> {
+  const deadline = deadlineSignal(request.timeoutMs, request.controller.signal);
+  try {
+    let response: Response;
+    try {
+      response = await fetch(request.url, { ...request.init, signal: deadline.signal });
+    } catch {
+      if (request.isCancelled()) {
+        return;
+      }
+      throw new Error(deadline.timedOut() ? `${request.codePrefix}_timeout` : `${request.codePrefix}_network_error`);
+    }
+    if (!response.ok || !response.body) {
+      if (typeof response.body?.cancel === "function") {
+        void Promise.resolve(response.body.cancel()).catch(() => undefined);
+      }
+      throw new Error(`${request.codePrefix}_error_${response.status}`);
+    }
+    const reader = response.body.getReader();
+    try {
+      for (;;) {
+        if (request.isCancelled()) {
+          return;
+        }
+        let step: { done: boolean; value?: Uint8Array };
+        try {
+          step = await reader.read();
+        } catch {
+          if (request.isCancelled()) {
+            return;
+          }
+          throw new Error(deadline.timedOut() ? `${request.codePrefix}_timeout` : `${request.codePrefix}_stream_error`);
+        }
+        if (step.done) {
+          return;
+        }
+        yield Buffer.from(step.value ?? new Uint8Array(0));
+      }
+    } finally {
+      void Promise.resolve(reader.cancel()).catch(() => undefined);
+    }
+  } finally {
+    deadline.dispose();
+  }
+}
+
+/** Standard totalfrist for én TTS-chunk over HTTP (ms). En chunk er maks ca. 320 tegn; OpenAI/ElevenLabs bruker typisk et par sekunder. */
+export const DEFAULT_TTS_HTTP_TIMEOUT_MS = 30_000;
+
 /** OpenAI TTS (batch; streaming-kandidater vurderes i benchmark). UVERIFISERT uten nøkkel. */
 export class OpenAiTts implements TtsAdapter {
   readonly name = "openai-tts";
@@ -159,7 +231,8 @@ export class OpenAiTts implements TtsAdapter {
   constructor(
     private readonly apiKey: string | undefined = process.env["OPENAI_API_KEY"],
     private readonly model: string = "gpt-4o-mini-tts",
-    private readonly voice: string = "alloy"
+    private readonly voice: string = "alloy",
+    private readonly timeoutMs: number = DEFAULT_TTS_HTTP_TIMEOUT_MS
   ) {}
 
   available(): boolean {
@@ -173,32 +246,29 @@ export class OpenAiTts implements TtsAdapter {
     if (!this.apiKey) {
       throw new Error("openai_tts_not_configured");
     }
-    const { apiKey, model, voice } = this;
+    const { apiKey, model, voice, timeoutMs } = this;
     const speed = options?.speed !== undefined && Math.abs(options.speed - 1) > 0.005 ? options.speed : undefined;
     let cancelled = false;
-    async function* generate(): AsyncIterable<Buffer> {
-      const response = await fetch("https://api.openai.com/v1/audio/speech", {
+    const controller = new AbortController();
+    const frames = streamHttpPcm({
+      url: "https://api.openai.com/v1/audio/speech",
+      init: {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({ model, voice, input: text, response_format: "pcm", ...(speed !== undefined ? { speed } : {}) })
-      });
-      if (!response.ok || !response.body) {
-        throw new Error(`openai_tts_error_${response.status}`);
+      },
+      timeoutMs,
+      codePrefix: "openai_tts",
+      controller,
+      isCancelled: () => cancelled
+    });
+    return {
+      frames,
+      cancel: () => {
+        cancelled = true;
+        controller.abort();
       }
-      const reader = response.body.getReader();
-      for (;;) {
-        if (cancelled) {
-          await reader.cancel();
-          return;
-        }
-        const { done, value } = await reader.read();
-        if (done) {
-          return;
-        }
-        yield Buffer.from(value);
-      }
-    }
-    return { frames: generate(), cancel: () => (cancelled = true) };
+    };
   }
 }
 
@@ -263,7 +333,8 @@ export class ElevenLabsTts implements TtsAdapter {
     private readonly apiKey: string | undefined = process.env["JARVIS_ELEVENLABS_API_KEY"],
     /** Påkrevd i selve URL-stien - ElevenLabs har intet "standard stemme"-endepunkt. */
     private readonly voiceId: string | undefined = process.env["JARVIS_ELEVENLABS_VOICE_ID"],
-    private readonly modelId: string = "eleven_multilingual_v2"
+    private readonly modelId: string = "eleven_multilingual_v2",
+    private readonly timeoutMs: number = DEFAULT_TTS_HTTP_TIMEOUT_MS
   ) {}
 
   /** Stemme-ID-en er like påkrevd som nøkkelen - ElevenLabs kan strukturelt ikke kalles uten den. */
@@ -275,34 +346,28 @@ export class ElevenLabsTts implements TtsAdapter {
     if (!this.apiKey || !this.voiceId) {
       throw new Error("elevenlabs_tts_not_configured");
     }
-    const { apiKey, voiceId, modelId } = this;
+    const { apiKey, voiceId, modelId, timeoutMs } = this;
     let cancelled = false;
-    async function* generate(): AsyncIterable<Buffer> {
-      const response = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=pcm_16000`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json", "xi-api-key": apiKey },
-          body: JSON.stringify({ text, model_id: modelId })
-        }
-      );
-      if (!response.ok || !response.body) {
-        throw new Error(`elevenlabs_tts_error_${response.status}`);
+    const controller = new AbortController();
+    const frames = streamHttpPcm({
+      url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=pcm_16000`,
+      init: {
+        method: "POST",
+        headers: { "content-type": "application/json", "xi-api-key": apiKey },
+        body: JSON.stringify({ text, model_id: modelId })
+      },
+      timeoutMs,
+      codePrefix: "elevenlabs_tts",
+      controller,
+      isCancelled: () => cancelled
+    });
+    return {
+      frames,
+      cancel: () => {
+        cancelled = true;
+        controller.abort();
       }
-      const reader = response.body.getReader();
-      for (;;) {
-        if (cancelled) {
-          await reader.cancel();
-          return;
-        }
-        const { done, value } = await reader.read();
-        if (done) {
-          return;
-        }
-        yield Buffer.from(value);
-      }
-    }
-    return { frames: generate(), cancel: () => (cancelled = true) };
+    };
   }
 }
 
@@ -330,6 +395,71 @@ export class ElevenLabsTts implements TtsAdapter {
  * Selve subprosess-/strømme-/kanselleringskoden ER testet, mot en faket
  * binær (se `test/local-piper-tts.test.ts`).
  */
+export type PiperSampleRateSource = "env" | "model_config" | "default" | "constructor";
+
+export interface PiperSampleRate {
+  rate: number;
+  source: PiperSampleRateSource;
+  /** Satt når miljøvariabelen og stemmemodellens egen konfig er uenige (env vinner, men avviket logges). */
+  mismatch?: { env: number; model_config: number };
+}
+
+export const DEFAULT_PIPER_SAMPLE_RATE = 22_050;
+
+function plausibleSampleRate(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 8_000 && value <= 96_000 ? value : undefined;
+}
+
+/**
+ * WP-V2 (K6b, JARVIS-080): samplerate for piper-rammene.
+ * Prioritet: (1) `JARVIS_PIPER_SAMPLE_RATE` (eierens eksplisitte overstyring), (2) stemmens egen `<modell>.onnx.json` -
+ * `audio.sample_rate` (piper-stemmer leveres med en slik konfigfil ved siden av modellen; FORMATET er UVERIFISERT mot offisiell
+ * dokumentasjon inntil eieren har lest en ekte fil, se runbook WPV2 - derfor tolkes kun et heltall i 8 000-96 000 Hz, alt annet
+ * ignoreres), (3) 22 050 Hz. Kilden rapporteres i `/status` og i oppstartsloggen; et avvik mellom env og modellfil logges.
+ */
+export function resolvePiperSampleRate(
+  modelPath: string | undefined,
+  envValue: string | undefined,
+  readConfig: (path: string) => string | undefined = (path) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+): PiperSampleRate {
+  const envRate = envValue !== undefined && envValue.trim() !== "" ? plausibleSampleRate(Number(envValue)) : undefined;
+  let modelRate: number | undefined;
+  if (modelPath) {
+    const raw = readConfig(`${modelPath}.json`);
+    if (raw !== undefined) {
+      try {
+        const parsed = JSON.parse(raw) as { audio?: { sample_rate?: unknown } };
+        modelRate = plausibleSampleRate(parsed?.audio?.sample_rate);
+      } catch {
+        modelRate = undefined;
+      }
+    }
+  }
+  if (envRate !== undefined) {
+    return {
+      rate: envRate,
+      source: "env",
+      ...(modelRate !== undefined && modelRate !== envRate ? { mismatch: { env: envRate, model_config: modelRate } } : {})
+    };
+  }
+  if (modelRate !== undefined) {
+    return { rate: modelRate, source: "model_config" };
+  }
+  return { rate: DEFAULT_PIPER_SAMPLE_RATE, source: "default" };
+}
+
+/** Standard maksvarighet for ÉN piper-chunk (ms) - en prosess som ikke er ferdig innen dette drepes (hele prosessgruppen). */
+export const DEFAULT_PIPER_CHUNK_TIMEOUT_MS = 60_000;
+
+/** Prosess-delt standardsemafor (brukes når ingen injiseres). `main.ts` injiserer et eget med grensen fra `VoiceLimits`. */
+const DEFAULT_PIPER_SLOTS = new ProcessSlots(4, DEFAULT_VOICE_LIMITS.processQueueTimeoutMs, DEFAULT_VOICE_LIMITS.reservedProvenSlots);
+
 export class LocalPiperTts implements TtsAdapter {
   readonly name = "local-piper";
   /** Lokal binær - tekst/lyd forlater aldri maskinen. */
@@ -340,38 +470,111 @@ export class LocalPiperTts implements TtsAdapter {
     processor_terms_status: "NOT_APPLICABLE_LOCAL"
   };
   /**
-   * D-390: piper-stemmer er typisk 22 050 Hz (noen 16 000) - raten bestemmes av stemmemodellen Tobias installerer, og settes med
-   * `JARVIS_PIPER_SAMPLE_RATE` (standard 22 050). Adapteren re-samplerer ikke; klienten spiller av i denne raten.
+   * D-390/WP-V2 (K6b): samplerate (Hz) for rammene. Kilden er `sampleRateSource` (env > stemmens `.onnx.json` > 22 050). Adapteren
+   * re-samplerer ikke selv; klienten spiller av i denne raten (`started.tts_sample_rate`).
    */
   readonly sampleRate: number;
+  readonly sampleRateSource: PiperSampleRateSource;
+  private readonly sampleRateMismatch: PiperSampleRate["mismatch"];
+  /** FIX-7: `available()` går hit (5 s cache) i stedet for synkron stat/access ved hvert kall (hver TTS-chunk via `usableReserve`, og `/health`). */
+  private readonly availability: AvailabilityCache;
   constructor(
     private readonly binPath: string | undefined = process.env["JARVIS_PIPER_BIN"],
     private readonly modelPath: string | undefined = process.env["JARVIS_PIPER_MODEL"],
-    sampleRate: number = Number(process.env["JARVIS_PIPER_SAMPLE_RATE"] ?? "") || 22_050
+    /** Eksplisitt rate (tester/kode) - hopper over env/modellkonfig. Udefinert = `resolvePiperSampleRate`. */
+    sampleRate?: number,
+    /** WP-V2 (K2): samtidige piper-prosesser (delt). */
+    private readonly slots: ProcessSlots = DEFAULT_PIPER_SLOTS,
+    /** WP-V2 (K4): maks varighet per chunk (ms). */
+    private readonly chunkTimeoutMs: number = DEFAULT_PIPER_CHUNK_TIMEOUT_MS,
+    /** FIX-7: klokke for tilgjengelighets-cachen (tester). */
+    now: () => number = Date.now
   ) {
-    this.sampleRate = sampleRate;
+    this.availability = new AvailabilityCache(() => probeLocalBinary(this.binPath, this.modelPath), AVAILABILITY_CACHE_MS, now);
+    if (typeof sampleRate === "number" && Number.isFinite(sampleRate) && sampleRate > 0) {
+      this.sampleRate = sampleRate;
+      this.sampleRateSource = "constructor";
+    } else {
+      const resolved = resolvePiperSampleRate(modelPath, process.env["JARVIS_PIPER_SAMPLE_RATE"]);
+      this.sampleRate = resolved.rate;
+      this.sampleRateSource = resolved.source;
+      this.sampleRateMismatch = resolved.mismatch;
+      if (resolved.mismatch) {
+        console.warn(JSON.stringify({ msg: "piper_sample_rate_mismatch", ...resolved.mismatch, using: resolved.rate }));
+      }
+    }
   }
 
-  /** Stemmemodellen er like påkrevd som binæren - piper kan strukturelt ikke kjøre uten `--model`. */
+  /**
+   * WP-V2 (K1c, audit D1): `available()` sjekker nå at binæren FINNES og er kjørbar og at stemmemodellen er lesbar - ikke bare at
+   * miljøvariablene er satt. En feil konfigurasjon gir dermed `NOT_CONFIGURED` i `/health` (503) i stedet for et spawn-feil midt i en samtale.
+   * Årsaken (`unavailableReason`) er en kort kode uten stier.
+   */
   available(): boolean {
-    return Boolean(this.binPath) && Boolean(this.modelPath);
+    return this.unavailableReason() === undefined;
+  }
+
+  unavailableReason(): LocalBinaryProblem | undefined {
+    return this.availability.get();
+  }
+
+  status(): Record<string, unknown> {
+    const reason = this.unavailableReason();
+    return {
+      sample_rate_source: this.sampleRateSource,
+      ...(this.sampleRateMismatch ? { sample_rate_mismatch: this.sampleRateMismatch } : {}),
+      ...(reason !== undefined ? { unavailable_reason: reason } : {}),
+      process_slots: { max: this.slots.max, in_use: this.slots.inUse, queued: this.slots.queued, reserved_for_proven: this.slots.reservedForProven }
+    };
   }
 
   /** D-405: piper kan justere hastighet (length_scale), uttrykk (noise_scale/noise_w) og setningspause (sentence_silence). */
   readonly voiceCapabilities: VoiceCapabilities = { speed: true, expressiveness: true, pause: true };
 
-  synthesize(text: string, options?: TtsOptions): TtsPlayback {
+  /** `context` (FIX-4): kun `SERVER_VERIFIED` får de reserverte prosessplassene; manglende kontekst regnes som ubevist (fail-closed). */
+  synthesize(text: string, options?: TtsOptions, context?: SpeechCallContext): TtsPlayback {
     if (!this.binPath || !this.modelPath) {
       throw new Error("local_piper_not_configured");
     }
-    const { binPath, modelPath } = this;
+    const { binPath, modelPath, slots, chunkTimeoutMs } = this;
+    const unproven = context?.authority !== "SERVER_VERIFIED";
     const extraArgs = piperArgsFor(options);
     let cancelled = false;
     let child: ReturnType<typeof spawn> | undefined;
-    async function* runOnce(extra: string[]): AsyncIterable<Buffer> {
-      if (cancelled) {
+    /** Avbryter en ventende plassforespørsel (barge-in mens chunken står i prosesskøen). */
+    const cancelController = new AbortController();
+    /**
+     * Plassen frigjøres av `cancel()` OGSÅ - ikke bare av generatorens `finally`. En generator som konsumenten forlater uten å
+     * kalle `return()` (en forhåndshentet chunk som aldri spilles) står ellers evig parkert ved `yield` og holder plassen.
+     */
+    let releaseSlot: (() => void) | undefined;
+    /**
+     * FIX-9: plassen gis tilbake når prosessen er DØD (`exit`), ikke ved SIGTERM - ellers kunne en ny piper starte oppå en som ennå dør, og taket gjaldt
+     * generatorer, ikke prosesser. En prosess som ignorerer SIGTERM trappes opp til SIGKILL etter 2 s (selv om generatoren er parkert og aldri når sin egen
+     * `finally`), og en sikkerhetstimer (5 s) gir plassen tilbake uansett så den aldri blir hengende. `release` er idempotent.
+     */
+    const releaseWhenGone = (): void => {
+      const release = releaseSlot;
+      if (!release) {
         return;
       }
+      const proc = child;
+      // Ingen prosess (aldri startet) eller en som allerede er død - også en spawn-feil (Node setter da `exitCode` til en negativ errno og sender kun `close`, ikke `exit`): gi plassen tilbake nå.
+      if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+        release();
+        return;
+      }
+      const escalate = setTimeout(() => killProcessGroup(proc, "SIGKILL"), 2_000);
+      const safety = setTimeout(release, 5_000);
+      escalate.unref();
+      safety.unref();
+      proc.once("exit", () => {
+        clearTimeout(escalate);
+        clearTimeout(safety);
+        release();
+      });
+    };
+    async function* spawnAndStream(extra: string[]): AsyncIterable<Buffer> {
       // `detached: true` (POSIX): piper blir gruppeleder for en NY
       // prosessgruppe - `killProcessGroup()` under kan da drepe HELE
       // undertreet (`-pid`), ikke kun selve piper-PID-en. Nødvendig fordi et
@@ -387,8 +590,24 @@ export class LocalPiperTts implements TtsAdapter {
       child = proc;
       let stderr = "";
       let stdinError: Error | null = null;
+      let spawnError: NodeJS.ErrnoException | null = null;
+      let streamError: NodeJS.ErrnoException | null = null;
+      let timedOut = false;
+      // WP-V2 (K1b, audit A1): UTEN en `error`-lytter på selve prosessen er en spawn-feil (ENOENT/EACCES - feil `JARVIS_PIPER_BIN`,
+      // slettet binær) en uhåndtert `error`-hendelse, og Node kaster den som uncaughtException = HELE voice-gateway-prosessen
+      // krasjer. Samme mønster som `LocalWhisperStt` (`proc.once("error", ...)`). Feilen kastes etter strømmen som en kode.
+      proc.once("error", (err: Error) => {
+        spawnError = err as NodeJS.ErrnoException;
+      });
       proc.stderr.on("data", (d: Buffer) => {
-        stderr += d.toString("utf8");
+        if (stderr.length < 4096) {
+          stderr += d.toString("utf8");
+        }
+      });
+      // Samme klasse: en feil på stdout/stderr-strømmene skal aldri bli uhåndtert.
+      proc.stderr.on("error", () => undefined);
+      proc.stdout.on("error", (err: Error) => {
+        streamError = err as NodeJS.ErrnoException;
       });
       // D-256: SAMME bug-klasse som `LocalWhisperStt.end()` (se stt.ts sin
       // kommentar) - avslutter/lukker piper sin egen stdin FØR `.end(text)`
@@ -401,6 +620,12 @@ export class LocalPiperTts implements TtsAdapter {
       });
       proc.stdin.end(text);
       const exitCode = new Promise<number | null>((resolve) => proc.once("close", resolve));
+      // WP-V2 (K4): en piper-prosess som ikke er ferdig innen `chunkTimeoutMs` drepes (hele gruppen, SIGKILL) - ellers blokkerer en
+      // hengende chunk alle senere chunker i sesjonen.
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killProcessGroup(proc, "SIGKILL");
+      }, chunkTimeoutMs);
       try {
         for await (const chunk of proc.stdout) {
           if (cancelled) {
@@ -408,15 +633,62 @@ export class LocalPiperTts implements TtsAdapter {
           }
           yield chunk as Buffer;
         }
+      } catch (err) {
+        if (!cancelled) {
+          streamError = err as NodeJS.ErrnoException;
+        }
       } finally {
+        clearTimeout(timer);
         killProcessGroup(proc);
+        // Et prosesstre som ignorerer SIGTERM skal aldri få henge `await exitCode` under: opptrapping til SIGKILL.
+        const escalation = setTimeout(() => killProcessGroup(proc, "SIGKILL"), 2_000);
+        escalation.unref();
+        void exitCode.then(() => clearTimeout(escalation));
       }
       const code = await exitCode;
-      if (!cancelled && code !== 0) {
+      if (cancelled) {
+        return;
+      }
+      if (spawnError) {
+        throw new Error(`local_piper_spawn_failed:${(spawnError as NodeJS.ErrnoException).code ?? "unknown"}`);
+      }
+      if (timedOut) {
+        throw new Error("local_piper_timeout");
+      }
+      if (streamError) {
+        throw new Error(`local_piper_stdout_failed:${(streamError as NodeJS.ErrnoException).code ?? "unknown"}`);
+      }
+      if (code !== 0) {
         const detail = stdinError
           ? `${stderr.slice(0, 150)} (stdin write: ${(stdinError as Error).message})`
           : stderr.slice(0, 200);
         throw new Error(`local_piper_process_failed:${code ?? "unknown"}:${detail}`);
+      }
+    }
+    async function* runOnce(extra: string[]): AsyncIterable<Buffer> {
+      if (cancelled) {
+        return;
+      }
+      // WP-V2 (K2): samtidige piper-prosesser er begrenset (delt semafor). Køen har en frist -> `VoiceBusyError` ("voice_busy").
+      let release: () => void;
+      try {
+        release = await slots.acquire(cancelController.signal, { unproven });
+      } catch (err) {
+        if (cancelled) {
+          return;
+        }
+        throw err;
+      }
+      releaseSlot = release;
+      // FIX-9: `cancel()` kan ha kommet etter at plassen ble innvilget, men før denne fortsettelsen (mikro-vindu) - da startes ingen prosess, og plassen gis tilbake.
+      if (cancelled) {
+        release();
+        return;
+      }
+      try {
+        yield* spawnAndStream(extra);
+      } finally {
+        releaseWhenGone();
       }
     }
     /**
@@ -434,7 +706,9 @@ export class LocalPiperTts implements TtsAdapter {
           }
           return;
         } catch (err) {
-          if (cancelled || yielded || i === attempts.length - 1) {
+          // En spawn-feil/timeout/opptatt-kø skal ALDRI prøves på nytt med standardflagg - det var ikke flaggene som feilet.
+          const retriable = !(err instanceof VoiceBusyError) && !/^local_piper_(spawn_failed|timeout)/.test((err as Error).message);
+          if (cancelled || yielded || i === attempts.length - 1 || !retriable) {
             throw err;
           }
           console.warn(JSON.stringify({ msg: "piper_custom_voice_params_failed_retry_default", reason: (err as Error).message.slice(0, 120) }));
@@ -445,28 +719,12 @@ export class LocalPiperTts implements TtsAdapter {
       frames: generate(),
       cancel(): void {
         cancelled = true;
+        cancelController.abort();
         if (child) {
           killProcessGroup(child);
         }
+        releaseWhenGone();
       }
     };
-  }
-}
-
-/**
- * Dreper HELE prosessgruppen `proc` leder (se `detached: true`-kommentaren
- * over), ALDRI kun selve PID-en - `ESRCH` (prosessen/gruppen er allerede
- * borte) svelges bevisst, det er den FORVENTEDE, harmløse utfallsformen når
- * prosessen allerede rakk å avslutte selv (f.eks. lykkes-banen der
- * `finally`-blokken kjører etter en NORMAL EOF, ikke en kansellering).
- */
-function killProcessGroup(proc: ReturnType<typeof spawn>): void {
-  if (proc.killed || proc.exitCode !== null || proc.pid === undefined) {
-    return;
-  }
-  try {
-    process.kill(-proc.pid, "SIGTERM");
-  } catch {
-    // ESRCH: allerede avsluttet - se filhode.
   }
 }
