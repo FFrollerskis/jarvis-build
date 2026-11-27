@@ -360,6 +360,91 @@
     }
   ],
   "runtime_parent_allowlist": [],
+  "definer_access": {
+    "approvals": {
+      "reason": "Retensjon (073, D-395 JARVIS-074): prune_operational_data leser nonce/expires_at og sletter utløpte godkjenninger (policyene begrenser til rader eldre enn 7 dager).",
+      "privileges": [
+        "DELETE",
+        "SELECT(expires_at,nonce)"
+      ],
+      "policies": [
+        "approvals_definer_prune_select|P|SELECT|using=(expires_at < (now() - '7 days'::interval))|check=-",
+        "approvals_definer_prune|P|DELETE|using=(expires_at < (now() - '7 days'::interval))|check=-"
+      ]
+    },
+    "device_enrollment_tickets": {
+      "reason": "Retensjon (073): prune_operational_data leser ticket_id/expires_at og sletter utløpte enrollment-billetter eldre enn 7 dager.",
+      "privileges": [
+        "DELETE",
+        "SELECT(expires_at,ticket_id)"
+      ],
+      "policies": [
+        "device_enrollment_tickets_definer_prune_select|P|SELECT|using=(expires_at < (now() - '7 days'::interval))|check=-",
+        "device_enrollment_tickets_definer_prune|P|DELETE|using=(expires_at < (now() - '7 days'::interval))|check=-"
+      ]
+    },
+    "policy_decisions": {
+      "reason": "Retensjon av policy-beslutningsjournalen (108, WP-K D-471): prune_policy_decisions leser decided_at og sletter rader eldre enn 30 dager.",
+      "privileges": [
+        "DELETE",
+        "SELECT(decided_at,decision_id,tenant_id)"
+      ],
+      "policies": [
+        "policy_decisions_definer_prune_select|P|SELECT|using=(decided_at < (now() - '30 days'::interval))|check=-",
+        "policy_decisions_definer_prune|P|DELETE|using=(decided_at < (now() - '30 days'::interval))|check=-"
+      ]
+    },
+    "scheduler_state": {
+      "reason": "Retensjon (073): prune_operational_data leser og sletter fullførte jobb-claims (job_name, run_date, completed_at); PLATFORM-tabell uten RLS.",
+      "privileges": [
+        "DELETE",
+        "SELECT(completed_at,job_name,run_date)"
+      ],
+      "policies": []
+    },
+    "session_grants": {
+      "reason": "Sesjons-grant: jarvis_session_grant_tenant (053) slår opp tenant for en grant_id, og retensjon (073) sletter utløpte eller tilbakekalte grants eldre enn 7 dager.",
+      "privileges": [
+        "DELETE",
+        "SELECT(expires_at,grant_id,revoked_at,tenant_id)"
+      ],
+      "policies": [
+        "session_grants_definer_lookup|P|SELECT|using=true|check=-",
+        "session_grants_definer_prune|P|DELETE|using=((expires_at < (now() - '7 days'::interval)) OR (revoked_at < (now() - '7 days'::interval)))|check=-"
+      ]
+    },
+    "tasks": {
+      "reason": "Worker-køens claim (007/009/035/064/083/084): claim_next_task velger oppgaver på tvers av tenants og oppdaterer kun lease- og statuskolonnene.",
+      "privileges": [
+        "SELECT(attempts,cancel_requested,checkpoint,contract,created_at,last_error,lease_expires_at,not_before,status,task_id,tenant_id)",
+        "UPDATE(attempts,claimed_at,finished_at,last_error,lease_expires_at,not_before,status,worker_id)"
+      ],
+      "policies": [
+        "tasks_definer_claim_select|P|SELECT|using=true|check=-",
+        "tasks_definer_claim_update|P|UPDATE|using=true|check=true"
+      ]
+    },
+    "tenants": {
+      "reason": "Tenant-katalog uten tenant-kontekst (023/052): jarvis_list_business_tenant_ids og jarvis_list_all_tenant_ids leser kun tenant_id og kind.",
+      "privileges": [
+        "SELECT(kind,tenant_id)"
+      ],
+      "policies": [
+        "tenants_definer_catalog|P|SELECT|using=true|check=-"
+      ]
+    },
+    "tool_executions": {
+      "reason": "Retensjon (073): prune_operational_data leser og sletter fullførte verktøykjøringer (succeeded/failed) eldre enn 30 dager.",
+      "privileges": [
+        "DELETE",
+        "SELECT(executed_at,idempotency_key,status,tenant_id)"
+      ],
+      "policies": [
+        "tool_executions_definer_prune_select|P|SELECT|using=((status = ANY (ARRAY['succeeded'::text, 'failed'::text])) AND (executed_at < (now() - '30 days'::interval)))|check=-",
+        "tool_executions_definer_prune|P|DELETE|using=((status = ANY (ARRAY['succeeded'::text, 'failed'::text])) AND (executed_at < (now() - '30 days'::interval)))|check=-"
+      ]
+    }
+  },
   "exceptions": [
     {
       "rule": "platform_app_access",

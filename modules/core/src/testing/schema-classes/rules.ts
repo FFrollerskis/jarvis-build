@@ -67,6 +67,9 @@ export const RULES: readonly RuleInfo[] = [
   R("definer_not_allowlisted", "catalog", false, "SECURITY DEFINER-funksjon utenfor allowlisten (default deny)."),
   R("definer_allowlist_stale", "catalog", false, "Allowlisten har en funksjon som ikke finnes som SECURITY DEFINER (allowlisten kan bare krympe)."),
   R("definer_owner_privileged", "catalog", false, "SECURITY DEFINER-funksjon eid av en superuser/BYPASSRLS-rolle."),
+  R("definer_owner_unexpected", "catalog", false, "SECURITY DEFINER-funksjon eid av en annen rolle enn `jarvis_definer` (`definer_access` dekker kun den rollens tilgang)."),
+  R("definer_access_unlisted", "catalog", false, "`jarvis_definer` har et privilegium eller en policy (`TO jarvis_definer`) på en tabell som ikke står i manifestets `definer_access` (blast radius for DEFINER-funksjonene)."),
+  R("definer_access_stale", "catalog", false, "Manifestets `definer_access` lister et privilegium/en policy som `jarvis_definer` ikke lenger har, eller med annen tekst (listen kan bare krympe: fjern/rett oppføringen)."),
   R("definer_search_path", "catalog", false, "SECURITY DEFINER-funksjon uten låst `search_path` (pg_catalog først, pg_temp sist)."),
   R("definer_public_execute", "catalog", false, "SECURITY DEFINER-funksjon med EXECUTE for PUBLIC.")
 ];
@@ -95,6 +98,8 @@ export interface ClassInfo {
 
 export interface LintConfig {
   readonly runtimeRole: string;
+  /** Rollen som skal eie alle SECURITY DEFINER-funksjoner; dens tilgang er frosset i manifestets `definer_access`. */
+  readonly definerRole: string;
   /** Roller en `true`-policy kan være rettet mot (SECURITY DEFINER-eieren; ikke runtime). */
   readonly trustedPolicyRoles: ReadonlySet<string>;
   readonly tenantSetting: string;
@@ -102,6 +107,7 @@ export interface LintConfig {
 
 export const DEFAULT_LINT_CONFIG: LintConfig = {
   runtimeRole: "jarvis_app",
+  definerRole: "jarvis_definer",
   trustedPolicyRoles: new Set(["jarvis_definer"]),
   tenantSetting: "jarvis.tenant_id"
 };
@@ -113,6 +119,8 @@ export interface LintInput {
   readonly definerAllowlist: ReadonlySet<string>;
   /** Roller runtime-rollen (eller et medlem) har lov til å være medlem av (manifestets `runtime_parent_allowlist`; tom = ingen). */
   readonly runtimeParentAllowlist?: ReadonlySet<string>;
+  /** Frosset tilgang for DEFINER-rollen per tabell (manifestets `definer_access`; tom = ingen tilgang). */
+  readonly definerAccess?: Readonly<Record<string, { readonly privileges: readonly string[]; readonly policies: readonly string[] }>>;
   readonly config?: Partial<LintConfig>;
 }
 
@@ -384,11 +392,27 @@ export function lintCatalog(input: LintInput): Violation[] {
     if (!fn.securityDefiner) continue;
     seenDefiners.add(fn.signature);
     if (!input.definerAllowlist.has(fn.signature)) add("definer_not_allowlisted", null, fn.signature, `SECURITY DEFINER-funksjonen ${fn.signature} står ikke på allowlisten (default deny). Legg til \`-- jarvis-definer: ${fn.signature} reason="..."\` i migrasjonen som lager den.`);
+    if (fn.owner !== cfg.definerRole) add("definer_owner_unexpected", null, fn.signature, `${fn.signature} eies av ${fn.owner}, ikke ${cfg.definerRole}: definer_access i manifestet beskriver kun ${cfg.definerRole} sin tilgang, så en annen eier ville hatt ulintede rettigheter.`);
     if (fn.ownerIsSuperuser || fn.ownerBypassRls) add("definer_owner_privileged", null, fn.signature, `${fn.signature} eies av ${fn.owner} (superuser/BYPASSRLS): en DEFINER-funksjon må eies av en rolle med minst mulig rettigheter.`);
     const sp = fn.config.find((c) => c.startsWith("search_path="));
     const parts = sp === undefined ? [] : sp.slice("search_path=".length).split(",").map((s) => s.trim());
     if (parts[0] !== "pg_catalog" || parts[parts.length - 1] !== "pg_temp") add("definer_search_path", null, fn.signature, `${fn.signature} har ikke låst search_path (forventet pg_catalog først og pg_temp sist, fant ${sp ?? "ingen"}).`);
     if (fn.publicExecute) add("definer_public_execute", null, fn.signature, `${fn.signature} har EXECUTE for PUBLIC: REVOKE ALL ... FROM PUBLIC og GRANT kun til nødvendige roller.`);
+  }
+  // DEFINER-rollens tilgang: alt jarvis_definer har (GRANT og policyer `TO jarvis_definer`) må stå i den frosne listen, og listen kan bare krympe (foreldede oppføringer feiler).
+  const listedAccess = input.definerAccess ?? {};
+  const actualAccess = new Map(catalog.definerAccess.map((a) => [a.table, a] as const));
+  const accessItems = (a: { readonly privileges: readonly string[]; readonly policies: readonly string[] } | undefined): Set<string> =>
+    new Set([...(a?.privileges ?? []).map((x) => `priv:${x}`), ...(a?.policies ?? []).map((x) => `policy:${x}`)]);
+  for (const table of [...new Set([...Object.keys(listedAccess), ...actualAccess.keys()])].sort()) {
+    const have = accessItems(actualAccess.get(table));
+    const want = accessItems(listedAccess[table]);
+    for (const item of [...have].sort()) {
+      if (!want.has(item)) add("definer_access_unlisted", table, item, `${cfg.definerRole} har ${item} på ${table}, men det står ikke i manifestets definer_access (nye GRANT/policyer til ${cfg.definerRole} utvider blast radius for DEFINER-funksjonene og krever en eksplisitt, pinned endring).`);
+    }
+    for (const item of [...want].sort()) {
+      if (!have.has(item)) add("definer_access_stale", table, item, `definer_access lister ${item} på ${table}, men ${cfg.definerRole} har ikke (lenger) akkurat det (listen kan bare krympe: fjern eller rett oppføringen).`);
+    }
   }
   for (const sig of input.definerAllowlist) {
     if (!seenDefiners.has(sig)) add("definer_allowlist_stale", null, sig, `Allowlisten har ${sig}, men databasen har ingen SECURITY DEFINER-funksjon med den signaturen (allowlisten kan bare krympe: fjern oppføringen).`);

@@ -52,7 +52,10 @@ export async function runSchemaClassChecks(options: CheckOptions): Promise<Check
   let catalog: Catalog | null = null;
   let dbTables: string[] | null = null;
   if (options.db !== undefined) {
-    catalog = await extractCatalog(options.db, options.config?.runtimeRole === undefined ? {} : { runtimeRole: options.config.runtimeRole });
+    catalog = await extractCatalog(options.db, {
+      ...(options.config?.runtimeRole === undefined ? {} : { runtimeRole: options.config.runtimeRole }),
+      ...(options.config?.definerRole === undefined ? {} : { definerRole: options.config.definerRole })
+    });
     dbTables = catalog.relations.filter((r) => r.schema === "public" && r.kind === "r").map((r) => r.name);
   }
   const resolved = resolveClasses(manifest, analysis, dbTables);
@@ -65,6 +68,7 @@ export async function runSchemaClassChecks(options: CheckOptions): Promise<Check
       classes: resolved.classes,
       definerAllowlist: definerAllowlist(manifest, analysis),
       runtimeParentAllowlist: new Set(manifest.runtime_parent_allowlist.map((e) => e.role)),
+      definerAccess: manifest.definer_access,
       ...(options.config === undefined ? {} : { config: options.config })
     });
     const reconciled = reconcileExceptions(violations, manifest.exceptions);

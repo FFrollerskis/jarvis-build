@@ -94,6 +94,15 @@ export interface CatalogFunction {
   readonly runtimeExecute: boolean;
 }
 
+/** Tilgangen DEFINER-rollen (`jarvis_definer`) har til en tabell: kanonisk tekst per privilegium og per policy som lister rollen eksplisitt (se `extractCatalog`). */
+export interface CatalogDefinerAccess {
+  readonly table: string;
+  /** Tabellprivilegier (`SELECT`, `DELETE`, ...) og kolonneprivilegier som ikke er dekket av tabellnivå (`UPDATE(kol1,kol2)`), sortert. */
+  readonly privileges: readonly string[];
+  /** Policyer med DEFINER-rollen i `TO`-listen: `navn|P|DELETE|using=<uttrykk eller ->|check=<uttrykk eller ->` (P = PERMISSIVE, R = RESTRICTIVE), sortert. */
+  readonly policies: readonly string[];
+}
+
 export interface CatalogRole {
   readonly name: string;
   readonly canLogin: boolean;
@@ -125,6 +134,9 @@ export interface Catalog {
   readonly runtimeCanCreateInPublic: boolean;
   /** Runtime-rollen har CREATE på databasen (kan opprette egne skjemaer/objekter). */
   readonly runtimeCanCreateInDatabase: boolean;
+  /** DEFINER-rollens (`jarvis_definer`) faktiske tilgang per tabell (kun tabeller der den har minst ett privilegium eller en policy). Blast radius for SECURITY DEFINER-funksjonene. */
+  readonly definerRole: string;
+  readonly definerAccess: readonly CatalogDefinerAccess[];
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : String(v ?? ""));
@@ -136,7 +148,11 @@ const POLICY_COMMANDS: Record<string, PolicyCommand> = { "*": "ALL", r: "SELECT"
 
 export interface ExtractOptions {
   readonly runtimeRole?: string;
+  /** Rollen som eier SECURITY DEFINER-funksjonene (default `jarvis_definer`). */
+  readonly definerRole?: string;
 }
+
+const squash = (expr: string | null): string => (expr === null ? "-" : expr.replace(/\s+/g, " ").trim());
 
 /**
  * Leser katalogen. Utenfor `pg_catalog`/`information_schema`/toast/temp. Kun SELECT.
@@ -239,6 +255,54 @@ export async function extractCatalog(db: Queryable, options: ExtractOptions = {}
     using: r["using_expr"] === null ? null : str(r["using_expr"]),
     withCheck: r["check_expr"] === null ? null : str(r["check_expr"])
   }));
+
+  // DEFINER-rollens tilgang (blast radius for SECURITY DEFINER-funksjonene): tabell- og kolonneprivilegier og policyer som lister rollen. Tomt hvis rollen ikke finnes.
+  const definer = options.definerRole ?? "jarvis_definer";
+  const definerExists = (await db.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [definer])).rows.length > 0;
+  const access = new Map<string, { privileges: Set<string>; policies: Set<string> }>();
+  const accessOf = (table: string): { privileges: Set<string>; policies: Set<string> } => {
+    const have = access.get(table) ?? { privileges: new Set<string>(), policies: new Set<string>() };
+    access.set(table, have);
+    return have;
+  };
+  if (definerExists) {
+    const tablePrivs = (
+      await db.query(
+        `SELECT c.relname AS tbl, p.priv AS priv FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+           CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) p(priv)
+          WHERE c.relkind IN ('r','p') AND ${sysSchemas} AND has_table_privilege($1::name, c.oid, p.priv) ORDER BY 1, 2`,
+        [definer]
+      )
+    ).rows;
+    const tableLevel = new Set(tablePrivs.map((r) => `${str(r["tbl"])}|${str(r["priv"])}`));
+    for (const r of tablePrivs) accessOf(str(r["tbl"])).privileges.add(str(r["priv"]));
+    const columnPrivs = (
+      await db.query(
+        `SELECT c.relname AS tbl, p.priv AS priv, a.attname::text AS col FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+           JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+           CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES')) p(priv)
+          WHERE c.relkind IN ('r','p') AND ${sysSchemas} AND has_column_privilege($1::name, c.oid, a.attnum, p.priv) AND NOT has_table_privilege($1::name, c.oid, p.priv)
+          ORDER BY 1, 2, 3`,
+        [definer]
+      )
+    ).rows;
+    const byColumnGrant = new Map<string, string[]>();
+    for (const r of columnPrivs) {
+      const key = `${str(r["tbl"])}|${str(r["priv"])}`;
+      if (tableLevel.has(key)) continue;
+      byColumnGrant.set(key, [...(byColumnGrant.get(key) ?? []), str(r["col"])]);
+    }
+    for (const [key, cols] of byColumnGrant) {
+      const [tbl, priv] = key.split("|") as [string, string];
+      accessOf(tbl).privileges.add(`${priv}(${[...cols].sort().join(",")})`);
+    }
+  }
+  for (const p of policies) {
+    if (p.roles.includes(definer)) accessOf(p.table).policies.add(`${p.name}|${p.permissive ? "P" : "R"}|${p.command}|using=${squash(p.using)}|check=${squash(p.withCheck)}`);
+  }
+  const definerAccess: CatalogDefinerAccess[] = [...access]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([table, have]) => ({ table, privileges: [...have.privileges].sort(), policies: [...have.policies].sort() }));
 
   const fkRows = (
     await db.query(
@@ -358,5 +422,5 @@ export async function extractCatalog(db: Queryable, options: ExtractOptions = {}
     runtimeCanCreateInDatabase = bool(databaseRows[0]?.["can_create"]);
   }
 
-  return { runtimeRole: runtime, relations, columns, tablePrivileges, policies, foreignKeys, indexes, functions, runtimeRoleRecord, runtimeMembers, runtimeParents, runtimeCanCreateInPublic, runtimeCanCreateInDatabase };
+  return { runtimeRole: runtime, relations, columns, tablePrivileges, policies, foreignKeys, indexes, functions, runtimeRoleRecord, runtimeMembers, runtimeParents, runtimeCanCreateInPublic, runtimeCanCreateInDatabase, definerRole: definer, definerAccess };
 }

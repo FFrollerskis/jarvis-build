@@ -145,7 +145,7 @@ interface Mutant {
   readonly desc: string;
   readonly sql: () => string;
   /** Regler linten MÅ rapportere (tabell og presis detalj valgfritt). */
-  readonly lint: ReadonlyArray<{ rule: string; table?: () => string | null; detail?: string }>;
+  readonly lint: ReadonlyArray<{ rule: string; table?: () => string | null; detail?: string; detailIncludes?: string }>;
   /** Atferdsharnisken MÅ feile på disse operasjonene (kun policy-mutanter som er atferdsmessig synlige): kontroll (egen tenant virker ikke) eller lekkasje. */
   readonly behavior?: ReadonlyArray<Op>;
   /** Operasjoner der harnisken MÅ melde en LEKKASJE (angrepet lyktes), ikke bare en feilet kontroll. */
@@ -250,7 +250,14 @@ const MUTANTS: Mutant[] = [
   },
   { id: "M61", desc: "policy for BLANDEDE roller (jarvis_definer + runtime) med USING (true): ikke 'betrodd' når bare noen av rollene er det", sql: () => `CREATE POLICY mut_mixed ON ${q(T())} FOR SELECT TO jarvis_definer, jarvis_app USING (true)`, lint: [{ rule: "policy_true", table: T, detail: "mut_mixed:using" }], behavior: ["read"], behaviorLeak: ["read"] },
   { id: "M62", desc: "tenant-indeksen er UGYLDIG (indisvalid = false): teller ikke som indeks", sql: () => `UPDATE pg_index SET indisvalid = false WHERE indexrelid = '${pick.index}'::regclass`, lint: [{ rule: "tenant_index_missing", table: () => pick.indexTable }], behaviorEquivalent: true },
-  { id: "M63", desc: "PROSEDYRE med SECURITY DEFINER utenfor allowlisten (kun prokind 'p'; katalogen må se prosedyrer)", sql: () => "CREATE PROCEDURE mut_proc() LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$ SELECT 1 $$", lint: [{ rule: "definer_not_allowlisted", table: () => null, detail: "mut_proc()" }] }
+  { id: "M63", desc: "PROSEDYRE med SECURITY DEFINER utenfor allowlisten (kun prokind 'p'; katalogen må se prosedyrer)", sql: () => "CREATE PROCEDURE mut_proc() LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$ SELECT 1 $$", lint: [{ rule: "definer_not_allowlisted", table: () => null, detail: "mut_proc()" }] },
+  // --- fiks-runde 1, M3: jarvis_definer sin tilgang (GRANT og policyer `TO jarvis_definer`) er frosset i manifestets `definer_access` og kan bare krympe ---
+  { id: "M64", desc: "policy FOR ALL TO jarvis_definer USING (true) WITH CHECK (true) på en baseline ORG-tabell (blast radius for DEFINER-funksjonene)", sql: () => "CREATE POLICY definer_all ON sites FOR ALL TO jarvis_definer USING (true) WITH CHECK (true)", lint: [{ rule: "definer_access_unlisted", table: () => "sites", detailIncludes: "policy:definer_all|" }] },
+  { id: "M65", desc: "GRANT ALL ON en baseline ORG-tabell TO jarvis_definer", sql: () => "GRANT ALL ON sites TO jarvis_definer", lint: ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"].map((p) => ({ rule: "definer_access_unlisted", table: () => "sites", detail: `priv:${p}` })) },
+  { id: "M66", desc: "kolonne-GRANT utvidet for en allerede listet tabell (UPDATE (contract) ON tasks): den frosne kolonnelisten stemmer ikke lenger", sql: () => "GRANT UPDATE (contract) ON tasks TO jarvis_definer", lint: [{ rule: "definer_access_unlisted", table: () => "tasks", detailIncludes: "priv:UPDATE(" }, { rule: "definer_access_stale", table: () => "tasks", detailIncludes: "priv:UPDATE(" }] },
+  { id: "M67", desc: "en listet definer-policy svekkes (USING true på approvals_definer_prune): ny tekst er ikke i manifestet, den frosne er foreldet", sql: () => "ALTER POLICY approvals_definer_prune ON approvals USING (true)", lint: [{ rule: "definer_access_unlisted", table: () => "approvals", detailIncludes: "policy:approvals_definer_prune|" }, { rule: "definer_access_stale", table: () => "approvals", detailIncludes: "policy:approvals_definer_prune|" }] },
+  { id: "M68", desc: "en listet rettighet fjernes (REVOKE DELETE ON approvals): oppføringen i manifestet er foreldet (kan bare krympe)", sql: () => "REVOKE DELETE ON approvals FROM jarvis_definer", lint: [{ rule: "definer_access_stale", table: () => "approvals", detail: "priv:DELETE" }] },
+  { id: "M69", desc: "DEFINER-funksjon eid av en annen rolle enn jarvis_definer (definer_access dekker kun jarvis_definer)", sql: () => `CREATE ROLE mut_other_owner NOLOGIN; ALTER FUNCTION ${DEFINER_FN} OWNER TO mut_other_owner`, lint: [{ rule: "definer_owner_unexpected", table: () => null, detail: DEFINER_FN }] }
 ];
 
 describe("A: mutanter mot det eksisterende skjemaet (DDL i en transaksjon som rulles tilbake)", () => {
@@ -269,8 +276,10 @@ describe("A: mutanter mot det eksisterende skjemaet (DDL i en transaksjon som ru
       });
       for (const want of m.lint) {
         const table = want.table === undefined ? undefined : want.table();
-        const hit = strictResult.failures.some((f) => f.rule === want.rule && (table === undefined || f.table === table) && (want.detail === undefined || f.detail === want.detail));
-        expect(hit, `${m.id}: forventet [${want.rule}]${table === undefined ? "" : ` på ${table}`}${want.detail === undefined ? "" : ` (${want.detail})`} fra linten, fikk:\n${formatFailures(strictResult.failures)}`).toBe(true);
+        const hit = strictResult.failures.some(
+          (f) => f.rule === want.rule && (table === undefined || f.table === table) && (want.detail === undefined || f.detail === want.detail) && (want.detailIncludes === undefined || f.detail.includes(want.detailIncludes))
+        );
+        expect(hit, `${m.id}: forventet [${want.rule}]${table === undefined ? "" : ` på ${table}`}${want.detail === undefined ? "" : ` (${want.detail})`}${want.detailIncludes === undefined ? "" : ` (detail inneholder ${want.detailIncludes})`} fra linten, fikk:\n${formatFailures(strictResult.failures)}`).toBe(true);
       }
       let behaviorKilled = false;
       if (m.behavior !== undefined || m.behaviorEquivalent === true) {

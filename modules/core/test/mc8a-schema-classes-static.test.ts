@@ -46,6 +46,8 @@ interface Draft {
   classes: Record<string, string[]>;
   class_notes: Record<string, string>;
   definer_allowlist: Array<{ signature: string; reason: string }>;
+  runtime_parent_allowlist: Array<{ role: string; reason: string }>;
+  definer_access: Record<string, { reason: string; privileges: string[]; policies: string[] }>;
   exceptions: Array<{ rule: string; table: string; detail?: string; reason: string; finding?: string }>;
   exception_ceiling: { total: number; per_rule: Record<string, number> };
 }
@@ -266,7 +268,15 @@ describe("E: manifestet (frosset baseline) er gyldig, og hver manifest-mutant av
       m.exceptions.push({ rule: "tenant_index_missing", table: "tenants", reason: "En gyldig lang begrunnelse" });
     }, /exceptions_above_rule_ceiling:tenant_index_missing/],
     ["ugyldig definer-signatur", (m) => m.definer_allowlist.push({ signature: "Foo(text)", reason: "En gyldig lang begrunnelse" }), /definer_signature_invalid/],
-    ["definer uten begrunnelse", (m) => m.definer_allowlist.push({ signature: "foo(text)", reason: "kort" }), /definer_reason_missing/]
+    ["definer uten begrunnelse", (m) => m.definer_allowlist.push({ signature: "foo(text)", reason: "kort" }), /definer_reason_missing/],
+    ["definer_access for en ukjent tabell", (m) => (m.definer_access["ghost"] = { reason: "En gyldig lang begrunnelse", privileges: ["DELETE"], policies: [] }), /definer_access_unknown_table:ghost/],
+    ["definer_access uten begrunnelse", (m) => (m.definer_access["tasks"] = { ...(m.definer_access["tasks"] as Draft["definer_access"][string]), reason: "kort" }), /definer_access_reason_missing:tasks/],
+    ["definer_access tom oppføring", (m) => (m.definer_access["tasks"] = { reason: "En gyldig lang begrunnelse", privileges: [], policies: [] }), /definer_access_empty:tasks/],
+    ["definer_access ikke sortert", (m) => m.definer_access["tasks"]?.privileges.reverse(), /definer_access_not_sorted_unique:tasks.privileges/],
+    ["definer_access med duplikat", (m) => m.definer_access["approvals"]?.privileges.push("DELETE"), /definer_access_not_sorted_unique:approvals.privileges/],
+    ["runtime_parent_allowlist: ugyldig rollenavn", (m) => m.runtime_parent_allowlist.push({ role: "Bad Role", reason: "En gyldig lang begrunnelse" }), /runtime_parent_role_invalid:Bad Role/],
+    ["runtime_parent_allowlist: uten begrunnelse", (m) => m.runtime_parent_allowlist.push({ role: "some_role", reason: "kort" }), /runtime_parent_reason_missing:some_role/],
+    ["runtime_parent_allowlist: duplikat", (m) => m.runtime_parent_allowlist.push({ role: "some_role", reason: "En gyldig lang begrunnelse" }, { role: "some_role", reason: "En gyldig lang begrunnelse" }), /runtime_parent_duplicate:some_role/]
   ];
   for (const [name, change, expected] of mutants) {
     it(`manifest-mutant avvises: ${name}`, () => {

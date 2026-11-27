@@ -38,6 +38,13 @@ export interface RuntimeParentEntry {
   readonly reason: string;
 }
 
+/** Frosset tilgang for `jarvis_definer` til én tabell (se `CatalogDefinerAccess` for tekstformatet). Kan bare krympe. */
+export interface DefinerAccessEntry {
+  readonly reason: string;
+  readonly privileges: readonly string[];
+  readonly policies: readonly string[];
+}
+
 export interface Manifest {
   readonly version: 1;
   readonly frozen_through_migration: number;
@@ -49,6 +56,8 @@ export interface Manifest {
   readonly definer_allowlist: readonly DefinerAllowEntry[];
   /** Foreldre (roller runtime er medlem av) som er godkjent. TOM i dag; kan bare krympe (utvidelse krever endring av pinned verdi i testkoden). */
   readonly runtime_parent_allowlist: readonly RuntimeParentEntry[];
+  /** `jarvis_definer` sin tilgang per FROSSEN tabell (privilegier og policyer `TO jarvis_definer`), frosset fra skjemaet etter migrasjon 148. Kan bare krympe. */
+  readonly definer_access: Readonly<Record<string, DefinerAccessEntry>>;
   readonly exceptions: readonly BaselineException[];
   readonly exception_ceiling: { readonly total: number; readonly per_rule: Readonly<Record<string, number>> };
 }
@@ -90,6 +99,12 @@ export function manifestShapeProblems(raw: unknown): string[] {
     Array.isArray(raw["runtime_parent_allowlist"]) && raw["runtime_parent_allowlist"].every((e) => isRecord(e) && typeof e["role"] === "string" && typeof e["reason"] === "string"),
     "runtime_parent_allowlist",
     "en liste av {role, reason}"
+  );
+  need(
+    isRecord(raw["definer_access"]) &&
+      Object.values(raw["definer_access"]).every((e) => isRecord(e) && typeof e["reason"] === "string" && isStringArray(e["privileges"]) && isStringArray(e["policies"])),
+    "definer_access",
+    "et objekt tabell -> {reason, privileges[], policies[]}"
   );
   need(
     Array.isArray(raw["exceptions"]) &&
@@ -193,6 +208,14 @@ export function validateManifest(manifest: Manifest, knownRules: ReadonlySet<str
   for (const entry of manifest.definer_allowlist) {
     if (!/^[a-z_][a-z0-9_]*\([^()]*\)$/.test(entry.signature)) problems.push(`manifest_definer_signature_invalid:${entry.signature}`);
     if (entry.reason.trim().length < 10) problems.push(`manifest_definer_reason_missing:${entry.signature}`);
+  }
+  for (const [table, entry] of Object.entries(manifest.definer_access)) {
+    if (!seen.has(table)) problems.push(`manifest_definer_access_unknown_table:${table}`);
+    if (entry.reason.trim().length < 10) problems.push(`manifest_definer_access_reason_missing:${table}`);
+    if (entry.privileges.length + entry.policies.length === 0) problems.push(`manifest_definer_access_empty:${table}`);
+    for (const [label, list] of [["privileges", entry.privileges], ["policies", entry.policies]] as const) {
+      if (JSON.stringify([...new Set(list)].sort()) !== JSON.stringify(list)) problems.push(`manifest_definer_access_not_sorted_unique:${table}.${label}`);
+    }
   }
   const parents = new Set<string>();
   for (const entry of manifest.runtime_parent_allowlist) {
