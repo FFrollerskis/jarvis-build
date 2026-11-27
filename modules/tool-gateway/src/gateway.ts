@@ -1217,7 +1217,7 @@ export class ToolGateway {
       if (!isPolicyDenied(err)) {
         this.setHealth(request.tool_id,
           /401|403|auth/.test(raw) ? "auth_failed" : /429|rate/.test(raw) ? "rate_limited" : "unavailable",
-          raw.slice(0, 60));
+          clipRedacted(raw, 60)); // (review B, M1: rå leverandørfeil kuttet FØR skann lå igjen i `health[tool].detail`, som vises av /infra/status og executive-status)
       }
     }
 
