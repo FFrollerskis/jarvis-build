@@ -50,7 +50,7 @@ async function transcribe(stt: SttAdapter): Promise<string> {
 }
 
 describe("isPrivateSttHost", () => {
-  it.each(["127.0.0.1", "localhost", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.5", "100.86.89.57", "100.64.0.1", "100.127.255.255", "169.254.1.1", "nas", "[::1]", "fd00::1"])("%s er privat", (h) => {
+  it.each(["127.0.0.1", "localhost", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.5", "100.101.102.103", "100.64.0.1", "100.127.255.255", "169.254.1.1", "nas", "[::1]", "fd00::1"])("%s er privat", (h) => {
     expect(isPrivateSttHost(h)).toBe(true);
   });
   it.each(["8.8.8.8", "100.128.0.1", "100.63.0.1", "172.32.0.1", "172.15.0.1", "192.169.0.1", "api.openai.com", "example.com", "999.1.1.1", "2606:4700::1"])("%s er IKKE privat", (h) => {
@@ -66,7 +66,7 @@ describe("RemoteWhisperStt: konfigurasjon (fail-closed)", () => {
     expect(() => new RemoteWhisperStt("https://example.com").startStream()).toThrow("remote_whisper_not_configured");
   });
   it("privat adresse => tilgjengelig og deklarert lokal", () => {
-    const s = new RemoteWhisperStt("http://100.86.89.57:8000/");
+    const s = new RemoteWhisperStt("http://100.101.102.103:8000/");
     expect(s.available()).toBe(true);
     expect(s.processor.locality).toBe("local");
     expect(s.processor.processor_terms_status).toBe("NOT_APPLICABLE_LOCAL");
