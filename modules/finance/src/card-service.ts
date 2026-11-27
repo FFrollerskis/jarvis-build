@@ -296,7 +296,7 @@ export class CardService {
       await this.settleFailedSubmit(tenantId, memorySpace, cardId, failureClass, "call").catch((cleanupErr) => {
         console.error(JSON.stringify({ msg: "card_submit_cleanup_failed", card_id: cardId, error: redactForLog((cleanupErr as Error).message, 120) }));
       });
-      if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(cardId, (err instanceof Error ? err.message : String(err)).replace(/^outcome_unknown:/, "").slice(0, 110), err);
+      if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(cardId, clipRedacted((err instanceof Error ? err.message : String(err)).replace(/^outcome_unknown:/, ""), 110), err);
       throw err;
     }
 
@@ -319,7 +319,7 @@ export class CardService {
       await this.settleFailedSubmit(tenantId, memorySpace, cardId, "unknown", "local_write").catch((cleanupErr) => {
         console.error(JSON.stringify({ msg: "card_submit_cleanup_failed", card_id: cardId, phase: "after_provider_call", error: redactForLog((cleanupErr as Error).message, 120) }));
       });
-      throw new ProviderOutcomeUnknownError(cardId, `provider_call_completed_local_write_failed:${applyErr instanceof Error ? applyErr.message : String(applyErr)}`.slice(0, 110), applyErr);
+      throw new ProviderOutcomeUnknownError(cardId, clipRedacted(`provider_call_completed_local_write_failed:${applyErr instanceof Error ? applyErr.message : String(applyErr)}`, 110), applyErr);
     }
   }
 

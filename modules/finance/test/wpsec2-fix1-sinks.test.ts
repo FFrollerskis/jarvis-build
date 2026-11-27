@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 import { FinanceService } from "../src/service.ts";
+import { ProviderOutcomeUnknownError } from "../src/types.ts";
 import { StripeTransport } from "../src/stripe-transport.ts";
 import { VippsTransport } from "../src/vipps-transport.ts";
 import { fikenAccessToken, resetFikenAccessTokenCache } from "../src/fiken-transport.ts";
@@ -87,5 +88,16 @@ describe("F1 (white-box): frigivelse av en barne-reservasjon lagrer en redigert 
     expect(queries).toHaveLength(1);
     clean(queries[0]?.params, "failure_reason");
     expect(queries[0]?.params[2]).toBe(`provider said ${MARK}`);
+  });
+});
+
+describe("B-L3: `ProviderOutcomeUnknownError` skanner detaljen før den kuttes (var `.slice(0, 160)` uten skanning)", () => {
+  it("token innenfor og over 160 tegn gir ingen token-rest i meldingen (som lagres som `failure_reason` og kastes videre)", () => {
+    const inside = new ProviderOutcomeUnknownError("s-1", `provider_call_completed_local_write_failed:duplicate key ${TOKEN}`);
+    clean(inside.message, "outcome_unknown");
+    expect(inside.message).toBe(`outcome_unknown:provider_call_completed_local_write_failed:duplicate key ${MARK}`);
+    const crossing = new ProviderOutcomeUnknownError("s-1", `${"x".repeat(135)} ${TOKEN}`);
+    clean(crossing.message, "outcome_unknown (kryss)");
+    expect(crossing.message.length).toBeLessThanOrEqual(160);
   });
 });

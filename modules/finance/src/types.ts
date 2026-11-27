@@ -11,6 +11,8 @@
  * webhook-hendelses-identiteten EXTERNAL_CANONICAL. Bank (resten av P1) og
  * kort/wallet (P2) er BEVISST IKKE bygget ennå - se `PaymentProvider` under.
  */
+import { clipRedacted } from "@jarvis/core";
+
 
 export type PaymentIntentState = "draft" | "submitted" | "provider_acknowledged" | "settled" | "failed" | "cancelled";
 export type ReconciliationState = "unreconciled" | "matched" | "mismatched";
@@ -210,7 +212,7 @@ export class PossibleDuplicatePaymentError extends Error {
  */
 export class ProviderOutcomeUnknownError extends Error {
   constructor(readonly subjectId: string, detail: string, cause?: unknown) {
-    super(`outcome_unknown:${detail}`.slice(0, 160), cause === undefined ? undefined : { cause });
+    super(clipRedacted(`outcome_unknown:${detail}`, 160), cause === undefined ? undefined : { cause }); // skann FØRST, kutt etterpå (fiks-runde 1, review B L3)
     this.name = "ProviderOutcomeUnknownError";
   }
 }

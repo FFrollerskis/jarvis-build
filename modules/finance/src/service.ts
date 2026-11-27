@@ -910,7 +910,7 @@ export class FinanceService {
       await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.onCallError!(client, prepared.plan, "unknown", applyErr)).catch((cleanupErr) => {
         console.error(JSON.stringify({ msg: "finance_submit_cleanup_failed", subject_id: steps.subjectId ?? null, phase: "after_provider_call", error: redactForLog((cleanupErr as Error).message, 120) }));
       });
-      throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", `provider_call_completed_local_write_failed:${applyErr instanceof Error ? applyErr.message : String(applyErr)}`.slice(0, 110), applyErr);
+      throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", clipRedacted(`provider_call_completed_local_write_failed:${applyErr instanceof Error ? applyErr.message : String(applyErr)}`, 110), applyErr);
     }
   }
 
@@ -960,7 +960,7 @@ export class FinanceService {
     const reverted = await client.query(
       `UPDATE ${table} SET state = 'draft', submitted_at = NULL, failure_reason = $3, updated_at = now()
        WHERE tenant_id = $1 AND ${idColumn} = $2 AND state = 'submitted'${refGuard}`,
-      [tenantId, id, `outcome_unknown:${reason}`.slice(0, 200)]
+      [tenantId, id, clipRedacted(`outcome_unknown:${reason}`, 200)]
     );
     // Flagges kun når raden FAKTISK var uferdig: er leverandørsvaret allerede lagret (samtidig gjenopptakelse) finnes det intet ukjent utfall å varsle om.
     if ((reverted.rowCount ?? 0) === 1) await this.appendChainAnomalyFlags(client, tenantId, table, idColumn, id, ["SUBMIT_OUTCOME_UNKNOWN"]);
@@ -1034,7 +1034,7 @@ export class FinanceService {
       // opprinnelige feilen skjules aldri, den er `cause`). Stripe/Vipps gjenopptas senere med samme Idempotency-Key; Fiken/Neonomics krever avstemming (Fiken-markøren finner bilaget).
       await this.recordUnknownSubmitOutcome(tenantId, memorySpace, paymentIntentId, plan.idempotentAtProvider, "local_write");
       throw new ProviderOutcomeUnknownError(
-        paymentIntentId, `provider_call_completed_local_write_failed:${finalizeErr instanceof Error ? finalizeErr.message : String(finalizeErr)}`.slice(0, 110), finalizeErr
+        paymentIntentId, clipRedacted(`provider_call_completed_local_write_failed:${finalizeErr instanceof Error ? finalizeErr.message : String(finalizeErr)}`, 110), finalizeErr
       );
     }
   }
