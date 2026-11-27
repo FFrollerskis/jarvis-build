@@ -203,3 +203,17 @@ e498cdf5790872e61e91b658b30b31e45a5f42d8:apps/api/test/wpn1-job-status.test.ts:g
 # token or password. Verified manually by the independent reviewer and by lead.
 # NB: the commit hash is stable (the V2 branch is merged, never rebased).
 97b8b75803c19aa1bc37932ede5fbbfa5ba40f01:apps/voice-gateway/test/wpv2-k1-crash-protection.test.ts:generic-api-key:118
+
+# WP-SEC2 (commit 350f18c7): six gitleaks false positives in the scanner's own TEST files. Five are `private-key`
+# hits on the literal PEM header `-----BEGIN PRIVATE KEY-----` inside test source (modules/core/test/wpsec2-secret-scan.test.ts
+# lines 75/332/358/406 and wpsec2-structured.test.ts line 46); every key BODY is generated at run time by the test helper
+# `body(n)` from a deterministic synthetic generator and no key material exists in the repository. One is a
+# `generic-api-key` hit (wpsec2-secret-scan.test.ts line 322) on a list of benign strings the scanner must NOT redact
+# (a trace id, the public RFC 4122 example UUID, a base64 data-URI of synthetic bytes). Verified manually by the lead;
+# the commit stays in branch history (two-parent merge), so the fingerprints stay stable.
+350f18c787f617622a4b91ba4bd7936e5b9b4074:modules/core/test/wpsec2-structured.test.ts:private-key:46
+350f18c787f617622a4b91ba4bd7936e5b9b4074:modules/core/test/wpsec2-secret-scan.test.ts:private-key:75
+350f18c787f617622a4b91ba4bd7936e5b9b4074:modules/core/test/wpsec2-secret-scan.test.ts:generic-api-key:322
+350f18c787f617622a4b91ba4bd7936e5b9b4074:modules/core/test/wpsec2-secret-scan.test.ts:private-key:332
+350f18c787f617622a4b91ba4bd7936e5b9b4074:modules/core/test/wpsec2-secret-scan.test.ts:private-key:358
+350f18c787f617622a4b91ba4bd7936e5b9b4074:modules/core/test/wpsec2-secret-scan.test.ts:private-key:406
