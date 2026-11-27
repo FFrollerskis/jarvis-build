@@ -183,8 +183,9 @@ export const DeviceEnrollmentRequestSchema = z
         /**
          * WP-S1: den KLIENT-PÅSTÅTTE etiketten (eldre klienter sender den fortsatt: `web`, `iphone`, `watch`). Den er ALDRI autoritet: enhetstypen (`devices.device_kind`) bestemmes av serveren fra innrullingsbilletten, og
          * en `device_proof`-innrullering endrer aldri typen. Valgfri, så nye klienter kan utelate den; en avvikende verdi revideres kun (`claimed_kind`, `claimed_kind_matches`).
+         * A-M1 (fiks-runde 1): øvre grense 256 tegn (de ekte verdiene er under 20). Etiketten er ubetrodd tekst som ellers kun var begrenset av JSON-kroppens 64 KiB; en lang verdi avvises her, før noe annet arbeid.
          */
-        kind: z.string().min(1).optional(),
+        kind: z.string().min(1).max(256).optional(),
         public_key_pem: z.string().min(1)
       })
       .strict(),

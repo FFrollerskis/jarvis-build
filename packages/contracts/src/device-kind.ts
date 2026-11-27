@@ -97,8 +97,14 @@ const LEGACY_LABELS: Readonly<Record<string, DeviceKind>> = Object.freeze({
 });
 export function deviceKindFromLegacyLabel(label: unknown): { device_kind: DeviceKind; mapped: boolean } {
   if (typeof label !== "string") return { device_kind: "legacy_unknown", mapped: false };
-  // Kun ASCII-bokstaver/understrek etter at vanlige mellomrom i endene er fjernet: samme avgrensning som `lower(btrim(kind))` i migrasjon 149 (ingen Unicode-/blank-tegn-forskjeller mellom SQL og kode).
-  const trimmed = label.replace(/^ +| +$/g, "");
+  // Kun ASCII-bokstaver/understrek etter at vanlige mellomrom (U+0020) i endene er fjernet: samme avgrensning som `lower(btrim(kind COLLATE "C"))` i migrasjon 149 (ingen Unicode-/blank-tegn-forskjeller mellom SQL og kode).
+  // A-M1 (fiks-runde 1): trimmingen er en LINEÆR løkke, aldri en regex over rå klienttekst (`/^ +| +$/g` er kvadratisk for `x` + mange mellomrom + `y`: 80 000 tegn tok 2,6 sekunder). Regex-en under er forankret og
+  // har en øvre grense på 32 tegn, så den kan ikke backtracke utover 33 skritt uansett hvor lang etiketten er.
+  let start = 0;
+  let end = label.length;
+  while (start < end && label.charCodeAt(start) === 32) start += 1;
+  while (end > start && label.charCodeAt(end - 1) === 32) end -= 1;
+  const trimmed = label.slice(start, end);
   if (!/^[A-Za-z_]{1,32}$/.test(trimmed)) return { device_kind: "legacy_unknown", mapped: false };
   const key = trimmed.toLowerCase();
   const known = Object.hasOwn(LEGACY_LABELS, key) ? LEGACY_LABELS[key] : undefined;

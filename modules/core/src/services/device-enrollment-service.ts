@@ -298,7 +298,6 @@ export class DeviceEnrollmentService {
         const kindChanged = target !== null && target.device_kind !== decided.device_kind;
         const sourceChanged = target !== null && target.device_kind_source !== decided.device_kind_source;
         const claimed = request.device.kind;
-        const claimedMatches = claimed === undefined ? null : deviceKindFromLegacyLabel(claimed).device_kind === decided.device_kind;
         const bindingMode: ChannelBindingMode = this.deps.channelBindingMode === "enforce" ? "enforce" : "observe";
 
         // WP-S1: en enhet uten step-up-kanal kan ikke vitne for å re-nøkle en ANNEN enhet som har en (se filhodet). Re-nøkling av seg selv er alltid tillatt; en NY enhet blir `legacy_unknown` og er ufarlig.
@@ -312,6 +311,10 @@ export class DeviceEnrollmentService {
           if (bindingMode === "enforce") throw new EnrollmentDenial("authorizing_device_kind_not_allowed", fact);
           wouldDeny = fact;
         }
+
+        // A-M1 (fiks-runde 1): den påståtte etiketten (ubetrodd tekst) sammenlignes FØRST ETTER regel R-B, så et avslått forsøk aldri koster arbeid over den. Selve avbildningen er lineær og etiketten er begrenset til 256
+        // tegn i kontrakten, men rekkefølgen er en bevisst andre forsvarslinje: radlåsene er holdt hele tiden her, og et avslag skal slippe dem så fort som mulig.
+        const claimedMatches = claimed === undefined ? null : deviceKindFromLegacyLabel(claimed).device_kind === decided.device_kind;
 
         let written: boolean;
         try {
