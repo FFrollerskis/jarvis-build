@@ -159,17 +159,18 @@ describe("F: vakten er selv mutasjonstestet (den feller det den skal felle)", ()
 });
 
 describe("G: hasOwnFullChain krever HVER egenskap i WP-D3-kjeden (ellers står en handling feilaktig som existing_chain)", () => {
-  const full = {
+  const full: Record<string, unknown> = {
     preflight_action: "get_state", preflight_requires_target: true, preflight_validator: () => true, postcondition_predicate: () => true, step_up_required: true, owner_only: true
-  } as unknown as ToolDefinition;
+  };
+  const chain = (over: Record<string, unknown> = {}): boolean => hasOwnFullChain({ ...full, ...over } as unknown as ToolDefinition);
   it("hele kjeden er sann; å fjerne eller slå av hver enkelt egenskap gjør den usann; postcondition_target_absent kan erstatte predikatet", () => {
-    expect(hasOwnFullChain(full)).toBe(true);
+    expect(chain()).toBe(true);
     for (const drop of ["preflight_action", "preflight_requires_target", "preflight_validator", "postcondition_predicate", "step_up_required", "owner_only"]) {
-      expect(hasOwnFullChain({ ...full, [drop]: undefined } as ToolDefinition), drop).toBe(false);
+      expect(chain({ [drop]: undefined }), drop).toBe(false);
     }
-    expect(hasOwnFullChain({ ...full, preflight_requires_target: false } as ToolDefinition)).toBe(false);
-    expect(hasOwnFullChain({ ...full, step_up_required: false } as ToolDefinition)).toBe(false);
-    expect(hasOwnFullChain({ ...full, owner_only: false } as ToolDefinition)).toBe(false);
-    expect(hasOwnFullChain({ ...full, postcondition_predicate: undefined, postcondition_target_absent: true } as ToolDefinition)).toBe(true);
+    expect(chain({ preflight_requires_target: false })).toBe(false);
+    expect(chain({ step_up_required: false })).toBe(false);
+    expect(chain({ owner_only: false })).toBe(false);
+    expect(chain({ postcondition_predicate: undefined, postcondition_target_absent: true })).toBe(true);
   });
 });
