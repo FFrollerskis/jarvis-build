@@ -1,7 +1,7 @@
 import { analyzeMigrations, resolveClasses, type MigrationFile, type StaticAnalysis } from "./analysis.ts";
 import { extractCatalog, type Catalog, type Queryable } from "./catalog.ts";
 import { SCHEMA_CLASSES, type SchemaClass } from "./directives.ts";
-import { validateManifest, type BaselineException, type Manifest } from "./manifest.ts";
+import { manifestShapeProblems, validateManifest, type BaselineException, type Manifest } from "./manifest.ts";
 import { EXCEPTION_ELIGIBLE_RULES, RULE_IDS, lintCatalog, reconcileExceptions, type ClassInfo, type LintConfig, type Violation } from "./rules.ts";
 
 /**
@@ -40,6 +40,11 @@ export async function runSchemaClassChecks(options: CheckOptions): Promise<Check
   const failures: Violation[] = [];
   for (const problem of validateManifest(manifest, EXCEPTION_ELIGIBLE_RULES)) {
     failures.push({ rule: "manifest_invalid", table: null, detail: problem, message: `Manifestet er ugyldig: ${problem}` });
+  }
+  if (manifestShapeProblems(manifest).length > 0) {
+    // Strukturelt ødelagt manifest: analysen kan ikke leses videre uten å kaste en tilfeldig `TypeError`. Kun manifestfeilene rapporteres.
+    const empty = Object.fromEntries(SCHEMA_CLASSES.map((c) => [c, 0])) as Record<SchemaClass, number>;
+    return { failures, known: [], classes: new Map(), counts: empty, analysis: { files: [], tables: new Map(), newDefinerNames: new Set(), violations: [] }, catalog: null, mode: "static" };
   }
   const analysis = analyzeMigrations(options.files, manifest);
   failures.push(...analysis.violations);

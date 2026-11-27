@@ -45,8 +45,66 @@ export interface Manifest {
   readonly exception_ceiling: { readonly total: number; readonly per_rule: Readonly<Record<string, number>> };
 }
 
+/** Manifestfilen kan ikke leses, er ikke JSON eller har feil struktur (klar melding i stedet for en vilkårlig `TypeError`). */
+export class ManifestLoadError extends Error {
+  constructor(readonly path: string, readonly problems: readonly string[]) {
+    super(`manifestet ${path} kan ikke brukes:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
+    this.name = "ManifestLoadError";
+  }
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
+const isStringMap = (v: unknown): v is Record<string, string> => isRecord(v) && Object.values(v).every((x) => typeof x === "string");
+
+/**
+ * Strukturell sjekk av en RÅ manifest-verdi (før noe i biblioteket leser feltene): hvert felt som koden bruker må finnes med riktig type. Tom liste = strukturen er
+ * brukbar (innholdet valideres av `validateManifest`). Uten denne ga en manglende nøkkel «Cannot convert undefined or null to object» langt inne i analysen.
+ */
+export function manifestShapeProblems(raw: unknown): string[] {
+  if (!isRecord(raw)) return ["manifest_shape:rot: forventet et JSON-objekt"];
+  const problems: string[] = [];
+  const need = (ok: boolean, field: string, expected: string): void => {
+    if (!ok) problems.push(`manifest_shape:${field}: forventet ${expected}`);
+  };
+  need(typeof raw["version"] === "number", "version", "et tall");
+  need(typeof raw["frozen_through_migration"] === "number", "frozen_through_migration", "et tall");
+  need(isStringMap(raw["frozen_migrations"]), "frozen_migrations", "et objekt filnavn -> sjekksum (tekst)");
+  need(isStringArray(raw["bootstrap_tables"]), "bootstrap_tables", "en liste med tekst");
+  need(isRecord(raw["classes"]) && Object.values(raw["classes"]).every(isStringArray), "classes", "et objekt klasse -> liste med tabellnavn");
+  need(isStringMap(raw["class_notes"]), "class_notes", "et objekt tabell -> notat (tekst)");
+  need(
+    Array.isArray(raw["definer_allowlist"]) && raw["definer_allowlist"].every((e) => isRecord(e) && typeof e["signature"] === "string" && typeof e["reason"] === "string"),
+    "definer_allowlist",
+    "en liste av {signature, reason}"
+  );
+  need(
+    Array.isArray(raw["exceptions"]) &&
+      raw["exceptions"].every((e) => isRecord(e) && typeof e["rule"] === "string" && typeof e["table"] === "string" && typeof e["reason"] === "string" && (e["detail"] === undefined || typeof e["detail"] === "string")),
+    "exceptions",
+    "en liste av {rule, table, reason, detail?}"
+  );
+  const ceiling = raw["exception_ceiling"];
+  need(isRecord(ceiling) && typeof ceiling["total"] === "number" && isRecord(ceiling["per_rule"]) && Object.values(ceiling["per_rule"]).every((n) => typeof n === "number"), "exception_ceiling", "{total: tall, per_rule: {regel: tall}}");
+  return problems;
+}
+
 export function loadManifest(path: string = MANIFEST_PATH): Manifest {
-  return JSON.parse(readFileSync(path, "utf8")) as Manifest;
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    throw new ManifestLoadError(path, [`manifest_unreadable: ${err instanceof Error ? err.message : String(err)}`]);
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    throw new ManifestLoadError(path, [`manifest_not_json: ${err instanceof Error ? err.message : String(err)}`]);
+  }
+  const problems = manifestShapeProblems(raw);
+  if (problems.length > 0) throw new ManifestLoadError(path, problems);
+  return raw as Manifest;
 }
 
 export function exceptionKey(rule: string, table: string, detail: string | undefined): string {
@@ -68,6 +126,8 @@ export function baselineTables(manifest: Manifest): Set<string> {
 
 /** Strukturell validering av selve manifestfilen (uavhengig av databasen). Tom liste = gyldig. */
 export function validateManifest(manifest: Manifest, knownRules: ReadonlySet<string>): string[] {
+  const shape = manifestShapeProblems(manifest);
+  if (shape.length > 0) return shape;
   const problems: string[] = [];
   if (manifest.version !== 1) problems.push(`manifest_version_unsupported:${String(manifest.version)}`);
   if (!Number.isInteger(manifest.frozen_through_migration) || manifest.frozen_through_migration < 1) problems.push("manifest_frozen_through_invalid");

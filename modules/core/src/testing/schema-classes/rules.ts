@@ -37,6 +37,7 @@ export const RULES: readonly RuleInfo[] = [
   R("frozen_migration_missing", "structure", false, "En frossen migrasjonsfil som manifestet kjenner mangler."),
   R("frozen_migration_added", "structure", false, "En NY fil med nummer ≤ 148 (innsatt i den frosne rekkefølgen) finnes ikke i manifestet."),
   R("migration_file_name_invalid", "structure", false, "En `.sql`-fil i migrasjonsmappen følger ikke `NNN_navn.sql`."),
+  R("migration_prefix_duplicate", "structure", false, "To migrasjonsfiler har samme 3-sifrede prefiks (tvetydig rekkefølge; migratoren avviser det)."),
   R("definer_directive_missing", "structure", false, "En ny migrasjon lager en SECURITY DEFINER-funksjon uten `-- jarvis-definer:`-direktiv."),
   R("definer_directive_unknown", "structure", false, "Et `-- jarvis-definer:`-direktiv peker på en funksjon som ingen ny migrasjon oppretter."),
   R("exception_stale", "structure", false, "Et baseline-unntak som ikke lenger brytes (baseline kan bare krympe: fjern det)."),

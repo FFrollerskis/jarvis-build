@@ -71,6 +71,7 @@ export function analyzeMigrations(files: readonly MigrationFile[], manifest: Man
   const cut = manifest.frozen_through_migration;
 
   const present = new Set<string>();
+  const byPrefix = new Map<string, string>();
   for (const file of [...files].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     const m = MIGRATION_FILE.exec(file.name);
     if (m === null) {
@@ -79,6 +80,13 @@ export function analyzeMigrations(files: readonly MigrationFile[], manifest: Man
     }
     present.add(file.name);
     const prefix = Number(m[1]);
+    // Samme regel som migratoren (`listMigrationFiles`): to filer med samme 3-sifrede prefiks har tvetydig rekkefølge. Uten denne meldte kun full modus det (som en migratorfeil).
+    const sameNumber = byPrefix.get(m[1] as string);
+    if (sameNumber !== undefined) {
+      violations.push(structure("migration_prefix_duplicate", null, m[1] as string, `${sameNumber} og ${file.name} har samme prefiks ${m[1]} - tvetydig rekkefølge (migratoren avviser det); gi den ene et nytt, unikt nummer.`));
+    } else {
+      byPrefix.set(m[1] as string, file.name);
+    }
     const frozen = prefix <= cut;
     if (frozen) {
       const expected = manifest.frozen_migrations[file.name];
