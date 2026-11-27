@@ -34,7 +34,7 @@ describe("main.ts: konfigurasjon, rute og jobb", () => {
   });
 
   it("den daglige jobben er registrert KUN inne i `if (toolLedgerConfig.enabled)`, via failOnSweepFailures med samleren sendt inn, og med eget jobbnavn", () => {
-    const block = MAIN.match(/if \(toolLedgerConfig\.enabled\) \{\n\s*new DailyScheduler\(\n\s*pool, "tool-ledger-reconcile", envHour\("JARVIS_TOOL_LEDGER_RECONCILE_HOUR", 5\)\n\s*\)\.start\(\(\) => failOnSweepFailures\("tool-ledger-reconcile", \(failures\) => runLedgerReconcileForAllTenants\(pool, toolLedgerConfig, failures\)\)\);\n\s*\}/);
+    const block = MAIN.match(/if \(toolLedgerConfig\.enabled\) \{\n\s*new DailyScheduler\(\n\s*pool, "tool-ledger-reconcile", envHour\("JARVIS_TOOL_LEDGER_RECONCILE_HOUR", 5\)\n\s*\)\.start\(\(run\) => failOnSweepFailures\("tool-ledger-reconcile", \(failures\) => runLedgerReconcileForAllTenants\(pool, toolLedgerConfig, failures, run\)\)\);\n\s*\}/);
     expect(block, "jobben skal ligge i en `if (toolLedgerConfig.enabled)`-blokk").not.toBeNull();
     expect([...MAIN.matchAll(/"tool-ledger-reconcile"/g)]).toHaveLength(2); // DailyScheduler-navnet og failOnSweepFailures-navnet er det samme
     expect([...MAIN.matchAll(/runLedgerReconcileForAllTenants\(/g)]).toHaveLength(1);

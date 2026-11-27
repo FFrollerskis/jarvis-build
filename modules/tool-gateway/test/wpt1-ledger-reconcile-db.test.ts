@@ -178,6 +178,20 @@ describe("B: utløpssveipet", () => {
     expect(actor.actor_kind).toBe("system");
   });
 
+  it("revisjonsradene bærer kjøringens oppgave-/spor-ID (JARVIS-054) når sveipet får en korrelasjon (ScheduledRun-feltene filtreres), og ingen ID-er når det ikke får en", async () => {
+    const tenant = "tenant-t1r-corr";
+    await admin.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenant}','C','person')`);
+    const withRun = newKey(); const without = newKey();
+    await seed(withRun, "reserved", 900, { tenant });
+    const run = { task_id: "sched:tool-ledger-reconcile:2026-11-27", trace_id: "sched-tool-ledger-reconcile-2026-11-27-a1", job_name: "tool-ledger-reconcile", attempt: 1 };
+    await runLedgerReconcileForAllTenants(app, CFG, undefined, run, async () => [tenant]);
+    await seed(without, "reserved", 900, { tenant });
+    await sweepLedgerTenant(app, tenant, CFG);
+    const idsOf = async (key: string) => (await admin.query("SELECT task_id, trace_id FROM audit_events WHERE tenant_id = $1 AND type = 'tool.ledger_reconciled' AND payload->>'key_fp' = $2", [tenant, shortFingerprint(key)])).rows as Array<{ task_id: string | null; trace_id: string | null }>;
+    expect(await idsOf(withRun)).toEqual([{ task_id: run.task_id, trace_id: run.trace_id }]);
+    expect(await idsOf(without)).toEqual([{ task_id: null, trace_id: null }]);
+  });
+
   it("grensen er presis: 14 minutter gammel reserved flyttes ikke ved TTL 15, 16 minutter gammel flyttes", async () => {
     const young = newKey(); const old = newKey();
     await seed(young, "reserved", 14);
@@ -228,7 +242,7 @@ describe("B: utløpssveipet", () => {
     const collector = new SweepFailureCollector();
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const summary = await runLedgerReconcileForAllTenants(failing, CFG, collector, async () => ["tenant-boom", TENANT]);
+    const summary = await runLedgerReconcileForAllTenants(failing, CFG, collector, undefined, async () => ["tenant-boom", TENANT]);
     const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
     log.mockRestore();
     err.mockRestore();
@@ -244,7 +258,7 @@ describe("B: utløpssveipet", () => {
     const tenant = "tenant-t1r-empty";
     await admin.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenant}','E','person')`);
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    expect(await runLedgerReconcileForAllTenants(app, CFG, undefined, async () => [tenant])).toEqual({ tenants: 1, failed_tenants: 0, reserved_to_unknown: 0, unverified_to_needs_resolution: 0 });
+    expect(await runLedgerReconcileForAllTenants(app, CFG, undefined, undefined, async () => [tenant])).toEqual({ tenants: 1, failed_tenants: 0, reserved_to_unknown: 0, unverified_to_needs_resolution: 0 });
     log.mockRestore();
     expect(((await admin.query("SELECT count(*)::int AS n FROM audit_events WHERE tenant_id = $1", [tenant])).rows[0] as { n: number }).n).toBe(0);
   });

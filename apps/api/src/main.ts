@@ -2057,7 +2057,7 @@ porter: se docs/RUNTIME_GATES.md`;
   if (toolLedgerConfig.enabled) {
     new DailyScheduler(
       pool, "tool-ledger-reconcile", envHour("JARVIS_TOOL_LEDGER_RECONCILE_HOUR", 5)
-    ).start(() => failOnSweepFailures("tool-ledger-reconcile", (failures) => runLedgerReconcileForAllTenants(pool, toolLedgerConfig, failures)));
+    ).start((run) => failOnSweepFailures("tool-ledger-reconcile", (failures) => runLedgerReconcileForAllTenants(pool, toolLedgerConfig, failures, run)));
   }
   // WP-K (D-471, JARVIS-053): oppbevaring for den varige policy-journalen (`policy_decisions`, migrasjon 108) - SAMME mønster og klokkeslett som sveipet over, men egen jobb (egen claim/retry/helse i
   // `scheduler_state`, så en feil her aldri skjuler resultatet av det eksisterende sveipet). Kun registrert når journalen er PÅ (AV = ingenting nytt kjører); `prune_policy_decisions()` har et fast gulv på 30 dager.

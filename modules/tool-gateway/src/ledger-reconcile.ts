@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { SweepFailureCollector, type IdentityContext } from "@jarvis/contracts";
+import { SweepFailureCollector, correlationFields, type IdentityContext, type RunCorrelation } from "@jarvis/contracts";
 import { listAllTenantIds, scanForSecrets, withTenantTransaction, writeAudit } from "@jarvis/core";
 import { ownerStepUpDenial } from "./class-d-pipeline.ts";
 import type { ToolGateway } from "./gateway.ts";
@@ -72,8 +72,13 @@ export interface LedgerSweepResult {
   unverified_to_needs_resolution: number;
 }
 
-/** Revisjonsidentiteten for sveipet: en SYSTEMHANDLING (`person_id: "system"` merkes `actor_kind: system` av revisjonsskriveren), aldri en person. */
-const sweepIdentity = (tenantId: string) => ({ tenant_id: tenantId, person_id: "system", session_id: "ledger-reconcile", device_id: "jarvis-core" });
+/**
+ * Systemprinsipalen revisjonsskriveren merker `actor_kind: system` (en systemhandling, aldri en oppdiktet person; samme verdi som business-/support-/samtalegraf-synkene bruker). Navngitt konstant: denne filen kaller aldri `ToolGateway.execute()`,
+ * den skriver kun egne revisjonsrader, så kildevakten for system-KALL (`wpk-054-system-caller-correlation`) gjelder ikke her - korrelasjonen (JARVIS-054) legges likevel på hver revisjonsrad (`correlation`).
+ */
+const SYSTEM_PERSON_ID = "system";
+/** Revisjonsidentiteten for sveipet: en SYSTEMHANDLING, aldri en person. */
+const sweepIdentity = (tenantId: string) => ({ tenant_id: tenantId, person_id: SYSTEM_PERSON_ID, session_id: "ledger-reconcile", device_id: "jarvis-core" });
 
 interface MovedRow { idempotency_key: string; tool_id: string; action: string; age_minutes: number | string }
 
@@ -82,7 +87,7 @@ interface MovedRow { idempotency_key: string; tool_id: string; action: string; a
  * delvis eller `maxBatches` er nådd, slik at en etterslep (for eksempel første kjøring etter at flagget er slått på) tas i én kjøring uten én enorm setning.
  */
 export async function sweepLedgerTenant(
-  pool: pg.Pool, tenantId: string, config: Pick<LedgerReconcileConfig, "reservedTtlMinutes" | "unverifiedTtlHours">, batch = LEDGER_SWEEP_BATCH, maxBatches = LEDGER_SWEEP_MAX_BATCHES
+  pool: pg.Pool, tenantId: string, config: Pick<LedgerReconcileConfig, "reservedTtlMinutes" | "unverifiedTtlHours">, batch = LEDGER_SWEEP_BATCH, maxBatches = LEDGER_SWEEP_MAX_BATCHES, correlation?: RunCorrelation
 ): Promise<LedgerSweepResult> {
   return withTenantTransaction(pool, tenantId, async (client): Promise<LedgerSweepResult> => {
     const moveBatch = async (from: "reserved" | "unverified", to: "unknown_outcome" | "needs_resolution", basis: string, olderThanSql: string, olderThanParam: number): Promise<number> => {
@@ -101,7 +106,7 @@ export async function sweepLedgerTenant(
       );
       for (const row of moved.rows) {
         await writeAudit(client, sweepIdentity(tenantId), {
-          type: "tool.ledger_reconciled", decision: "ALLOW", reason: basis, tool_id: row.tool_id, action: row.action,
+          type: "tool.ledger_reconciled", decision: "ALLOW", reason: basis, tool_id: row.tool_id, action: row.action, ...correlationFields(correlation),
           payload: { key_fp: shortFingerprint(row.idempotency_key), from_status: from, to_status: to, age_minutes: Number(row.age_minutes) }
         });
       }
@@ -132,13 +137,14 @@ export interface LedgerReconcileSummary extends LedgerSweepResult {
  * Skriver en logglinje med KUN tall.
  */
 export async function runLedgerReconcileForAllTenants(
-  pool: pg.Pool, config: Pick<LedgerReconcileConfig, "reservedTtlMinutes" | "unverifiedTtlHours">, failures?: SweepFailureCollector, listTenants: (pool: pg.Pool) => Promise<string[]> = (p) => listAllTenantIds(p, 200)
+  pool: pg.Pool, config: Pick<LedgerReconcileConfig, "reservedTtlMinutes" | "unverifiedTtlHours">, failures?: SweepFailureCollector, correlation?: RunCorrelation,
+  listTenants: (pool: pg.Pool) => Promise<string[]> = (p) => listAllTenantIds(p, 200)
 ): Promise<LedgerReconcileSummary> {
   const tenants = await listTenants(pool);
   const summary: LedgerReconcileSummary = { tenants: tenants.length, failed_tenants: 0, reserved_to_unknown: 0, unverified_to_needs_resolution: 0 };
   for (const tenantId of tenants) {
     try {
-      const result = await sweepLedgerTenant(pool, tenantId, config);
+      const result = await sweepLedgerTenant(pool, tenantId, config, LEDGER_SWEEP_BATCH, LEDGER_SWEEP_MAX_BATCHES, correlation);
       summary.reserved_to_unknown += result.reserved_to_unknown;
       summary.unverified_to_needs_resolution += result.unverified_to_needs_resolution;
     } catch (err) {
