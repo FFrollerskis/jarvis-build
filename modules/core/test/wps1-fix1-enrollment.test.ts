@@ -17,7 +17,6 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
  */
 const TENANT = "tenant-s1f";
 const PERSON = "person-s1f";
-const STEP_UP_KINDS: readonly DeviceKind[] = ["iphone", "mac", "windows", "web_browser", "api_client"];
 
 let stop: (() => Promise<void>) | undefined;
 let adminPool: pg.Pool;

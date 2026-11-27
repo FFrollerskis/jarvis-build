@@ -77,7 +77,10 @@ export class InvalidCommsConfigError extends Error {
 const HOST = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
 const TEMPLATE_NAME = /^[a-z0-9_]{1,512}$/;
 
-export function parseCommsConfig(env: Readonly<Record<string, string | undefined>> = process.env): CommsConfig {
+// WP-S1 fiks-runde 1 (B-M1, JARVIS-111): miljøet er et OBLIGATORISK argument, aldri en standardverdi. Den tidligere standardparameteren (rå prosessmiljø) var en innebygd omgåelse av step-up-porten
+// (`applyStepUpBindingGate`): `parseCommsConfig()` uten argument leste de rå flaggene og slo på utgående kommunikasjon uten `JARVIS_STEPUP_CHANNEL_BINDING=enforce`. Parseren får kun den gatede miljø-kopien
+// (`apps/api/src/comms-wiring.ts`); en strukturell vakt (`apps/api/test/wps1-stepup-gate-wiring.test.ts`, gruppe G) feller enhver `process`-referanse i denne filen og ethvert kall med rått prosessmiljø.
+export function parseCommsConfig(env: Readonly<Record<string, string | undefined>>): CommsConfig {
   const channels = new Set<CommsChannel>();
   for (const entry of listOf(env, "JARVIS_COMMS_CHANNELS")) {
     if (!isCommsChannel(entry)) throw new InvalidCommsConfigError("JARVIS_COMMS_CHANNELS", `ukjent kanal (gyldige: ${COMMS_CHANNELS.join(", ")})`);
