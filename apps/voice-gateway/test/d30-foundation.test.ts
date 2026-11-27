@@ -605,8 +605,12 @@ describe("HttpCoreClient (§12/§24/§33): SSE-parsing, abort og provider-overri
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: string, init: RequestInit) => {
-        expect(init.signal).toBe(controller.signal);
+        // WP-V2 (K4): klienten sender nå et AFLEDET signal (barge-in + total turfrist), ikke kallerens eget objekt - kontrakten er at
+        // et abort på kallerens signal propagerer til fetch (tidligere: identitetssjekk av selve objektet).
+        const forwarded = init.signal as AbortSignal;
+        expect(forwarded.aborted).toBe(false);
         controller.abort();
+        expect(forwarded.aborted).toBe(true);
         const err = new Error("aborted");
         err.name = "AbortError";
         throw err;
