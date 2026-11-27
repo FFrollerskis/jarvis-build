@@ -146,6 +146,8 @@ export class Watchdog {
   private observer: ((report: WatchdogTickReport) => void | Promise<void>) | undefined;
   /** WP-OPS2a K3: når siste tikk FULLFØRTE (vakthundens egen klokke, ms). Grunnlaget for den eksterne dead man's switch-en: et hengt eller dødt tikk flytter det aldri. */
   private lastTickCompletedAt: number | null = null;
+  /** WP-OPS2a fiks 1 (A-L2): MONOTONT tidspunkt (ms, `performance.now()`) da siste tikk FULLFØRTE - kun til å regne alder. Veggklokken (`now`) kan hoppe (NTP, manuell endring) og ville gjort en hengt vakthund fersk eller en frisk gammel. */
+  private lastTickCompletedMono: number | null = null;
 
   constructor(
     private readonly alerts: AlertSink,
@@ -154,7 +156,9 @@ export class Watchdog {
     private readonly checkTimeoutMs = 20_000,
     /** D-395: samme varsel fra samme sjekk sendes på nytt først etter dette (eller straks meldingen endres). Standard 30 minutter. */
     private readonly alertCooldownMs = 30 * 60_000,
-    private readonly now: () => number = () => Date.now()
+    private readonly now: () => number = () => Date.now(),
+    /** WP-OPS2a fiks 1 (A-L2): monoton klokke (ms) for `lastCompletedTickAgeMs`. Standard `performance.now()`; injiseres i tester. */
+    private readonly monotonicNow: () => number = () => performance.now()
   ) {}
 
   register(check: HealthCheck): void {
@@ -182,6 +186,14 @@ export class Watchdog {
    */
   lastCompletedTickAt(): number | null {
     return this.lastTickCompletedAt;
+  }
+
+  /**
+   * WP-OPS2a fiks 1 (A-L2): alderen (ms) på siste FULLFØRTE tikk, målt med en MONOTON klokke (`performance.now()`), eller `null` før første. Den eksterne heartbeaten pinger på DENNE, ikke på `Date.now() - lastCompletedTickAt()`: et hopp i veggklokken
+   * (NTP-steg, manuell endring) kan da aldri gjøre en hengt vakthund «fersk» (falske pings) eller en frisk vakthund «gammel» (falsk stillhet). Settes og flyttes sammen med `lastCompletedTickAt` - kun av et FULLFØRT tikk.
+   */
+  lastCompletedTickAgeMs(): number | null {
+    return this.lastTickCompletedMono === null ? null : this.monotonicNow() - this.lastTickCompletedMono;
   }
 
   async tick(): Promise<Alert[]> {
@@ -261,6 +273,7 @@ export class Watchdog {
         }
       }
       this.lastTickCompletedAt = this.now();
+      this.lastTickCompletedMono = this.monotonicNow();
       return fired;
     } finally {
       this.ticking = false;
@@ -297,6 +310,11 @@ export function stuckTasksCheck(pool: pg.Pool, tenantId: string): HealthCheck {
 export const STUCK_TASKS_MAX_TENANTS = 200;
 /** WP-OPS2a K2: tidsbudsjett for selve telleløkken (under sjekk-fristen på 20 s): uleste tenants regnes som «ikke lest», så en treg database ikke lar kjøringer hope seg opp. */
 export const STUCK_TASKS_READ_BUDGET_MS = 15_000;
+/**
+ * WP-OPS2a fiks 1 (A-L4): `statement_timeout` for HVER tenant-telling (`SET LOCAL`, kun i den tenant-transaksjonen). Budsjettet over sjekkes bare MELLOM tenants; en spørring som henger (ACCESS EXCLUSIVE på `tasks`) overlevde ellers både
+ * sjekk-fristen og budsjettet og holdt en pool-tilkobling for hvert tikk. Postgres avbryter nå spørringen (57014, også ventetid på lås), tenanten telles som «ikke lest», og tilkoblingen frigis.
+ */
+export const STUCK_TASKS_STATEMENT_TIMEOUT_MS = 8_000;
 
 export interface StuckTasksAllTenantsOptions {
   /** Overstyrer `STUCK_TASKS_MAX_TENANTS` (tester). */
@@ -305,6 +323,10 @@ export interface StuckTasksAllTenantsOptions {
   budgetMs?: number;
   /** Klokke i ms (tester). */
   now?: () => number;
+  /** WP-OPS2a fiks 1 (A-L5): eierens tenant. Vurderes ALLTID først - også når katalogen er lengre enn `maxTenants` og eieren (sortert på tenant_id) ellers ville falt utenfor. Tom/usatt = som før. */
+  ownerTenantId?: string;
+  /** WP-OPS2a fiks 1 (A-L4): overstyrer `STUCK_TASKS_STATEMENT_TIMEOUT_MS` (tester). */
+  statementTimeoutMs?: number;
 }
 
 /**
@@ -312,6 +334,9 @@ export interface StuckTasksAllTenantsOptions {
  * teller utløpt lease i HVER tenant (`listAllTenantIds` + `withTenantTransaction` per tenant, samme RLS-trygge mønster som `stuckTasksCheck` og sveipene) og beholder navn, runbook, nedkjøling og meldingsform.
  *  - Meldingen er IDENTISK med den gamle når katalogen har nøyaktig én tenant (`N jobber med utløpt lease`); med flere tenants får den suffikset ` (i k tenants)` (k = tenants som har fastlåste jobber).
  *  - Delvis blindhet er ALDRI «0 = frisk»: en opptellingsfeil, en tenant som ikke kan leses (eller ikke rekkes innen tidsbudsjettet), en tom katalog og flere enn `maxTenants` gir `ok:false` (warning). En feilende tenant stopper ikke de øvrige.
+ *  - Fiks-runde 1 (A-L3): er ALLE de vurderte tenantene uleste (en RLS-/rettighetsfeil på `tasks`, en hengt lås, et budsjett som gikk ut før første tenant) er vakthunden blind for jobber - da er det `critical`, som den gamle sjekken (den kastet, og
+ *    Watchdog gjorde det til `critical`). Delvis blindhet er fortsatt `warning`. Årsakene (SQLSTATE) står i loggen `watchdog_stuck_tasks_tenant_read_failed`, aldri i meldingen.
+ *  - Fiks-runde 1 (A-L4): hver tenant-telling har `SET LOCAL statement_timeout` (8 s), så en spørring som henger avbrytes av Postgres. (A-L5): `ownerTenantId` vurderes alltid først.
  *  - Aldri tenant-id og aldri rå feiltekst i melding eller logg: kun antall og SQLSTATE-koder (feilteksten kan sitere tenant-id eller rader).
  *  - Opptellingen er stille (`quiet`): sjekken kjører hvert minutt og skal ikke legge en ny loggrad per tikk.
  */
@@ -319,7 +344,10 @@ export function stuckTasksAllTenantsCheck(pool: pg.Pool, options: StuckTasksAllT
   const maxTenants = options.maxTenants ?? STUCK_TASKS_MAX_TENANTS;
   const budgetMs = options.budgetMs ?? STUCK_TASKS_READ_BUDGET_MS;
   const clock = options.now ?? (() => Date.now());
-  const warn = (message: string): { ok: false; severity: Severity; message: string } => ({ ok: false, severity: "warning", message });
+  const statementTimeoutMs = Math.max(1, Math.trunc(options.statementTimeoutMs ?? STUCK_TASKS_STATEMENT_TIMEOUT_MS));
+  const owner = typeof options.ownerTenantId === "string" && options.ownerTenantId.length > 0 ? options.ownerTenantId : undefined;
+  const fail = (severity: Severity, message: string): { ok: false; severity: Severity; message: string } => ({ ok: false, severity, message });
+  const warn = (message: string): { ok: false; severity: Severity; message: string } => fail("warning", message);
   return {
     name: "stuck_tasks",
     runbook: "docs/runbooks/TIER1_RUNBOOKS.md#worker",
@@ -334,7 +362,9 @@ export function stuckTasksAllTenantsCheck(pool: pg.Pool, options: StuckTasksAllT
       }
       if (found.length === 0) return warn("ingen tenants funnet - jobber med utløpt lease er ikke vurdert");
       const truncated = found.length > maxTenants;
-      const tenants = truncated ? found.slice(0, maxTenants) : found;
+      // Eieren først (A-L5): ellers kan en lang katalog kutte eieren bort. `found` er katalogen; `ordered` er rekkefølgen vi leser i.
+      const ordered = owner === undefined ? found : [owner, ...found.filter((id) => id !== owner)];
+      const tenants = truncated ? ordered.slice(0, maxTenants) : ordered;
       const startedAt = clock();
       let stuck = 0;
       let stuckTenants = 0;
@@ -348,6 +378,7 @@ export function stuckTasksAllTenantsCheck(pool: pg.Pool, options: StuckTasksAllT
         }
         try {
           const n = await withTenantTransaction(pool, tenantId, async (client) => {
+            await client.query(`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
             const result = await client.query(`SELECT count(*)::int AS n FROM tasks WHERE status = 'running' AND lease_expires_at < now()`);
             return (result.rows[0] as { n: number }).n;
           });
@@ -369,7 +400,8 @@ export function stuckTasksAllTenantsCheck(pool: pg.Pool, options: StuckTasksAllT
       }
       if (unread > 0) parts.push(`${unread} av ${tenants.length} tenants kunne ikke leses`);
       if (truncated) parts.push(`flere enn ${maxTenants} tenants (de øvrige er ikke vurdert)`);
-      return parts.length === 0 ? { ok: true, severity: "info", message: "" } : warn(parts.join("; "));
+      if (parts.length === 0) return { ok: true, severity: "info", message: "" };
+      return fail(unread === tenants.length ? "critical" : "warning", parts.join("; "));
     }
   };
 }
