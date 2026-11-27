@@ -569,7 +569,7 @@ describe("D: oppkoblingen (`buildCommsRuntime`) og kildevakter", () => {
 
   it("main.ts: kun fabrikken leser konfigurasjonen; verktøyene går i den ene register-løkken; deps settes kun når fabrikken gir noe", () => {
     const main = read("../src/main.ts");
-    expect(main).toMatch(/const commsRuntime = buildCommsRuntime\(\{\s*env: process\.env, pool, graph: conversationGraphService, business: businessService, secrets: readSecretProvider,/);
+    expect(main).toMatch(/const commsRuntime = buildCommsRuntime\(\{\s*env: stepUpGate\.env, pool, graph: conversationGraphService, business: businessService, secrets: readSecretProvider,/);
     // Integrasjon (G1+G2): `...commsRuntime.tools` er ikke lenger siste element (G2 sin `...personal.tools` følger), og G2 pakker `firstWaveTools(...)` i `personal.filterTools(...)`. Vakten krever fortsatt den ENE register-løkken.
     expect(main).toMatch(/\.\.\.commsRuntime\.tools,?\s*\n(?:\s*\/\/[^\n]*\n)*(?:\s*\.\.\.personal\.tools\s*\n)?\s*\]\s*\n\s*\}\)+ toolGateway\.register\(tool\);/);
     expect(main).toContain("const commsApiDeps = commsRuntime.apiDeps(toolGateway);");

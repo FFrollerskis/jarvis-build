@@ -126,7 +126,8 @@ describe("B: rekkefølgen i rutene er låst (kildevakt)", () => {
 
 describe("C: main.ts - flagg-AV-identitet (kildevakt)", () => {
   it("konfig leses fra miljøet via den delte parseren, og både verktøy og ruter er betinget", () => {
-    expect(MAIN).toContain("growthWriteConfigFromEnv(process.env)");
+    // WP-S1: konfigen leses fra den EFFEKTIVE miljø-kopien (uten blokkerte flagg), aldri rå process.env (se wps1-stepup-gate-wiring.test.ts)
+    expect(MAIN).toContain("growthWriteConfigFromEnv(stepUpGate.env)");
     expect(MAIN).toMatch(/const growthWriteEnabled = growthWriteConfig\.platforms\.size > 0;/);
     expect(MAIN).toMatch(/const growthExperimentsEnabled = process\.env\["JARVIS_GROWTH_EXPERIMENTS"\] === "on";/);
     expect(MAIN).toMatch(/\.\.\.\(growthWriteEnabled \? growthWriteToolDefinitions\(growthWriteConfig, growthWriteTransports\) : \[\]\)/);

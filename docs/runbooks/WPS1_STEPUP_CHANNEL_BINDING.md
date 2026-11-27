@@ -140,7 +140,7 @@ Billetten vises kun i terminalen, er engangs og lever 15 minutter. Lim den aldri
 
 Alle trinn er eierens og `NOT_VERIFIED` til de er kjørt. Test-/akseptanseløp skal bruke en sandbox-tenant og testenheter.
 
-1. **Sikkerhetskopi** etter vanlig rutine. Oppdater koden; `migrate`-tjenesten kjører migrasjon 149. Ingenting endres i atferd (modus `observe`).
+1. **Sikkerhetskopi** etter vanlig rutine. Oppdater koden; `migrate`-tjenesten kjører migrasjon 149. Ingenting endres i atferd (modus `observe`) bortsett fra at høyrisiko-flaggene i §3 står blokkert dersom du allerede hadde dem på. Rekkefølge: api-koden krever skjema 149 (den leser `devices.device_kind`); i compose kjører `migrate` først. Starter du kun api mot et skjema uten 149, feiler autorisasjonen lukket (ingen grant, `500`), aldri åpent.
 2. **List enhetene** (admin-bruker, rå SQL; RLS gjelder ikke for admin):
 
    ```
