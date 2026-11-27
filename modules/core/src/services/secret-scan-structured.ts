@@ -1,5 +1,5 @@
 import { mergeSecretSpans, scanForSecrets, scanSecretSpans, type SecretFinding, type SecretSpan } from "./secret-scan.ts";
-import { classifyKey } from "./secret-scan-keys.ts";
+import { classifyKey, isAuthCredential, isBenignSecretValue } from "./secret-scan-keys.ts";
 
 /**
  * WP-SEC2 (JARVIS-013/069, K2b/K3): hemmelighetsskanning av STRUKTURERT data (JSON-lignende: objekter, lister, strenger, tall). Brukes der teksten ikke er én streng - audit-nyttelaster, ledger-tilstand, verktøysvar.
@@ -9,8 +9,9 @@ import { classifyKey } from "./secret-scan-keys.ts";
  *  2. NØKKELNAVN-bevisst (`secret-scan-keys.ts`): ligner nøkkelen en hemmelighet (`password`, `passord`, `api_key`, `client_secret`, `Authorization`, `cookie` ...) redigeres VERDIEN uansett format (strenger; tall kun under sterke
  *     nøkler som passord/PIN/privat nøkkel), med unntak for teller-/metadatanøkler (`token_count`, `passwords_checked`, `token_type`, `expires_at` ...). En hemmelig nøkkel gjør at ALLE strenger under den (rekursivt) redigeres,
  *     bortsett fra under metadatanøkler (`type`, `name`, `id` ...). Selve nøkkelnavnene skannes også (en nøkkel kan være en hemmelighet).
- *  3. FAIL-CLOSED og begrenset: dybde over `STRUCTURED_MAX_DEPTH`, over `STRUCTURED_MAX_NODES` noder og sykliske referanser erstattes av `[REDACTED:structure_limit]` (funnet rapporteres) - aldri stakkoverflyt, aldri en
- *     uendelig løkke. Tekst/verdier uten funn returneres UENDRET (samme referanse: kallere må ikke mutere resultatet).
+ *  3. FAIL-CLOSED og begrenset: dybde over `STRUCTURED_MAX_DEPTH`, over `STRUCTURED_MAX_NODES` noder, sykliske referanser og noder som KASTER ved lesing (kastende getter, Proxy-felle, tilbakekalt Proxy, kastende `toJSON`)
+ *     erstattes av `[REDACTED:structure_limit]` (funnet rapporteres) - aldri stakkoverflyt, aldri en uendelig løkke, aldri en kastet feil ut av skanningen. Tekst/verdier uten funn returneres UENDRET (samme referanse: kallere må ikke mutere resultatet).
+ *     En `Error` skannes som et vanlig objekt (enumerable egenskaper som `config.headers.Authorization` serialiseres av `JSON.stringify`); `message`/`stack` er ikke enumerable og er ikke en del av en serialisert nyttelast.
  */
 export interface StructuredScanResult {
   value: unknown;
@@ -23,6 +24,8 @@ export const STRUCTURED_MAX_NODES = 500_000;
 export const STRUCTURED_JOIN_MAX_CHARS = 1_048_576;
 
 const NAMED = "[REDACTED:named_secret]";
+/** Alt utenfor synlig ASCII (+ linjeskift/tabulator): kan skjule en BEGIN-linje (fullbredde, nullbredde). */
+const NON_ASCII = /[^\x20-\x7e\n\t\r]/;
 const LIMIT = "[REDACTED:structure_limit]";
 
 interface State {
@@ -64,7 +67,8 @@ function scanSiblings(texts: readonly string[], state: State): string[] {
   const spans: SecretSpan[] = scanSecretSpans(texts.join("\n"), { noUnterminatedKey: true });
   // En privat nøkkel uten avslutning i EN del gir ikke noe spenn i den limte teksten (den ville spist alle søsken): hver del med BEGIN skannes for seg.
   texts.forEach((t, i) => {
-    if (!t.includes("-----BEGIN")) return;
+    // A-L3: også en SKJULT/fullbredde BEGIN (`BE<ZWSP>GIN`, `－－－ＢＥＧＩＮ`) - rå tekst kan ikke avgjøre det, så all ikke-ASCII-tekst skannes for seg.
+    if (!t.includes("BEGIN") && !NON_ASCII.test(t)) return;
     for (const s of scanSecretSpans(t)) spans.push({ ...s, start: s.start + (offsets[i] as number), end: s.end + (offsets[i] as number) });
   });
   if (spans.length === 0) return [...texts];
@@ -114,27 +118,26 @@ function walk(value: unknown, depth: number, secretCtx: boolean, state: State): 
     return scanSiblings([value], state)[0] as string;
   }
   if (typeof value !== "object" || value === null) return value;
-  if (value instanceof Date || ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
-  if (depth >= STRUCTURED_MAX_DEPTH || state.ancestors.has(value)) {
+  try {
+    if (value instanceof Date || ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+    if (depth >= STRUCTURED_MAX_DEPTH || state.ancestors.has(value)) {
+      bump(state, "structure_limit");
+      return LIMIT;
+    }
+    state.ancestors.add(value);
+    try {
+      if (Array.isArray(value)) return walkArray(value, depth, secretCtx, state);
+      const toJson = (value as { toJSON?: unknown }).toJSON;
+      if (typeof toJson === "function") return walk((toJson as () => unknown).call(value), depth + 1, secretCtx, state);
+      if (value instanceof Map || value instanceof Set) return value;
+      return walkObject(value as Record<string, unknown>, depth, secretCtx, state);
+    } finally {
+      state.ancestors.delete(value);
+    }
+  } catch {
+    // Fail-closed (A-L4): en node som kaster ved lesing (getter, Proxy-felle, tilbakekalt Proxy, toJSON) kan ikke skannes og erstattes; resten av strukturen skannes videre.
     bump(state, "structure_limit");
     return LIMIT;
-  }
-  state.ancestors.add(value);
-  try {
-    if (Array.isArray(value)) return walkArray(value, depth, secretCtx, state);
-    const toJson = (value as { toJSON?: unknown }).toJSON;
-    if (typeof toJson === "function") {
-      try {
-        return walk((toJson as () => unknown).call(value), depth + 1, secretCtx, state);
-      } catch {
-        bump(state, "structure_limit");
-        return LIMIT;
-      }
-    }
-    if (value instanceof Map || value instanceof Set || value instanceof Error) return value;
-    return walkObject(value as Record<string, unknown>, depth, secretCtx, state);
-  } finally {
-    state.ancestors.delete(value);
   }
 }
 
@@ -167,7 +170,12 @@ function walkObject(obj: Record<string, unknown>, depth: number, secretCtx: bool
     // Verdier under en hemmelig nøkkel (eller under en hemmelig forelder, bortsett fra metadatanøkler) er hemmeligheter uansett format.
     const redactAll = (cls.secret || (secretCtx && !cls.metadata)) && !cls.safe;
     if (typeof v === "string") {
-      if (redactAll && v.length > 0 && !startsWithMarker(v) && (secretCtx || cls.strong || v.length >= 6)) {
+      // `authorization_header: "Basic …"` (A-L6): verdien er en hemmelighet bare når den er en credential med skjema; et headernavn (`X-Api-Key`) og en plassholder røres ikke.
+      if (cls.authHeader && isAuthCredential(v)) {
+        bump(state, "named_secret");
+        values[n] = NAMED;
+      } else if (redactAll && v.length > 0 && !startsWithMarker(v) && (secretCtx || cls.strong || v.length >= 6) && !isBenignSecretValue(v, cls)) {
+        // (statusverdier og plassholdere som `required`/`YOUR_API_KEY` er ikke hemmeligheter, A-L9)
         bump(state, "named_secret");
         values[n] = NAMED;
       } else {
@@ -188,6 +196,7 @@ function walkObject(obj: Record<string, unknown>, depth: number, secretCtx: bool
   });
   // Nøkkelnavn kan selv være hemmeligheter (en token som nøkkel i et objekt): skann dem, og unngå kollisjoner når to nøkler blir like.
   const seen = new Set<string>();
+  const nextSuffix = new Map<string, number>(); // A-M2: neste ledige suffiks per grunnnavn (ellers kvadratisk når mange nøkler får samme redigerte navn)
   let changed = false;
   const finalKeys = outKeys.map((key) => {
     let k = key;
@@ -200,7 +209,12 @@ function walkObject(obj: Record<string, unknown>, depth: number, secretCtx: bool
       }
     }
     let unique = k;
-    for (let i = 2; seen.has(unique); i += 1) unique = `${k}~${i}`;
+    if (seen.has(unique)) {
+      let i = nextSuffix.get(k) ?? 2;
+      while (seen.has(`${k}~${i}`)) i += 1;
+      unique = `${k}~${i}`;
+      nextSuffix.set(k, i + 1);
+    }
     if (unique !== key) changed = true;
     seen.add(unique);
     return unique;
@@ -218,6 +232,13 @@ function walkObject(obj: Record<string, unknown>, depth: number, secretCtx: bool
  */
 export function scanStructuredForSecrets(value: unknown): StructuredScanResult {
   const state: State = { nodes: 0, counts: new Map(), ancestors: new Set() };
-  const out = walk(value, 0, false, state);
+  let out: unknown;
+  try {
+    out = walk(value, 0, false, state);
+  } catch {
+    // (kun for det uventede: `walk` fanger selv kastende noder) - fail-closed, aldri en kastet feil.
+    out = LIMIT;
+    bump(state, "structure_limit");
+  }
   return { value: out, findings: [...state.counts.entries()].map(([kind, count]) => ({ kind, count })) };
 }

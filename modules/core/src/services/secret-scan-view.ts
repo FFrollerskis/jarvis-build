@@ -43,8 +43,8 @@ export function origEnd(view: ScanView, i: number): number {
 // Alt som IKKE er synlig ASCII (+ \n \t \r) må gjennom normalisering. Ren ASCII-tekst er sin egen visning (rask vei).
 const NEEDS_VIEW = /[^\x20-\x7e\n\t\r]/;
 // Tegn som ikke har noe i en visning å gjøre: format (Cf: nullbredde, bidi, myk bindestrek, tag-tegn), kontroll (Cc), kombinerende merker (Mn/Me: også variantvelgere og CGJ), løse surrogater (Cs), privat bruk (Co),
-// «default ignorable» (Hangul-fyllere osv.) og brailleblankt.
-const DROPPED = /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\p{Mn}\p{Me}\p{Cs}\p{Co}\u2800]/u;
+// «default ignorable» (Hangul-fyllere osv.), brailleblankt og U+FFFC (objekt-erstatningstegn, kategori So: usynlig plassholder som ellers bryter et token).
+const DROPPED = /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\p{Mn}\p{Me}\p{Cs}\p{Co}\u2800\uFFFC]/u;
 
 /** Håndvalgte homoglyfer (kyrillisk/gresk/latinsk utvidelse -> ASCII). `unverified`: ikke fra TR39. */
 const HOMOGLYPHS: ReadonlyMap<number, string> = new Map<number, string>([
@@ -145,6 +145,7 @@ export function isWordChar(c: number): boolean {
   return (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) || c === 0x5f;
 }
 
+const isDigitCode = (c: number): boolean => c >= 0x30 && c <= 0x39;
 const isSpaceCode = (c: number): boolean => c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d || c === 0x0b || c === 0x0c || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
 
 export interface Squeezed {
@@ -174,7 +175,8 @@ export function squeezeView(view: ScanView): Squeezed | null {
     if (isSpaceCode(c)) {
       let j = i + 1;
       while (j < n && isSpaceCode(text.charCodeAt(j))) j += 1;
-      const prevIsToken = m > 0 && isTokenChar(units[m - 1] as number);
+      // «<siffer>:» (Telegram-token) regnes også som token-slutt, så en bryting rett etter kolonet slås sammen (fiks-runde 1, A-L5).
+      const prevIsToken = m > 0 && (isTokenChar(units[m - 1] as number) || (units[m - 1] === 0x3a && m > 1 && isDigitCode(units[m - 2] as number)));
       const nextIsToken = j < n && isTokenChar(text.charCodeAt(j));
       if (prevIsToken && nextIsToken) {
         pendingGap = 1;

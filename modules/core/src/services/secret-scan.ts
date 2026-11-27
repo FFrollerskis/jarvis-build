@@ -1,5 +1,5 @@
 import { SCAN_OVERLAP_CHARS, SCAN_WINDOW_CHARS, buildView, isWordChar, origEnd, origStart, squeezeView, windowStarts, type ScanView, type Squeezed } from "./secret-scan-view.ts";
-import { classifyKey } from "./secret-scan-keys.ts";
+import { classifyKey, isAuthCredential, isAuthPlaceholder, isBenignSecretValue } from "./secret-scan-keys.ts";
 
 /**
  * Del 3 (JARVIS-013/005) + WP-SEC2 (JARVIS-013/069, D-487): deterministisk hemmelighetsdeteksjon + redigering FØR tekst lagres (messages, minne, audit) eller sendes til en modell/leverandør. Mønsterbasert (ingen LLM) og
@@ -50,6 +50,8 @@ interface PatternDef {
   readonly skip?: (m: RegExpExecArray) => boolean;
   /** Et forkastet treff (`skip`) eier likevel området, så senere mønstre ikke redigerer deler av det (f.eks. «Bearer» i `Authorization: Bearer <token>`). */
   readonly claimOnSkip?: boolean;
+  /** Etter et forkastet treff (`skip`) søkes det videre fra denne indeksen i stedet for treffets slutt: et forkastet treff skal ikke skjule et ekte treff som ligger inne i det forbrukte området (fiks-runde 1, A-L1). Må være større enn treffets start. */
+  readonly resumeAfterSkip?: (m: RegExpExecArray) => number;
   readonly special?: "private_key";
 }
 
@@ -62,26 +64,39 @@ const startsWithMarker = (text: string): boolean => text.startsWith("[REDACTED")
 /** `auth.js:41:11` i en stakksporing er en kildeplassering, ikke `NAVN: verdi` (WP-SEC2 K5: stakksporinger i en auth-modul ble tidligere redigert). */
 const FILE_LOCATION = /\.(?:[cm]?[jt]sx?|py|java|go|rs|cs|rb|php|kt|swift|cc?|cpp|hh?|hpp|scala|sh)\s*:\s*\d+(?::\d+)*\)?[,;]?$/i;
 
-/** `"navn": "verdi"` (JSON-tekst): verdien redigeres når NAVNET er en hemmelighet (K3). Korte verdier under ikke-sterke navn (`"auth":"none"`) røres ikke. */
+/** A-L9: `cond ? "api_key" : "short_lived_token"` er kode, ikke JSON: et JSON-nøkkelnavn følger aldri rett etter «?». */
+const TERNARY_BEFORE = /\?\s*$/;
+/** `"navn": "verdi"` (JSON-tekst): verdien redigeres når NAVNET er en hemmelighet (K3). Korte verdier under ikke-sterke navn (`"auth":"none"`) røres ikke, og heller ikke status-/plassholderverdier (`"password":"required"`, A-L9). */
 function jsonPairSkip(m: RegExpExecArray): boolean {
   const key = m[1] as string;
   const value = m[2] as string;
   if (value.length === 0 || startsWithMarker(value) || PLACEHOLDER.test(value)) return true;
+  if (TERNARY_BEFORE.test(m.input.slice(Math.max(0, m.index - 16), m.index))) return true;
   const cls = classifyKey(key);
+  if (cls.authHeader) return !isAuthCredential(value); // `"authorization_header":"Basic …"` er en hemmelighet; `"auth_header":"X-Api-Key"` (et headernavn) er det ikke
   if (!cls.secret) return true;
+  if (isBenignSecretValue(value, cls)) return true;
   return !cls.strong && value.length < 6;
 }
+/** Skipper et forkastet JSON-par og fortsetter fra verdiens åpningsanførselstegn (`openLen` tegn før verdien): det kan være NESTE pars nøkkel (`"d":\n"password":"…"`). */
+const resumeAtValueQuote = (openLen: number) => (m: RegExpExecArray): number => Math.max(m.index + 1, (m.indices?.[2]?.[0] ?? m.index + 1) - openLen);
 
 /** K4: hex/base64 KUN med hemmelighetsord rett foran (aldri frittstående: hasher, digester, trace-id-er og UUID-er er overalt). */
+/** A-L9: ord rett foran nøkkelordet som gjør en 40-/64-sifret heksverdi til en git-SHA/sjekksum (`commit key: <sha>`, `cache key: <digest>`), ikke en hemmelighet. */
+const GIT_CONTEXT = /(?:^|[^A-Za-z])(?:commit|sha|git|cache|object|tree|parent|revision|rev|build|etag|checksum|digest)[ \t_-]{0,3}$/i;
 function blobSkip(m: RegExpExecArray): boolean {
   const value = m[1] as string;
   if (startsWithMarker(value) || UUID.test(value)) return true;
+  if ((value.length === 40 || value.length === 64) && /^[0-9A-Fa-f]+$/.test(value) && GIT_CONTEXT.test(m.input.slice(Math.max(0, m.index - 16), m.index))) return true;
   if (/^[0-9A-Fa-f]+$/.test(value)) return !(/\d/.test(value) && /[A-Fa-f]/.test(value));
   if (!(/\d/.test(value) && /[a-z]/.test(value) && /[A-Z]/.test(value))) return true;
   const slashes = (value.match(/\//g) ?? []).length;
   const dashes = (value.match(/[-_]/g) ?? []).length;
   return slashes > value.length / 12 || dashes > value.length / 8 || new Set(value).size < 8;
 }
+
+/** Tilfeldig kropp: både sifre, små og store bokstaver (base62). En vanlig identifikator/et ord har det aldri. */
+const mixedRandom = (text: string): boolean => /\d/.test(text) && /[a-z]/.test(text) && /[A-Z]/.test(text);
 
 const PATTERNS: ReadonlyArray<PatternDef> = [
   { kind: "private_key", special: "private_key" },
@@ -103,6 +118,26 @@ const PATTERNS: ReadonlyArray<PatternDef> = [
   { kind: "google_oauth_token", re: /(?<![A-Za-z0-9_])(?:ya29\.[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}|1\/\/0[A-Za-z0-9_-]{30,})/g },
   { kind: "slack_app_token", re: /\bxapp-\d-[A-Za-z0-9-]{20,}\b/g },
   { kind: "huggingface_token", re: /\bhf_[A-Za-z0-9]{30,}\b/g },
+  // Fiks-runde 1 (review A, M4): connector-leverandørenes formater (docs/INTEGRATIONS.md: Notion, Linear, Sentry, Tavily, Groq, Atlassian, Brave, Twilio, Telnyx, HubSpot, Dropbox, Discord, Slack, Resend, Meta) FRITTSTÅENDE, uten nøkkelord foran
+  // (eieren limer en nøkkel i chat uten «TOKEN=»). ALLE `unverified`: leverandørdokumentasjonen kunne ikke leses (ingen nett), formene er kjent offentlig praksis. Hver regel er STRENG (tegnklasse + minstelengde); der prefikset er kort
+  // eller vanlig (`secret_`, `re_`, `BSA`, Discord) kreves en tilfeldig kropp (sifre og bokstaver) så en vanlig identifikator ikke treffes.
+  { kind: "notion_token", re: /\b(?:ntn_[A-Za-z0-9]{40,}|secret_[A-Za-z0-9]{40,})\b/g, skip: (m) => m[0].startsWith("secret_") && !mixedRandom(m[0].slice(7)) },
+  { kind: "linear_token", re: /\blin_(?:api|oauth)_[A-Za-z0-9]{32,}\b/g },
+  { kind: "sentry_token", re: /\bsntry[su]_[A-Za-z0-9+/=_-]{40,}/g },
+  { kind: "tavily_key", re: /\btvly-[A-Za-z0-9_-]{28,}\b/g },
+  { kind: "groq_key", re: /\bgsk_[A-Za-z0-9]{40,}\b/g },
+  { kind: "atlassian_token", re: /\bATATT[A-Za-z0-9_=-]{60,}/g },
+  { kind: "brave_key", re: /\bBSA[A-Za-z0-9_-]{27,}\b/g, skip: (m) => !(/\d/.test(m[0]) && /[A-Za-z]/.test(m[0].slice(3))) },
+  { kind: "twilio_sid", re: /\b(?:SK|AC)[0-9a-f]{32}\b/g },
+  { kind: "telnyx_key", re: /\bKEY0[A-Za-z0-9]{28,}(?:_[A-Za-z0-9]{16,})?\b/g },
+  { kind: "hubspot_token", re: /\bpat-[a-z]{2}\d-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi },
+  { kind: "dropbox_token", re: /(?<![A-Za-z0-9_.-])sl\.[A-Za-z0-9_-]{100,}/g },
+  { kind: "discord_bot_token", re: /\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}\b/g, skip: (m) => !mixedRandom(m[0]) },
+  { kind: "webhook_url", re: /\b(?:https?:\/\/)?(?:hooks\.slack\.com\/services\/T[A-Z0-9]{6,}\/B[A-Z0-9]{6,}\/[A-Za-z0-9]{20,}|discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d{15,22}\/[A-Za-z0-9_-]{50,})/g },
+  { kind: "resend_key", re: /\bre_[A-Za-z0-9_]{28,}\b/g, skip: (m) => !mixedRandom(m[0].slice(3)) },
+  { kind: "meta_token", re: /\bEAA[A-Za-z0-9]{80,}\b/g },
+  // age (prosjektets egen SOPS/age): bech32-alfabetet, `AGE-SECRET-KEY-1` + 58 tegn (50-70 godtatt fordi lengden er `unverified`). Den OFFENTLIGE nøkkelen (`age1…`) er ingen hemmelighet.
+  { kind: "age_secret_key", re: /\bAGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{50,70}\b/gi },
   // Azure: `AccountKey=…`/`SharedAccessKey=…` i tilkoblingsstrenger og `sig=` i SAS-URL-er (`sv=<dato>&…&sig=…`). `unverified`.
   { kind: "azure_key", re: /\b(?:AccountKey|SharedAccessKey|PrimaryMasterKey|SecondaryMasterKey)\s*=\s*["']?([^\s;"']{16,})/gid, group: 1 },
   { kind: "azure_key", re: /\bsv=\d{4}-\d{2}-\d{2}[^\s"'<>]{0,600}?[?&;]sig=([A-Za-z0-9%+/=_-]{20,})/gd, group: 1 },
@@ -118,13 +153,20 @@ const PATTERNS: ReadonlyArray<PatternDef> = [
     group: 2,
     claim: 1,
     claimOnSkip: true,
-    skip: (m) => SCHEME_ONLY.test(m[2] as string) || /^[<{$%[]|^\.{3,}$|^\*+$/.test(m[2] as string)
+    // A-L7: kun en REELL, lukket plassholderform er unntatt (`<token>`, `${TOKEN}`, `{{ token }}`, `...`); et ekte token som tilfeldigvis starter med `<`, `{`, `$`, `%` eller `[` redigeres.
+    skip: (m) => {
+      const credential = m[2] as string;
+      if (startsWithMarker(credential) || SCHEME_ONLY.test(credential)) return true;
+      const at = m.indices?.[2]?.[0];
+      return at !== undefined && isAuthPlaceholder(m.input.slice(at, at + 140));
+    }
   },
-  { kind: "cookie_header", re: /\b(?:Set-)?Cookie[ \t]*:[ \t]*([^\r\n]{1,2000})/gid, group: 1, skip: (m) => startsWithMarker(m[1] as string) || !/^[A-Za-z0-9_.~%+-]{1,64}=/.test(m[1] as string) },
+  // A-L1: «name=»-kravet står i REGEXEN (lookahead), ikke i skip: et godartet `Cookie: <prosa>` forbruker da ikke resten av linjen og skjuler ikke en ekte cookie senere på linjen (`Cookie: godkjent av styret og Cookie: sid=…`).
+  { kind: "cookie_header", re: /\b(?:Set-)?Cookie[ \t]*:[ \t]*(?=[A-Za-z0-9_.~%+-]{1,64}=)([^\r\n]{1,2000})/gid, group: 1, skip: (m) => startsWithMarker(m[1] as string) },
   // WP-SEC2 (K3): JSON-tekstform `"navn": "verdi"` (anførselstegn mellom navn og kolon gjør at NAVN=verdi under ikke ser den), også enkle anførselstegn og dobbelt-escapet JSON (`\"navn\":\"verdi\"`).
-  { kind: "named_secret", re: /"([^"\\\r\n]{1,80})"[ \t\r\n]*:[ \t\r\n]*"((?:[^"\\]|\\.)*)"/gd, group: 2, skip: jsonPairSkip },
-  { kind: "named_secret", re: /'([^'\\\r\n]{1,80})'[ \t\r\n]*:[ \t\r\n]*'((?:[^'\\]|\\.)*)'/gd, group: 2, skip: jsonPairSkip },
-  { kind: "named_secret", re: /\\"([^"\\\r\n]{1,80})\\"[ \t\r\n]*:[ \t\r\n]*\\"((?:[^"\\]|\\(?!"))*)\\"/gd, group: 2, skip: jsonPairSkip },
+  { kind: "named_secret", re: /"([^"\\\r\n]{1,80})"[ \t\r\n]*:[ \t\r\n]*"((?:[^"\\]|\\.)*)"/gd, group: 2, skip: jsonPairSkip, resumeAfterSkip: resumeAtValueQuote(1) },
+  { kind: "named_secret", re: /'([^'\\\r\n]{1,80})'[ \t\r\n]*:[ \t\r\n]*'((?:[^'\\]|\\.)*)'/gd, group: 2, skip: jsonPairSkip, resumeAfterSkip: resumeAtValueQuote(1) },
+  { kind: "named_secret", re: /\\"([^"\\\r\n]{1,80})\\"[ \t\r\n]*:[ \t\r\n]*\\"((?:[^"\\]|\\(?!"))*)\\"/gd, group: 2, skip: jsonPairSkip, resumeAfterSkip: resumeAtValueQuote(2) },
   // `NAVN=verdi` / `NAVN: verdi` der NAVN ser ut som en hemmelighet - kun verdien fjernes.
   // Gjennomgang av WP-A (D-451): prefikset/suffikset er BEGRENSET (`{0,64}`). Uten tak er `[A-Za-z0-9_.-]*` + `\b` kvadratisk på lange tekster uten nøkkelord: 64 KB «a.b.…» tok 5 s og 500 KB «lege-…» 143 s per klassifisering.
   { kind: "named_secret", re: /\b([A-Za-z0-9_.-]{0,64}(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|AUTH)[A-Za-z0-9_.-]{0,64}\s*[:=]\s*["']?)([^\s"']{6,})/gid, group: 2, skip: (m) => FILE_LOCATION.test(m[0]) },
@@ -135,24 +177,31 @@ const PATTERNS: ReadonlyArray<PatternDef> = [
   // Gjennomgang av WP-A (D-451): også bestemte former («PIN-koden er …») og BankID-/engangskoder. En kode har SIFFER; «engangskoden er sendt til deg» og «Pin er satt til høy» er ikke koder.
   { kind: "spoken_code", re: /\b(?:pin(?:-?kode[a-zæøå]*)?|bankid-?kode[a-zæøå]*|engangskode[a-zæøå]*)(?:\s+(?:min|mi|mitt|di|ditt|din|vår))?(?:\s+(?:fra|på|til|for)\s+[A-Za-zæøåÆØÅ-]{2,20}){0,2}\s*(?:er|is|[:=])\s*["']?((?=[^\s"',.;]*\d)[^\s"',.;]{4,})/gid, group: 1 },
   // WP-SEC2 (K4): hex (≥ 32) og base64 (≥ 32, blandet bruk av store/små bokstaver og sifre) KUN rett etter et hemmelighetsord («the signing secret is …», «key: …», «nøkkel …»). Frittstående hex/base64 røres ikke (hasher/digester/trace-id-er).
-  { kind: "secret_blob", re: /\b(?:secret|key|token|password|passwd|passord|credential|hmac|salt|pepper|signature|seed|nøkkel|hemmelighet)s?\b[ \t]{0,8}(?:(?:is|er|=>|[:=-])[ \t]{0,8})?["'`]?([0-9A-Fa-f]{32,}|[A-Za-z0-9+/_-]{32,}={0,2})(?![A-Za-z0-9+/_=-])/gid, group: 1, skip: blobSkip }
+  // Fiks-runde 1 (A-M3): også norske BESTEMTE/SAMMENSATTE former («nøkkelen min er …», «tokenet er …», «hemmeligheten: …», «API-nøkkelen: …», «signeringsnøkkelen er …», «nøkler: …») - derfor uten venstre `\b` (sammensetninger) og med
+  // valgfritt suffiks. UTEN lat venstre-prefiks: en variant med `{0,20}?` felte K6-ytelsestesten (3,6 s).
+  { kind: "secret_blob", re: /(?:secret|key|token|password|passwd|passord|credential|hmac|salt|pepper|signature|seed|nøkkel|nøkl(?:er|ene)|hemmelighet)(?:s|en|et|er|ene)?\b(?:[ \t]{1,3}(?:min|mi|mitt|di|ditt|din|vår|my|our))?[ \t]{0,8}(?:(?:is|er|=>|[:=-])[ \t]{0,8})?["'`]?([0-9A-Fa-f]{32,}|[A-Za-z0-9+/_-]{32,}={0,2})(?![A-Za-z0-9+/_=-])/gid, group: 1, skip: blobSkip }
 ];
 
 /** Dedikert kortnummerpass (Luhn) - kjøres sist. Regelen er IKKE utvidet i WP-SEC2 (kun innsnevret: en UUID er aldri et kortnummer, se `insideUuid`). */
 const CARD_RE = /\b(?:\d[ -]?){13,19}\b/g;
-const UUID_SHAPE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const UUID_SHAPE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const isHexOrHyphen = (c: number): boolean => c === 0x2d || (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66);
 
 /**
  * Et siffertreff som ligger inne i en UUID (`fin-pi-47015187-4988-4107-9302-…`) er ingen kortnummer: de første gruppene i en UUID kan bestå bare av sifre og (10 % av gangene) bestå Luhn. WP-SEC2 skanner mer tekst enn før
  * (feilårsaker i ledger/audit), og en UUID-id i en `tool_failed:possible_duplicate_of:<id>`-grunn ble tilfeldig til `[REDACTED:card_number]` (oppdaget av `modules/finance/test/wpf1-review-fixes.test.ts`).
+ * Fiks-runde 1 (review B, M2): UUID-treffet må OVERLAPPE siffer-kandidaten. En UUID et sted i nabolaget (`kort 4111 1111 1111 1111 <uuid>`, `4111111111111111-<uuid>`, `<uuid>-4111111111111111`) gjør ikke kortet til en del av UUID-en.
  */
 function insideUuid(text: string, start: number, end: number): boolean {
   let a = start;
   while (a > 0 && start - a < 40 && isHexOrHyphen(text.charCodeAt(a - 1))) a -= 1;
   let b = end;
   while (b < text.length && b - end < 40 && isHexOrHyphen(text.charCodeAt(b))) b += 1;
-  return UUID_SHAPE.test(text.slice(a, b));
+  for (const m of text.slice(a, b).matchAll(UUID_SHAPE)) {
+    const us = a + (m.index ?? 0);
+    if (us < end && us + m[0].length > start) return true;
+  }
+  return false;
 }
 
 function luhnValid(digits: string): boolean {
@@ -234,9 +283,17 @@ const SQUEEZE_RULES: ReadonlyArray<SqueezeRule> = [
   { kind: "sendgrid_key", prefix: /SG\./g, body: isAlnumDashUnderscoreDot, min: 33, max: 120 },
   { kind: "npm_token", prefix: /npm_/g, body: isAlnum, min: 30, max: 36, fixed: 36 },
   { kind: "gitlab_token", prefix: /gl(?:pat|dt|rt|ptt|ft|imt|agent|cbt|soat|oas)-/g, body: isAlnumDashUnderscore, min: 20, max: 120 },
-  { kind: "huggingface_token", prefix: /hf_/g, body: isAlnum, min: 30, max: 80 }
+  { kind: "huggingface_token", prefix: /hf_/g, body: isAlnum, min: 30, max: 80 },
+  // Fiks-runde 1 (A-L5): resten av token-familiene med et fast prefiks. `unverified` (lengdene: sk_live_ ≥ 16, whsec_ ≥ 16, xapp-<n>- ≥ 20, AIza = 35, telegram <8-10 siffer>:<35>, enr_ ≥ 30, ya29. ≥ 20).
+  { kind: "stripe_key", prefix: /(?:sk|rk|pk)_(?:live|test)_/g, body: isAlnum, min: 16, max: 100 },
+  { kind: "stripe_key", prefix: /whsec_/g, body: isAlnum, min: 16, max: 100 },
+  { kind: "slack_app_token", prefix: /xapp-\d-/g, body: isAlnumDash, min: 20, max: 200 },
+  { kind: "google_api_key", prefix: /AIza/g, body: isAlnumDashUnderscore, min: 35, max: 35, fixed: 35, strictEnd: true },
+  { kind: "telegram_bot_token", prefix: /\d{8,10}:/g, body: isAlnumDashUnderscore, min: 35, max: 35, fixed: 35, strictEnd: true },
+  { kind: "enrollment_ticket", prefix: /enr_/g, body: isAlnumDashUnderscore, min: 30, max: 200 },
+  { kind: "google_oauth_token", prefix: /ya29\./g, body: isAlnumDashUnderscore, min: 20, max: 400 }
 ];
-const SQUEEZE_LOOSE_PREFIX = /g\s*h\s*[pousr]\s*_|g\s*i\s*t\s*h\s*u\s*b\s*_\s*p\s*a\s*t|s\s*k\s*-|x\s*o\s*x|A\s*K\s*I\s*A|A\s*S\s*I\s*A|e\s*y\s*J|-----\s*B\s*E\s*G\s*I\s*N|S\s*G\s*\.|n\s*p\s*m\s*_|g\s*l\s*[a-z]{2,5}\s*-|h\s*f\s*_/;
+const SQUEEZE_LOOSE_PREFIX = /g\s*h\s*[pousr]\s*_|g\s*i\s*t\s*h\s*u\s*b\s*_\s*p\s*a\s*t|s\s*k\s*-|x\s*o\s*x|A\s*K\s*I\s*A|A\s*S\s*I\s*A|e\s*y\s*J|-----\s*B\s*E\s*G\s*I\s*N|S\s*G\s*\.|n\s*p\s*m\s*_|g\s*l\s*[a-z]{2,5}\s*-|h\s*f\s*_|[spr]\s*k\s*_\s*(?:l\s*i\s*v\s*e|t\s*e\s*s\s*t)\s*_|w\s*h\s*s\s*e\s*c\s*_|x\s*a\s*p\s*p\s*-|A\s*I\s*z\s*a|(?:\d\s*){8}:|e\s*n\s*r\s*_|y\s*a\s*2\s*9\s*\./;
 const PEM_SQUEEZED_HEADER = /-----BEGIN[A-Z0-9]*PRIVATEKEY(?:BLOCK)?-----/g;
 const BEGIN_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
 const END_RE = /-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
@@ -247,10 +304,16 @@ const MIN_MATCH_CHARS = 7;
 interface WindowState {
   /** Forrige vindu endte inne i en privat nøkkel uten avslutning. */
   openKey: boolean;
+  /** Original-indeks der den åpne nøkkelen begynte (BEGIN): ligger den i NESTE vindu også, tar vanlig BEGIN-skanning den, og vinduet starter ikke med en falsk «åpen nøkkel» (A-L2). */
+  openAt: number;
 }
 
-function scanWindow(source: string, ws: number, we: number, isLast: boolean, state: WindowState, options: SecretScanOptions, out: SecretSpan[]): void {
-  const view: ScanView = buildView(source, ws, we);
+/**
+ * `raw` = identitetsvisning (A-M1): mønstrene kjøres mot RÅ vindustekst, med de ordgrensene den gamle skanneren så. Den normaliserte visningen fjerner skjulte tegn og folder fullbredde/homoglyfer, og da flytter `\b` seg
+ * for et token som står inntil slike tegn (`abc<ZWSP>ghp_…`, `AKIA…<ZWSP>abc`, `ｘghp_…`). Er teksten ikke ren ASCII, kjøres derfor mønstrene også mot råteksten, og unionen av spennene brukes.
+ */
+function scanWindow(source: string, ws: number, we: number, isLast: boolean, state: WindowState, options: SecretScanOptions, out: SecretSpan[], raw = false): void {
+  const view: ScanView = raw ? { text: source.slice(ws, we), map: null, base: ws, source } : buildView(source, ws, we);
   const text = view.text;
   const n = text.length;
   if (n < MIN_MATCH_CHARS) return;
@@ -287,6 +350,7 @@ function scanWindow(source: string, ws: number, we: number, isLast: boolean, sta
   // --- private nøkkelblokk (BEGIN ... END, eller til slutten av vinduet/teksten hvis den ikke avsluttes: fail-closed) ---
   const scanPrivateKeys = (): void => {
     let pos = 0;
+    if (state.openKey && state.openAt >= ws) state.openKey = false; // A-L2: BEGIN ligger i DETTE vinduet også; den vanlige BEGIN-skanningen under tar den
     if (state.openKey) {
       state.openKey = false;
       END_RE.lastIndex = 0;
@@ -317,7 +381,10 @@ function scanWindow(source: string, ws: number, we: number, isLast: boolean, sta
         continue;
       }
       place("private_key", b.index, n, true);
-      if (!isLast) state.openKey = true;
+      if (!isLast) {
+        state.openKey = true;
+        state.openAt = origStart(view, b.index);
+      }
       return;
     }
   };
@@ -349,7 +416,10 @@ function scanWindow(source: string, ws: number, we: number, isLast: boolean, sta
         continue;
       }
       place("private_key", vs, n, true);
-      if (!isLast) state.openKey = true;
+      if (!isLast) {
+        state.openKey = true;
+        state.openAt = origStart(view, vs);
+      }
       return;
     }
   };
@@ -418,8 +488,10 @@ function scanWindow(source: string, ws: number, we: number, isLast: boolean, sta
   };
 
   const squeezedKinds = new Set(SQUEEZE_RULES.map((r) => r.kind));
-  scanPrivateKeys();
-  squeezePrivateKey();
+  if (!raw) {
+    scanPrivateKeys();
+    squeezePrivateKey();
+  }
 
   for (let p = 0; p < PATTERNS.length; p += 1) {
     const def = PATTERNS[p] as PatternDef;
@@ -434,6 +506,7 @@ function scanWindow(source: string, ws: number, we: number, isLast: boolean, sta
         continue;
       }
       if (def.skip !== undefined && def.skip(m)) {
+        if (def.resumeAfterSkip !== undefined) re.lastIndex = Math.max(m.index + 1, Math.min(re.lastIndex, def.resumeAfterSkip(m)));
         if (def.claimOnSkip === true && def.claim !== undefined) {
           const c = m.indices?.[def.claim];
           if (c !== undefined) {
@@ -464,6 +537,8 @@ function scanWindow(source: string, ws: number, we: number, isLast: boolean, sta
     if (insideUuid(text, m.index, m.index + m[0].length)) continue;
     place("card_number", m.index, m.index + m[0].length, true);
   }
+  // A-M1: ikke-ASCII tekst får ett pass til mot råteksten (se `scanWindow`-kommentaren); spennene er i originalkoordinater i begge passene.
+  if (!raw && view.map !== null) scanWindow(source, ws, we, isLast, { openKey: false, openAt: 0 }, options, out, true);
 }
 
 /** Alle funn i `input`, i originalens koordinater (ikke slått sammen). Vinduer og overlapp: se `SCAN_WINDOW_CHARS`/`SCAN_OVERLAP_CHARS`. */
@@ -471,7 +546,7 @@ export function scanSecretSpans(input: string, options: SecretScanOptions = {}):
   const out: SecretSpan[] = [];
   const length = input.length;
   if (length < MIN_MATCH_CHARS) return out;
-  const state: WindowState = { openKey: false };
+  const state: WindowState = { openKey: false, openAt: 0 };
   if (length <= SCAN_WINDOW_CHARS) {
     scanWindow(input, 0, length, true, state, options, out);
     return out;
@@ -564,12 +639,15 @@ export function redactLogText(text: string): string {
 
 // eslint-disable-next-line no-control-regex -- kontrolltegn i en loggmelding er nettopp det som skal bort
 const LOG_CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
-/** Øvre grense for hvor mye av en loggverdi som skannes (skann FØRST, kutt etterpå - men arbeidet er begrenset uansett hva leverandøren sender). */
-const LOG_SCAN_MAX_CHARS = 65_536;
+/**
+ * Øvre grense for hvor mye av en loggverdi som skannes. Fiks-runde 1 (review B, L3): 64 KB var for lavt - et token bak en stor skjult blokk (`[REDACTED:private_key] ghp_…`) ble kuttet midt i, og et halvt token sto igjen i utdata. 8 MiB er det
+ * største en transport leverer (docker-logger: 8 MB per linje), så i praksis skannes ALT FØR kuttet; skanningen er lineær (vinduer), så arbeidet er likevel begrenset. Over taket gjelder kutt-før-skann fortsatt (kjent, dokumentert grense).
+ */
+const LOG_SCAN_MAX_CHARS = 8 * 1024 * 1024;
 
 /**
  * WP-SEC2 (K7c): felles redaksjon for FEILTEKST/loggmeldinger som kan komme fra en leverandør/HTTP/underprosess (`console.error(...)` med `err.message`). Tar en `Error`, en streng eller en hvilken som helst verdi;
- * skanner for hemmeligheter FØRST (på inntil 64 KB), fjerner kontrolltegn (én linje, ingen logginjeksjon) og kutter SIST til `max` tegn. Aldri en kastet feil.
+ * skanner for hemmeligheter FØRST (på inntil `LOG_SCAN_MAX_CHARS`), fjerner kontrolltegn (én linje, ingen logginjeksjon) og kutter SIST til `max` tegn. Aldri en kastet feil.
  */
 export function redactForLog(value: unknown, max = 300): string {
   let text: string;
