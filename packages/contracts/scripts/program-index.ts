@@ -114,7 +114,7 @@ export function main(argv: readonly string[], env: NodeJS.ProcessEnv, out: (line
         let problems = 0;
         for (const c of changes) {
           if (c.problem !== null) problems += 1;
-          out(`${c.component_id}: ${c.changed ? (c.written ? "oppdatert" : "AVVIK (kjør med --write)") : "à jour"}${c.version_before !== c.version_after ? ` (versjon ${c.version_before} -> ${c.version_after})` : ""}${c.problem !== null ? ` [${c.problem}]` : ""}`);
+          out(`${c.component_id}: ${c.changed ? (c.written ? "oppdatert" : "AVVIK (kjør med --write)") : "à jour"}${c.version_before !== c.version_after ? ` (versjon ${c.version_before} -> ${c.version_after})` : ""}${c.problem !== null ? ` [${c.problem}]` : ""}${c.note !== undefined ? ` (merknad: ${c.note})` : ""}`);
         }
         const drift = changes.filter((c) => c.changed && !c.written).length;
         out(`${changes.length} komponenter sjekket, ${changes.filter((c) => c.changed).length} med endring, ${changes.filter((c) => c.written).length} skrevet`);

@@ -1,6 +1,7 @@
-import { renameSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { contractFingerprint } from "./hash.ts";
+import { acquireLock, replaceFileAtomically } from "./file-lock.ts";
+import { canonicalJson, contractFingerprint } from "./hash.ts";
 import { loadProgramData, makeFileReader, PROGRAM_DIR } from "./fs-loader.ts";
 import { canonicalizeShard, serializeData } from "./index-builder.ts";
 import { ComponentShardSchema, type ComponentShard } from "./schema.ts";
@@ -23,8 +24,10 @@ export interface FingerprintChange {
   version_before: string | null;
   version_after: string | null;
   written: boolean;
-  /** Hvorfor komponenten ikke kunne oppdateres (manglende fil, ugyldig resultat ...). */
+  /** Hvorfor komponenten ikke kunne oppdateres (manglende fil, ugyldig resultat, samtidig endring ...). */
   problem: string | null;
+  /** Tilleggsmerknad som ikke er en feil (f.eks. at en foreldet lås ble overtatt). Finnes kun når det er noe å si. */
+  note?: string;
 }
 
 export function bumpVersion(version: string, kind: BumpKind): string | null {
@@ -42,6 +45,18 @@ export interface RefreshOptions {
   bump?: BumpKind;
   /** Tidspunkt (ISO) som settes som `changed_at` ved endring. Injiseres så testene er deterministiske. */
   now: string;
+  /** KUN for testene: kalles rett før den endelige re-lesingen av skjerven (en test kan late som en annen skriver rørte filen). Aldri satt i produksjon. */
+  _before_commit?: (componentId: string) => void;
+}
+
+/** Skjerven slik den står NÅ, som kanonisk JSON (for re-lesingen rett før rename); null hvis den mangler eller er ugyldig. */
+function readCanonicalShard(file: string): string | null {
+  try {
+    const parsed = ComponentShardSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
+    return parsed.success ? canonicalJson(canonicalizeShard(parsed.data)) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function refreshFingerprints(root: string, opts: RefreshOptions): FingerprintChange[] {
@@ -84,9 +99,32 @@ export function refreshFingerprints(root: string, opts: RefreshOptions): Fingerp
       }
       const file = join(root, PROGRAM_DIR, "components", `${c.component_id}.json`);
       const tmp = join(root, PROGRAM_DIR, "components", `.${c.component_id}.json.tmp-${process.pid}`);
-      writeFileSync(tmp, serializeData(canonicalizeShard(valid.data)), { flag: "wx" });
-      renameSync(tmp, file);
-      result.written = true;
+      // M1: eksklusiv lås per komponent og re-lesing rett før rename (samme mønster som porteregistreringen).
+      const lock = acquireLock(join(root, PROGRAM_DIR, `.${c.component_id}.lock`));
+      if (!lock.ok) {
+        out.push({ ...result, problem: `samtidig oppdatering (concurrent_registration): ${lock.detail}; ingenting er skrevet, prøv på nytt` });
+        continue;
+      }
+      try {
+        if (lock.took_over_stale) result.note = "en foreldet lås (eldre enn 60 s, fra en avbrutt oppdatering) ble overtatt";
+        const before = canonicalJson(canonicalizeShard(c));
+        const outcome = replaceFileAtomically({
+          file,
+          tmp,
+          text: serializeData(canonicalizeShard(valid.data)),
+          unchanged: () => {
+            opts._before_commit?.(c.component_id);
+            return readCanonicalShard(file) === before;
+          }
+        });
+        if (outcome !== "written") {
+          out.push({ ...result, problem: `samtidig oppdatering (concurrent_registration): ${outcome === "tmp_exists" ? "en midlertidig fil finnes allerede (en annen, eller en avbrutt, skriving)" : "skjerven ble endret av en annen mens oppdateringen pågikk"}; ingenting er skrevet, prøv på nytt` });
+          continue;
+        }
+        result.written = true;
+      } finally {
+        lock.release();
+      }
     }
     out.push(result);
   }

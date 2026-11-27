@@ -1,9 +1,10 @@
-import { lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { OperationalGateChangedPayloadSchema, type GateStatus, type OperationalGateChangedPayload } from "./gate-events.ts";
 import { evaluateGate, evaluateOrl, GateSchema, makeGateContext, OrlSchema, type Gate, type Orl } from "./gates.ts";
 import { loadProgramData, makeFileReader, PROGRAM_DIR, ProgramDataError } from "./fs-loader.ts";
-import { contractFingerprint, normalizeLineEndings, sha256Hex } from "./hash.ts";
+import { acquireLock, replaceFileAtomically } from "./file-lock.ts";
+import { canonicalJson, contractFingerprint, normalizeLineEndings, sha256Hex } from "./hash.ts";
 import { serializeData } from "./index-builder.ts";
 import { EvidenceRefSchema, type EvidenceRef } from "./schema.ts";
 
@@ -36,6 +37,7 @@ export const RECORD_PROBLEMS = [
   "evidence_older_than_contract_change",
   "prerequisite_not_pass",
   "reason_invalid",
+  "concurrent_registration",
   "result_invalid"
 ] as const;
 export type RecordProblem = (typeof RECORD_PROBLEMS)[number];
@@ -58,6 +60,8 @@ export interface RecordGateInput {
   /** Git-SHA til arbeidstreet nå (brukes kun når evidensfilen ikke har en egen). */
   git_sha: string | null;
   write: boolean;
+  /** KUN for testene: kalles rett før den endelige re-lesingen, så en test kan late som en annen skriver rørte filen etter at vi leste (aldri satt i produksjon). */
+  _before_commit?: () => void;
 }
 
 export type RecordGateResult =
@@ -99,11 +103,37 @@ export function parseEvidenceHeader(text: string): EvidenceHeader {
 
 const fail = (problem: RecordProblem, detail: string): RecordGateResult => ({ ok: false, problem, detail });
 
+const GATE_OR_ORL_ID = /^(?:G(?:0[1-9]|1[0-7])|ORL[0-5])$/;
+
+/** Port-/nivåfilen slik den står NÅ, som kanonisk JSON (for re-lesingen rett før rename); null hvis den mangler eller er ugyldig. */
+function readCanonical(file: string, isOrl: boolean): string | null {
+  try {
+    const parsed = (isOrl ? OrlSchema : GateSchema).safeParse(JSON.parse(readFileSync(file, "utf8")));
+    return parsed.success ? canonicalJson(parsed.data) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function recordGate(input: RecordGateInput): RecordGateResult {
   if (!ISO_INSTANT.test(input.now) || !Number.isFinite(Date.parse(input.now))) return fail("evidence_time_invalid", "now er ikke et gyldig UTC-tidspunkt");
   const reason = input.reason.replace(/[\r\n]+/g, " ").trim();
   if (reason.length < 3 || reason.length > 200) return fail("reason_invalid", "begrunnelsen må være 3-200 tegn");
+  // Id-en bygges inn i en lås- og filsti: kun nøyaktig G01-G17/ORL0-ORL5 slipper videre (aldri ukontrollert tekst i en sti).
+  if (!GATE_OR_ORL_ID.test(input.gate_id)) return fail("gate_unknown", `${input.gate_id} er ikke en port (G01-G17) eller et nivå (ORL0-ORL5)`);
+  if (!input.write) return recordGateCore(input, reason, false);
 
+  // Skriving: eksklusiv lås per port (M1). Hele lese-vurder-skriv-sekvensen skjer under låsen, så en samtidig registrering enten nektes eller ser vårt resultat.
+  const lock = acquireLock(join(input.root, PROGRAM_DIR, `.${input.gate_id}.lock`));
+  if (!lock.ok) return lock.reason === "held" ? fail("concurrent_registration", `${input.gate_id}: ${lock.detail}; vent til den er ferdig og prøv på nytt`) : fail("data_invalid", `${PROGRAM_DIR} er ikke tilgjengelig: ${lock.detail}`);
+  try {
+    return recordGateCore(input, reason, lock.took_over_stale);
+  } finally {
+    lock.release();
+  }
+}
+
+function recordGateCore(input: RecordGateInput, reason: string, tookOverStaleLock: boolean): RecordGateResult {
   let data;
   try {
     data = loadProgramData(input.root);
@@ -122,6 +152,7 @@ export function recordGate(input: RecordGateInput): RecordGateResult {
 
   const reader = makeFileReader(input.root);
   const warnings: string[] = [];
+  if (tookOverStaleLock) warnings.push("en foreldet lås (eldre enn 60 s, fra en avbrutt registrering) ble overtatt");
   let evidence: EvidenceRef | null = null;
 
   if (input.status === "OPEN") {
@@ -225,8 +256,19 @@ export function recordGate(input: RecordGateInput): RecordGateResult {
     const dir = join(input.root, PROGRAM_DIR, isOrl ? "orl" : "gates");
     const file = join(dir, `${input.gate_id}.json`);
     const tmp = join(dir, `.${input.gate_id}.json.tmp-${process.pid}`);
-    writeFileSync(tmp, serializeData(valid.data), { flag: "wx" });
-    renameSync(tmp, file);
+    // Re-lesing rett før rename: er port-filen fortsatt nøyaktig slik vi leste den? Ellers har en annen skriver rørt den, og vi skriver ikke over den (tapt oppdatering).
+    const before = canonicalJson(target);
+    const outcome = replaceFileAtomically({
+      file,
+      tmp,
+      text: serializeData(valid.data),
+      unchanged: () => {
+        input._before_commit?.();
+        return readCanonical(file, isOrl) === before;
+      }
+    });
+    if (outcome === "tmp_exists") return fail("concurrent_registration", `${input.gate_id}: en midlertidig fil finnes allerede (en annen, eller en avbrutt, skriving); fjern den og prøv på nytt`);
+    if (outcome === "changed_since_read") return fail("concurrent_registration", `${input.gate_id}: port-filen ble endret av en annen mens registreringen pågikk; ingenting er skrevet, prøv på nytt`);
     written = true;
   }
   return { ok: true, gate_id: input.gate_id, prior_status: prior, new_status: input.status, payload, evidence_ref: evidence, warnings, written };

@@ -1,6 +1,7 @@
 import { mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { acquireLock } from "../src/program/file-lock.ts";
 import { refreshFingerprints } from "../src/program/fingerprint-tool.ts";
 import { loadProgramData } from "../src/program/fs-loader.ts";
 import { OperationalGateChangedEventSchema } from "../src/program/gate-events.ts";
@@ -224,7 +225,11 @@ describe("nektelser (hver kontroll har en test som feiler uten den)", () => {
     ["evidence_time_invalid", (r) => rec(r, { now: "i dag" })],
     ["reason_invalid", (r) => rec(r, { reason: "ab" })],
     ["reason_invalid", (r) => rec(r, { reason: "   " })],
-    ["reason_invalid", (r) => rec(r, { reason: "x".repeat(201) })]
+    ["reason_invalid", (r) => rec(r, { reason: "x".repeat(201) })],
+    ["concurrent_registration", (r) => {
+      acquireLock(join(r, "config/program/.G01.lock"));
+      return rec(r, { write: true });
+    }]
   ];
   for (const [expected, run] of cases) {
     it(`${expected}`, () => {
