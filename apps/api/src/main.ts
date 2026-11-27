@@ -436,6 +436,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `ToolGateway.setSecret()` skriver via. ALDRI to uavhengige Infisical-
   // tilkoblinger.
   const infisicalSecretProvider = new InfisicalSecretProvider();
+  // WP-AUTH2a (JARVIS-014): deterministisk klasse C-behandling. Modus AV (standard) sender ingen option = gatewayen er identisk med main; samme kobling som i worker-main.ts.
+  const classCWiring = createClassCWiring(process.env);
   // Task #121 (D-214): hevet ut til en navngitt konstant (tidligere anonym
   // inline i ToolGateway-konstruktøren) - `SelfModificationService` sin
   // `resolveGitToken` gjenbruker DENNE SAMME kjeden (Infisical PRIMÆR,
@@ -450,8 +452,6 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // leverer dekoratøren installasjonstokenet under SAMME ref (`JARVIS_GITHUB_TOKEN`); privatnøkkelen leses fra vaulten ved hver signering.
   const githubAuth = createGitHubAuth({ secrets: baseSecretProvider, env: process.env });
   const readSecretProvider = githubAuth.secretProvider(baseSecretProvider);
-  // WP-AUTH2a (JARVIS-014): deterministisk klasse C-behandling. Modus AV (standard) sender ingen option = gatewayen er identisk med main; samme kobling som i worker-main.ts.
-  const classCWiring = createClassCWiring(process.env);
   // Del 3 (JARVIS-013/043): klasse D-pipelinen er HÅRD i produksjon (nøkkel + full kjede + out-of-band-varsler; varsleren bindes sent under).
   const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
     classDPipeline: { enforce: true },

@@ -204,6 +204,8 @@ const policy = new PolicyGateway({
   },
   ...(policyAuditSink ? { auditSink: policyAuditSink.write } : {})
 });
+// WP-AUTH2a (JARVIS-014): deterministisk klasse C-behandling, samme kobling som i main.ts (API/worker-parity). Modus AV (standard) sender ingen option = gatewayen er identisk med main.
+const classCWiring = createClassCWiring(process.env);
 // D-181 (BLOCKER B1, D184): hoistet til en NAVNGITT konstant (var tidligere
 // inline i ToolGateway-konstruksjonen) slik at NØYAKTIG SAMME
 // `SecretProvider`-instans også kan injiseres i `WatchdogEmergencyAlertSink`
@@ -226,8 +228,6 @@ const baseToolSecretProvider = new FallbackSecretProvider(
 // privatnøkkelen leses fra vaulten (workeren beholder Infisical-maskinidentiteten) - aldri fra container-env.
 const githubAuth = createGitHubAuth({ secrets: baseToolSecretProvider, env: process.env });
 const toolSecretProvider = githubAuth.secretProvider(baseToolSecretProvider);
-// WP-AUTH2a (JARVIS-014): deterministisk klasse C-behandling, samme kobling som i main.ts (API/worker-parity). Modus AV (standard) sender ingen option = gatewayen er identisk med main.
-const classCWiring = createClassCWiring(process.env);
 // Del 3 (JARVIS-013/043): samme HÅRDE klasse D-pipeline som API-prosessen (API/worker-parity); varsleren bindes rett under.
 const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider, {
   classDPipeline: { enforce: true },
