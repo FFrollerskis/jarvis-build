@@ -12,12 +12,12 @@ docker run --gpus=all --publish 8000:8000 --volume ~/.cache/huggingface:/root/.c
 
 Krever Docker med GPU-støtte (NVIDIA Container Toolkit / Docker Desktop med WSL2-GPU). Modellen lastes ned ved første kall. Alle servere som tilbyr `POST /v1/audio/transcriptions` (multipart: `file`, valgfritt `model`, `language`, `prompt`) fungerer.
 
-PC-ens brannmur/Tailscale må slippe NAS-en til port 8000 (Tailscale-adresse, f.eks. `100.86.89.57`).
+PC-ens brannmur/Tailscale må slippe NAS-en til port 8000 (Tailscale-adresse, f.eks. `100.101.102.103`).
 
 ## 2. Test serveren FØR Jarvis berøres (fra NAS-en)
 
 ```
-curl -s -m 60 http://100.86.89.57:8000/v1/audio/transcriptions -F "file=@prøve.wav" -F "language=no"
+curl -s -m 60 http://100.101.102.103:8000/v1/audio/transcriptions -F "file=@prøve.wav" -F "language=no"
 ```
 
 Svaret skal være JSON med `text`. Mål tiden (`time`) og sjekk at norsken er riktig.
@@ -25,7 +25,7 @@ Svaret skal være JSON med `text`. Mål tiden (`time`) og sjekk at norsken er ri
 ## 3. Pek Jarvis på serveren (`.env` på NAS-en)
 
 ```
-JARVIS_STT_REMOTE_URL=http://100.86.89.57:8000
+JARVIS_STT_REMOTE_URL=http://100.101.102.103:8000
 JARVIS_STT_REMOTE_MODEL=        # tom = serverens standardmodell; ellers modellnavnet serveren forventer
 JARVIS_STT_REMOTE_TIMEOUT_MS=   # tom = 4000
 ```

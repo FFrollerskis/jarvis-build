@@ -10,13 +10,13 @@ Alle kommandoer kjøres fra `/volume1/jarvisbuild-data/jarvisbuild` (compose og 
 
 | PuTTY-felt | Verdi |
 |---|---|
-| Host Name (or IP address) | `100.76.2.58` |
+| Host Name (or IP address) | `100.101.102.104` |
 | Port / Connection type | `22` / SSH |
 | login as | `Jarvis` (stor J), deretter passordet til NAS-brukeren |
 
-`100.76.2.58` er NAS-ens **Tailscale-adresse** og virker fra alle nett. `10.0.0.30` / `10.0.0.138` er hjemmenettet (LAN) og virker KUN når maskinen sitter på samme nett som NAS-en. I Tailscale heter NAS-en `dxp4800plus-ring`; `jarvis-nas-2` / `jarvis-nas-1` i eldre dokumenter er gamle navn. Adressen og navnet er sist bekreftet 2026-10-02 med `sudo docker exec tailscaled tailscale status` på NAS-en (Tailscale kjører der som container, ikke som vertstjeneste). Oppkobling fra et annet nett enn hjemmenettet er ikke dokumentert testet.
+`100.101.102.104` er NAS-ens **Tailscale-adresse** og virker fra alle nett. `10.0.0.11` / `10.0.0.12` er hjemmenettet (LAN) og virker KUN når maskinen sitter på samme nett som NAS-en. I Tailscale heter NAS-en `jarvis-nas`; `jarvis-nas-2` / `jarvis-nas-1` i eldre dokumenter er gamle navn. Adressen og navnet er sist bekreftet 2026-10-02 med `sudo docker exec tailscaled tailscale status` på NAS-en (Tailscale kjører der som container, ikke som vertstjeneste). Oppkobling fra et annet nett enn hjemmenettet er ikke dokumentert testet.
 
-1. Tailscale må kjøre og være pålogget med samme konto som NAS-en (vises som `post@…` i `tailscale status`) på maskinen du sitter ved. I Tailscale-menyen skal `dxp4800plus-ring` stå i listen over enheter og ikke være offline. Er den offline, er NAS-en av eller uten internett, og da kommer du ikke inn før den er det. Står ikke maskinen din i listen (2026-10-02 hadde tailnettet én Windows-maskin, `srby`), må Tailscale installeres og logges inn der først.
+1. Tailscale må kjøre og være pålogget med samme konto som NAS-en (vises som `post@…` i `tailscale status`) på maskinen du sitter ved. I Tailscale-menyen skal `jarvis-nas` stå i listen over enheter og ikke være offline. Er den offline, er NAS-en av eller uten internett, og da kommer du ikke inn før den er det. Står ikke maskinen din i listen (2026-10-02 hadde tailnettet én Windows-maskin, `srby`), må Tailscale installeres og logges inn der først.
 2. Skriv adressen selv. Første gang fra en ny maskin viser PuTTY «host key not cached»; det er normalt, velg Accept.
 3. Lagre økten under «Saved Sessions» (for eksempel «Jarvis-NAS»), så er neste gang ett klikk.
 4. Etter innlogging, gå til arbeidsmappen:
@@ -27,17 +27,17 @@ cd /volume1/jarvisbuild-data/jarvisbuild
 
 **Feilsøking:** `Connection timed out` = Tailscale er ikke tilkoblet på din maskin, eller NAS-en er offline (punkt 1). `Connection refused` = NAS-en svarer, men tar ikke imot SSH på port 22. `Access denied` = feil bruker eller passord (stor J i `Jarvis`).
 
-**Observert 2026-10-08:** innlogging med `100.76.2.58`, port 22, bruker `Jarvis` fra et annet nett enn hjemmenettet fungerte (PuTTY).
+**Observert 2026-10-08:** innlogging med `100.101.102.104`, port 22, bruker `Jarvis` fra et annet nett enn hjemmenettet fungerte (PuTTY).
 
 ## Innrullere en ny nettleser eller enhet
 
 Hver nettleser må innrulleres én gang per adresse med en engangsbillett fra NAS-en; siden viser «Denne enheten er ikke innrullert ennå». Hintet `pnpm --filter @jarvis/api enroll-ticket` virker **ikke** på NAS-en: CLI-en trenger admin-databasetilgang, og den finnes bevisst bare i `migrate`-tjenesten (Remediering del 2), ikke i `api`/`worker`. Kjør i stedet fra `/volume1/jarvisbuild-data/jarvisbuild`:
 
 ```
-ops/nas/enroll-device.sh https://dxp4800plus-ring.tail3935f7.ts.net
+ops/nas/enroll-device.sh https://jarvis-nas.tail1234.ts.net
 ```
 
-Adressen må være **den samme HTTPS-adressen nettleseren bruker**: enhetsnøkkelen lagres per nettleser og adresse, og nettleseren krever HTTPS for å lage den, så `http://` og LAN-adressen (`10.0.0.30:3010`) fungerer ikke. Valgfritt andre argument velger landingsside: `dashboard` (standard), `voice` eller `chat`. Billetten er engangs og gyldig i 15 minutter.
+Adressen må være **den samme HTTPS-adressen nettleseren bruker**: enhetsnøkkelen lagres per nettleser og adresse, og nettleseren krever HTTPS for å lage den, så `http://` og LAN-adressen (`10.0.0.11:3010`) fungerer ikke. Valgfritt andre argument velger landingsside: `dashboard` (standard), `voice` eller `chat`. Billetten er engangs og gyldig i 15 minutter.
 
 1. Marker hele lenken skriptet skriver ut (`…?enroll=…`) med musen (dra over den; ikke dobbeltklikk, for `-` og `_` deler ordet) og lim den inn i nettleserens adressefelt. Siden innrullerer seg selv og viser «Enheten er innrullert.»
 2. Virker ikke lenken, lim den korte billett-strengen inn i feltet «Innrullerings-billett» på siden.

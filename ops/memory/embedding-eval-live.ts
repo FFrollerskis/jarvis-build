@@ -7,7 +7,7 @@
  *
  * Kjøring i api-containeren på NAS:
  *   docker compose -f infra/local/docker-compose.yml exec api node --experimental-transform-types ops/memory/embedding-eval-live.ts
- * Lokalt: JARVIS_EMBEDDING_PROVIDER=ollama JARVIS_EMBEDDING_URL=http://100.86.89.57:11434 node --experimental-transform-types ops/memory/embedding-eval-live.ts
+ * Lokalt: JARVIS_EMBEDDING_PROVIDER=ollama JARVIS_EMBEDDING_URL=http://100.101.102.103:11434 node --experimental-transform-types ops/memory/embedding-eval-live.ts
  *
  * Ingen hemmeligheter, ingen skriving. Resultatet er BEVIS for D-386-påstanden «semantisk gjenfinning virker på norsk», ikke en
  * påstand i seg selv - kopier utskriften inn i PR/decision-loggen.
