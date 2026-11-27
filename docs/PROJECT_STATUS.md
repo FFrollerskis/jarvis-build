@@ -449,7 +449,7 @@ tobias.sg@icloud.com.
 
 **Forrige milepæl (uendret, MERGET PR #211/#212 under D-192): D-347 - dashbord-innrullering.** Mens
 Tobias forsøkte å visuelt bekrefte D-340/D-346 sin fiks i selve dashbordet
-(`http://10.0.0.30:3010/dashboard`), viste siden `POST /session/authorize` 403 × 8 og stod evig på
+(`http://10.0.0.11:3010/dashboard`), viste siden `POST /session/authorize` 403 × 8 og stod evig på
 "Laster …". Database-bevist rotårsak (`audit_events` sin `identity.denied`-tabell ga **0 rader** -
 utelukker `unknown_membership`/`unknown_device`/`unknown_memory_space`/`device_authority_revoked`,
 ren kodelesing av `dashboard.html`/kontraktsenumene utelukker `unknown_channel`/`malformed_evidence`):
@@ -1413,12 +1413,12 @@ DECISIONS_AND_ASSUMPTIONS.md. **Live-bekreftet (denne runden):** turen kjører e
 STT returnerer konsekvent tomt - se D-263 over for neste lag.
 
 **Forrige milepæl (uendret, MERGET, PR #169): D-261 -
-SELV MED D-260 sin klikkbare lenke fortsatte `enrollment_ticket_invalid` - rot-årsak: `srby.tail3935f7.ts.net`
+SELV MED D-260 sin klikkbare lenke fortsatte `enrollment_ticket_invalid` - rot-årsak: `srby.tail1234.ts.net`
 (URL-en brukt GJENNOM HELE D-253→D-260-runden) er Tobias sin WINDOWS-PC, ALDRI selve Ugreen-NAS-en.
 Bekreftet via `tailscale status` på NAS-en: NAS-ens eget navn er `jarvis-nas-2`. Server-side kommandoer
 traff alltid riktig maskin (samme SSH-terminal); kun nettleser-URL-en (tatt fra en tidligere skjermdump,
 aldri verifisert) pekte feil. **Rettet (ingen kodeendring):** `.env`/lenken pekes nå til
-`jarvis-nas-2.tail3935f7.ts.net`. Første ekte test mot FAKTISK NAS-kode lyktes umiddelbart: enrollment
+`jarvis-nas-2.tail1234.ts.net`. Første ekte test mot FAKTISK NAS-kode lyktes umiddelbart: enrollment
 OK, `SERVER_VERIFIED`-sesjon startet (Tailscale Serve viste seg allerede korrekt TLS-konfigurert for
 BÅDE 443→3010 og 3020→3020). Deretter: NY stillhet - `{"type":"started",...}` fulgt av ren
 `WebSocket lukket.` ~57s senere, INGEN state-endring, INGEN krasj i container-loggen, selv med bekreftet

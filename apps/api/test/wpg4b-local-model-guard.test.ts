@@ -100,10 +100,10 @@ describe("B: enforceLocalModelEndpoints", () => {
   });
 
   it("tailnet (100.64/10, *.ts.net) regnes som lokalt KUN med `JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE=on`", async () => {
-    for (const url of ["http://100.86.89.57:11434", "http://100.127.255.255", "http://min-pc.tail1234.ts.net:11434"]) {
-      const without = await run(gemma(url), { lookup: async () => [{ address: "100.86.89.57" }] });
+    for (const url of ["http://100.101.102.103:11434", "http://100.127.255.255", "http://min-pc.tail1234.ts.net:11434"]) {
+      const without = await run(gemma(url), { lookup: async () => [{ address: "100.101.102.103" }] });
       expect(localityOf(without.profiles, "gemma_local"), `uten: ${url}`).toBe("cloud");
-      const withTs = await run({ ...gemma(url), JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE: "on" }, { lookup: async () => [{ address: "100.86.89.57" }] });
+      const withTs = await run({ ...gemma(url), JARVIS_LOCAL_MODEL_ALLOW_TAILSCALE: "on" }, { lookup: async () => [{ address: "100.101.102.103" }] });
       expect(localityOf(withTs.profiles, "gemma_local"), `med: ${url}`).toBe("local");
     }
     // utenfor 100.64/10 er aldri tailnet
