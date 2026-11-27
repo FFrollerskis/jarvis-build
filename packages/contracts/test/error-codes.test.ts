@@ -160,6 +160,59 @@ describe("A. register-lint (alltid streng)", () => {
     expect(ERROR_CODES["AUTH_TENANT.POLICY_DENY"].retryability).toBe("never");
   });
 
+  /**
+   * Fiks 1 (M6, M64): gjentakbarheten for HVER kode er festet. Tidligere sa to koder («for en mutasjon er utfallet UKJENT inntil det er lest tilbake») at utfallet var ukjent, men hadde
+   * `retry_with_backoff`, og en flipp av replay-koden til retry overlevde i report-modus. N = never, F = retry_after_fix, B = retry_with_backoff, R = readback_first. En ny kode må legges
+   * til her (bevisst); en endret gjentakbarhet er en kontraktendring.
+   */
+  const PINNED_RETRYABILITY: Record<string, "N" | "F" | "B" | "R"> = Object.fromEntries([
+  ["AUTH_TENANT.MEMBERSHIP_MISMATCH", "N"], ["AUTH_TENANT.WRONG_ORG", "N"], ["AUTH_TENANT.DEVICE_REVOKED", "N"], ["AUTH_TENANT.DEVICE_UNKNOWN", "N"], ["AUTH_TENANT.POLICY_DENY", "N"],
+  ["AUTH_TENANT.STALE_GRANT", "F"], ["AUTH_TENANT.INVALID_IDENTITY_CONTEXT", "N"], ["AUTH_TENANT.AUTH_STRENGTH_INSUFFICIENT", "F"], ["AUTH_TENANT.NO_MANDATE", "F"],
+  ["AUTH_TENANT.KILL_SWITCH_ACTIVE", "F"], ["AUTH_TENANT.APPROVAL_MISSING", "F"], ["AUTH_TENANT.APPROVAL_MALFORMED", "F"], ["AUTH_TENANT.APPROVAL_EXPIRED", "F"],
+  ["AUTH_TENANT.APPROVAL_NOT_YET_VALID", "F"], ["AUTH_TENANT.APPROVAL_BINDING_MISMATCH", "N"], ["AUTH_TENANT.APPROVAL_REPLAYED", "N"], ["AUTH_TENANT.APPROVER_NOT_AUTHORIZED", "N"],
+  ["SECRET_IDENTITY.TOKEN_EXPIRED", "F"], ["SECRET_IDENTITY.VAULT_LOOKUP_FAILED", "B"], ["SECRET_IDENTITY.PROVIDER_VERIFICATION_FAILED", "N"], ["SECRET_IDENTITY.MISSING_SCOPE", "F"],
+  ["SECRET_IDENTITY.SIGNATURE_INVALID", "N"], ["MODEL_ROUTING.PROVIDER_TIMEOUT", "B"], ["MODEL_ROUTING.MALFORMED_OUTPUT", "B"], ["MODEL_ROUTING.TOOL_SELECTION_FAILED", "F"],
+  ["MODEL_ROUTING.CONTEXT_OVERFLOW", "F"], ["MODEL_ROUTING.QUALITY_REGRESSION", "F"], ["TOOL_CONNECTOR.API_CLIENT_ERROR", "F"], ["TOOL_CONNECTOR.API_SERVER_ERROR", "R"],
+  ["TOOL_CONNECTOR.RATE_LIMITED", "B"], ["TOOL_CONNECTOR.SCHEMA_DRIFT", "F"], ["TOOL_CONNECTOR.IDEMPOTENCY_REPLAY", "R"], ["TOOL_CONNECTOR.WRONG_TARGET_READBACK", "R"],
+  ["TOOL_CONNECTOR.INVALID_TOOL_CALL", "N"], ["TOOL_CONNECTOR.CONNECTOR_FROZEN", "F"], ["DB_DATA.RLS_DENY", "N"], ["DB_DATA.MIGRATION_MISMATCH", "F"], ["DB_DATA.MIGRATION_SET_INVALID", "F"],
+  ["DB_DATA.MIGRATION_CREDENTIALS_MISSING", "F"], ["DB_DATA.STALE_DATA", "F"], ["DB_DATA.DUPLICATE_DATA", "R"], ["DB_DATA.CORRUPT_DATA", "N"], ["DB_DATA.CONSTRAINT_VIOLATION", "N"],
+  ["DB_DATA.DEADLOCK", "B"], ["DB_DATA.NONCE_STORE_ERROR", "B"], ["DB_DATA.TRUTH_REGIME_INVALID_INPUT", "N"], ["DB_DATA.TRUTH_BASIS_REQUIRED", "F"], ["WORKER_INFRA.CRASH_LOOP", "F"],
+  ["WORKER_INFRA.OOM", "F"], ["WORKER_INFRA.DISK_FULL", "F"], ["WORKER_INFRA.QUEUE_LEASE_LOST", "B"], ["WORKER_INFRA.HOST_UNREACHABLE", "B"], ["WORKER_INFRA.NETWORK_FAILURE", "R"],
+  ["WORKER_INFRA.DNS_FAILURE", "B"], ["WORKER_INFRA.TUNNEL_DOWN", "B"], ["WORKER_INFRA.INFRA_MODE_PAUSED", "F"], ["WORKER_INFRA.INFRA_DEGRADED_BLOCKS_CLASS_D", "F"],
+  ["WORKER_INFRA.INFRA_MODE_UNAVAILABLE", "B"], ["WORKER_INFRA.STATE_UNKNOWN", "B"], ["WORKER_INFRA.OBSERVABILITY_MISSING", "F"], ["WORKER_INFRA.INCIDENT_OPEN", "F"],
+  ["WORKER_INFRA.SLO_BREACHED", "F"], ["MEMORY_RETRIEVAL_EXPERT.MISSING_SOURCE", "F"], ["MEMORY_RETRIEVAL_EXPERT.STALE_PACK", "F"], ["MEMORY_RETRIEVAL_EXPERT.EXPERT_RECALLED", "N"],
+  ["MEMORY_RETRIEVAL_EXPERT.RETRIEVAL_CONTAMINATION", "N"], ["LEARNING_EVAL.BAD_CANDIDATE", "N"], ["LEARNING_EVAL.HOLDOUT_REGRESSION", "N"], ["LEARNING_EVAL.POISONED_EVIDENCE", "N"],
+  ["LEARNING_EVAL.SKILL_DRIFT", "F"], ["LEARNING_EVAL.EVAL_LEAKAGE", "N"], ["VOICE_DEVICE_UI.STT_FAILURE", "B"], ["VOICE_DEVICE_UI.TTS_FAILURE", "B"], ["VOICE_DEVICE_UI.APNS_FAILURE", "B"],
+  ["VOICE_DEVICE_UI.DEVICE_STATE_INVALID", "F"], ["VOICE_DEVICE_UI.CALL_PROVIDER_FAILURE", "R"], ["VOICE_DEVICE_UI.CLIENT_MISMATCH", "F"], ["FINANCE_SIDE_EFFECT.RECONCILIATION_MISMATCH", "F"],
+  ["FINANCE_SIDE_EFFECT.DUPLICATE_INTENT", "N"], ["FINANCE_SIDE_EFFECT.RECIPIENT_MISMATCH", "N"], ["FINANCE_SIDE_EFFECT.PROVIDER_STATE_AMBIGUOUS", "R"], ["SECURITY.PROMPT_INJECTION", "N"],
+  ["SECURITY.EXFILTRATION_ATTEMPT", "N"], ["SECURITY.TAMPER_DETECTED", "N"], ["SECURITY.CROSS_TENANT_ESCAPE", "N"], ["SECURITY.SUSPICIOUS_SELF_CHANGE", "N"],
+  ["SECURITY.CONSTITUTION_NOT_VERIFIED", "F"], ["SECURITY.CONSTITUTION_INVALID", "F"], ["SECURITY.TRUTH_REGIME_MODEL_ESCALATION", "N"]
+  ]) as Record<string, "N" | "F" | "B" | "R">;
+  const SHORT = { never: "N", retry_after_fix: "F", retry_with_backoff: "B", readback_first: "R" } as const;
+
+  it("gjentakbarheten er festet for ALLE koder: ingen kode er lagt til, fjernet eller endret uten at tabellen er endret (M64: replay-koden flippet til retry overlevde)", () => {
+    expect(Object.keys(PINNED_RETRYABILITY).sort()).toEqual(ERROR_CODE_DEFS.map((d) => d.code).sort());
+    for (const def of ERROR_CODE_DEFS) expect(SHORT[def.retryability], def.code).toBe(PINNED_RETRYABILITY[def.code]);
+    expect(SHORT[ERROR_CODES["AUTH_TENANT.APPROVAL_REPLAYED"].retryability]).toBe("N");
+  });
+
+  it("M6: en beskrivelse som sier at utfallet er UKJENT eller må leses tilbake krever readback_first (aldri blind retry) - for alle koder", () => {
+    const READBACK_MARKERS = /\bUKJENT\b|\b(?:lest|les|lese)\s+tilbake\b|\bles\s+status\b|ALDRI blind retry/;
+    const marked = ERROR_CODE_DEFS.filter((d) => READBACK_MARKERS.test(d.description));
+    expect(marked.length).toBeGreaterThanOrEqual(4);
+    for (const def of marked) expect(def.retryability, `${def.code}: «${def.description}»`).toBe("readback_first");
+    expect(ERROR_CODES["TOOL_CONNECTOR.API_SERVER_ERROR"].retryability).toBe("readback_first");
+    expect(ERROR_CODES["WORKER_INFRA.NETWORK_FAILURE"].retryability).toBe("readback_first");
+    // Linten fanger det den skal: den gamle formuleringen på en retry-kode ville vært rød.
+    expect(READBACK_MARKERS.test("for en mutasjon er utfallet UKJENT inntil det er lest tilbake")).toBe(true);
+    expect(READBACK_MARKERS.test("Forbindelsen feilet; prøv igjen etter utsettelse")).toBe(false);
+  });
+
+  it("definisjonen av readback_first i kilden sier ALDRI blind retry, og ingen kode med retry_with_backoff nevner ukjent utfall", () => {
+    for (const def of ERROR_CODE_DEFS.filter((d) => d.retryability === "retry_with_backoff")) expect(def.description, def.code).not.toMatch(/UKJENT|lest tilbake/);
+    expect(readFileSync(resolve(ROOT, "packages/contracts/src/error-codes.ts"), "utf8")).toContain("ALDRI blind retry");
+  });
+
   it("registeret er frosset (en importerende modul kan ikke mutere det)", () => {
     expect(Object.isFrozen(ERROR_CODE_DEFS)).toBe(true);
     expect(Object.isFrozen(ERROR_CODES)).toBe(true);

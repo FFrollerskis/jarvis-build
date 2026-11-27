@@ -21,7 +21,7 @@ export const LOAD_RULES = ["data_invalid", "stray_file", "shard_filename_mismatc
 export type LoadRule = (typeof LOAD_RULES)[number];
 
 export class ProgramDataError extends Error {
-  constructor(readonly code: "manifest_invalid" | "baseline_invalid", readonly detail: string) {
+  constructor(readonly code: "manifest_invalid" | "baseline_invalid" | "compose_invalid", readonly detail: string) {
     super(`${code}: ${detail}`);
     this.name = "ProgramDataError";
   }
@@ -131,17 +131,31 @@ export function loadProgramData(root: string): ProgramData {
   return { manifest: manifest.data, baseline: baseline.data, components, gates, orls, findings };
 }
 
-/** Compose-tjenestene: nøklene rett under `services:` (to blanke innrykk). Kommentarer og andre toppnøkler (x-*, volumes) leses ikke. */
+/**
+ * Compose-tjenestene: nøklene rett under `services:`. Innrykket kan være hvilken som helst bredde (2, 3, 4 ...; bredden settes av første tjenestelinje), navn kan stå i anførselstegn, og en tjeneste kan ha
+ * flow-stil på kroppen (`a: { image: x }`) eller et anker. Kommentarer, blanke linjer og andre toppnøkler (x-*, volumes) leses ikke. Alt parseren ikke kan lese (tab-innrykk, flow-stil på selve `services:`,
+ * inkonsistent innrykk, innhold som ikke er en nøkkel) kaster `ProgramDataError("compose_invalid")` med linjen og årsaken: aldri en stille «ingen tjenester» som ville latt hver tjeneste stå uten eier.
+ */
 export function parseComposeServiceNames(text: string): string[] {
   const lines = text.split(/\r?\n/);
-  const start = lines.findIndex((l) => /^services:\s*(?:#.*)?$/.test(l));
+  const start = lines.findIndex((l) => /^services:(?:\s|$)/.test(l));
   if (start === -1) return [];
+  const head = (lines[start] as string).slice("services:".length).replace(/#.*$/, "").trim();
+  if (head !== "") throw new ProgramDataError("compose_invalid", `«services:» har innhold på samme linje (flow-stil eller anker støttes ikke): ${head.slice(0, 40)}`);
   const names: string[] = [];
+  let indent = -1;
   for (let i = start + 1; i < lines.length; i += 1) {
     const line = lines[i] as string;
-    if (/^\S/.test(line) && !line.startsWith("#")) break;
-    const m = /^ {2}([A-Za-z0-9_.-]+):\s*(?:#.*)?$/.exec(line);
-    if (m !== null) names.push(m[1] as string);
+    if (/^\s*(?:#.*)?$/.test(line)) continue; // blank eller kommentar
+    if (!/^\s/.test(line)) break; // neste toppnøkkel
+    if (/^ *\t/.test(line)) throw new ProgramDataError("compose_invalid", `linje ${i + 1}: tab i innrykket er ikke gyldig YAML (bruk mellomrom)`);
+    const lead = line.length - line.trimStart().length;
+    if (indent === -1) indent = lead;
+    if (lead < indent) throw new ProgramDataError("compose_invalid", `linje ${i + 1}: innrykket er mindre enn første tjenestelinje (${indent} mellomrom): inkonsistent innrykk`);
+    if (lead > indent) continue; // tjenestens innhold
+    const m = /^ +(?:"([A-Za-z0-9_.-]+)"|'([A-Za-z0-9_.-]+)'|([A-Za-z0-9_.-]+)):(?:\s|$)/.exec(line);
+    if (m === null) throw new ProgramDataError("compose_invalid", `linje ${i + 1}: kan ikke lese en tjenestenøkkel av «${line.trim().slice(0, 40)}»`);
+    names.push((m[1] ?? m[2] ?? m[3]) as string);
   }
   return names;
 }

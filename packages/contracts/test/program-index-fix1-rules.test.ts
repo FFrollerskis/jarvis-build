@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { collectRepoFacts, loadProgramData, makeFileReader } from "../src/program/fs-loader.ts";
+import { collectRepoFacts, loadProgramData, makeFileReader, parseComposeServiceNames, ProgramDataError } from "../src/program/fs-loader.ts";
 import { MANIFEST_MINIMUMS, manifestWeakenings } from "../src/program/frozen-rules.ts";
 import { scanGates, type Gate, type GateContext } from "../src/program/gates.ts";
 import { GUARD_MODE_ENV, parseModeValue, resolveGuardMode } from "../src/program/mode.ts";
@@ -10,6 +10,7 @@ import { runProgramIndex } from "../src/program/run.ts";
 import { scanProgramIndex } from "../src/program/scan.ts";
 import { ComponentShardSchema, ManifestSchema, type Manifest } from "../src/program/schema.ts";
 import { cleanWorld, cloneWorld, planned, shard, T0, toScanInput, type World } from "./program-index-fixtures.ts";
+import { main } from "../scripts/program-index.ts";
 import { miniRepo, put, tmp } from "./program-index-minirepo.ts";
 
 /**
@@ -327,7 +328,8 @@ describe("L5: en port bundet til en BYGD komponent uten contract.files er et fun
 describe("L8: testhull fra mutantsettet (produksjonskoden var riktig; ingen test festet den)", () => {
   it("M03: en tabell med flere eiere har ingen entydig eier: et eksklusivt navn slipper ikke unna fordi den FØRSTE eieren er tillatt", () => {
     const w = edit((x) => {
-      x.components.push(shard("jx.real", { code_paths: ["modules/jxreal"], contract: { schema_version: "0.1.0" } }));
+      // jx.real står FØRST i komponentlisten, så en mutant som velger «første eier» ville valgt den tillatte.
+      x.components.unshift(shard("jx.real", { code_paths: ["modules/jxreal"], contract: { schema_version: "0.1.0" } }));
       x.repo.workspace_dirs.push("modules/jxreal");
       addTable(x, "commitment_log", "jx.real");
       comp(x, "core.beta").state_store.tables.push("commitment_log");
@@ -395,3 +397,77 @@ describe("L8: testhull fra mutantsettet (produksjonskoden var riktig; ingen test
 });
 
 void T0;
+
+describe("L3: compose-parseren leser tjenestene uansett innrykk, siterte navn og flow-stil, og FEILER høylytt i stedet for å gi «ingen tjenester»", () => {
+  const names = (text: string): string[] => parseComposeServiceNames(text);
+  const fails = (text: string, part: string): void => {
+    let caught: unknown;
+    try {
+      parseComposeServiceNames(text);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught, text).toBeInstanceOf(ProgramDataError);
+    expect((caught as ProgramDataError).code).toBe("compose_invalid");
+    expect((caught as ProgramDataError).detail).toContain(part);
+  };
+
+  it("2-, 3- og 4-mellomroms innrykk gir de samme tjenestene (før: 4 mellomrom ga ingen)", () => {
+    expect(names("services:\n  a:\n    image: x\n  b:\n    image: y\n")).toEqual(["a", "b"]);
+    expect(names("services:\n    a:\n        image: x\n    b:\n        image: y\n")).toEqual(["a", "b"]);
+    expect(names("services:\n   a:\n      image: x\n   b:\n      image: y\n")).toEqual(["a", "b"]);
+  });
+
+  it("siterte tjenestenavn (dobbel og enkel apostrof) og navn med punktum, bindestrek og understrek", () => {
+    expect(names('services:\n  "a":\n    image: x\n  \'b\':\n    image: y\n  c.d-e_f:\n    image: z\n')).toEqual(["a", "b", "c.d-e_f"]);
+  });
+
+  it("flow-stil på tjenestens kropp, anker/merge og etterstilte kommentarer", () => {
+    expect(names("services:\n  a: { image: x }\n  b:\n    image: y\n  c: *base # kommentar\n  d: # note\n    <<: *base\n")).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("kommentarer og blanke linjer midt i blokken, andre toppnøkler før og etter, CRLF, dokumentstart og `services:` med etterkommentar", () => {
+    expect(names("---\nx-common: &common\n  restart: always\nservices: # tjenestene\n\n  # først\n  a:\n    image: x\n\n  b:\n    image: y\nvolumes:\n  data: {}\n")).toEqual(["a", "b"]);
+    expect(names("services:\r\n  a:\r\n    image: x\r\n")).toEqual(["a"]);
+  });
+
+  it("ingen `services:` (eller en tom blokk) er fortsatt ingen tjenester, ikke en feil", () => {
+    expect(names("name: x\n")).toEqual([]);
+    expect(names("")).toEqual([]);
+    expect(names("services:\nvolumes:\n  v: {}\n")).toEqual([]);
+  });
+
+  it("tab-innrykk (ugyldig YAML), flow-stil på services selv og inkonsistent innrykk gir en tydelig feil", () => {
+    fails("services:\n\ta:\n\t\timage: x\n", "tab");
+    fails("services:\n  a:\n    image: x\n \tb:\n", "tab");
+    fails("services: { a: { image: x } }\n", "flow-stil");
+    fails("services: [a, b]\n", "flow-stil");
+    fails("services:\n    a:\n      image: x\n  b:\n    image: y\n", "innrykk");
+  });
+
+  it("innhold som ikke er tjenestenøkler (liste, kompleks nøkkel, nøkkel med mellomrom) gir en feil som sier hvilken linje", () => {
+    fails("services:\n  - a\n  - b\n", "linje 2");
+    fails("services:\n  ? a\n  : b\n", "linje 2");
+    fails("services:\n  a:\n    image: x\n  b c:\n    image: y\n", "linje 4");
+  });
+
+  it("gjennom lasteren: et mini-repo med 4-mellomroms compose gir tjenestene; med tab-innrykk stopper hele kjøringen (ProgramDataError) og CLI-en gir DATAFEIL", () => {
+    const { root } = miniRepo();
+    put(root, "compose.yml", "services:\n    svc:\n        image: x\n");
+    expect(collectRepoFacts(root, loadProgramData(root).manifest).compose_services).toEqual(["svc"]);
+    expect(runProgramIndex({ root, env: undefined, origin: [] }).findings).toEqual([]);
+    put(root, "compose.yml", "services:\n\tsvc:\n\t\timage: x\n");
+    expect(() => runProgramIndex({ root, env: undefined, origin: [] })).toThrow(ProgramDataError);
+    const err: string[] = [];
+    const code = main(["report", "--root", root], {}, () => undefined, (l) => err.push(l));
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain("DATAFEIL (compose_invalid)");
+  });
+
+  it("det virkelige compose-filen gir fortsatt de 10 tjenestene", () => {
+    const real = parseComposeServiceNames(readFileSync(resolve(ROOT, "infra/local/docker-compose.yml"), "utf8"));
+    expect(real).toHaveLength(10);
+    expect(real).toContain("postgres");
+    expect(new Set(real).size).toBe(real.length);
+  });
+});
