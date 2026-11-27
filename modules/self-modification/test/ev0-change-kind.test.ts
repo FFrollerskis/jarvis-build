@@ -68,7 +68,8 @@ describe("B: typer utledet fra stiene (hevder man «code», fanger stiene det)",
     [["modules/tool-gateway/src/live-transports.ts"], ["protected-adjacent"]],
     [["README.md"], ["protected-adjacent"]],
     [["apps/web/index.html"], []],
-    [["config/charlie-personality.json"], []]
+    // WP-EV0 fix1 (L2): personlighetsfilen (zero-review-allowlisten) avslører typen «personality» uansett hva forslaget hevder.
+    [["config/charlie-personality.json"], ["personality"]]
   ];
 
   it("B1: tabell (stier -> utledede typer, sortert i typerekkefølgen)", () => {
@@ -162,8 +163,24 @@ describe("C: validateProposal - klassen er alltid max(sti-klasse, gulv for typen
       expect(v.reasons, String(scope)).toContain("personality_customer_facing_requires_owner");
     }
     expect(validateProposal({ ...base({ kind: "personality" }), personality_scope: "everyone" }, constitution).decision).toBe("rejected");
-    // omfanget gjelder kun typen «personality»: på en annen type endrer det ingenting
-    expect(validateProposal(base({ kind: "code", personality_scope: "customer_facing" }), constitution).effective_class).toBe("E1");
+    // WP-EV0 fix1 (L2): omfangsregelen kan ikke omgås ved å velge en annen type - personlighetsfilen avslører selv at endringen er personlighet (declared || derived).
+    for (const kind of ["code", "config", "prompt", "routing"] as const) {
+      for (const scope of ["customer_facing", undefined] as const) {
+        const p = base({ kind });
+        if (scope === undefined) delete (p as { personality_scope?: unknown }).personality_scope; else p.personality_scope = scope;
+        const v = validateProposal(p, constitution);
+        expect(v.effective_class, `${kind}/${String(scope)}`).toBe("E2");
+        expect(v.decision, `${kind}/${String(scope)}`).toBe("needs_owner");
+        expect(v.reasons, `${kind}/${String(scope)}`).toContain("personality_customer_facing_requires_owner");
+        expect(v.derived_kinds, `${kind}/${String(scope)}`).toContain("personality");
+      }
+      // uttrykkelig internt omfang holder seg E1 også på de andre typene
+      expect(validateProposal(base({ kind, personality_scope: "internal" }), constitution).effective_class, kind).toBe("E1");
+    }
+    // omfanget gjelder KUN personlighetsfilen: en annen sti påvirkes ikke av `personality_scope` (E2 etter stien, samme med og uten omfang)
+    for (const scope of ["customer_facing", "internal"] as const) {
+      expect(validateProposal(withPaths(["apps/web/index.html"], { kind: "code", personality_scope: scope }), constitution).reasons).not.toContain("personality_customer_facing_requires_owner");
+    }
   });
 
   it("C6: typen er PÅKREVD og lukket: manglende/ukjent/feil skrevet type avvises som E3 (invalid_proposal:kind)", () => {

@@ -1,5 +1,6 @@
 export * from "./common.ts";
 export * from "./change-kind.ts";
+export * from "./diff-paths.ts";
 export * from "./migration-gate.ts";
 export * from "./status-block.ts";
 export * from "./proposal.ts";

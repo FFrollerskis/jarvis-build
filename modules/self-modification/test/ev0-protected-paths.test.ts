@@ -1,8 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  FORBIDDEN_PATH_PATTERNS, INVALID_PATH_KEY, REQUIRED_E3_ACTIONS, REQUIRED_PROTECTED_PROBES, buildConstitution, classifySelfModification, isInvalidPathKey,
-  protectionKey, type ConstitutionManifest
+  FORBIDDEN_PATH_PATTERNS, INVALID_PATH_KEY, REQUIRED_E3_ACTIONS, REQUIRED_PROTECTED_DIRECTORY_PROBES, REQUIRED_PROTECTED_PROBES, buildConstitution, classifySelfModification,
+  isInvalidPathKey, protectionKey, type ConstitutionManifest
 } from "../src/index.ts";
 
 /**
@@ -179,7 +179,9 @@ describe("C: invarianter mellom hardkodede mønstre, sonder og signert manifest"
       ".env", ".env.production", // aldri sjekket inn
       "config/program/index.json", // HF6 program-indeks (finnes ikke i basen ennå)
       // opprinnelige sondenavn som ikke samsvarer med en fil, beholdt: gulvet er monotont (en sonde fjernes aldri); de ekte navnene er sonder ved siden av
-      "modules/policy/src/gateway.ts", "modules/core/src/db/migrations/001_init.sql", "docs/security/SECURITY_MODEL.md"
+      "modules/policy/src/gateway.ts", "modules/core/src/db/migrations/001_init.sql", "docs/security/SECURITY_MODEL.md",
+      // WP-EV0 fix1 (A-F2): filer som kan komme til (finnes ikke i repoet i dag) - sonden er der for at mønsteret ikke kan innsnevres, og manifestet må dekke dem før de dukker opp
+      ".mcp.json", ".npmrc", ".pnpmfile.cjs", ".gitattributes", ".gitmodules", ".git/config", ".claude/settings.json", ".husky/pre-commit", "apps/api/.env"
     ]);
     const missing = REQUIRED_PROTECTED_PROBES.filter((p) => !existsSync(new URL(p, ROOT)) && !ABSENT_OK.has(p));
     expect(missing).toEqual([]);
@@ -213,7 +215,9 @@ describe("C: invarianter mellom hardkodede mønstre, sonder og signert manifest"
 
 describe("C2: de hardkodede mønstrene beskytter hele trærne selv når manifestet er minimalt", () => {
   /** Et gyldig, men MINIMALT manifest: kun én eksakt regel pr. sonde (ingen prefiks) - så beskyttelsen av resten av treet må komme fra de hardkodede mønstrene. */
-  const minimal = (): ConstitutionManifest => ({ ...manifest(), protected_paths: REQUIRED_PROTECTED_PROBES.map((value) => ({ kind: "exact" as const, value })) });
+  const minimal = (): ConstitutionManifest => ({
+    ...manifest(), protected_paths: [...REQUIRED_PROTECTED_PROBES, ...REQUIRED_PROTECTED_DIRECTORY_PROBES].map((value) => ({ kind: "exact" as const, value }))
+  });
 
   it("C2a: manifestet er gyldig (alle sonder dekket), og en fil UTENFOR sondene men under et beskyttet tre er likevel E3", () => {
     const c = buildConstitution(minimal());

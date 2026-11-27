@@ -95,8 +95,10 @@ export class HttpSelfModificationGithubClient implements SelfModificationGithubC
         headers: githubHeaders(this.token)
       });
       if (!response.ok) throw new Error(`self_modification_github_files_${response.status}`);
-      const body = (await response.json()) as Array<{ filename: string }>;
-      files.push(...body.map((f) => f.filename));
+      const body = (await response.json()) as Array<{ filename: string; previous_filename?: string }>;
+      // WP-EV0 fix1 (A-F1): en omdøpt fil står her kun med NYTT navn i `filename`; kilden ligger i `previous_filename`. Begge er endrede stier: ellers kunne `git mv modules/policy
+      // modules/policy-x` skjule at policy-kildene forsvant (`modules/policy-x/...` ser uskyldig ut). Klassifiseringen får alltid BEGGE navnene.
+      files.push(...body.flatMap((f) => (typeof f.previous_filename === "string" && f.previous_filename !== "" ? [f.filename, f.previous_filename] : [f.filename])));
       if (body.length < 100) return files;
     }
     throw new Error("self_modification_github_files_truncated");

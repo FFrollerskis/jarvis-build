@@ -179,6 +179,170 @@
     {
       "kind": "exact",
       "value": "docs/CANONICAL_SPEC.md"
+    },
+    {
+      "kind": "exact",
+      "value": "packages/contracts/src/approval.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "packages/contracts/src/canonical.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "packages/contracts/src/capability.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "packages/contracts/src/identity.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "packages/contracts/src/session-grant.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "packages/contracts/src/voice-authority.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/tool-manifest.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/chat-read-tier.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/chat-act-tier.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/chat-delegate-tier.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/autonomy-bindable.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/url-safety.ts"
+    },
+    {
+      "kind": "suffix",
+      "value": "-target-policy.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/personal/critical-ops.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/situations/src/autonomy-guard.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/db/migrator.ts"
+    },
+    {
+      "kind": "prefix",
+      "value": "modules/core/src/services/secret-scan"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/core/src/services/confirmation-store.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "apps/api/src/ev0-boot.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "apps/api/src/http-guard.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "apps/api/src/restricted-context-guard.ts"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/model-gateway/src/budget-guard.ts"
+    },
+    {
+      "kind": "prefix",
+      "value": "modules/model-gateway/src/claude-budget"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/model-gateway/src/content-sensitivity.ts"
+    },
+    {
+      "kind": "prefix",
+      "value": "modules/watchdog/"
+    },
+    {
+      "kind": "basename",
+      "value": ".sops.yaml"
+    },
+    {
+      "kind": "basename",
+      "value": ".gitleaksignore"
+    },
+    {
+      "kind": "basename",
+      "value": ".gitignore"
+    },
+    {
+      "kind": "basename",
+      "value": ".dockerignore"
+    },
+    {
+      "kind": "basename",
+      "value": ".mcp.json"
+    },
+    {
+      "kind": "basename",
+      "value": ".npmrc"
+    },
+    {
+      "kind": "basename",
+      "value": ".pnpmfile.cjs"
+    },
+    {
+      "kind": "basename",
+      "value": ".gitattributes"
+    },
+    {
+      "kind": "basename",
+      "value": ".gitmodules"
+    },
+    {
+      "kind": "basename",
+      "value": "vitest.config.ts"
+    },
+    {
+      "kind": "basename",
+      "value": "eslint.config.mjs"
+    },
+    {
+      "kind": "basename",
+      "value": "tsconfig.base.json"
+    },
+    {
+      "kind": "basename",
+      "value": ".env"
+    },
+    {
+      "kind": "prefix",
+      "value": ".git/"
+    },
+    {
+      "kind": "prefix",
+      "value": ".claude/"
+    },
+    {
+      "kind": "prefix",
+      "value": ".husky/"
     }
   ],
   "budget_caps": {

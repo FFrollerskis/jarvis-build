@@ -54,6 +54,11 @@ export const REQUIRED_E3_ACTIONS: readonly string[] = [
  * klasse D-kjeden og modellflaten, step-up, revisjonsintegritet, godkjenningslager og identitets-/sesjons-/enhetsautoritet, databasens tenant-kontekst,
  * confidence-gaten, program-indeksen, containment/backup/worker-isolasjon og ADR-ene. Testet: hver sonde er forbudt av de hardkodede mønstrene ALENE, og hvert
  * mønster treffes av en sonde. Sondene er representative filer - selve beskyttelsen er mønstrene/prefiksene (så en omdøpt fil faller fortsatt under prefikset).
+ *
+ * WP-EV0 fix1 (A-F2, FØR første signering): resten av Authority Plane (kontrakter for signert godkjenning/kanonisk JSON/kapabilitet/identitet/sesjon/stemme, risikoklasser og autonomi-
+ * bindbarhet, mål-policyer, autonomivakten, migrasjonsvakten, oppstartsverifisereren, HTTP-/kontekstvakter, budsjett-/personvernvakter, vakthunden) samt gate- og forsyningskjede-konfig
+ * (`.sops.yaml`, `.gitleaksignore`, ignorer-lister, MCP-/npm-/pnpm-oppsett, `.git*`, `.claude`, `.husky`, vitest/eslint/tsconfig-base, nestet `.env`). Sonder som ikke finnes i repoet i dag er filer
+ * som kan komme til (listet i testens `ABSENT_OK`). En sonde legges BARE til: et manifest signert FØR en ny sonde finnes får `constitution_weakened`, derfor landet disse før signering.
  */
 export const REQUIRED_PROTECTED_PROBES: readonly string[] = [
   "modules/policy/src/gateway.ts",
@@ -105,8 +110,98 @@ export const REQUIRED_PROTECTED_PROBES: readonly string[] = [
   "ops/backup/jarvis-backup.mjs",
   "ops/job-runner/egress-proxy.mjs",
   "ops/job-runner/credential-helper.mjs",
-  "ops/claude-worker/worker.mjs"
+  "ops/claude-worker/worker.mjs",
+  // --- WP-EV0 fix1 (A-F2: resten av Authority Plane; hvert nytt mønster i policy.ts har minst én sonde her) ---
+  "packages/contracts/src/approval.ts",
+  "packages/contracts/src/canonical.ts",
+  "packages/contracts/src/capability.ts",
+  "packages/contracts/src/identity.ts",
+  "packages/contracts/src/session-grant.ts",
+  "packages/contracts/src/voice-authority.ts",
+  "modules/tool-gateway/src/tool-manifest.ts",
+  "modules/tool-gateway/src/chat-read-tier.ts",
+  "modules/tool-gateway/src/chat-act-tier.ts",
+  "modules/tool-gateway/src/chat-delegate-tier.ts",
+  "modules/tool-gateway/src/autonomy-bindable.ts",
+  "modules/tool-gateway/src/url-safety.ts",
+  "modules/tool-gateway/src/cloudflare-target-policy.ts",
+  "modules/tool-gateway/src/docker-target-policy.ts",
+  "modules/tool-gateway/src/gce-target-policy.ts",
+  "modules/tool-gateway/src/postgres-ops-target-policy.ts",
+  "modules/tool-gateway/src/personal/critical-ops.ts",
+  "modules/situations/src/autonomy-guard.ts",
+  "modules/core/src/db/migrator.ts",
+  "modules/core/src/services/secret-scan.ts",
+  "modules/core/src/services/confirmation-store.ts",
+  "apps/api/src/ev0-boot.ts",
+  "apps/api/src/http-guard.ts",
+  "apps/api/src/restricted-context-guard.ts",
+  "modules/model-gateway/src/budget-guard.ts",
+  "modules/model-gateway/src/claude-budget.ts",
+  "modules/model-gateway/src/claude-budget-enforcer.ts",
+  "modules/model-gateway/src/content-sensitivity.ts",
+  "modules/watchdog/src/watchdog.ts",
+  "modules/self-modification/src/constitution.ts",
+  ".sops.yaml",
+  ".gitleaksignore",
+  ".gitignore",
+  ".dockerignore",
+  ".mcp.json",
+  ".npmrc",
+  ".pnpmfile.cjs",
+  ".gitattributes",
+  ".gitmodules",
+  "vitest.config.ts",
+  "eslint.config.mjs",
+  "tsconfig.base.json",
+  ".git/config",
+  ".claude/settings.json",
+  ".husky/pre-commit",
+  "apps/api/.env"
 ];
+
+/**
+ * WP-EV0 fix1 (A-F1): KATALOGENE SELV. En sonde pr. beskyttet katalog (`PROTECTED_DIRECTORY_ROOTS`/`PROTECTED_DIRECTORY_NAMES` i policy.ts), uten avsluttende skråstrek: en symlink eller
+ * fil som erstatter katalogen skal være E3 i BÅDE de hardkodede mønstrene og det signerte manifestet (`prefix`-regelen `modules/policy/` dekker `modules/policy`). Holdes atskilt fra
+ * `REQUIRED_PROTECTED_PROBES` fordi sondene der også avgjør hvilke mapper som er «beskyttet-nær» (`change-kind.ts`); en katalogsonde skal ikke gjøre overliggende mapper (f.eks. `config/`) om til det.
+ * Gulvet er monotont på samme måte: en katalogsonde fjernes aldri.
+ */
+export const REQUIRED_PROTECTED_DIRECTORY_PROBES: readonly string[] = [
+  "modules/policy",
+  "modules/owner-controls",
+  "modules/self-modification",
+  "modules/core/src/db/migrations",
+  ".github",
+  "infra",
+  "docs/security",
+  "docs/remediation",
+  "config/evolution",
+  "config/program",
+  "ops/security",
+  "ops/break-glass",
+  "ops/backup",
+  "ops/job-runner",
+  "ops/claude-worker",
+  "modules/watchdog",
+  ".git",
+  ".claude",
+  ".husky"
+];
+
+/**
+ * WP-EV0 fix1 (A-F2): hvilke FILER som håndhever en E3-handling - dermed er handlingen ikke bare en streng i manifestet, men har sti-dekning (E3) i koden. Alle stiene er sonder
+ * (`REQUIRED_PROTECTED_PROBES`; testet) og forbudt av de hardkodede mønstrene alene. Ikke alle handlinger har en egen fil (f.eks. `grant_self_root` er en container-/verts-handling); kun de med en
+ * entydig håndhevingsfil står her.
+ */
+export const E3_ACTION_ENFORCEMENT_PATHS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  raise_own_authority_or_budget_limits: Object.freeze(["modules/self-modification/src/constitution.ts", "config/evolution/constitution.v1.json"]),
+  modify_kill_switch: Object.freeze(["modules/policy/src/kill-switch.ts"]),
+  modify_approval_verifier: Object.freeze(["modules/policy/src/approval-verifier.ts", "packages/contracts/src/approval.ts"]),
+  modify_audit_integrity: Object.freeze(["modules/core/src/services/audit-writer.ts", "modules/core/src/services/policy-audit-sink.ts"]),
+  disable_security_alarm: Object.freeze(["modules/watchdog/src/watchdog.ts"]),
+  raise_autonomy_level: Object.freeze(["modules/situations/src/autonomy-guard.ts", "modules/tool-gateway/src/autonomy-bindable.ts"]),
+  modify_protected_path_manifest: Object.freeze(["config/evolution/constitution.v1.json", "ops/security/sign-constitution.mjs"])
+});
 
 /** Kostnadskategorier for Evolution-motoren (HF2 kap. 29): hver har et eget månedstak i det signerte manifestet; totalen har `max_evolution_cost_ore_per_month`. */
 export const EVOLUTION_COST_CATEGORIES = ["radar", "eval", "redteam", "shadow", "review"] as const;
@@ -180,7 +275,8 @@ export const ConstitutionManifestSchema = z
     schema_version: z.literal(2),
     constitution_id: z.string().min(1).max(80),
     /** Monoton økende; kjøretiden nekter nedgradering mot `minVersion` (rollback-vern). */
-    version: z.number().int().min(1),
+    /** Heltall 1..2^53-1 (`Number.MAX_SAFE_INTEGER`): en versjon over det kan ikke sammenlignes sikkert (rollback-vernet). */
+    version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
     issued_at: z.string().datetime(),
     issued_by: z.string().min(1).max(80),
     /** Fri tekst som signeres sammen med resten (f.eks. utkast-merknad). Aldri maskinlest som regel. */
@@ -202,7 +298,8 @@ export type ConstitutionErrorCode =
   | "constitution_signature_invalid"
   | "constitution_invalid"
   | "constitution_weakened"
-  | "constitution_rollback";
+  | "constitution_rollback"
+  | "constitution_min_version_invalid";
 
 export class ConstitutionError extends Error {
   constructor(readonly code: ConstitutionErrorCode, detail?: string) {
@@ -240,7 +337,8 @@ function matchesRule(rule: PathRule, key: string): boolean {
   const value = protectionKey(rule.value);
   if (isInvalidPathKey(value)) return false;
   switch (rule.kind) {
-    case "prefix": return key.startsWith(value);
+    // En katalog-prefiks (`modules/policy/`) dekker også KATALOGEN SELV (`modules/policy`): en symlink/fil som erstatter katalogen er like beskyttet (WP-EV0 fix1, A-F1).
+    case "prefix": return key.startsWith(value) || (value.endsWith("/") && key === value.slice(0, -1));
     case "exact": return key === value;
     case "suffix": return key.endsWith(value);
     case "basename": return key === value || key.endsWith(`/${value}`);
@@ -260,6 +358,14 @@ export interface Constitution {
   isActionForbidden(action: string): boolean;
 }
 
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const inner of Object.values(value as Record<string, unknown>)) deepFreeze(inner);
+  }
+  return value;
+}
+
 /** Bygger en Constitution fra et allerede VERIFISERT manifest. Kaster `constitution_invalid`/`constitution_weakened`. */
 export function buildConstitution(raw: unknown): Constitution {
   const parsed = ConstitutionManifestSchema.safeParse(raw);
@@ -270,7 +376,7 @@ export function buildConstitution(raw: unknown): Constitution {
     const key = protectionKey(path);
     return !isInvalidPathKey(key) && manifest.protected_paths.some((rule) => matchesRule(rule, key));
   };
-  for (const probe of REQUIRED_PROTECTED_PROBES) {
+  for (const probe of [...REQUIRED_PROTECTED_PROBES, ...REQUIRED_PROTECTED_DIRECTORY_PROBES]) {
     if (!protectedBy(probe)) throw new ConstitutionError("constitution_weakened", `unprotected:${probe}`);
   }
   for (const action of REQUIRED_E3_ACTIONS) {
@@ -295,6 +401,9 @@ export function buildConstitution(raw: unknown): Constitution {
 
   const e1 = new Set(manifest.e1_allowlist);
   const digest = createHash("sha256").update(canonicalizeManifest(manifest)).digest("hex");
+  // WP-EV0 fix1 (I5): HELE manifestet er frosset (ikke bare budsjettet): `classify`/`isActionForbidden` leser reglene live, så en prosess som muterte `protected_paths`/`e3_actions`
+  // etter verifisering ville ellers svekket klassifiseringen uten at signaturen merket det. Mutasjon kaster nå (ESM er strict).
+  deepFreeze(manifest);
 
   return {
     manifest,
@@ -329,12 +438,19 @@ export interface VerifyConstitutionInput {
   publicKeyPem: string | null;
   /** SHA-256 (hex) av SPKI-DER for eierens offentlige nøkkel - festet i miljøet, utenfor repoet. */
   pinnedPublicKeySha256: string | null;
-  /** Laveste akseptable versjon (rollback-vern). */
+  /** Laveste akseptable versjon (rollback-vern). Må være et trygt heltall >= 1; alt annet (NaN, 0, negativ, brøk, ikke-tall) kaster `constitution_min_version_invalid` - aldri stille ignorert. */
   minVersion?: number;
+}
+
+/** Er verdien en gyldig `minVersion` (trygt heltall >= 1)? Delt av `verifyConstitution` og oppstartssjekken. */
+export function isValidMinVersion(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
 /** Ren verifisering uten I/O - fail-closed. Kaster `ConstitutionError`. */
 export function verifyConstitution(input: VerifyConstitutionInput): Constitution {
+  // En ugyldig terskel er en konfigurasjonsfeil og skal aldri føre til at rollback-vernet stille faller bort (`version < NaN` er alltid usant).
+  if (input.minVersion !== undefined && !isValidMinVersion(input.minVersion)) throw new ConstitutionError("constitution_min_version_invalid", String(input.minVersion));
   if (input.signatureB64 === null || input.signatureB64.trim() === "") throw new ConstitutionError("constitution_unsigned");
   if (input.publicKeyPem === null || input.publicKeyPem.trim() === "") throw new ConstitutionError("constitution_unsigned", "no_public_key");
   const pinned = input.pinnedPublicKeySha256?.trim().toLowerCase() ?? "";

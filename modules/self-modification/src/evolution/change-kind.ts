@@ -1,5 +1,5 @@
 import { REQUIRED_PROTECTED_PROBES, type EvChangeClass } from "../constitution.ts";
-import { isInvalidPathKey, protectionKey } from "../policy.ts";
+import { ZERO_REVIEW_ALLOWLIST, isInvalidPathKey, protectionKey } from "../policy.ts";
 import { maxClass, sensitiveTouches } from "./common.ts";
 
 /**
@@ -44,14 +44,18 @@ const parentDir = (key: string): string => {
   return i === -1 ? "" : key.slice(0, i);
 };
 
+/** De foldede (`protectionKey`) personlighetsfilene: zero-review-allowlisten er den ENESTE veien til E1, og en slik fil er alltid typen `personality`. */
+const PERSONALITY_KEYS: ReadonlySet<string> = new Set([...ZERO_REVIEW_ALLOWLIST].map(protectionKey).filter((k) => !isInvalidPathKey(k)));
+
 /** Katalogene som inneholder en påkrevd sonde: en fil som ligger SIDE OM SIDE med en beskyttet fil er «beskyttet-nær». */
 const PROBE_DIRS: ReadonlySet<string> = new Set(
   REQUIRED_PROTECTED_PROBES.map(protectionKey).filter((k) => !isInvalidPathKey(k)).map(parentDir)
 );
 
 /**
- * Typene stiene avslører (i typerekkefølgen): skjema (SQL/migrasjoner), avhengighet, credential, nettverk og beskyttet-nær (samme katalog som en sonde).
+ * Typene stiene avslører (i typerekkefølgen): personlighet (den navngitte zero-review-filen), skjema (SQL/migrasjoner), avhengighet, credential, nettverk og beskyttet-nær (samme katalog som en sonde).
  * En sti som ikke kan normaliseres trygt regnes som beskyttet-nær. Brukes til å heve klassen når forslaget hevder en svakere type, aldri til å senke den.
+ * WP-EV0 fix1 (L2): personlighetsfilen avslører typen `personality` uansett hva forslaget hevder - ellers kunne `kind: config` + kundevendt omfang slippe forbi omfangsregelen (E2) og bli E1.
  */
 export function derivedKindsFromPaths(paths: readonly string[]): ChangeKind[] {
   const found = new Set<ChangeKind>();
@@ -65,6 +69,7 @@ export function derivedKindsFromPaths(paths: readonly string[]): ChangeKind[] {
       found.add("protected-adjacent");
       continue;
     }
+    if (PERSONALITY_KEYS.has(key)) found.add("personality");
     if (/\.sql$/.test(key) || /(^|\/)migrations\//.test(key)) found.add("schema");
     if (PROBE_DIRS.has(parentDir(key))) found.add("protected-adjacent");
   }

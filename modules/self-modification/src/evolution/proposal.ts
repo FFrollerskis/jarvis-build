@@ -126,7 +126,8 @@ export function validateProposal(raw: unknown, constitution: Pick<Constitution, 
   // WP-EV0: gulvet for den DEKLARERTE typen, for typene stiene avslører, og for kundevendt/uoppgitt personlighetsomfang. Kan bare heve klassen.
   const derivedKinds = derivedKindsFromPaths(p.proposed_change.paths);
   const declaredFloor = minimumClassForKind(p.kind);
-  const personalityNeedsOwner = p.kind === "personality" && p.personality_scope !== "internal";
+  // L2: `declared || derived` - personlighetsfilen avslører typen selv om forslaget hevder `config`/`code`/..., så omfangsregelen kan ikke omgås ved å velge en annen type.
+  const personalityNeedsOwner = (p.kind === "personality" || derivedKinds.includes("personality")) && p.personality_scope !== "internal";
   derived = atLeast(atLeast(atLeast(derived, declaredFloor), minimumClassForKinds(derivedKinds)), personalityNeedsOwner ? "E2" : "E0");
   const raisedKinds = derivedKinds.filter((k) => classRank(minimumClassForKind(k)) > classRank(declaredFloor));
   if (raisedKinds.length > 0) reasons.push(`kind_raised_by_paths:${p.kind}->${raisedKinds.join("+")}`);
