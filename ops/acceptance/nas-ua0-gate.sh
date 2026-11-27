@@ -3,8 +3,9 @@
 #   ops/acceptance/nas-ua0-gate.sh                # kjør mot kjørende compose-stack (fra repoets rot på NAS)
 #   JARVIS_ACCEPTANCE_DRY_RUN=1 ops/acceptance/nas-ua0-gate.sh   # skriv kun sjekklisten (ingen docker)
 # Valgfritt miljø: JARVIS_BACKUP_DIR (mappen nas-backup.sh skriver til), JARVIS_COMPOSE_FILE, JARVIS_ACCEPTANCE_OUT_DIR (evidensmappe; standard ops/acceptance/out).
-# Kun for test: JARVIS_ACCEPTANCE_BACKUP_STATUS_CMD (kjørbar fil som erstatter ops/backup/nas-schedule.sh i C13), JARVIS_ACCEPTANCE_BACKUP_STATUS_TIMEOUT_SEC (standard 120), JARVIS_ACCEPTANCE_NODE_BIN (standard node).
-# Leser aldri .env og skriver aldri passord/tokens: Postgres nås via lokal socket i containeren (ingen passord), og kun antall/navn/tilstand rapporteres.
+# Kun for test: JARVIS_ACCEPTANCE_BACKUP_STATUS_CMD (kjørbar fil som erstatter ops/backup/nas-schedule.sh i C13), JARVIS_ACCEPTANCE_BACKUP_STATUS_TIMEOUT_SEC (standard 120), JARVIS_ACCEPTANCE_NODE_BIN (standard node). C13-raden får «(OVERSTYRT, kun test)» når en av dem er satt.
+# Selve gaten leser aldri .env og skriver aldri passord/tokens: Postgres nås via lokal socket i containeren (ingen passord), og kun antall/navn/tilstand rapporteres. UNNTAK (C13): gaten kjører ops/backup/nas-schedule.sh,
+# og DET skriptet leser .env (DB-admin-passordet i sitt EGET miljø, JARVIS_BACKUP_*) og kan bygge age-imaget første gang; gaten viser kun koder og tall fra svaret.
 # Utdata: stdout + ops/acceptance/out/nas-ua0-gate-<tid>.md (git-ignorert). Exit 1 hvis minst én sjekk er FAIL; UNKNOWN/WARN er IKKE bestått.
 # Ærlighet: «PASS» betyr bare at DENNE målingen var som forventet akkurat nå - ikke at en UA-port er lukket.
 set -uo pipefail
@@ -145,19 +146,27 @@ if echo "$hard" | grep -q "AVVIK"; then record C12_container_hardening FAIL "$ha
 elif echo "$hard" | grep -q "ukjent"; then record C12_container_hardening UNKNOWN "$hard"
 else record C12_container_hardening PASS "$hard"; fi
 
-# C13 (WP-OPS2a K5): backup-status fra backup-skriptets EGET statusskript (`nas-schedule.sh <mappe> status --json`): exit 0 frisk = PASS, 3 forfalt = FAIL, 4 restore-verifisering / 5 off-site = WARN, alt annet = UNKNOWN.
-# Kun koder og tall når skjermen og evidensfilen: JSON-en er ubetrodd data og leses med en lukket mal (tilstander fra faste lister, tall, årsakskoder uten settnavn) - aldri fritekst. Gaten leser ingenting selv.
+# C13 (WP-OPS2a K5): backup-status fra backup-skriptets EGET statusskript (`nas-schedule.sh <mappe> status --json`): exit 3 forfalt = FAIL, 4 restore-verifisering / 5 off-site = WARN, exit 0 = PASS KUN når JSON-en har en gyldig exit_code som er lik exit-koden,
+# alder og begge tilstandene er kjent, og restore-verifisering og off-site er `ok`. Samme WARN som H07 (nas-hf1-hf2-gate.sh, classify_backup) for restore=never_run|not_configured og offsite=not_configured|pending. Alt annet (ukjent/manglende felt, uenighet, uventet exit) = UNKNOWN.
+# Kun koder og tall når skjermen og evidensfilen: JSON-en er ubetrodd data og leses med en lukket mal (tilstander fra faste lister, tall, årsakskoder uten settnavn) - aldri fritekst. Selve gaten leser ingenting fra backup-mappen i C13 (C10 gjør det).
 NODE_BIN="${JARVIS_ACCEPTANCE_NODE_BIN:-node}"
 BACKUP_STATUS_CMD="${JARVIS_ACCEPTANCE_BACKUP_STATUS_CMD:-$ROOT/ops/backup/nas-schedule.sh}"
 BACKUP_STATUS_TIMEOUT="${JARVIS_ACCEPTANCE_BACKUP_STATUS_TIMEOUT_SEC:-120}"
 [[ "$BACKUP_STATUS_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$BACKUP_STATUS_TIMEOUT" -ge 1 ] && [ "$BACKUP_STATUS_TIMEOUT" -le 900 ] || BACKUP_STATUS_TIMEOUT=120
+# En test-seam kan gi PASS uten at noe ekte er målt: raden sier det (skjerm og evidensfil).
+C13_NOTE=""
+if [ -n "${JARVIS_ACCEPTANCE_BACKUP_STATUS_CMD:-}${JARVIS_ACCEPTANCE_NODE_BIN:-}${JARVIS_ACCEPTANCE_BACKUP_STATUS_TIMEOUT_SEC:-}" ]; then C13_NOTE=" (OVERSTYRT, kun test)"; fi
+c13() { record C13_backup_status "$1" "$2$C13_NOTE"; }
+# Mappen absolutiseres her: nas-schedule.sh bytter til repoets rot før den leser den, så en relativ sti ville pekt på en annen mappe enn C10 leste.
+BACKUP_DIR_ABS=""
+if [ -n "${JARVIS_BACKUP_DIR:-}" ]; then case "$JARVIS_BACKUP_DIR" in /*) BACKUP_DIR_ABS="$JARVIS_BACKUP_DIR";; *) BACKUP_DIR_ABS="$PWD/$JARVIS_BACKUP_DIR";; esac; fi
 PARSE_BACKUP_STATUS='
 let s = "";
 process.stdin.on("data", (c) => { s += c; }).on("end", () => {
   let j;
   try { j = JSON.parse(s); } catch { console.log("INVALID"); return; }
   if (typeof j !== "object" || j === null || Array.isArray(j)) { console.log("INVALID"); return; }
-  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? String(Math.round(v * 10) / 10) : "?");
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 && v < 1e9 ? String(Math.round(v * 10) / 10) : "?");
   const pick = (v, list) => (typeof v === "string" && list.includes(v) ? v : "?");
   const code = (r) => {
     if (typeof r !== "string") return null;
@@ -166,31 +175,40 @@ process.stdin.on("data", (c) => { s += c; }).on("end", () => {
     return b !== undefined && /^[a-z_]{1,40}$/.test(b) ? a + ":" + b : a;
   };
   const reasons = (Array.isArray(j.reasons) ? j.reasons : []).map(code).filter((x) => x !== null).slice(0, 6).join(",");
-  console.log(["OK", "ec=" + (Number.isInteger(j.exit_code) ? j.exit_code : "?"), "age_h=" + num(j.backup && j.backup.age_hours),
+  console.log(["OK", "ec=" + (Number.isInteger(j.exit_code) && j.exit_code >= 0 && j.exit_code <= 255 ? j.exit_code : "?"), "age_h=" + num(j.backup && j.backup.age_hours),
     "verify=" + pick(j.restore_verify && j.restore_verify.state, ["not_configured", "never_run", "ok", "failed"]),
     "offsite=" + pick(j.offsite && j.offsite.state, ["not_configured", "pending", "ok", "failed"]), "reasons=" + (reasons || "-")].join(" "));
 });'
-if [ -z "${JARVIS_BACKUP_DIR:-}" ]; then record C13_backup_status UNKNOWN "sett JARVIS_BACKUP_DIR til mappen nas-backup.sh skriver til"
-elif ! command -v "$NODE_BIN" >/dev/null 2>&1; then record C13_backup_status UNKNOWN "node finnes ikke på verten (status-kommandoen og tolkningen trenger node)"
+PARSED_RE='^OK ec=([0-9]{1,3}|\?) age_h=([0-9.]+|\?) verify=([a-z_?]+) offsite=([a-z_?]+) reasons=(.*)$'
+if [ -z "${JARVIS_BACKUP_DIR:-}" ]; then c13 UNKNOWN "sett JARVIS_BACKUP_DIR til mappen nas-backup.sh skriver til"
+elif ! command -v "$NODE_BIN" >/dev/null 2>&1; then c13 UNKNOWN "node finnes ikke på verten (status-kommandoen og tolkningen trenger node)"
 else
+  c13_t0="$(date +%s)"
   if command -v timeout >/dev/null 2>&1; then
-    status_json="$(timeout "$BACKUP_STATUS_TIMEOUT" "$BACKUP_STATUS_CMD" "$JARVIS_BACKUP_DIR" status --json </dev/null 2>/dev/null)"; status_rc=$?
+    # -k 5: en kommando som ignorerer TERM får KILL 5 s etter fristen (exit 137), så den aldri holder gaten.
+    status_json="$(timeout -k 5 "$BACKUP_STATUS_TIMEOUT" "$BACKUP_STATUS_CMD" "$BACKUP_DIR_ABS" status --json </dev/null 2>/dev/null)"; status_rc=$?
   else
-    status_json="$("$BACKUP_STATUS_CMD" "$JARVIS_BACKUP_DIR" status --json </dev/null 2>/dev/null)"; status_rc=$?
+    status_json="$("$BACKUP_STATUS_CMD" "$BACKUP_DIR_ABS" status --json </dev/null 2>/dev/null)"; status_rc=$?
   fi
+  c13_elapsed=$(( $(date +%s) - c13_t0 ))
   parsed="$(printf '%s' "$status_json" | "$NODE_BIN" -e "$PARSE_BACKUP_STATUS" 2>/dev/null)"
-  if [ "$status_rc" = "124" ]; then record C13_backup_status UNKNOWN "tidsavbrudd etter ${BACKUP_STATUS_TIMEOUT} s (status-kommandoen svarte ikke)"
-  elif [[ "$parsed" != OK\ * ]]; then record C13_backup_status UNKNOWN "status-JSON kunne ikke tolkes (exit $status_rc)"
+  if [ "$status_rc" = "124" ] || { [ "$status_rc" = "137" ] && [ "$c13_elapsed" -ge "$BACKUP_STATUS_TIMEOUT" ]; }; then c13 UNKNOWN "tidsavbrudd etter ${BACKUP_STATUS_TIMEOUT} s (status-kommandoen svarte ikke)"
+  elif ! [[ "$parsed" =~ $PARSED_RE ]]; then c13 UNKNOWN "status-JSON kunne ikke tolkes (exit $status_rc)"
   else
-    ec="${parsed#OK ec=}"; ec="${ec%% *}"
-    detail="exit=$status_rc ${parsed#OK ec=* }"
-    if [ "$ec" != "?" ] && [ "$ec" != "$status_rc" ]; then record C13_backup_status UNKNOWN "exit-koden ($status_rc) og status-JSON (exit_code $ec) er uenige"
+    ec="${BASH_REMATCH[1]}"; age="${BASH_REMATCH[2]}"; verify="${BASH_REMATCH[3]}"; offsite="${BASH_REMATCH[4]}"
+    detail="exit=$status_rc age_h=$age verify=$verify offsite=$offsite reasons=${BASH_REMATCH[5]}"
+    if [ "$ec" = "?" ]; then c13 UNKNOWN "status-JSON mangler gyldig exit_code (exit $status_rc) - ikke tolket som frisk: $detail"
+    elif [ "$ec" != "$status_rc" ]; then c13 UNKNOWN "exit-koden ($status_rc) og status-JSON (exit_code $ec) er uenige"
     else
       case "$status_rc" in
-        0) record C13_backup_status PASS "$detail";;
-        3) record C13_backup_status FAIL "$detail";;
-        4|5) record C13_backup_status WARN "$detail";;
-        *) record C13_backup_status UNKNOWN "uventet exit $status_rc: $detail";;
+        0)
+          if [ "$age" = "?" ] || [ "$verify" = "?" ] || [ "$offsite" = "?" ]; then c13 UNKNOWN "ufullstendig status-JSON (alder, restore-tilstand eller off-site-tilstand er ukjent) - ikke tolket som frisk: $detail"
+          elif [ "$verify" = "failed" ] || [ "$offsite" = "failed" ]; then c13 UNKNOWN "exit-koden (0) og status-JSON (failed) er uenige: $detail"
+          elif [ "$verify" != "ok" ] || [ "$offsite" != "ok" ]; then c13 WARN "$detail - restore-verifisering eller off-site er ikke bekreftet (samme WARN som H07)"
+          else c13 PASS "$detail"; fi;;
+        3) c13 FAIL "$detail";;
+        4|5) c13 WARN "$detail";;
+        *) c13 UNKNOWN "uventet exit $status_rc: $detail";;
       esac
     fi
   fi

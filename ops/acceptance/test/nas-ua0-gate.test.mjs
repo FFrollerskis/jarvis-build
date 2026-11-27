@@ -169,7 +169,7 @@ describe("nas-ua0-gate.sh", () => {
       const r = run(gateEnv(0, statusJson()));
       const [status, detail] = c13(r);
       expect(status, r.out).toBe("PASS");
-      expect(detail).toBe("exit=0 age_h=3.5 verify=ok offsite=ok reasons=-");
+      expect(detail).toBe("exit=0 age_h=3.5 verify=ok offsite=ok reasons=- (OVERSTYRT, kun test)"); // WP-OPS2a fiks 1 (B-L9): test-seamen er synlig i raden
       expect(r.status, r.out).toBe(0);
     });
 
@@ -177,7 +177,7 @@ describe("nas-ua0-gate.sh", () => {
       const overdue = run(gateEnv(3, statusJson({ ok: false, exit_code: 3, reasons: ["newest_backup_40h_old_limit_36h", "set_dated_in_future:jarvis-backup-20301231T000000Z"], backup: { age_hours: 40 } })));
       const [status, detail] = c13(overdue);
       expect(status, overdue.out).toBe("FAIL");
-      expect(detail).toBe("exit=3 age_h=40 verify=ok offsite=ok reasons=newest_backup_40h_old_limit_36h,set_dated_in_future");
+      expect(detail).toBe("exit=3 age_h=40 verify=ok offsite=ok reasons=newest_backup_40h_old_limit_36h,set_dated_in_future (OVERSTYRT, kun test)");
       expect(overdue.status).toBe(1);
       const verify = run(gateEnv(4, statusJson({ ok: false, exit_code: 4, reasons: ["restore_verify_failed:verify_failed"], restore_verify: { state: "failed" } })));
       expect(c13(verify)[0]).toBe("WARN");
@@ -198,7 +198,7 @@ describe("nas-ua0-gate.sh", () => {
     });
 
     it("ugyldig JSON (tom, ikke JSON, array, null, tall), og JSON som er uenig med exit-koden, gir UNKNOWN - også ved exit 0 og 3", () => {
-      for (const [rc, body] of [[0, ""], [0, "dette er ikke json"], [0, "[]"], [0, "null"], [0, "42"], [3, "{ikke json"], [0, JSON.stringify(statusJson({ exit_code: 3 }))], [3, JSON.stringify(statusJson({ exit_code: 0 }))]]) {
+      for (const [rc, body] of [[0, ""], [0, "dette er ikke json"], [0, "[]"], [0, "null"], [0, "42"], [0, "{}"], [0, '{"ok":true}'], [3, "{ikke json"], [0, JSON.stringify(statusJson({ exit_code: 3 }))], [3, JSON.stringify(statusJson({ exit_code: 0 }))]]) {
         const r = run(gateEnv(rc, body));
         expect(c13(r)[0], `exit ${rc} / ${body.slice(0, 20)}`).toBe("UNKNOWN");
         expect(r.status, r.out).toBe(0); // ukjent er ikke FAIL
@@ -233,9 +233,19 @@ describe("nas-ua0-gate.sh", () => {
         backup: { age_hours: "ikke et tall" }, note: "password=hunter2 JARVIS_DB_ADMIN_PASSWORD=pw", last_error: "secret-value"
       });
       const r = run(gateEnv(0, hostile));
-      expect(c13(r)[1]).toBe("exit=0 age_h=? verify=? offsite=? reasons=newest_backup_1h_old_limit_36h");
+      // WP-OPS2a fiks 1 (B-M1): ukjente tilstander og ukjent alder med exit 0 er UNKNOWN (tidligere PASS); den filtrerte detaljen er den samme.
+      expect(c13(r)[0]).toBe("UNKNOWN");
+      expect(c13(r)[1]).toContain("exit=0 age_h=? verify=? offsite=? reasons=newest_backup_1h_old_limit_36h");
       const file = r.out.match(/Evidens skrevet til: (.+)/)[1].trim();
       for (const text of [r.out, readFileSync(file, "utf8")]) {
+        expect(text).not.toMatch(/Bearer|hunter2|passwd|script|secret-value|rm -rf|JARVIS_DB_ADMIN_PASSWORD/);
+      }
+      // Samme fiendtlige tekst rundt GYLDIGE tilstander: PASS med kun de filtrerte årsakskodene.
+      const known = run(gateEnv(0, statusJson({ reasons: hostile.reasons, note: hostile.note, last_error: hostile.last_error })));
+      expect(c13(known)[0]).toBe("PASS");
+      expect(c13(known)[1]).toBe("exit=0 age_h=3.5 verify=ok offsite=ok reasons=newest_backup_1h_old_limit_36h (OVERSTYRT, kun test)");
+      const knownFile = known.out.match(/Evidens skrevet til: (.+)/)[1].trim();
+      for (const text of [known.out, readFileSync(knownFile, "utf8")]) {
         expect(text).not.toMatch(/Bearer|hunter2|passwd|script|secret-value|rm -rf|JARVIS_DB_ADMIN_PASSWORD/);
       }
     });
