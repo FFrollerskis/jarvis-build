@@ -97,8 +97,11 @@ const CLASSES: ReadonlySet<string> = new Set(["A", "B", "C", "D"]);
 const DEGRADED_WINDOW_MS = 5 * 60_000;
 const LOG_THROTTLE_MS = 60_000;
 
-/** Øvre grense for hvor mye fritekst som skannes (arbeidet er begrenset uansett hva en feilende kaller sender). Mye større enn `max`: kuttet skjer ETTER skanningen (WP-SEC2 K7b). */
-const MAX_SCANNED_TEXT = 65_536;
+/**
+ * Øvre grense for hvor mye fritekst som skannes (arbeidet er begrenset uansett hva en feilende kaller sender). Mye større enn `max`: kuttet skjer ETTER skanningen (WP-SEC2 K7b). Fiks-runde 1 (review B, L3): 64 KB var for lavt - et token bak en
+ * stor skjult blokk ble kuttet midt i og et delvis token ble stående; 1 MiB er langt over alt policy-motoren selv skriver (grunnkoder), så i praksis skannes alt før kuttet. Over taket gjelder kutt-før-skann fortsatt (dokumentert).
+ */
+const MAX_SCANNED_TEXT = 1_048_576;
 
 /**
  * Fritekst (grunnkode): hemmeligheter redigert (`[REDACTED:<type>]`), så kontrolltegn bort, så kuttet til `max`. `null` for ikke-tekst/tom. KUN fritekst skannes - id-er gjør det aldri (se `cleanId`).

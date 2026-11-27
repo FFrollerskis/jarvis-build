@@ -96,7 +96,7 @@ describe("K7e: ingen ny lagringssted-skriving uten klassifisering", () => {
     const writers = [...found].filter(([, tables]) => tables.has("audit_events")).map(([file]) => file);
     expect(writers).toEqual(["modules/core/src/services/audit-writer.ts"]);
     const text = readFileSync(join(ROOT, writers[0] as string), "utf8");
-    expect(text).toMatch(/scanForSecrets\(entry\.reason\)/);
+    expect(text).toMatch(/scanForSecrets\(typeof rawReason === "string" \? rawReason : String\(rawReason\)\)/); // reason (også en ikke-streng fra en JS-kaller) skannes (fiks-runde 1, B-L1)
     expect(text).toMatch(/scanStructuredForSecrets\(entry\.payload/);
   });
 });

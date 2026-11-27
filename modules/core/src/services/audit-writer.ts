@@ -48,8 +48,10 @@ function redactAuditEntry(entry: AuditEntry): { reason: string | null; payload: 
   try {
     const kinds = new Set<string>();
     let reason: string | null = null;
-    if (entry.reason !== undefined) {
-      const scanned = scanForSecrets(entry.reason);
+    // JS-kallere kan sende `reason: null` eller et tall (typen sier `string`): ikke-streng bli tekst i stedet for et unntak som kaster HELE nyttelasten (review B, L1).
+    const rawReason: unknown = entry.reason;
+    if (rawReason !== undefined && rawReason !== null) {
+      const scanned = scanForSecrets(typeof rawReason === "string" ? rawReason : String(rawReason));
       for (const f of scanned.findings) kinds.add(f.kind);
       reason = scanned.text;
     }
@@ -57,9 +59,50 @@ function redactAuditEntry(entry: AuditEntry): { reason: string | null; payload: 
     for (const f of scannedPayload.findings) kinds.add(f.kind);
     const payload = scannedPayload.value as Record<string, unknown>;
     return { reason, payload: kinds.size === 0 ? payload : { ...payload, secret_redacted: [...kinds] } };
-  } catch {
-    return { reason: null, payload: { redaction_failed: true } };
+  } catch (err) {
+    // Fail-closed, men ikke stille og ikke alt-eller-ingenting (review B, L1): feilen logges (kun type og feilklasse, ALDRI innhold), og nyttelastens nøkler og ikke-strenger (tall/boolean/null) beholdes - strenger og objekter,
+    // som ikke kunne skannes, erstattes av en markør. `reason` kunne ikke skannes og utelates.
+    console.error(JSON.stringify({ msg: "audit_redaction_failed", type: safeAuditType(entry), error: err instanceof Error ? err.name : "non_error" }));
+    return { reason: null, payload: failClosedPayload(entry) };
   }
+}
+
+const REDACTION_FAILED_MARKER = "[REDACTED:redaction_failed]";
+
+function safeAuditType(entry: AuditEntry): string {
+  try {
+    return typeof entry.type === "string" ? entry.type.slice(0, 80) : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/** Nyttelasten når skanningen sviktet: `redaction_failed: true` + toppnivånøklene (skannet som tekst) med tall/boolean/null beholdt og alt annet som markør. Kan ikke nøklene leses, står kun `redaction_failed`. */
+function failClosedPayload(entry: AuditEntry): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  try {
+    const payload = (entry.payload ?? {}) as Record<string, unknown>;
+    for (const key of Object.keys(payload).slice(0, 64)) {
+      let kept: unknown = REDACTION_FAILED_MARKER;
+      try {
+        const value = payload[key];
+        if (typeof value === "number" || typeof value === "boolean" || value === null) kept = value;
+      } catch {
+        /* getter som kaster: markør */
+      }
+      let name = key.slice(0, 120);
+      try {
+        name = scanForSecrets(name).text;
+      } catch {
+        name = REDACTION_FAILED_MARKER;
+      }
+      out[name] = kept;
+    }
+  } catch {
+    /* nøkkelliste som ikke kan leses: kun markøren under */
+  }
+  out["redaction_failed"] = true;
+  return out;
 }
 
 export async function writeAudit(client: pg.PoolClient, identity: AuditSubject, entry: AuditEntry): Promise<void> {
