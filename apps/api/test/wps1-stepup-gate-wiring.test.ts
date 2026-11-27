@@ -184,7 +184,10 @@ describe("D: main.ts gir ALDRI rå process.env til de fire flaggfamiliene, og mo
 
   it("status: oppstartsloggen og /infra/status får modus og blokkerte flagg", () => {
     expect(main).toContain("stepUpBinding: describeStepUpBinding(stepUpGate)");
-    expect(main).toContain('msg: "stepup_channel_binding"');
+    // oppstartsloggen: betingelsen og innholdet er testet i contracts (`stepUpBindingLogEvent`); main.ts skal bruke funksjonen og skrive nøyaktig det den returnerer
+    expect(count("const stepUpLog = stepUpBindingLogEvent(stepUpGate);")).toBe(1);
+    expect(count("if (stepUpLog !== null) console.log(JSON.stringify(stepUpLog));")).toBe(1);
+    expect(main).not.toContain('msg: "stepup_channel_binding"'); // meldingsnavnet bor kun i contracts (én kilde)
   });
 
   it("worker-main kobler aldri inn noen av de fire flaggfamiliene (kun api-prosessen har dem, så porten i main.ts dekker alle)", () => {

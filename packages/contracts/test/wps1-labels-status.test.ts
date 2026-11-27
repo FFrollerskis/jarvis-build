@@ -5,7 +5,8 @@ import {
   applyStepUpBindingGate,
   describeStepUpBinding,
   deviceKindFromLegacyLabel,
-  displayKindLabel
+  displayKindLabel,
+  stepUpBindingLogEvent
 } from "../src/index.ts";
 
 /**
@@ -89,5 +90,40 @@ describe("WP-S1 K4: describeStepUpBinding - status viser modus, ugyldig verdi og
     expect(status.mode).toBe("observe");
     expect(status.invalid_value).toBe(`enf?orce${"x".repeat(32)}`);
     expect(status.invalid_value).toHaveLength(40);
+  });
+});
+
+describe("WP-S1 K4: stepUpBindingLogEvent - oppstartsloggen melder det eieren må se, og er stille ellers (identisk med main)", () => {
+  const log = (env: Record<string, string>) => stepUpBindingLogEvent(applyStepUpBindingGate(env));
+
+  it("observe uten blokkerte flagg og uten ugyldig verdi: INGEN loggline (null), også med urelaterte og AV-flagg", () => {
+    expect(log({})).toBeNull();
+    expect(log({ [STEPUP_CHANNEL_BINDING_ENV]: "observe" })).toBeNull();
+    expect(log({ [STEPUP_CHANNEL_BINDING_ENV]: "", JARVIS_PERSONAL_CAR: "off", JARVIS_GROWTH_WRITE_PLATFORMS: "  ", SOMETHING_ELSE: "on" })).toBeNull();
+  });
+
+  it("observe MED et påslått høyrisiko-flagg: loggen melder flagget med årsaken (ingen stille suksess)", () => {
+    expect(log({ JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CALLS: "on" })).toEqual({
+      msg: "stepup_channel_binding", mode: "observe", enforced: false, invalid_value: null,
+      blocked: [
+        { flag: "JARVIS_COMMS_OUTBOUND", group: "comms_outbound", reason: STEPUP_BINDING_NOT_ENFORCED },
+        { flag: "JARVIS_COMMS_CALLS", group: "comms_outbound", reason: STEPUP_BINDING_NOT_ENFORCED }
+      ]
+    });
+  });
+
+  it("en ugyldig modusverdi alene gir en loggline (eieren ser skrivefeilen), og modusen er observe", () => {
+    expect(log({ [STEPUP_CHANNEL_BINDING_ENV]: "enforced" })).toEqual({ msg: "stepup_channel_binding", mode: "observe", enforced: false, invalid_value: "enforced", blocked: [] });
+  });
+
+  it("enforce gir ALLTID en loggline (også uten flagg), uten blokkerte flagg", () => {
+    expect(log({ [STEPUP_CHANNEL_BINDING_ENV]: "enforce" })).toEqual({ msg: "stepup_channel_binding", mode: "enforce", enforced: true, invalid_value: null, blocked: [] });
+    expect(log({ [STEPUP_CHANNEL_BINDING_ENV]: "enforce", JARVIS_SITUATION_SIGNALS: "on" })?.blocked).toEqual([]);
+  });
+
+  it("hendelsen har nøyaktig feltene msg, mode, enforced, invalid_value og blocked (ingen flaggverdier)", () => {
+    const event = log({ JARVIS_PERSONAL_FAMILY: "on", UNRELATED: "secret-value" });
+    expect(Object.keys(event ?? {}).sort()).toEqual(["blocked", "enforced", "invalid_value", "mode", "msg"]);
+    expect(JSON.stringify(event)).not.toContain("secret-value");
   });
 });

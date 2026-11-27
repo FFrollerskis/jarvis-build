@@ -129,3 +129,12 @@ export function describeStepUpBinding(gate: Pick<StepUpBindingGate, "setting" | 
     blocked: gate.blocked.map((b) => ({ flag: b.flag, group: b.group, reason: b.reason }))
   };
 }
+
+/**
+ * Oppstartsloggen (`apps/api/src/main.ts`): `null` når det ikke er noe å melde (modus `observe`, ingen blokkerte flagg, ingen ugyldig verdi) = ingen ekstra loggline (identisk med main); ellers hendelsen som skrives. Ren funksjon, så
+ * betingelsen og innholdet er testet uten å starte api-prosessen: en eier som har slått på et høyrisiko-flagg uten `enforce` SKAL se det i loggen (ingen stille suksess).
+ */
+export function stepUpBindingLogEvent(gate: Pick<StepUpBindingGate, "setting" | "blocked">): ({ readonly msg: "stepup_channel_binding" } & StepUpBindingStatus) | null {
+  if (!gate.setting.enforced && gate.blocked.length === 0 && gate.setting.invalid_value === null) return null;
+  return { msg: "stepup_channel_binding", ...describeStepUpBinding(gate) };
+}

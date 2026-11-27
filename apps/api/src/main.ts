@@ -7,7 +7,7 @@ import { parseCouncilProposals } from "./council-proposals.ts";
 import { fileURLToPath } from "node:url";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
-import { applyStepUpBindingGate, assertNoSweepFailures, describeStepUpBinding, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
+import { applyStepUpBindingGate, assertNoSweepFailures, describeStepUpBinding, envHour, envInt, envPort, failOnSweepFailures, stepUpBindingLogEvent, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { buildSelfModelReaders } from "./self-model-readers.ts";
 import { backupStatusSourceFromEnv } from "./backup-status.ts";
@@ -188,9 +188,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // (JARVIS_PERSONAL_*, JARVIS_GROWTH_WRITE_PLATFORMS, JARVIS_COMMS_OUTBOUND med avhengige, JARVIS_SITUATION_SIGNALS) har INGEN effekt uten `enforce`. De fire flaggfamiliene under leser `stepUpGate.env` (en kopi uten de
   // blokkerte flaggene), aldri `process.env`; hvert flagg som er slått på men blokkert meldes i oppstartsloggen og i `/infra/status`. Ingen krasj, ingen stille suksess.
   const stepUpGate = applyStepUpBindingGate(process.env);
-  if (stepUpGate.setting.enforced || stepUpGate.blocked.length > 0 || stepUpGate.setting.invalid_value !== null) {
-    console.log(JSON.stringify({ msg: "stepup_channel_binding", ...describeStepUpBinding(stepUpGate) }));
-  }
+  const stepUpLog = stepUpBindingLogEvent(stepUpGate);
+  if (stepUpLog !== null) console.log(JSON.stringify(stepUpLog));
   const pool = createPool(configFromEnv());
   // Migrasjoner kjøres av admin-bruker i drift (compose: `migrate`-tjenesten); her antas app-bruker å ha skjema fra før.
   // D-395 (JARVIS-075): flagget kjører migratoren med ADMIN-konfig i en egen, kortlivet pool - aldri med runtime-rollen (Q-21) - og feiler

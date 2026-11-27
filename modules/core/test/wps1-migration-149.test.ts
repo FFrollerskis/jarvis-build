@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DEVICE_KINDS, deviceKindFromLegacyLabel } from "@jarvis/contracts";
+import { DEVICE_KINDS, DEVICE_KIND_SOURCES, deviceKindFromLegacyLabel } from "@jarvis/contracts";
 import { runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 
@@ -110,6 +110,25 @@ describe("WP-S1 K1: migrasjon 149 oppover fra main-skjemaet", () => {
     await admin.query("INSERT INTO devices (device_id, tenant_id, person_id, kind) VALUES ('dev-s1m-raw', $1, $2, 'phone')", [TENANT, PERSON]);
     expect((await admin.query("SELECT device_kind, device_kind_source FROM devices WHERE device_id = 'dev-s1m-raw'")).rows[0]).toEqual({ device_kind: "legacy_unknown", device_kind_source: "unclassified" });
     await expect(admin.query("UPDATE devices SET device_kind = 'iphone', device_kind_source = 'enrollment_ticket' WHERE device_id = 'dev-s1m-raw'")).rejects.toThrow(/device_kind_change_not_authorized/);
+  });
+
+  it("(e2) CHECK-ene HÅNDHEVER den lukkede listen og kilde-invarianten (ikke bare finnes), og listene i SQL er NØYAKTIG listene i koden", async () => {
+    const ins = (id: string, kind: string, source: string) =>
+      admin.query("INSERT INTO devices (device_id, tenant_id, person_id, kind, device_kind, device_kind_source) VALUES ($1, $2, $3, 'x', $4, $5)", [id, TENANT, PERSON, kind, source]);
+    await expect(ins("dev-s1m-c1", "phone", "legacy_label")).rejects.toThrow(/devices_device_kind_ck/);
+    await expect(ins("dev-s1m-c2", "IPHONE", "legacy_label")).rejects.toThrow(/devices_device_kind_ck/);
+    await expect(ins("dev-s1m-c3", "iphone", "magic")).rejects.toThrow(/devices_device_kind_source_ck/);
+    await expect(ins("dev-s1m-c4", "legacy_unknown", "enrollment_ticket")).rejects.toThrow(/devices_device_kind_source_consistent_ck/);
+    await expect(ins("dev-s1m-c5", "iphone", "unclassified")).rejects.toThrow(/devices_device_kind_source_consistent_ck/);
+    for (const kind of DEVICE_KINDS) await ins(`dev-s1m-ok-${kind}`, kind, kind === "legacy_unknown" ? "unclassified" : "legacy_label");
+    // SQL-listene = TS-listene (en ny type i koden uten migrasjon, eller omvendt, feller testen)
+    const literals = async (name: string): Promise<string[]> => {
+      const def = (await admin.query("SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = $1", [name])).rows[0]?.d as string;
+      return [...def.matchAll(/'([a-z_]+)'/g)].map((m) => m[1] as string).sort();
+    };
+    expect(await literals("devices_device_kind_ck")).toEqual([...DEVICE_KINDS].sort());
+    expect(await literals("device_enrollment_tickets_device_kind_ck")).toEqual([...DEVICE_KINDS].sort());
+    expect(await literals("devices_device_kind_source_ck")).toEqual([...DEVICE_KIND_SOURCES].sort());
   });
 
   it("(f) migrasjonen er ferdig anvendt og kan ikke anvendes på nytt (checksum låst, ingen nye revisjonsrader ved omkjøring)", async () => {

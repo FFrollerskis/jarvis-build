@@ -562,3 +562,53 @@ describe("WP-S1 K3 F: en ny enhet skrives som ren innsetting - et samtidig kappl
   });
 });
 
+describe("WP-S1 K3 G: device.enrolled-revisjonen sier hva serveren bestemte (type, kilde, forrige type, endret) for HVER vei", () => {
+  const enrolled = async (id: string): Promise<Record<string, unknown>> => ((await audits(id, "device.enrolled")).at(-1)?.payload ?? {}) as Record<string, unknown>;
+
+  it("billett med type, ny enhet: iphone / enrollment_ticket, ingen forrige type, ingen endring", async () => {
+    const id = fresh("dev-g-ticket-new");
+    expect((await enforce.enroll(request(id, generateKeyPairSync("ed25519"), await ticketFor("iphone")))).ok).toBe(true);
+    expect(await enrolled(id)).toMatchObject({ enrollment_method: "enrollment_ticket", device_kind: "iphone", device_kind_source: "enrollment_ticket", previous_device_kind: null, kind_changed: false, source_changed: false });
+  });
+
+  it("device_proof, ny enhet: legacy_unknown / unclassified (aldri enrollment_ticket), ingen endring", async () => {
+    const authorizing = fresh("dev-g-auth");
+    await addDevice(authorizing, "iphone");
+    const id = fresh("dev-g-proof-new");
+    expect((await enforce.enroll(request(id, generateKeyPairSync("ed25519"), proofFrom(authorizing)))).ok).toBe(true);
+    expect(await enrolled(id)).toMatchObject({ enrollment_method: "device_proof", device_kind: "legacy_unknown", device_kind_source: "unclassified", previous_device_kind: null, kind_changed: false, source_changed: false });
+  });
+
+  it("device_proof (re-nøkling av seg selv) av en enhet med kilden legacy_label: typen OG kilden beholdes og revisjonen sier det", async () => {
+    const id = fresh("dev-g-legacy-label");
+    const k = generateKeyPairSync("ed25519");
+    keys.set(id, k);
+    await adminPool.query("INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem, device_kind, device_kind_source) VALUES ($1, $2, $3, 'web', $4, 'web_browser', 'legacy_label')", [id, TENANT, PERSON, pem(k)]);
+    expect((await enforce.enroll(request(id, generateKeyPairSync("ed25519"), proofFrom(id)))).ok).toBe(true);
+    expect(await row(id)).toMatchObject({ device_kind: "web_browser", device_kind_source: "legacy_label" });
+    expect(await enrolled(id)).toMatchObject({ enrollment_method: "device_proof", rotated: true, device_kind: "web_browser", device_kind_source: "legacy_label", previous_device_kind: "web_browser", kind_changed: false, source_changed: false });
+  });
+
+  it("billett UTEN type for en eksisterende enhet: typen og kilden beholdes (trusted_provisioning), revisjonen sier ingen endring", async () => {
+    const id = fresh("dev-g-notype-existing");
+    await addDevice(id, "watch");
+    expect((await plain.enroll(request(id, generateKeyPairSync("ed25519"), await ticketFor(undefined, id)))).ok).toBe(true);
+    expect(await enrolled(id)).toMatchObject({ device_kind: "watch", device_kind_source: "trusted_provisioning", previous_device_kind: "watch", kind_changed: false, source_changed: false });
+  });
+
+  it("billett med ANNEN type for en eksisterende enhet: ny type + kilde enrollment_ticket, forrige type, kind_changed og source_changed", async () => {
+    const id = fresh("dev-g-change");
+    await addDevice(id, "watch");
+    expect((await enforce.enroll(request(id, generateKeyPairSync("ed25519"), await ticketFor("iphone", id)))).ok).toBe(true);
+    expect(await enrolled(id)).toMatchObject({ device_kind: "iphone", device_kind_source: "enrollment_ticket", previous_device_kind: "watch", kind_changed: true, source_changed: true });
+  });
+
+  it("billett med SAMME type for en eksisterende enhet: typen er uendret, men kilden flyttes til enrollment_ticket (eieren har nå bekreftet typen)", async () => {
+    const id = fresh("dev-g-same");
+    await addDevice(id, "watch");
+    expect((await enforce.enroll(request(id, generateKeyPairSync("ed25519"), await ticketFor("watch", id)))).ok).toBe(true);
+    expect(await row(id)).toMatchObject({ device_kind: "watch", device_kind_source: "enrollment_ticket" });
+    expect(await enrolled(id)).toMatchObject({ device_kind: "watch", device_kind_source: "enrollment_ticket", previous_device_kind: "watch", kind_changed: false, source_changed: true });
+  });
+});
+
