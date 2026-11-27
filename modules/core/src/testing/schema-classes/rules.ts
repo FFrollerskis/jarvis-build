@@ -1,4 +1,4 @@
-import type { Catalog, CatalogColumn, CatalogForeignKey, CatalogPolicy } from "./catalog.ts";
+import type { Catalog, CatalogColumn, CatalogForeignKey, CatalogPolicy, CatalogRole } from "./catalog.ts";
 import type { SchemaClass } from "./directives.ts";
 import { exceptionKey, type BaselineException } from "./manifest.ts";
 
@@ -59,8 +59,11 @@ export const RULES: readonly RuleInfo[] = [
   R("global_tenant_payload", "catalog", true, "GLOBAL-tabellen bærer tenant-nyttelast (tenant_id/person_id/FK til tenants/people) uten `tenant-payload`-flagg."),
   R("global_app_write", "catalog", true, "GLOBAL-tabellen kan skrives av runtime-rollen (en skrivbar global tabell er en kryss-tenant-kanal)."),
   R("platform_app_access", "catalog", true, "PLATFORM-tabellen er tilgjengelig for runtime-rollen (skal ha ingen GRANT)."),
-  R("runtime_role_unsafe", "catalog", false, "Runtime-rollen (eller et medlem) er superuser/BYPASSRLS/CREATEDB/CREATEROLE/REPLICATION, eller finnes ikke."),
+  R("runtime_role_unsafe", "catalog", false, "Runtime-rollen, et medlem av den eller en FORELDER (rolle den er medlem av) er superuser/BYPASSRLS/CREATEDB/CREATEROLE/REPLICATION, eller runtime-rollen finnes ikke."),
+  R("runtime_parent_not_allowlisted", "catalog", false, "Runtime-rollen (eller et medlem) er medlem av en rolle som ikke står i manifestets `runtime_parent_allowlist` (default deny; en forelder kan gi SET ROLE/arvede rettigheter)."),
+  R("runtime_parent_allowlist_stale", "catalog", false, "Manifestets `runtime_parent_allowlist` har en rolle runtime-rollen ikke lenger er medlem av (allowlisten kan bare krympe: fjern oppføringen)."),
   R("runtime_create_in_public", "catalog", false, "Runtime-rollen kan opprette objekter i skjemaet `public` (ville eie dem og omgå FORCE RLS)."),
+  R("runtime_create_in_database", "catalog", false, "Runtime-rollen har CREATE på databasen (kan opprette egne skjemaer og objekter utenfor migrasjonenes kontroll)."),
   R("definer_not_allowlisted", "catalog", false, "SECURITY DEFINER-funksjon utenfor allowlisten (default deny)."),
   R("definer_allowlist_stale", "catalog", false, "Allowlisten har en funksjon som ikke finnes som SECURITY DEFINER (allowlisten kan bare krympe)."),
   R("definer_owner_privileged", "catalog", false, "SECURITY DEFINER-funksjon eid av en superuser/BYPASSRLS-rolle."),
@@ -108,6 +111,8 @@ export interface LintInput {
   readonly classes: ReadonlyMap<string, ClassInfo>;
   /** Normaliserte signaturer (`navn(typer)`) som er lov som SECURITY DEFINER. */
   readonly definerAllowlist: ReadonlySet<string>;
+  /** Roller runtime-rollen (eller et medlem) har lov til å være medlem av (manifestets `runtime_parent_allowlist`; tom = ingen). */
+  readonly runtimeParentAllowlist?: ReadonlySet<string>;
   readonly config?: Partial<LintConfig>;
 }
 
@@ -215,15 +220,29 @@ export function lintCatalog(input: LintInput): Violation[] {
 
   // Rollen appen kjører som: aldri superuser/BYPASSRLS/CREATEDB/CREATEROLE/REPLICATION, ikke eier, kan ikke lage objekter i public.
   const role = catalog.runtimeRoleRecord;
+  const flagsOf = (r: CatalogRole): string[] =>
+    [r.superuser ? "SUPERUSER" : "", r.bypassRls ? "BYPASSRLS" : "", r.createDb ? "CREATEDB" : "", r.createRole ? "CREATEROLE" : "", r.replication ? "REPLICATION" : ""].filter((f) => f !== "");
   if (role === null) {
     add("runtime_role_unsafe", null, `${cfg.runtimeRole}:missing`, `Runtime-rollen ${cfg.runtimeRole} finnes ikke i databasen (005_rls.sql skal opprette den).`);
   } else {
     for (const r of [role, ...catalog.runtimeMembers]) {
-      const flags = [r.superuser ? "SUPERUSER" : "", r.bypassRls ? "BYPASSRLS" : "", r.createDb ? "CREATEDB" : "", r.createRole ? "CREATEROLE" : "", r.replication ? "REPLICATION" : ""].filter((f) => f !== "");
+      const flags = flagsOf(r);
       if (flags.length > 0) add("runtime_role_unsafe", null, `${r.name}:${flags.join(",")}`, `Runtime-rollen ${r.name} har ${flags.join("/")} - RLS omgås eller rollen kan utvide egne rettigheter.`);
+    }
+    // FORELDRE (K2 «ingen BYPASSRLS som runtime»): en sesjon som er medlem av en BYPASSRLS-/superuser-rolle kan `SET ROLE` til den (også ved NOINHERIT) og omgå RLS.
+    // I tillegg default deny: hver forelder må stå i manifestets allowlist (tom i dag) - predefinerte roller (pg_read_all_data, pg_execute_server_program, ...) er også foreldre.
+    const allowedParents = input.runtimeParentAllowlist ?? new Set<string>();
+    for (const parent of catalog.runtimeParents) {
+      const flags = flagsOf(parent);
+      if (flags.length > 0) add("runtime_role_unsafe", null, `parent:${parent.name}:${flags.join(",")}`, `Runtime-rollen ${cfg.runtimeRole} (eller et medlem) er medlem av ${parent.name}, som har ${flags.join("/")}: en sesjon kan SET ROLE til den og omgå RLS.`);
+      if (!allowedParents.has(parent.name)) add("runtime_parent_not_allowlisted", null, parent.name, `Runtime-rollen ${cfg.runtimeRole} (eller et medlem) er medlem av ${parent.name}, som ikke står i manifestets runtime_parent_allowlist (default deny): en forelder gir SET ROLE og arvede rettigheter.`);
+    }
+    for (const name of [...allowedParents].sort()) {
+      if (!catalog.runtimeParents.some((p) => p.name === name)) add("runtime_parent_allowlist_stale", null, name, `runtime_parent_allowlist har ${name}, men runtime-rollen er ikke (lenger) medlem av den (allowlisten kan bare krympe: fjern oppføringen).`);
     }
   }
   if (catalog.runtimeCanCreateInPublic) add("runtime_create_in_public", null, cfg.runtimeRole, `${cfg.runtimeRole} kan opprette objekter i skjemaet public (eide objekter omgår FORCE RLS).`);
+  if (catalog.runtimeCanCreateInDatabase) add("runtime_create_in_database", null, cfg.runtimeRole, `${cfg.runtimeRole} har CREATE på databasen (kan opprette egne skjemaer og objekter utenfor migrasjonenes kontroll).`);
 
   const columnsOf = new Map<string, CatalogColumn[]>();
   for (const c of catalog.columns) {

@@ -117,7 +117,14 @@ export interface Catalog {
   /** Runtime-rollen (null hvis den ikke finnes) og alle roller som er medlem av den (transitivt). */
   readonly runtimeRoleRecord: CatalogRole | null;
   readonly runtimeMembers: readonly CatalogRole[];
+  /**
+   * FORELDRE: roller en runtime-sesjon kan nå OPPOVER (`pg_auth_members.member = runtime` eller et medlem av runtime, rekursivt, uavhengig av INHERIT/SET-valg):
+   * en sesjon som er medlem av en BYPASSRLS-rolle kan `SET ROLE` til den og omgå RLS. Selve runtime-rollen og dens medlemmer er ikke med (de sjekkes for seg).
+   */
+  readonly runtimeParents: readonly CatalogRole[];
   readonly runtimeCanCreateInPublic: boolean;
+  /** Runtime-rollen har CREATE på databasen (kan opprette egne skjemaer/objekter). */
+  readonly runtimeCanCreateInDatabase: boolean;
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : String(v ?? ""));
@@ -131,7 +138,11 @@ export interface ExtractOptions {
   readonly runtimeRole?: string;
 }
 
-/** Leser katalogen. Utenfor `pg_catalog`/`information_schema`/toast/temp og uten utvidelses-eide objekter. Kun SELECT. */
+/**
+ * Leser katalogen. Utenfor `pg_catalog`/`information_schema`/toast/temp. Kun SELECT.
+ * Utvidelses-eide RELASJONER er med (en utvidelse kan legge en visning/tabell i `public` som runtime-rollen får lese; reviewer T20): de lintes som alt annet.
+ * Utvidelses-eide FUNKSJONER utelates (utvidelsens egen kode er ikke migrasjonenes SECURITY DEFINER-flate).
+ */
 export async function extractCatalog(db: Queryable, options: ExtractOptions = {}): Promise<Catalog> {
   const runtime = options.runtimeRole ?? "jarvis_app";
   const sysSchemas = `n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%'`;
@@ -145,7 +156,6 @@ export async function extractCatalog(db: Queryable, options: ExtractOptions = {}
               ${roleExists ? "pg_has_role($1::name, c.relowner, 'MEMBER')" : "false"} AS runtime_is_owner_member, c.relrowsecurity AS rls, c.relforcerowsecurity AS forced
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles o ON o.oid = c.relowner
         WHERE c.relkind IN ('r','p','v','m','f') AND ${sysSchemas}
-          AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
         ORDER BY 1, 2`,
       params
     )
@@ -305,7 +315,9 @@ export async function extractCatalog(db: Queryable, options: ExtractOptions = {}
   });
   let runtimeRoleRecord: CatalogRole | null = null;
   let runtimeMembers: CatalogRole[] = [];
+  let runtimeParents: CatalogRole[] = [];
   let runtimeCanCreateInPublic = false;
+  let runtimeCanCreateInDatabase = false;
   if (roleExists) {
     const roleRows = (await db.query(`SELECT ${roleCols} FROM pg_roles r WHERE r.rolname = $1`, [runtime])).rows;
     runtimeRoleRecord = roleRows[0] === undefined ? null : toRole(roleRows[0]);
@@ -322,9 +334,29 @@ export async function extractCatalog(db: Queryable, options: ExtractOptions = {}
       )
     ).rows;
     runtimeMembers = memberRows.map(toRole);
+    // Foreldre: oppover fra runtime-rollen OG fra alle medlemmene (innloggingsrollen er et medlem; den kan være medlem av en BYPASSRLS-rolle i tillegg).
+    // Leser kun `member`/`roleid` (finnes i alle PG-versjoner): `inherit_option`/`set_option` (PG 16+) ignoreres med vilje - NOINHERIT og SET-only medlemskap teller også.
+    const parentRows = (
+      await db.query(
+        `WITH RECURSIVE down(oid) AS (
+           SELECT oid FROM pg_roles WHERE rolname = $1
+           UNION
+           SELECT am.member FROM pg_auth_members am JOIN down ON am.roleid = down.oid
+         ), up(oid) AS (
+           SELECT am.roleid FROM pg_auth_members am WHERE am.member IN (SELECT oid FROM down)
+           UNION
+           SELECT am.roleid FROM pg_auth_members am JOIN up ON am.member = up.oid
+         )
+         SELECT ${roleCols} FROM pg_roles r WHERE r.oid IN (SELECT oid FROM up) AND r.oid NOT IN (SELECT oid FROM down) ORDER BY 1`,
+        [runtime]
+      )
+    ).rows;
+    runtimeParents = parentRows.map(toRole);
     const schemaRows = (await db.query("SELECT has_schema_privilege($1::name, 'public', 'CREATE') AS can_create", [runtime])).rows;
     runtimeCanCreateInPublic = bool(schemaRows[0]?.["can_create"]);
+    const databaseRows = (await db.query("SELECT has_database_privilege($1::name, current_database(), 'CREATE') AS can_create", [runtime])).rows;
+    runtimeCanCreateInDatabase = bool(databaseRows[0]?.["can_create"]);
   }
 
-  return { runtimeRole: runtime, relations, columns, tablePrivileges, policies, foreignKeys, indexes, functions, runtimeRoleRecord, runtimeMembers, runtimeCanCreateInPublic };
+  return { runtimeRole: runtime, relations, columns, tablePrivileges, policies, foreignKeys, indexes, functions, runtimeRoleRecord, runtimeMembers, runtimeParents, runtimeCanCreateInPublic, runtimeCanCreateInDatabase };
 }

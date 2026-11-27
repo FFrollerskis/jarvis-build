@@ -359,6 +359,7 @@
       "reason": "Retensjon av policy-beslutningsjournalen (108, WP-K D-471): standard 90 dager, aldri under 30."
     }
   ],
+  "runtime_parent_allowlist": [],
   "exceptions": [
     {
       "rule": "platform_app_access",

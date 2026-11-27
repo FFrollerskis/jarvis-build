@@ -32,6 +32,12 @@ export interface DefinerAllowEntry {
   readonly reason: string;
 }
 
+export interface RuntimeParentEntry {
+  /** Rollen runtime-rollen (eller et medlem) har lov til å være medlem av. */
+  readonly role: string;
+  readonly reason: string;
+}
+
 export interface Manifest {
   readonly version: 1;
   readonly frozen_through_migration: number;
@@ -41,6 +47,8 @@ export interface Manifest {
   readonly classes: Readonly<Record<SchemaClass, readonly string[]>>;
   readonly class_notes: Readonly<Record<string, string>>;
   readonly definer_allowlist: readonly DefinerAllowEntry[];
+  /** Foreldre (roller runtime er medlem av) som er godkjent. TOM i dag; kan bare krympe (utvidelse krever endring av pinned verdi i testkoden). */
+  readonly runtime_parent_allowlist: readonly RuntimeParentEntry[];
   readonly exceptions: readonly BaselineException[];
   readonly exception_ceiling: { readonly total: number; readonly per_rule: Readonly<Record<string, number>> };
 }
@@ -77,6 +85,11 @@ export function manifestShapeProblems(raw: unknown): string[] {
     Array.isArray(raw["definer_allowlist"]) && raw["definer_allowlist"].every((e) => isRecord(e) && typeof e["signature"] === "string" && typeof e["reason"] === "string"),
     "definer_allowlist",
     "en liste av {signature, reason}"
+  );
+  need(
+    Array.isArray(raw["runtime_parent_allowlist"]) && raw["runtime_parent_allowlist"].every((e) => isRecord(e) && typeof e["role"] === "string" && typeof e["reason"] === "string"),
+    "runtime_parent_allowlist",
+    "en liste av {role, reason}"
   );
   need(
     Array.isArray(raw["exceptions"]) &&
@@ -180,6 +193,13 @@ export function validateManifest(manifest: Manifest, knownRules: ReadonlySet<str
   for (const entry of manifest.definer_allowlist) {
     if (!/^[a-z_][a-z0-9_]*\([^()]*\)$/.test(entry.signature)) problems.push(`manifest_definer_signature_invalid:${entry.signature}`);
     if (entry.reason.trim().length < 10) problems.push(`manifest_definer_reason_missing:${entry.signature}`);
+  }
+  const parents = new Set<string>();
+  for (const entry of manifest.runtime_parent_allowlist) {
+    if (!/^[a-z_][a-z0-9_]*$/.test(entry.role)) problems.push(`manifest_runtime_parent_role_invalid:${entry.role}`);
+    if (entry.reason.trim().length < 10) problems.push(`manifest_runtime_parent_reason_missing:${entry.role}`);
+    if (parents.has(entry.role)) problems.push(`manifest_runtime_parent_duplicate:${entry.role}`);
+    parents.add(entry.role);
   }
   return problems;
 }

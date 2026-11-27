@@ -11,8 +11,8 @@ const RUNBOOK = readFileSync(fileURLToPath(new URL("../../../docs/runbooks/WPMC8
 const MANIFEST = loadManifest();
 
 describe("runbook-vakt", () => {
-  it("hver regel-ID (alle 42) og hver klasse står i runbooken som `kode`", () => {
-    expect(RULES).toHaveLength(42);
+  it("hver regel-ID (alle 46) og hver klasse står i runbooken som `kode`", () => {
+    expect(RULES).toHaveLength(46);
     for (const rule of RULES) expect(RUNBOOK, `regel ${rule.id}`).toContain(`\`${rule.id}\``);
     for (const klass of SCHEMA_CLASSES) expect(RUNBOOK, `klasse ${klass}`).toContain(`\`${klass}\``);
     expect(EXCEPTION_ELIGIBLE_RULES.size).toBe(17);

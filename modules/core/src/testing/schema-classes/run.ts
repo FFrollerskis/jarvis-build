@@ -60,7 +60,13 @@ export async function runSchemaClassChecks(options: CheckOptions): Promise<Check
 
   const known: CheckResult["known"] = [];
   if (catalog !== null) {
-    const violations = lintCatalog({ catalog, classes: resolved.classes, definerAllowlist: definerAllowlist(manifest, analysis), ...(options.config === undefined ? {} : { config: options.config }) });
+    const violations = lintCatalog({
+      catalog,
+      classes: resolved.classes,
+      definerAllowlist: definerAllowlist(manifest, analysis),
+      runtimeParentAllowlist: new Set(manifest.runtime_parent_allowlist.map((e) => e.role)),
+      ...(options.config === undefined ? {} : { config: options.config })
+    });
     const reconciled = reconcileExceptions(violations, manifest.exceptions);
     failures.push(...reconciled.unexpected);
     known.push(...reconciled.known);

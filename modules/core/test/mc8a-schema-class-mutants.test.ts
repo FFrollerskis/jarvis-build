@@ -21,6 +21,7 @@ import {
   stripForIsolation,
   type Catalog,
   type IsolationEnv,
+  type Manifest,
   type MigrationFile,
   type TableIsolationReport,
   type Violation
@@ -221,7 +222,35 @@ const MUTANTS: Mutant[] = [
     lint: [{ rule: "policy_scope", table: T }],
     behavior: ["read"],
     behaviorLeak: ["read"]
-  }
+  },
+  // --- fiks-runde 1, M1: runtime-rollens FORELDRE (roller den er medlem av; SET ROLE/arv) og skjemaomfattende rolle-/rettighetsmutanter (L9, M5) ---
+  { id: "M44", desc: "runtime-rollen gjort til MEDLEM av en BYPASSRLS-rolle (forelder: SET ROLE omgår RLS)", sql: () => "CREATE ROLE mut_bypass_parent NOLOGIN BYPASSRLS; GRANT mut_bypass_parent TO jarvis_app", lint: [{ rule: "runtime_role_unsafe", table: () => null, detail: "parent:mut_bypass_parent:BYPASSRLS" }, { rule: "runtime_parent_not_allowlisted", table: () => null, detail: "mut_bypass_parent" }] },
+  { id: "M45", desc: "runtime-rollen gjort til MEDLEM av en SUPERUSER-rolle (forelder)", sql: () => "CREATE ROLE mut_super_parent NOLOGIN SUPERUSER; GRANT mut_super_parent TO jarvis_app", lint: [{ rule: "runtime_role_unsafe", table: () => null, detail: "parent:mut_super_parent:SUPERUSER" }, { rule: "runtime_parent_not_allowlisted", table: () => null, detail: "mut_super_parent" }] },
+  { id: "M46", desc: "NOINHERIT-medlemskap i en BYPASSRLS-rolle (SET ROLE er fortsatt mulig)", sql: () => "CREATE ROLE mut_bypass_parent2 NOLOGIN BYPASSRLS; GRANT mut_bypass_parent2 TO jarvis_app WITH INHERIT FALSE, SET TRUE", lint: [{ rule: "runtime_role_unsafe", table: () => null, detail: "parent:mut_bypass_parent2:BYPASSRLS" }, { rule: "runtime_parent_not_allowlisted", table: () => null, detail: "mut_bypass_parent2" }] },
+  { id: "M47", desc: "TRANSITIVT medlem av runtime-rollen (m2 -> m1 -> jarvis_app) med BYPASSRLS", sql: () => "CREATE ROLE mut_m1 NOLOGIN; GRANT jarvis_app TO mut_m1; CREATE ROLE mut_m2 NOLOGIN BYPASSRLS; GRANT mut_m1 TO mut_m2", lint: [{ rule: "runtime_role_unsafe", table: () => null, detail: "mut_m2:BYPASSRLS" }] },
+  { id: "M48", desc: "forelder to ledd opp (jarvis_app -> mut_p -> mut_gp med BYPASSRLS): begge må på allowlisten", sql: () => "CREATE ROLE mut_gp NOLOGIN BYPASSRLS; CREATE ROLE mut_p NOLOGIN; GRANT mut_gp TO mut_p; GRANT mut_p TO jarvis_app", lint: [{ rule: "runtime_role_unsafe", table: () => null, detail: "parent:mut_gp:BYPASSRLS" }, { rule: "runtime_parent_not_allowlisted", table: () => null, detail: "mut_p" }, { rule: "runtime_parent_not_allowlisted", table: () => null, detail: "mut_gp" }] },
+  { id: "M49", desc: "et MEDLEM av runtime-rollen (innloggingsrollen) er selv medlem av en BYPASSRLS-rolle", sql: () => "CREATE ROLE mut_login NOLOGIN; GRANT jarvis_app TO mut_login; CREATE ROLE mut_bp NOLOGIN BYPASSRLS; GRANT mut_bp TO mut_login", lint: [{ rule: "runtime_role_unsafe", table: () => null, detail: "parent:mut_bp:BYPASSRLS" }, { rule: "runtime_parent_not_allowlisted", table: () => null, detail: "mut_bp" }] },
+  { id: "M50", desc: "runtime-rollen gjort til medlem av jarvis_definer (arver definer-rettighetene via SET ROLE)", sql: () => "GRANT jarvis_definer TO jarvis_app", lint: [{ rule: "runtime_parent_not_allowlisted", table: () => null, detail: "jarvis_definer" }] },
+  { id: "M51", desc: "runtime-rollen gjort til medlem av en predefinert rolle (pg_execute_server_program)", sql: () => "GRANT pg_execute_server_program TO jarvis_app", lint: [{ rule: "runtime_parent_not_allowlisted", table: () => null, detail: "pg_execute_server_program" }] },
+  { id: "M52", desc: "runtime-rollen kan opprette objekter/skjemaer i databasen (GRANT CREATE ON DATABASE)", sql: () => "GRANT CREATE ON DATABASE jarvis_strict TO jarvis_app", lint: [{ rule: "runtime_create_in_database", table: () => null, detail: "jarvis_app" }] },
+  { id: "M53", desc: "utvidelses-eid visning (pg_buffercache) gitt til runtime-rollen: extension-eide relasjoner er IKKE unntatt", sql: () => "CREATE EXTENSION pg_buffercache; GRANT SELECT ON pg_buffercache TO jarvis_app", lint: [{ rule: "unmanaged_relation", table: () => "pg_buffercache" }] },
+  { id: "M54", desc: "runtime-rollen får CREATEDB", sql: () => "ALTER ROLE jarvis_app CREATEDB", lint: [{ rule: "runtime_role_unsafe", table: () => null, detail: "jarvis_app:CREATEDB" }] },
+  { id: "M55", desc: "runtime-rollen får CREATEROLE", sql: () => "ALTER ROLE jarvis_app CREATEROLE", lint: [{ rule: "runtime_role_unsafe", table: () => null, detail: "jarvis_app:CREATEROLE" }] },
+  { id: "M56", desc: "runtime-rollen får REPLICATION", sql: () => "ALTER ROLE jarvis_app REPLICATION", lint: [{ rule: "runtime_role_unsafe", table: () => null, detail: "jarvis_app:REPLICATION" }] },
+  { id: "M57", desc: "allowlistet DEFINER-funksjon eid av en BYPASSRLS-rolle (ikke superuser)", sql: () => `CREATE ROLE mut_bypass_owner NOLOGIN BYPASSRLS; ALTER FUNCTION ${DEFINER_FN} OWNER TO mut_bypass_owner`, lint: [{ rule: "definer_owner_privileged", table: () => null, detail: DEFINER_FN }] },
+  { id: "M58", desc: "DEFINER-funksjon med search_path der pg_catalog ikke står først (public, pg_catalog, pg_temp)", sql: () => `ALTER FUNCTION ${DEFINER_FN} SET search_path = public, pg_catalog, pg_temp`, lint: [{ rule: "definer_search_path", table: () => null, detail: DEFINER_FN }] },
+  { id: "M59", desc: "runtime-rollen er MEDLEM av tabelleieren (eier tabellen via arv)", sql: () => `CREATE ROLE mut_tbl_owner NOLOGIN; GRANT mut_tbl_owner TO jarvis_app; ALTER TABLE ${q(T())} OWNER TO mut_tbl_owner`, lint: [{ rule: "owner_is_runtime", table: T, detail: "mut_tbl_owner" }, { rule: "runtime_parent_not_allowlisted", table: () => null, detail: "mut_tbl_owner" }] },
+  {
+    id: "M60",
+    desc: "UPDATE-policy uten eksplisitt WITH CHECK (Postgres bruker USING som sjekk)",
+    sql: () =>
+      `DROP POLICY ${q(P())} ON ${q(T())}; CREATE POLICY p_sel ON ${q(T())} FOR SELECT USING (${TENANT}); CREATE POLICY p_ins ON ${q(T())} FOR INSERT WITH CHECK (${TENANT}); CREATE POLICY p_upd ON ${q(T())} FOR UPDATE USING (${TENANT}); CREATE POLICY p_del ON ${q(T())} FOR DELETE USING (${TENANT})`,
+    lint: [{ rule: "policy_with_check_missing", table: T, detail: "p_upd" }],
+    behaviorEquivalent: true
+  },
+  { id: "M61", desc: "policy for BLANDEDE roller (jarvis_definer + runtime) med USING (true): ikke 'betrodd' når bare noen av rollene er det", sql: () => `CREATE POLICY mut_mixed ON ${q(T())} FOR SELECT TO jarvis_definer, jarvis_app USING (true)`, lint: [{ rule: "policy_true", table: T, detail: "mut_mixed:using" }], behavior: ["read"], behaviorLeak: ["read"] },
+  { id: "M62", desc: "tenant-indeksen er UGYLDIG (indisvalid = false): teller ikke som indeks", sql: () => `UPDATE pg_index SET indisvalid = false WHERE indexrelid = '${pick.index}'::regclass`, lint: [{ rule: "tenant_index_missing", table: () => pick.indexTable }], behaviorEquivalent: true },
+  { id: "M63", desc: "PROSEDYRE med SECURITY DEFINER utenfor allowlisten (kun prokind 'p'; katalogen må se prosedyrer)", sql: () => "CREATE PROCEDURE mut_proc() LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$ SELECT 1 $$", lint: [{ rule: "definer_not_allowlisted", table: () => null, detail: "mut_proc()" }] }
 ];
 
 describe("A: mutanter mot det eksisterende skjemaet (DDL i en transaksjon som rulles tilbake)", () => {
@@ -403,4 +432,70 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ${name} TO jarvis_app;
     expect(out.failures.filter((f) => f.rule === "manifest_invalid").map((f) => f.detail)).toEqual(["manifest_exception_unknown_table:mut_naked"]);
     results.push({ id: "N10", lint: true, behavior: false });
   });
+});
+
+describe("C: runtime-rollens forelder-allowlist i manifestet (M1: tom i dag, kan bare krympe)", () => {
+  const withAllowlist = (entries: Array<{ role: string; reason: string }>): Manifest => ({ ...MANIFEST, runtime_parent_allowlist: entries }) as unknown as Manifest;
+  const check = (sql: string, manifest: Manifest): Promise<readonly Violation[]> =>
+    inTx(adminStrict, async (c) => {
+      await c.query(sql);
+      return (await runSchemaClassChecks({ files: FILES, manifest, db: c })).failures;
+    });
+
+  it("manifestet har ingen godkjente foreldre i dag, og en uvanlig forelder uten oppføring feiler", async () => {
+    expect(MANIFEST.runtime_parent_allowlist).toEqual([]);
+    const failures = await check("CREATE ROLE mut_ok_parent NOLOGIN; GRANT mut_ok_parent TO jarvis_app", MANIFEST);
+    expect(failures.map((f) => `${f.rule}:${f.detail}`)).toEqual(["runtime_parent_not_allowlisted:mut_ok_parent"]);
+  });
+
+  it("en allowlistet, harmløs forelder gir ingen brudd (kontroll)", async () => {
+    const failures = await check("CREATE ROLE mut_ok_parent NOLOGIN; GRANT mut_ok_parent TO jarvis_app", withAllowlist([{ role: "mut_ok_parent", reason: "Gruppe-rolle uten rettigheter, kun for testen" }]));
+    expect(formatFailures(failures)).toBe("(ingen)");
+  });
+
+  it("allowlisten kan IKKE skjule en farlig forelder: BYPASSRLS/SUPERUSER er `runtime_role_unsafe` selv om rollen står på listen", async () => {
+    const failures = await check("CREATE ROLE mut_bp_parent NOLOGIN BYPASSRLS; GRANT mut_bp_parent TO jarvis_app", withAllowlist([{ role: "mut_bp_parent", reason: "Forsøk på å godkjenne en BYPASSRLS-forelder" }]));
+    expect(failures.map((f) => `${f.rule}:${f.detail}`)).toEqual(["runtime_role_unsafe:parent:mut_bp_parent:BYPASSRLS"]);
+  });
+
+  it("en oppføring uten tilsvarende medlemskap er foreldet: `runtime_parent_allowlist_stale` (allowlisten kan bare krympe)", async () => {
+    const failures = await check("SELECT 1", withAllowlist([{ role: "mut_gone_parent", reason: "Rollen er ikke lenger forelder til runtime" }]));
+    expect(failures.map((f) => `${f.rule}:${f.detail}`)).toEqual(["runtime_parent_allowlist_stale:mut_gone_parent"]);
+  });
+});
+
+describe("Y08: forelder-rollen er en ÆRLIG RLS-omgåelse (bevist som en ekte innlogging), og linten fanger den nå", () => {
+  it("innloggingen (medlem av jarvis_app) kan SET ROLE til en BYPASSRLS-forelder og ser begge tenants (1 -> 2 rader); linten er RØD (var grønn før fiks-runde 1)", async () => {
+    const maintenance = open("postgres");
+    await maintenance.query("CREATE DATABASE jarvis_esc TEMPLATE jarvis_base");
+    await maintenance.end();
+    const escAdmin = open("jarvis_esc");
+    let appPool: pg.Pool | undefined;
+    try {
+      await createRuntimeLogin(escAdmin, "jarvis_esc_app", "esc-pw-1");
+      await escAdmin.query("INSERT INTO tenants (tenant_id, name, kind) VALUES ($1, 'A', 'business'), ($2, 'B', 'business')", [CTX.tenantA, CTX.tenantB]);
+      await escAdmin.query("INSERT INTO sites (site_id, tenant_id, name) VALUES ('esc-site-a', $1, 'A'), ('esc-site-b', $2, 'B')", [CTX.tenantA, CTX.tenantB]);
+      await escAdmin.query("CREATE ROLE esc_bypass NOLOGIN BYPASSRLS");
+      await escAdmin.query("GRANT SELECT ON ALL TABLES IN SCHEMA public TO esc_bypass");
+      await escAdmin.query("GRANT esc_bypass TO jarvis_app");
+      appPool = open("jarvis_esc", "jarvis_esc_app", "esc-pw-1");
+      const c = await appPool.connect();
+      try {
+        await c.query("BEGIN");
+        await c.query("SELECT set_config('jarvis.tenant_id', $1, true)", [CTX.tenantA]);
+        const before = Number((await c.query("SELECT count(*)::int AS n FROM sites")).rows[0]?.["n"]);
+        await c.query("SET LOCAL ROLE esc_bypass");
+        const after = Number((await c.query("SELECT count(*)::int AS n FROM sites")).rows[0]?.["n"]);
+        expect({ before, after }, "omgåelsen er ekte: som medlem av jarvis_app kan innloggingen bli BYPASSRLS").toEqual({ before: 1, after: 2 });
+        await c.query("ROLLBACK");
+      } finally {
+        c.release();
+      }
+      const lint = await runSchemaClassChecks({ files: FILES, manifest: MANIFEST, db: escAdmin });
+      expect(lint.failures.map((f) => `${f.rule}:${f.detail}`).sort()).toEqual(["runtime_parent_not_allowlisted:esc_bypass", "runtime_role_unsafe:parent:esc_bypass:BYPASSRLS"]);
+    } finally {
+      await appPool?.end();
+      await escAdmin.end();
+    }
+  }, 120_000);
 });

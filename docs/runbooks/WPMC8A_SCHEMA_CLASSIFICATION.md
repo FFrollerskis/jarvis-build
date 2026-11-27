@@ -32,9 +32,9 @@ Gjelder alle klasser: ingen `TRUNCATE`/`REFERENCES`/`TRIGGER` til runtime-rollen
 
 Regel-ID-ene (stabile; brukes i unntak, meldinger og tester). *Struktur*-regler kan aldri ha unntak; *katalog*-regler på en tabell kan ha et begrunnet baseline-unntak (kun for frosne tabeller).
 
-- Struktur: `manifest_invalid`, `unclassified_table`, `class_declared_twice`, `annotation_for_frozen_table`, `annotation_unknown_table`, `baseline_stale_table`, `baseline_grew`, `directive_malformed`, `unsupported_ddl`, `dynamic_create_table`, `static_db_mismatch`, `frozen_migration_changed`, `frozen_migration_missing`, `frozen_migration_added`, `migration_file_name_invalid`, `definer_directive_missing`, `definer_directive_unknown`, `exception_stale`.
+- Struktur: `manifest_invalid`, `unclassified_table`, `class_declared_twice`, `annotation_for_frozen_table`, `annotation_unknown_table`, `baseline_stale_table`, `baseline_grew`, `directive_malformed`, `unsupported_ddl`, `dynamic_create_table`, `static_db_mismatch`, `frozen_migration_changed`, `frozen_migration_missing`, `frozen_migration_added`, `migration_file_name_invalid`, `migration_prefix_duplicate`, `definer_directive_missing`, `definer_directive_unknown`, `exception_stale`.
 - Katalog (kan ha baseline-unntak): `unmanaged_relation`, `app_dangerous_privilege`, `owner_is_runtime`, `policy_true`, `org_no_tenant_id`, `tenant_id_nullable`, `tenant_fk_missing`, `tenant_index_missing`, `rls_not_forced`, `policy_coverage_missing`, `policy_scope`, `policy_with_check_missing`, `user_has_tenant_id`, `user_policy_context`, `global_tenant_payload`, `global_app_write`, `platform_app_access`.
-- Katalog (aldri unntak): `runtime_role_unsafe`, `runtime_create_in_public`, `definer_not_allowlisted`, `definer_allowlist_stale`, `definer_owner_privileged`, `definer_search_path`, `definer_public_execute`.
+- Katalog (aldri unntak): `runtime_role_unsafe`, `runtime_parent_not_allowlisted`, `runtime_parent_allowlist_stale`, `runtime_create_in_public`, `runtime_create_in_database`, `definer_not_allowlisted`, `definer_allowlist_stale`, `definer_owner_privileged`, `definer_search_path`, `definer_public_execute`.
 
 ### Krav fra HF3 §9.2/§17.2 (D-MC-34) mot regler og tester
 
