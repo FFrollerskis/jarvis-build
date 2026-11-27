@@ -358,9 +358,12 @@ export interface BackupCoverage {
 
 /**
  * WP-OPS2a K4: tolker backup-statusfilen til vedlikeholdsdekning. Ren funksjon. `null` = ingen kilde er montert.
- *  - Manglende/ulesbar/ugyldig fil, en kilde som kaster og `generated_at` frem i tid (klokkeavvik) gir INGEN dekning: oppgavene står som «ikke koblet», aldri forfalt og aldri med en fabrikkert tid.
+ *  - Manglende/ulesbar/ugyldig fil, en kilde som kaster, `generated_at` frem i tid (klokkeavvik) og et tidspunkt som ikke er et tidspunkt gir INGEN dekning: oppgavene står som «ikke koblet», aldri forfalt og aldri med en fabrikkert tid.
  *  - Gyldig fil: `backup_status` har `last_run = generated_at`. `disaster_recovery_sample_restore` har `last_run = restore_verify.last_success_at` når den finnes; er den aldri verifisert, er oppgaven dekket MEN uten `last_run`
- *    (dermed forfalt - ærlig, en månedlig restore-verifisering som aldri er gjort er forfalt); står `last_success_at` frem i tid (klokkeavvik), er restore-oppgaven ikke dekket.
+ *    (dermed forfalt - ærlig, en månedlig restore-verifisering som aldri er gjort er forfalt); står `last_success_at` frem i tid (klokkeavvik) eller er ugyldig, er restore-oppgaven ikke dekket.
+ *  - Fiks-runde 1 (B-L4): `restore_verify.state = "not_configured"` betyr at restore-verifisering ikke er satt opp - oppgaven har ingen utfører og er «ikke dekket» (med notat), ikke «dekket og forfalt for alltid».
+ *    `never_run` (satt opp, aldri kjørt) er fortsatt dekket men forfalt.
+ *  - Fiks-runde 1 (B-L5): et tidspunkt som ikke er et tidspunkt (NaN) er aldri «ikke frem i tid»: det gir «ikke dekket» (fast notat, aldri filinnhold).
  */
 export function backupCoverage(read: Settled<BackupStatusRead> | null, now: Date): BackupCoverage {
   const uncovered = (why: string): BackupCoverage => ({ covered: new Set(), last_run: {}, note: `backup_status og disaster_recovery_sample_restore er ikke vurdert: ${why}.` });
@@ -372,18 +375,34 @@ export function backupCoverage(read: Settled<BackupStatusRead> | null, now: Date
   if (value.kind === "invalid") return uncovered(`backup-statusfilen kunne ikke leses (${/^[a-z_]{1,20}$/.test(String(value.reason)) ? String(value.reason) : "ukjent"})`);
   if (value.kind !== "ok") return uncovered("lesingen av backup-statusfilen ga et ugyldig svar");
   const lastRun = backupMaintenanceLastRun(value.snapshot);
-  const ahead = (at: string | undefined): boolean => at !== undefined && new Date(at).getTime() - now.getTime() > BACKUP_FUTURE_SKEW_MS;
+  /** `valid` = et ekte tidspunkt som ikke ligger frem i tid; `ahead` = klokkeavvik (mer enn 5 min frem); `invalid` = ikke et tidspunkt (NaN). */
+  const judge = (at: string): "valid" | "ahead" | "invalid" => {
+    const t = new Date(at).getTime();
+    if (!Number.isFinite(t)) return "invalid";
+    return t - now.getTime() > BACKUP_FUTURE_SKEW_MS ? "ahead" : "valid";
+  };
   const generated = lastRun["backup_status"];
-  if (generated === undefined || ahead(generated)) return uncovered("backup-statusfilen er datert frem i tid (klokkeavvik mellom NAS og API) - alderen kan ikke bevises");
+  if (generated === undefined) return uncovered("backup-statusfilen har ikke noe tidspunkt");
+  const generatedJudged = judge(generated);
+  if (generatedJudged === "invalid") return uncovered("backup-statusfilen har et ugyldig tidspunkt");
+  if (generatedJudged === "ahead") return uncovered("backup-statusfilen er datert frem i tid (klokkeavvik mellom NAS og API) - alderen kan ikke bevises");
   const covered = new Set<string>(["backup_status"]);
   const last_run: Record<string, string> = { backup_status: generated };
-  const restore = lastRun["disaster_recovery_sample_restore"];
   let note: string | null = null;
-  if (restore === undefined) covered.add("disaster_recovery_sample_restore"); // aldri verifisert: dekket, uten `last_run` (forfalt)
-  else if (ahead(restore)) note = "disaster_recovery_sample_restore er ikke vurdert: siste restore-verifisering er datert frem i tid (klokkeavvik)";
+  if (value.snapshot.restore_verify.state === "not_configured") {
+    note = "disaster_recovery_sample_restore er ikke vurdert: restore-verifisering er ikke satt opp (ingen utfører)";
+    return { covered, last_run, note };
+  }
+  const restore = lastRun["disaster_recovery_sample_restore"];
+  if (restore === undefined) covered.add("disaster_recovery_sample_restore"); // satt opp, men aldri verifisert: dekket, uten `last_run` (forfalt)
   else {
-    covered.add("disaster_recovery_sample_restore");
-    last_run["disaster_recovery_sample_restore"] = restore;
+    const restoreJudged = judge(restore);
+    if (restoreJudged === "invalid") note = "disaster_recovery_sample_restore er ikke vurdert: siste restore-verifisering har et ugyldig tidspunkt";
+    else if (restoreJudged === "ahead") note = "disaster_recovery_sample_restore er ikke vurdert: siste restore-verifisering er datert frem i tid (klokkeavvik)";
+    else {
+      covered.add("disaster_recovery_sample_restore");
+      last_run["disaster_recovery_sample_restore"] = restore;
+    }
   }
   return { covered, last_run, note };
 }

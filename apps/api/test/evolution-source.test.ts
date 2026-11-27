@@ -312,6 +312,20 @@ describe("EV-19 K4: backup-status koblet inn", () => {
     expect(frozen.status).toBe("OK");
   });
 
+  it("WP-OPS2a fiks 1 (B-L4): restore-verifisering IKKE satt opp (`not_configured`) er «ikke dekket» (7 av 23, ingen ATTENTION, notat) - ikke «forfalt for alltid»; `never_run` (satt opp, aldri kjørt) er fortsatt forfalt", async () => {
+    const notConfigured = await run(ok(snapshot({ restoreAgo: null, restoreState: "not_configured" })));
+    const text = notConfigured.findings.join("\n");
+    expect(notConfigured.status).toBe("OK");
+    expect(dueList(notConfigured)).toEqual([]);
+    expect(text).toContain("7 av 23 vedlikeholdsoppgaver har en utfører");
+    expect(text).toContain("Merk: disaster_recovery_sample_restore er ikke vurdert: restore-verifisering er ikke satt opp (ingen utfører).");
+    expect(uncoveredList(notConfigured)).toContain("disaster_recovery_sample_restore");
+    expect(uncoveredList(notConfigured)).not.toContain("backup_status");
+    const neverRun = await run(ok(snapshot({ restoreAgo: null, restoreState: "never_run" })));
+    expect(neverRun.status).toBe("ATTENTION");
+    expect(dueList(neverRun)).toEqual(["disaster_recovery_sample_restore"]);
+  });
+
   it("ingen kilde, manglende fil, ulesbar fil (alle årsaker) og en kilde som kaster: «ikke dekket» (6 av 23) - ikke forfalt, ingen fabrikkert tid, og sier hvorfor", async () => {
     const failures: Array<[string, EvolutionSourceDeps["backupStatus"], RegExp]> = [
       ["ingen kilde", undefined, /ingen backup-statusfil er montert/],
