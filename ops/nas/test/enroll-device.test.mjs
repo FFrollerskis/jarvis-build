@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 const ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const SCRIPT = join(ROOT, "ops/nas/enroll-device.sh");
 const DEFAULT_COMPOSE = join(ROOT, "infra/local/docker-compose.yml");
-const BASE = "https://dxp4800plus-ring.tail3935f7.ts.net";
+const BASE = "https://jarvis-nas.tail1234.ts.net";
 // Markør som IKKE skal dukke opp i docker-argumentene eller utdataene. Bygget ved kjøring i stedet for som bokstavelig verdi etter «PASSWORD=»:
 // gitleaks (generic-api-key) leser en slik linje som en ekte hemmelighet selv i en testfixtur (PR #302, første commit).
 const SENTINEL = ["ikke", "i", "args", "eller", "utdata"].join("_");
@@ -76,7 +76,7 @@ describe("ops/nas/enroll-device.sh", () => {
   });
 
   it("http:// og ugyldige adresser avvises FØR docker kjøres (enhetsnøkkelen krever HTTPS)", () => {
-    const http = run(["http://dxp4800plus-ring.tail3935f7.ts.net"]);
+    const http = run(["http://jarvis-nas.tail1234.ts.net"]);
     expect(http.status).toBe(2);
     expect(http.dockerArgs).toBeNull();
     expect(http.out).toMatch(/https:\/\//);

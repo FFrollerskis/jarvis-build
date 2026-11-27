@@ -114,7 +114,7 @@ tailscale serve --bg --https=3020 http://127.0.0.1:3020
 ```
 
 Bruk NAS-ens `https://<nas-navn>.<tailnet>.ts.net/`-adresse i stedet for PC-ens gamle
-`https://srby.tail3935f7.ts.net/` fra nå av.
+`https://srby.tail1234.ts.net/` fra nå av.
 
 ## Trinn 8 - Stopp PC-stacken (kun etter at Trinn 5-7 er bekreftet OK)
 
