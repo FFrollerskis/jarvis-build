@@ -136,6 +136,7 @@ export class SupportTransport implements ToolTransport {
         return { external_id: result.event.event_id, data: result as unknown as JsonValue };
       }
       case "ingest_message": {
+        // WP-P3 K3: `ticket_id` (internt felt på `IngestMessageInput`) leses BEVISST ikke fra `parameters` - modellflaten kan aldri flytte en melding til et vilkårlig ticket (test: wpp3-104-manual-ticket-reply).
         const result = await this.service.ingestMessage(tenantId, memorySpace, {
           channel: (parameters["channel"] !== undefined ? String(parameters["channel"]) : "email") as never,
           source_type: requireString(parameters, "source_type"),

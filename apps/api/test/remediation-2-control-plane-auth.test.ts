@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   ChannelSessionAuthority, ContextBuilder, DeviceService, IdentityService, MessageStore, SessionGrantService, SessionService,
   createPool, runMigrations, withTenantTransaction
@@ -13,12 +13,13 @@ import {
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { DeploymentService, IncidentService } from "@jarvis/incidents";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
-import { InMemoryDeviceRegistry, InMemoryNonceStore, InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { InMemoryDeviceRegistry, InMemoryNonceStore, InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
 import { FORBIDDEN_IDENTITY_BODY_KEYS } from "../src/http-guard.ts";
 import { ConversationEngine } from "../src/conversation.ts";
+import { ownerPredicate } from "../src/control-center/register.ts";
 import { createApiServer } from "../src/server.ts";
 import { generateDeviceKey, mintGrant, type TestDeviceKey } from "./support/grant-client.ts";
 
@@ -34,6 +35,10 @@ let appPool: pg.Pool;
 let baseUrl: string;
 let server: ReturnType<typeof createApiServer>;
 let devices: DeviceService;
+/** WP-P3 K4: samme objekt som serveren leser per forespørsel (`deps.incidents`) - H2-testene setter/fjerner `controls` her. */
+let incidentsDeps: NonNullable<NonNullable<Parameters<typeof createApiServer>[0]>["incidents"]>;
+/** WP-P3 fiks-runde 1: samme objekt som serveren leser per forespørsel (`deps.ownerGate`) - H2-testene setter/fjerner eier-porten her. */
+let apiDeps: NonNullable<Parameters<typeof createApiServer>[0]>;
 const TENANT_A = "tenant-cp-a";
 const TENANT_B = "tenant-cp-b";
 
@@ -45,10 +50,12 @@ const infraGate = new InfraExecutionGate(undefined, {
   async clear() { if (infraStoreState.failWrite) throw new Error("secret-db-host:5432 refused"); infraStoreState.row = null; }
 }, { owner_person_id: "person-cp-a" });
 
-const keys: Record<string, TestDeviceKey> = { "cp-dev-a": generateDeviceKey(), "cp-dev-a2": generateDeviceKey(), "cp-dev-b": generateDeviceKey(), "cp-dev-race": generateDeviceKey() };
+const keys: Record<string, TestDeviceKey> = { "cp-dev-a": generateDeviceKey(), "cp-dev-a2": generateDeviceKey(), "cp-dev-b": generateDeviceKey(), "cp-dev-race": generateDeviceKey(), "cp-dev-m": generateDeviceKey() };
 const SUBJECT_A = { device_id: "cp-dev-a", person_id: "person-cp-a", tenant_id: TENANT_A, memory_space: "business" } as const;
 const SUBJECT_A2 = { device_id: "cp-dev-a2", person_id: "person-cp-a", tenant_id: TENANT_A, memory_space: "business" } as const;
 const SUBJECT_B = { device_id: "cp-dev-b", person_id: "person-cp-b", tenant_id: TENANT_B, memory_space: "business" } as const;
+/** En annen person i EIERENS tenant (grant-innehaver, men ikke den suverene eieren). */
+const SUBJECT_M = { device_id: "cp-dev-m", person_id: "person-cp-m", tenant_id: TENANT_A, memory_space: "business" } as const;
 
 /** Alle grant-beskyttede kontrollruter (tasks/incidents/infra/observability/deployments) + chat. Minimal gyldig body (uten identitet). */
 const CONTROL_ROUTES: Array<{ path: string; body: Record<string, unknown> }> = [
@@ -97,10 +104,10 @@ beforeAll(async () => {
   await adminPool.query("GRANT jarvis_app TO jarvis_test_cp");
   await adminPool.query(`
     INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT_A}','CpA','business'), ('${TENANT_B}','CpB','business');
-    INSERT INTO people (person_id, display_name) VALUES ('person-cp-a','A'), ('person-cp-b','B');
-    INSERT INTO person_tenants (person_id, tenant_id, role) VALUES ('person-cp-a','${TENANT_A}','owner'), ('person-cp-b','${TENANT_B}','owner');
+    INSERT INTO people (person_id, display_name) VALUES ('person-cp-a','A'), ('person-cp-b','B'), ('person-cp-m','M');
+    INSERT INTO person_tenants (person_id, tenant_id, role) VALUES ('person-cp-a','${TENANT_A}','owner'), ('person-cp-b','${TENANT_B}','owner'), ('person-cp-m','${TENANT_A}','member');
     INSERT INTO memory_spaces (memory_space_id, tenant_id, space) VALUES ('sp-cp-a','${TENANT_A}','business'), ('sp-cp-b','${TENANT_B}','business');`);
-  for (const [id, tenant, person] of [["cp-dev-a", TENANT_A, "person-cp-a"], ["cp-dev-a2", TENANT_A, "person-cp-a"], ["cp-dev-b", TENANT_B, "person-cp-b"], ["cp-dev-race", TENANT_A, "person-cp-a"]] as const) {
+  for (const [id, tenant, person] of [["cp-dev-a", TENANT_A, "person-cp-a"], ["cp-dev-a2", TENANT_A, "person-cp-a"], ["cp-dev-b", TENANT_B, "person-cp-b"], ["cp-dev-race", TENANT_A, "person-cp-a"], ["cp-dev-m", TENANT_A, "person-cp-m"]] as const) {
     await adminPool.query("INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem) VALUES ($1,$2,$3,'api',$4)", [id, tenant, person, keys[id]!.publicKeyPem]);
   }
   appPool = createPool({ host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: "jarvis_test_cp", password: "pw2" });
@@ -120,14 +127,16 @@ beforeAll(async () => {
   const sessionService = new SessionService(appPool);
   devices = new DeviceService(appPool);
   const grantService = new SessionGrantService(appPool);
-  server = createApiServer({
+  incidentsDeps = { service: incidentService, deployments: new DeploymentService(appPool), gateway, infraGate, pool: appPool };
+  apiDeps = {
     identity: identityService, sessions: sessionService, devices, grants: grantService,
     channelAuthority: new ChannelSessionAuthority({ pool: appPool, devices, sessions: sessionService, identity: identityService, grants: grantService }),
     policy, worker, tasks: taskService,
     conversation: new ConversationEngine({ messages: new MessageStore(appPool), context: new ContextBuilder(appPool), gateway: modelGateway, tasks: taskService, worker, trace: new MemoryTraceSink() }),
-    incidents: { service: incidentService, deployments: new DeploymentService(appPool), gateway, infraGate, pool: appPool },
+    incidents: incidentsDeps,
     rateLimits: { perIpPerMinute: 100_000, authPerIpPerMinute: 100_000, perDevicePerMinute: 100_000 }
-  });
+  };
+  server = createApiServer(apiDeps);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }, 240_000);
@@ -438,6 +447,158 @@ describe("H: delt infra-modus via /infra-rutene (D-438)", () => {
     expect(status.body["infra_mode_in_sync"]).toBe(false);
     expect(JSON.stringify(status.body)).not.toMatch(/secret-db-host/);
     reset();
+  });
+});
+
+describe("H2: WP-P3 K4 (JARVIS-094) - /infra/status viser frosne connectorer fra det VARIGE registeret (alle, sortert), ikke en hardkodet liste eller prosess-lokal tilstand", () => {
+  const OWNER_AUTH = { owner_person_id: "person-cp-a" };
+  /** Eier-porten slik `main.ts` bygger den: `ownerPredicate` av SAMME autoritet som Policy Gateway (kun den suverene eieren ser det globale registeret). */
+  const OWNER_GATE = ownerPredicate({ owner_person_id: "person-cp-a", owner_tenants: [TENANT_A] });
+  beforeEach(() => { apiDeps.ownerGate = OWNER_GATE; });
+  afterEach(() => { delete apiDeps.ownerGate; });
+  /** «En annen prosess» (worker/annen API-instans): egen prosess-lokal tilstand, men SAMME varige register (`owner_control_state`). */
+  const otherProcess = () => new OwnerControls(new KillSwitch(), appPool, OWNER_AUTH);
+  const viewer = () => new OwnerControls(new KillSwitch(), appPool, OWNER_AUTH);
+  const cleanup = async () => {
+    delete incidentsDeps.controls;
+    const writer = otherProcess();
+    for (const row of await writer.listFrozenConnectorsDurable()) await writer.unfreezeConnectorDurable(row.connector_id, "person-cp-a");
+  };
+  const statusOf = async () => post("/infra/status", { grant_token: await mintGrant(baseUrl, SUBJECT_A, keys["cp-dev-a"]!) });
+
+  it("frys gce + github (+ en tredje) i en ANNEN prosess: ALLE listes (sortert) selv om denne prosessen aldri har frosset dem lokalt; readable=true og helse-omfanget er `api_process`", async () => {
+    await cleanup();
+    const writer = otherProcess();
+    await writer.freezeConnectorDurable("github", "test", "person-cp-a");
+    await writer.freezeConnectorDurable("gce", "test", "person-cp-a");
+    await writer.freezeConnectorDurable("cloudflare", "test", "person-cp-a");
+    const mine = viewer();
+    incidentsDeps.controls = mine;
+    try {
+      expect(mine.isFrozen("gce")).toBe(false); // prosess-lokalt er ingenting frosset her - kun det varige registeret vet
+      const status = await statusOf();
+      expect(status.status).toBe(200);
+      expect(status.body["frozen_connectors"]).toEqual(["cloudflare", "gce", "github"]);
+      expect(status.body["frozen_connectors_readable"]).toBe(true);
+      expect(status.body["connector_health_scope"]).toBe("api_process");
+    } finally { await cleanup(); }
+  });
+
+  it("opphevet frys forsvinner, og ingen frosne gir en tom liste med readable=true", async () => {
+    await cleanup();
+    const writer = otherProcess();
+    await writer.freezeConnectorDurable("gce", "test", "person-cp-a");
+    incidentsDeps.controls = viewer();
+    try {
+      expect((await statusOf()).body["frozen_connectors"]).toEqual(["gce"]);
+      await writer.unfreezeConnectorDurable("gce", "person-cp-a");
+      const after = await statusOf();
+      expect(after.body["frozen_connectors"]).toEqual([]);
+      expect(after.body["frozen_connectors_readable"]).toBe(true);
+    } finally { await cleanup(); }
+  });
+
+  it("svaret er sortert uansett hvilken rekkefølge kilden gir (stabil, sammenlignbar utskrift)", async () => {
+    await cleanup();
+    incidentsDeps.controls = { listFrozenConnectorsDurable: async () => [{ connector_id: "gce" }, { connector_id: "github" }, { connector_id: "cloudflare" }] } as unknown as OwnerControls;
+    try {
+      const status = await statusOf();
+      expect(status.body["frozen_connectors"]).toEqual(["cloudflare", "gce", "github"]);
+      expect(status.body["frozen_connectors_readable"]).toBe(true);
+    } finally { await cleanup(); }
+  });
+
+  it("lesefeil på det varige registeret: frozen_connectors_readable=false og [] - uten å lekke feilteksten (som infra_mode_shared_readable)", async () => {
+    await cleanup();
+    incidentsDeps.controls = { listFrozenConnectorsDurable: async () => { throw new Error("secret-db-host:5432 refused"); }, isFrozen: () => true } as unknown as OwnerControls;
+    try {
+      const status = await statusOf();
+      expect(status.status).toBe(200);
+      expect(status.body["frozen_connectors_readable"]).toBe(false);
+      expect(status.body["frozen_connectors"]).toEqual([]);
+      expect(JSON.stringify(status.body)).not.toMatch(/secret-db-host|refused/);
+      expect(status.body["connector_health_scope"]).toBe("api_process");
+    } finally { await cleanup(); }
+  });
+
+  it("uten `controls`: frozen_connectors_readable=false og [] (vi VET ikke, vi påstår ikke «ingen frosne»)", async () => {
+    await cleanup();
+    const status = await statusOf();
+    expect(status.status).toBe(200);
+    expect(status.body["frozen_connectors"]).toEqual([]);
+    expect(status.body["frozen_connectors_readable"]).toBe(false);
+    expect(status.body["connector_health_scope"]).toBe("api_process");
+  });
+
+  // WP-P3 fiks-runde 1 (JARVIS-094, eier-grensen): det globale registeret (ALLE frosne connector-id-er, også finans- og `model:`-id-er) er en eier-opplysning. `/infra/status` har bare grant (`authedRequest`),
+  // så enhver grant-innehaver kunne ellers lese det. Nå listes det KUN for den suverene eieren (`deps.ownerGate`); alle andre får `[]` + readable=false, og resten av svaret er uendret.
+  const FROZEN_IDS = ["model:anthropic", "stripe", "gce", "github", "cloudflare"];
+  function spyControls(): { controls: OwnerControls; reads: () => number } {
+    let reads = 0;
+    const controls = { listFrozenConnectorsDurable: async () => { reads += 1; return FROZEN_IDS.map((connector_id) => ({ connector_id })); } } as unknown as OwnerControls;
+    return { controls, reads: () => reads };
+  }
+  const statusAs = async (subject: typeof SUBJECT_A | typeof SUBJECT_B | typeof SUBJECT_M, device: string) => post("/infra/status", { grant_token: await mintGrant(baseUrl, subject, keys[device]!) });
+  const withoutRegistry = (body: Record<string, unknown>): Record<string, unknown> => {
+    const copy = { ...body };
+    delete copy["frozen_connectors"];
+    delete copy["frozen_connectors_readable"];
+    return copy;
+  };
+
+  it("eieren ser ALLE (sortert, inkl. finans- og `model:`-id-er); en annen grant-innehaver i eierens tenant får [] + readable=false, registeret leses ikke for vedkommende, og resten av svaret er IDENTISK", async () => {
+    await cleanup();
+    const spy = spyControls();
+    incidentsDeps.controls = spy.controls;
+    try {
+      const asOwner = await statusAs(SUBJECT_A, "cp-dev-a");
+      expect(asOwner.status).toBe(200);
+      expect(asOwner.body["frozen_connectors"]).toEqual([...FROZEN_IDS].sort());
+      expect(asOwner.body["frozen_connectors_readable"]).toBe(true);
+      expect(spy.reads()).toBe(1);
+      const asMember = await statusAs(SUBJECT_M, "cp-dev-m");
+      expect(asMember.status).toBe(200);
+      expect(asMember.body["frozen_connectors"]).toEqual([]);
+      expect(asMember.body["frozen_connectors_readable"]).toBe(false);
+      expect(spy.reads()).toBe(1); // registeret ble IKKE lest for en ikke-eier
+      expect(withoutRegistry(asMember.body)).toEqual(withoutRegistry(asOwner.body)); // øvrig respons er byte-lik
+      expect(Object.keys(asMember.body).sort()).toEqual(Object.keys(asOwner.body).sort());
+      expect(JSON.stringify(asMember.body)).not.toMatch(/model:|stripe|cloudflare|github|gce/);
+    } finally { await cleanup(); }
+  });
+
+  it("eieren av en ANNEN tenant (ikke systemets eier) får heller ikke listen", async () => {
+    await cleanup();
+    const spy = spyControls();
+    incidentsDeps.controls = spy.controls;
+    try {
+      const asForeignOwner = await statusAs(SUBJECT_B, "cp-dev-b");
+      expect(asForeignOwner.status).toBe(200);
+      expect(asForeignOwner.body["frozen_connectors"]).toEqual([]);
+      expect(asForeignOwner.body["frozen_connectors_readable"]).toBe(false);
+      expect(spy.reads()).toBe(0);
+    } finally { await cleanup(); }
+  });
+
+  it("FAIL-CLOSED: uten konfigurert eier-port får ingen listen (heller ikke eieren), og en port som kaster eller svarer noe annet enn `true` gir samme tomme svar (200, aldri en 500, ingen feiltekst) - registeret leses aldri", async () => {
+    await cleanup();
+    const spy = spyControls();
+    incidentsDeps.controls = spy.controls;
+    try {
+      delete apiDeps.ownerGate;
+      const noGate = await statusAs(SUBJECT_A, "cp-dev-a");
+      expect(noGate.status).toBe(200);
+      expect(noGate.body).toMatchObject({ frozen_connectors: [], frozen_connectors_readable: false });
+      apiDeps.ownerGate = () => { throw new Error("gate exploded secret-db-host:5432"); };
+      const throwing = await statusAs(SUBJECT_A, "cp-dev-a");
+      expect(throwing.status).toBe(200);
+      expect(throwing.body).toMatchObject({ frozen_connectors: [], frozen_connectors_readable: false });
+      expect(JSON.stringify(throwing.body)).not.toMatch(/exploded|secret-db-host/);
+      apiDeps.ownerGate = (() => "yes") as unknown as NonNullable<typeof apiDeps.ownerGate>; // kun en strengt `true` slipper gjennom
+      const truthy = await statusAs(SUBJECT_A, "cp-dev-a");
+      expect(truthy.body).toMatchObject({ frozen_connectors: [], frozen_connectors_readable: false });
+      expect(spy.reads()).toBe(0);
+    } finally { await cleanup(); }
   });
 });
 
