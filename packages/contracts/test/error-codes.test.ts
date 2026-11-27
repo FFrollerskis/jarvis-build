@@ -92,6 +92,12 @@ describe("A. register-lint (alltid streng)", () => {
     }
   });
 
+  it("formatet avviser alt som ikke er NAMESPACE.NAVN med store bokstaver, tall og enkle understreker", () => {
+    const bad = ["", "AUTH_TENANT", "auth_tenant.x", "AUTH_TENANT.x", "Auth_Tenant.NAME", "AUTH_TENANT.NAME.EXTRA", "AUTH__TENANT.NAME", "_AUTH.NAME", "AUTH_.NAME", "AUTH.NAME_", "AUTH.1NAME", "1AUTH.NAME", "AUTH TENANT.NAME", "AUTH.NAME\n", ".NAME", "AUTH.", "AUTH-TENANT.NAME"];
+    for (const code of bad) expect(ERROR_CODE_FORMAT.test(code), JSON.stringify(code)).toBe(false);
+    for (const code of ["A.B", "AUTH_TENANT.MEMBERSHIP_MISMATCH", "A1.B2_C3"]) expect(ERROR_CODE_FORMAT.test(code), code).toBe(true);
+  });
+
   it("ingen duplikate koder (hverken ordrett eller etter store/små bokstaver)", () => {
     const codes = ERROR_CODE_DEFS.map((d) => d.code);
     expect(new Set(codes).size).toBe(codes.length);

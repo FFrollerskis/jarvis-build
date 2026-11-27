@@ -220,6 +220,17 @@ describe("repo-fakta og stibeskyttelse", () => {
     expect(r.file_sha256("link.ts")).toBeNull();
   });
 
+  it("makeFileReader: en sti som rømmer rota (..) nektes selv når målfilen FINNES utenfor rota", () => {
+    const { root } = miniRepo();
+    const outside = `utenfor-${process.pid}-${Date.now()}.txt`;
+    put(root, `../${outside}`, "finnes\n");
+    const r = makeFileReader(root);
+    expect(r.path_exists(`../${outside}`)).toBe(false);
+    expect(r.file_sha256(`../${outside}`)).toBeNull();
+    expect(r.path_exists(`contracts/../../${outside}`)).toBe(false);
+    expect(r.file_sha256(`contracts/../../${outside}`)).toBeNull();
+  });
+
   it("beslutningslogg: kun nøyaktige rader `| D-n |`; id-er med regex-tegn finnes aldri", () => {
     const { root } = miniRepo();
     const r = makeFileReader(root);

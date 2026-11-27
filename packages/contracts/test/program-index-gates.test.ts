@@ -79,8 +79,10 @@ describe("GateSchema", () => {
     expect(ok(mut(openGate(), (c) => (c["kind"] = "orl")))).toBe(false);
   });
 
-  it("PASS krever evidence_ref (D-PROG-08)", () => {
-    expect(ok(mut(passGate(), (c) => (c["evidence_ref"] = null)))).toBe(false);
+  it("PASS krever evidence_ref (D-PROG-08): avvist, og med den uttrykkelige meldingen (ikke bare som følge av kjedereglene)", () => {
+    const r = GateSchema.safeParse(mut(passGate(), (c) => (c["evidence_ref"] = null)));
+    expect(r.success).toBe(false);
+    expect(r.success ? [] : r.error.issues.map((i) => i.message)).toContain("PASS krever en evidence_ref (D-PROG-08)");
   });
 
   it("uten historikk må porten være OPEN uten evidens; en status uten historikk er ikke tillatt", () => {
